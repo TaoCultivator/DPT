@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import QPoint, QRect, Qt
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFrame,
@@ -23,7 +24,6 @@ from PyQt6.QtWidgets import (
 )
 
 from dpt_extractor.gui.waveform_plot import (
-    CHANNEL_UNITS,
     DISP_HALF_DIV,
     VDIV_LADDER,
     _pick_vdiv_ladder,
@@ -35,66 +35,69 @@ if TYPE_CHECKING:
 
 _PANEL_STYLE = """
 QDialog#ChannelSettingsPanel {
-    background-color: #d9d9d9;
-    border: 1px solid #6f6f6f;
+    background-color: rgba(188, 188, 188, 232);
+    border: 3px solid rgba(255, 73, 88, 235);
+    border-radius: 2px;
 }
-QDialog#ChannelSettingsPanel QLabel { color: #1a1a1a; }
+QDialog#ChannelSettingsPanel QLabel { color: #111111; }
 QLabel#chPanelHeader {
-    color: #ffffff;
+    color: #f4f4f4;
+    background-color: rgba(55, 55, 58, 225);
     font-size: 14px;
     font-weight: bold;
-    padding: 8px 12px;
+    padding: 9px 12px;
     letter-spacing: 1px;
 }
 QLabel#chPanelSection {
-    color: #2a2a2a;
+    color: #171717;
     font-size: 13px;
     font-weight: bold;
-    padding: 10px 12px 2px 12px;
+    padding: 12px 12px 4px 12px;
 }
 QLabel#chCellCaption {
-    color: #444444;
+    color: #050505;
     font-size: 12px;
+    font-weight: bold;
     padding: 0 0 2px 2px;
 }
 QPushButton#chToggleOn, QPushButton#chToggleOff {
-    min-width: 48px;
-    min-height: 30px;
-    border: 1px solid #9a9a9a;
-    border-radius: 3px;
-    background-color: #f4f4f4;
+    min-width: 58px;
+    min-height: 34px;
+    border: 1px solid rgba(95, 95, 95, 210);
+    border-radius: 4px;
+    background-color: rgba(232, 232, 232, 235);
     color: #1a1a1a;
-    font-size: 13px;
+    font-size: 14px;
 }
 QPushButton#chToggleOn:checked {
-    background-color: #29a36a;
-    color: #ffffff;
-    border-color: #1d7a4f;
+    background-color: #28bce8;
+    color: #101010;
+    border-color: #5de6ff;
 }
 QPushButton#chToggleOff:checked {
-    background-color: #c44545;
-    color: #ffffff;
-    border-color: #963232;
+    background-color: #28bce8;
+    color: #101010;
+    border-color: #5de6ff;
 }
 QPushButton#chStepBtn {
-    min-width: 30px;
-    max-width: 30px;
-    min-height: 30px;
+    min-width: 42px;
+    max-width: 42px;
+    min-height: 34px;
     padding: 0;
-    border: 1px solid #9a9a9a;
+    border: 1px solid rgba(95, 95, 95, 210);
     border-radius: 3px;
-    background-color: #f4f4f4;
+    background-color: rgba(238, 238, 238, 240);
     color: #1a1a1a;
-    font-size: 13px;
+    font-size: 14px;
 }
 QPushButton#chStepBtn:hover { background-color: #eaeaea; }
 QPushButton#chStepBtn:pressed { background-color: #cccccc; }
 QPushButton#chZeroBtn {
-    min-height: 30px;
+    min-height: 34px;
     padding: 4px 14px;
-    border: 1px solid #9a9a9a;
+    border: 1px solid rgba(95, 95, 95, 210);
     border-radius: 3px;
-    background-color: #f4f4f4;
+    background-color: rgba(238, 238, 238, 240);
     color: #1a1a1a;
     font-size: 13px;
 }
@@ -103,31 +106,80 @@ QPushButton#chZeroBtn:pressed { background-color: #cccccc; }
 QPushButton#chLinkBtn {
     border: none;
     background: transparent;
-    color: #0a5fa6;
+    color: #00aaff;
     font-size: 12px;
     text-align: left;
     padding: 3px 2px;
     min-height: 22px;
 }
 QPushButton#chLinkBtn:hover { text-decoration: underline; }
-QDoubleSpinBox {
-    min-height: 30px;
-    background-color: #ffffff;
-    color: #1a1a1a;
-    border: 1px solid #9a9a9a;
+QDoubleSpinBox, QComboBox {
+    min-height: 34px;
+    background-color: rgba(246, 246, 246, 250);
+    color: #050505;
+    border: 1px solid rgba(95, 95, 95, 210);
     border-radius: 3px;
     padding: 2px 8px;
     font-size: 13px;
 }
-QLabel#chTagValue {
-    background-color: #ffffff;
-    border: 1px solid #9a9a9a;
-    border-radius: 3px;
-    padding: 6px 10px;
-    font-size: 13px;
-    color: #1a1a1a;
+QComboBox::drop-down {
+    border-left: 1px solid rgba(95, 95, 95, 210);
+    width: 24px;
 }
+QComboBox QAbstractItemView {
+    background-color: #f2f2f2;
+    color: #050505;
+    selection-background-color: #28bce8;
+    selection-color: #050505;
+    border: 2px solid #ff4958;
+    outline: 0;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 24px;
+    padding: 4px 8px;
+    color: #050505;
+}
+QLabel#chTagValue {
+    background-color: rgba(246, 246, 246, 250);
+    border: 1px solid rgba(95, 95, 95, 210);
+    border-radius: 3px;
+    padding: 7px 10px;
+    font-size: 13px;
+    color: #050505;
+}
+QPushButton#chApplyBtn {
+    min-height: 34px;
+    padding: 4px 12px;
+    border: 1px solid #1599c7;
+    border-radius: 3px;
+    background-color: #28bce8;
+    color: #101010;
+    font-size: 13px;
+    font-weight: bold;
+}
+QPushButton#chApplyBtn:hover { background-color: #44d4ff; }
+QPushButton#chFormulaBtn {
+    min-height: 34px;
+    padding: 4px 12px;
+    border: 1px solid #6f6f6f;
+    border-radius: 3px;
+    background-color: rgba(238, 238, 238, 245);
+    color: #050505;
+    font-size: 13px;
+}
+QPushButton#chFormulaBtn:hover { background-color: #ffffff; }
 """
+
+_MAPPING_OPTIONS = (
+    ("", "未映射"),
+    ("vge", "Vge"),
+    ("vce", "Vce"),
+    ("ic", "Ic"),
+    ("il", "IL"),
+    ("irr", "Irr"),
+    ("v_diode", "V_二极管"),
+    ("vge_other", "对管Vge"),
+)
 
 
 def _vdiv_options_for(key: str) -> list[float]:
@@ -181,24 +233,22 @@ class ChannelSettingsPanel(QDialog):
         self.setWindowFlags(
             Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
         )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(_PANEL_STYLE)
-        self.setFixedWidth(320)
+        self.setFixedWidth(430)
 
         ch_idx = list(plot._trace_items.keys()).index(key) + 1
         legend = plot._trace_legend.get(key, key).strip().lstrip("-━— ")
         color = plot._trace_style.get(key, ("#cdd6f4", 1.0))[0]
-        unit = CHANNEL_UNITS.get(key, "")
+        unit = plot._unit_for_channel(key)
         hidden = key in plot._hidden_channels
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        header = QLabel(f"CHANNEL {ch_idx}")
+        header = QLabel(f"CHANNEL {ch_idx}    {key}")
         header.setObjectName("chPanelHeader")
-        header.setStyleSheet(
-            f"QLabel#chPanelHeader {{ background-color: {color}; }}"
-        )
         root.addWidget(header)
 
         body = QWidget()
@@ -289,6 +339,31 @@ class ChannelSettingsPanel(QDialog):
         tag_val.setObjectName("chTagValue")
         body_lay.addWidget(_cell("标签", tag_val))
 
+        mapping_row = QHBoxLayout()
+        mapping_row.setContentsMargins(0, 0, 0, 0)
+        mapping_row.setSpacing(8)
+        self._mapping_combo = QComboBox()
+        for role, label in _MAPPING_OPTIONS:
+            self._mapping_combo.addItem(label, role)
+        current_role = plot.mapping_role_for_source(key)
+        idx = self._mapping_combo.findData(current_role)
+        if idx >= 0:
+            self._mapping_combo.setCurrentIndex(idx)
+        self._mapping_apply = QPushButton("应用映射")
+        self._mapping_apply.setObjectName("chApplyBtn")
+        self._mapping_apply.clicked.connect(self._on_mapping_apply)
+        mapping_row.addWidget(self._mapping_combo, stretch=1)
+        mapping_row.addWidget(self._mapping_apply)
+        mapping_w = QWidget()
+        mapping_w.setLayout(mapping_row)
+        body_lay.addWidget(_cell("DPT 映射", mapping_w))
+
+        if key.upper().startswith("MATH"):
+            formula_btn = QPushButton("编辑公式")
+            formula_btn.setObjectName("chFormulaBtn")
+            formula_btn.clicked.connect(self._on_formula_edit)
+            body_lay.addWidget(_cell("数学通道", formula_btn))
+
         # --- 快捷动作 ---
         links = QHBoxLayout()
         links.setContentsMargins(0, 4, 0, 0)
@@ -361,6 +436,15 @@ class ChannelSettingsPanel(QDialog):
     def _on_center(self) -> None:
         self._plot._auto_center_channel(self._key)
         self._pos_spin.setValue(self._plot._disp_offset.get(self._key, 0.0))
+
+    def _on_mapping_apply(self) -> None:
+        role = self._mapping_combo.currentData()
+        self._plot.request_channel_mapping(self._key, str(role or ""))
+        self.close()
+
+    def _on_formula_edit(self) -> None:
+        self.close()
+        self._plot._show_math_formula_editor(self._key)
 
     def sync_from_plot(self) -> None:
         """外部改刻度/位置后刷新控件。"""

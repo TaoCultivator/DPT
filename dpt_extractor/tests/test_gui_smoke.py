@@ -62,11 +62,459 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot = WaveformPlot()
         plot.plot_waveforms(bundle, profile, None)
         for key in ("vge", "vce", "ic", "irr"):
-            raw = plot._trace_raw[key]
-            scale = plot._disp_scale[key]
+            display_key = plot._display_key_for_channel(key)
+            raw = plot._trace_raw[display_key]
+            scale = plot._disp_scale[display_key]
             mid_raw = 0.5 * (float(np.min(raw)) + float(np.max(raw)))
-            mid_disp = mid_raw / scale + plot._disp_offset[key]
+            mid_disp = mid_raw / scale + plot._disp_offset[display_key]
             self.assertAlmostEqual(mid_disp, 0.0, places=2, msg=key)
+
+    def _make_synthetic_plot(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 200
+        t = np.linspace(0, 1e-6, n)
+        profile = make_profile("W", "lower")
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                profile.vge: np.linspace(-5.0, 15.0, n),
+                profile.vce: np.linspace(0.0, 1200.0, n),
+                profile.ic: np.linspace(-100.0, 900.0, n),
+                profile.il: np.linspace(-50.0, 450.0, n),
+                profile.v_diode: np.linspace(0.0, 800.0, n),
+                profile.vge_other: np.linspace(-10.0, 10.0, n),
+                "MATH1": np.linspace(0.0, 1.0, n),
+            },
+            meta=TekMetadata(source_path="/fake/synthetic.tss"),
+        )
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+        return plot
+
+    def test_math_channels_display_and_formula_eval(self):
+        import numpy as np
+
+        plot = self._make_synthetic_plot()
+        self.assertEqual(
+            list(plot._channel_boxes),
+            ["CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "MATH1"],
+        )
+        self.assertEqual(plot._display_channel_roles["CH3"], ["Ic", "Irr=Ic-IL"])
+        self.assertIn("MATH1", plot._channel_boxes)
+        self.assertIn("MATH1", plot._trace_items)
+
+        plot._set_math_formula("MATH2", "CH3 + CH4")
+        self.assertIn("MATH2", plot._channel_boxes)
+        self.assertEqual(plot._unit_for_channel("MATH2"), "A")
+        np.testing.assert_allclose(
+            plot._trace_raw["MATH2"],
+            plot._formula_sources["CH3"] + plot._formula_sources["CH4"],
+        )
+
+        plot._set_math_formula("MATH3", "INTG(CH2 * MATH2)")
+        self.assertIn("MATH3", plot._channel_boxes)
+        self.assertEqual(plot._unit_for_channel("MATH3"), "J")
+
+    def test_tss_derived_ic_max_cursor_uses_imported_math_trace(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 300
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("U", "upper")
+        irr = np.linspace(100.0, 700.0, n)
+        il = np.linspace(20.0, 320.0, n)
+        math_ic = irr + il
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                "CH1": np.linspace(-5.0, 15.0, n),
+                "CH2": np.linspace(50.0, 900.0, n),
+                "CH3": irr,
+                "CH4": il,
+                "CH5": np.linspace(0.0, 600.0, n),
+                "CH6": np.zeros(n),
+                "MATH1": math_ic,
+            },
+            meta=TekMetadata(
+                source_path="/fake/imported.tss",
+                channel_vdiv={"MATH1": 200.0},
+                channel_math_formulas={"MATH1": "CH3+CH4"},
+            ),
+        )
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+
+        self.assertEqual(plot._display_key_for_channel("ic"), "MATH1")
+        self.assertIn("Ic", plot._display_channel_roles["MATH1"])
+
+        plot.enable_interval_interaction(
+            0.2,
+            0.8,
+            lambda *_args: None,
+            show_horizontal_peak=True,
+        )
+        peak = float(np.max(math_ic))
+        plot.set_interval_peak_horizontal(peak, channel="ic", t0_us=0.2, t1_us=0.8)
+
+        self.assertEqual(plot._readout_channel(), "MATH1")
+        self.assertIsNotNone(plot._h_cursor_a)
+        assert plot._h_cursor_a is not None
+        self.assertAlmostEqual(
+            plot._from_disp("ic", float(plot._h_cursor_a.value())),
+            peak,
+            delta=1.0,
+        )
+
+    def test_math_channel_can_open_settings_for_mapping(self):
+        from PyQt6.QtCore import QPoint
+
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
+        plot = self._make_synthetic_plot()
+        panel = ChannelSettingsPanel(plot, "MATH1", QPoint(0, 0), parent=plot)
+        self.assertGreaterEqual(panel._mapping_combo.findData("ic"), 0)
+        self.assertEqual(panel._mapping_combo.findData(""), 0)
+
+    def test_parameter_max_default_intervals_use_algorithm_windows(self):
+        import numpy as np
+
+        os.environ["LOCALAPPDATA"] = str(ROOT / ".tmp" / "localappdata")
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult, SegmentIndices
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        off = "\u5173\u65ad\u8fc7\u7a0b"
+        on = "\u5f00\u901a"
+        rr = "\u53cd\u5411\u6062\u590d"
+
+        n = 1000
+        dt = 10e-9
+        t = np.arange(n) * dt
+        profile = make_profile("U", "lower")
+        vge = np.zeros(n)
+        vge[100:420] = 15.0
+        vge[620:900] = 15.0
+        vce = np.ones(n) * 800.0
+        vce[100:420] = 50.0
+        vce[760:900] = 50.0
+        ic = np.zeros(n)
+        ic[120:390] = 100.0
+        ic[390:450] = np.linspace(100.0, 0.0, 60)
+        ic[650:780] = np.linspace(0.0, 120.0, 130)
+        il = np.ones(n) * 10.0
+        irr = np.zeros(n)
+        irr[610:760] = np.linspace(0.0, 80.0, 150)
+        irr[760:850] = np.linspace(80.0, 0.0, 90)
+        vd = np.zeros(n)
+        vd[600:900] = np.linspace(0.0, 500.0, 300)
+        vgo = np.zeros(n)
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                profile.vge: vge,
+                profile.vce: vce,
+                profile.ic: ic,
+                profile.il: il,
+                profile.irr: irr,
+                profile.v_diode: vd,
+                profile.vge_other: vgo,
+            },
+            meta=TekMetadata(),
+        )
+        segs = SegmentIndices(
+            turn_off=(350, 520),
+            turn_on=(580, 900),
+            reverse_recovery=(720, 820),
+            pulse1_on=100,
+            pulse1_off=400,
+            pulse2_on=620,
+            pulse2_off=900,
+        )
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = ExtractResult(segments=segs)
+
+        off_ic = win._parameter_max_interval_indices(off, "Ic_off_max")
+        on_ic = win._parameter_max_interval_indices(on, "Ic_on_max")
+        on_vce = win._parameter_max_interval_indices(on, "Vce_on_max")
+        rr_irr = win._parameter_max_interval_indices(rr, "Irr")
+
+        self.assertIsNotNone(off_ic)
+        self.assertIsNotNone(on_ic)
+        self.assertIsNotNone(on_vce)
+        self.assertIsNotNone(rr_irr)
+        assert off_ic is not None and on_ic is not None and on_vce is not None and rr_irr is not None
+
+        self.assertLess(off_ic[1], segs.turn_off[1])
+        self.assertGreater(on_ic[0], segs.turn_on[0])
+        self.assertLess(on_vce[1], segs.turn_on[1])
+        self.assertEqual(
+            rr_irr,
+            (max(segs.reverse_recovery[0], segs.pulse2_on), segs.turn_on[1] - 1),
+        )
+
+        for section, name, idx in (
+            (off, "Ic_off_max", off_ic),
+            (on, "Ic_on_max", on_ic),
+            (on, "Vce_on_max", on_vce),
+            (rr, "Irr", rr_irr),
+        ):
+            iv = win._parameter_interval_us(section, name)
+            self.assertIsNotNone(iv)
+            assert iv is not None
+            self.assertAlmostEqual(iv[0], t[idx[0]] * 1e6)
+            self.assertAlmostEqual(iv[1], t[idx[1]] * 1e6)
+        win.close()
+
+    def test_math_integral_uses_full_resolution_sources(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import MAX_PLOT_POINTS, WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = MAX_PLOT_POINTS * 2 + 123
+        t = np.arange(n, dtype=np.float64) * 1e-9
+        profile = make_profile("W", "lower")
+        channels = {
+            profile.vge: np.ones(n),
+            profile.vce: np.ones(n),
+            profile.ic: np.ones(n),
+            profile.il: np.zeros(n),
+            profile.v_diode: np.ones(n),
+            profile.vge_other: np.zeros(n),
+        }
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(t=t, channels=channels, meta=TekMetadata(source_path="/fake/full.tss")),
+            profile,
+            None,
+        )
+
+        plot._set_math_formula("MATH1", "INTG(CH2 * CH3)")
+        self.assertEqual(len(plot._formula_sources["MATH1"]), n)
+        self.assertLess(len(plot._trace_raw["MATH1"]), n)
+        self.assertAlmostEqual(plot._formula_sources["MATH1"][-1], t[-1] - t[0], places=12)
+
+    def test_formula_functions_match_numpy_reference(self):
+        import numpy as np
+
+        plot = self._make_synthetic_plot()
+        plot._formula_sources["CH1"] = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+        plot._formula_sources["CH2"] = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
+        plot._formula_sources["CH3"] = np.array([0.0, 1.0, 0.0, 1.0, 1.0])
+        plot._formula_sources["CH4"] = np.array([1.0, 1.0, 0.0, 0.0, 1.0])
+        plot._formula_t_s = np.arange(5, dtype=np.float64)
+
+        checks = {
+            "ABS(CH1)": np.abs(plot._formula_sources["CH1"]),
+            "SQRT(CH2)": np.sqrt(plot._formula_sources["CH2"]),
+            "LOG(CH2)": np.log10(plot._formula_sources["CH2"]),
+            "LN(CH2)": np.log(plot._formula_sources["CH2"]),
+            "EXP(CH1)": np.exp(plot._formula_sources["CH1"]),
+            "SIN(CH1)": np.sin(plot._formula_sources["CH1"]),
+            "COS(CH1)": np.cos(plot._formula_sources["CH1"]),
+            "TAN(CH1)": np.tan(plot._formula_sources["CH1"]),
+            "CEIL(CH1/2)": np.ceil(plot._formula_sources["CH1"] / 2.0),
+            "FLOOR(CH1/2)": np.floor(plot._formula_sources["CH1"] / 2.0),
+            "INV(CH2)": 1.0 / plot._formula_sources["CH2"],
+            "MIN(CH1,CH2)": np.minimum(plot._formula_sources["CH1"], plot._formula_sources["CH2"]),
+            "MAX(CH1,CH2)": np.maximum(plot._formula_sources["CH1"], plot._formula_sources["CH2"]),
+            "AND(CH3,CH4)": np.logical_and(plot._formula_sources["CH3"] != 0, plot._formula_sources["CH4"] != 0).astype(float),
+            "OR(CH3,CH4)": np.logical_or(plot._formula_sources["CH3"] != 0, plot._formula_sources["CH4"] != 0).astype(float),
+            "XOR(CH3,CH4)": np.logical_xor(plot._formula_sources["CH3"] != 0, plot._formula_sources["CH4"] != 0).astype(float),
+            "NAND(CH3,CH4)": (~np.logical_and(plot._formula_sources["CH3"] != 0, plot._formula_sources["CH4"] != 0)).astype(float),
+            "NOR(CH3,CH4)": (~np.logical_or(plot._formula_sources["CH3"] != 0, plot._formula_sources["CH4"] != 0)).astype(float),
+            "EQV(CH3,CH4)": (~np.logical_xor(plot._formula_sources["CH3"] != 0, plot._formula_sources["CH4"] != 0)).astype(float),
+            "CH1 > 0": (plot._formula_sources["CH1"] > 0).astype(float),
+        }
+        for expr, expected in checks.items():
+            np.testing.assert_allclose(plot._evaluate_math_formula("MATH9", expr), expected, err_msg=expr)
+        np.testing.assert_allclose(
+            plot._evaluate_math_formula("MATH9", "DERIV(CH2)"),
+            np.gradient(plot._formula_sources["CH2"], plot._formula_t_s),
+        )
+        np.testing.assert_allclose(
+            plot._evaluate_math_formula("MATH9", "PI + E"),
+            np.full(5, np.pi + np.e),
+        )
+
+    def test_formula_energy_matches_result_table_integrators(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.metrics.iec_windows import (
+            IntegrationWindow,
+            integrate_err_recovery,
+            integrate_vi_window,
+        )
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 2000
+        t = np.arange(n, dtype=np.float64) * 1e-9
+        v = 700.0 + 80.0 * np.sin(np.linspace(0.0, 6.0 * np.pi, n))
+        i = 950.0 + 120.0 * np.cos(np.linspace(0.0, 4.0 * np.pi, n))
+        vd = -400.0 + 50.0 * np.sin(np.linspace(0.0, 2.0 * np.pi, n))
+        irr = -150.0 + 25.0 * np.cos(np.linspace(0.0, 5.0 * np.pi, n))
+        profile = make_profile("W", "upper")
+        channels = {
+            "CH1": np.zeros(n),
+            "CH2": v,
+            "CH3": i,
+            "CH4": irr,
+            "CH5": vd,
+            "CH6": np.zeros(n),
+        }
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(t=t, channels=channels, meta=TekMetadata(source_path="/fake/energy.tss")),
+            profile,
+            None,
+        )
+        win = IntegrationWindow(300, 1500, float(t[300]), float(t[1500]))
+
+        plot._set_math_formula("MATH1", "INTG(CH2*CH3)")
+        integ = plot._formula_sources["MATH1"]
+        actual_mj = float(integ[win.i_end - 1] - integ[win.i_start]) * 1e3
+        self.assertAlmostEqual(actual_mj, integrate_vi_window(t, v, i, win), places=9)
+
+        plot._set_math_formula("MATH2", "INTG(ABS(CH5)*ABS(CH4))")
+        integ = plot._formula_sources["MATH2"]
+        actual_mj = float(integ[win.i_end - 1] - integ[win.i_start]) * 1e3
+        self.assertAlmostEqual(actual_mj, integrate_err_recovery(t, vd, irr, win), places=9)
+
+    def test_original_math_channels_load_by_default_on_new_file(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        base_channels = {
+            "CH1": np.zeros(n),
+            "CH2": np.ones(n),
+            "CH3": np.ones(n),
+            "CH4": np.zeros(n),
+            "CH5": np.zeros(n),
+            "CH6": np.zeros(n),
+        }
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(t=t, channels=base_channels, meta=TekMetadata(source_path="/fake/no_math.tss")),
+            profile,
+            None,
+        )
+        plot._set_math_formula("MATH1", "CH2+CH3")
+        self.assertIn("MATH1", plot._math_source_keys)
+
+        original_math = np.linspace(10.0, 20.0, n)
+        channels_with_math = dict(base_channels)
+        channels_with_math["MATH1"] = original_math
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels=channels_with_math,
+                meta=TekMetadata(
+                    source_path="/fake/with_math.tss",
+                    channel_vdiv={"MATH1": 0.05},
+                    channel_math_formulas={"MATH1": "CH3+CH4"},
+                ),
+            ),
+            profile,
+            None,
+        )
+        self.assertIn("MATH1", plot._channel_boxes)
+        self.assertEqual(plot._math_formulas, {"MATH1": "CH3+CH4"})
+        self.assertNotIn("MATH1", plot._math_source_keys)
+        self.assertAlmostEqual(plot._disp_scale["MATH1"], 0.05)
+        self.assertEqual(plot._unit_for_channel("MATH1"), "A")
+        np.testing.assert_allclose(plot._trace_raw["MATH1"], original_math)
+
+    def test_selected_channel_updates_physical_y_axis(self):
+        plot = self._make_synthetic_plot()
+        self.assertEqual(plot._axis_channel(), "CH3")
+        plot._on_legend_clicked("CH5")
+        self.assertEqual(plot._axis_channel(), "CH5")
+        self.assertEqual(plot._axis_last_signature[0], "CH5")
+        self.assertEqual(plot._format_axis_value(1200.0, "V"), "1.2 kV")
+
+    def test_y_axis_ticks_anchor_to_channel_zero_and_vdiv(self):
+        plot = self._make_synthetic_plot()
+        plot._on_legend_clicked("CH6")
+        tick_text = [
+            text
+            for level in plot.plot.getPlotItem().getAxis("left")._tickLevels
+            for _, text in level
+        ]
+        for expected in ("0 V", "5 V", "10 V", "15 V", "20 V"):
+            self.assertIn(expected, tick_text)
+
+    def test_selection_zoom_applies_local_x_and_y_range(self):
+        from PyQt6.QtCore import QPointF
+
+        plot = self._make_synthetic_plot()
+        vb = plot.plot.getPlotItem().getViewBox()
+        p0 = vb.mapViewToScene(QPointF(0.20, -2.0))
+        p1 = vb.mapViewToScene(QPointF(0.70, 2.0))
+        plot._apply_selection_zoom(p0, p1)
+        xr, yr = vb.viewRange()
+        self.assertAlmostEqual(xr[0], 0.20, places=2)
+        self.assertAlmostEqual(xr[1], 0.70, places=2)
+        self.assertAlmostEqual(yr[0], -2.0, places=2)
+        self.assertAlmostEqual(yr[1], 2.0, places=2)
+
+    def test_selection_zoom_requires_one_shot_button(self):
+        plot = self._make_synthetic_plot()
+        self.assertFalse(plot._selection_zoom_enabled)
+        self.assertFalse(plot._zoom_select_btn.isChecked())
+
+        plot._zoom_select_btn.setChecked(True)
+        self.assertTrue(plot._selection_zoom_enabled)
+        plot._finish_selection_zoom_mode()
+        self.assertFalse(plot._selection_zoom_enabled)
+        self.assertFalse(plot._zoom_select_btn.isChecked())
+
+        plot._arm_selection_zoom()
+        self.assertTrue(plot._selection_zoom_enabled)
+        self.assertTrue(plot._zoom_select_btn.isChecked())
+        plot._finish_selection_zoom_mode()
+        self.assertFalse(plot._selection_zoom_enabled)
+
+    def test_drag_wrapper_keeps_original_viewbox_handler(self):
+        plot = self._make_synthetic_plot()
+        vb = plot.plot.getPlotItem().getViewBox()
+        closure_types = [
+            type(cell.cell_contents).__name__
+            for cell in (vb.mouseDragEvent.__closure__ or [])
+        ]
+        self.assertIn("method", closure_types)
+        self.assertNotIn("function", closure_types)
+
+    def test_context_menu_group_selection(self):
+        plot = self._make_synthetic_plot()
+        self.assertEqual(plot.context_menu_group(), "cursor")
+        plot.set_context_menu_group("zoom")
+        self.assertEqual(plot.context_menu_group(), "zoom")
+        plot.set_context_menu_group("view")
+        self.assertEqual(plot.context_menu_group(), "view")
+        plot.set_context_menu_group("bad-value")
+        self.assertEqual(plot.context_menu_group(), "cursor")
 
 
 @unittest.skipUnless(WH.exists() and UH.exists(), "WH/UH sample missing")
@@ -100,8 +548,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertIsNotNone(plot._h_cursor_b)
         # 顶部信息栏文字（不在波形上）
         self.assertNotEqual(plot._readout_label.text(), "")
-        # 底部通道盒含全部 6 条通道
-        self.assertEqual(len(plot._channel_boxes), 6)
+        # 底部通道盒含全部 6 条逻辑通道，并可附加原始 Math
+        self.assertGreaterEqual(len(plot._channel_boxes), 6)
         self.assertIn("vge", plot._channel_boxes)
         self.assertIn("vge_other", plot._channel_boxes)
 

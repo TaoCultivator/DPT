@@ -21,6 +21,8 @@ class TekMetadata:
     channel_vdiv: dict[str, float] = field(default_factory=dict)
     #: CH/MATH -> vertical position from session (divisions, Tek yPosition)
     channel_y_position: dict[str, float] = field(default_factory=dict)
+    #: MATH channel -> formula restored from a Tektronix session setup file.
+    channel_math_formulas: dict[str, str] = field(default_factory=dict)
 
     @property
     def dt(self) -> float:

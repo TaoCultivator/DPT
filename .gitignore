@@ -1,5 +1,6 @@
 build/
 dist/
+.tmp/
 示例文件/
 *.spec.bak
 __pycache__/

@@ -9,6 +9,10 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from dpt_extractor.utils.text_encoding import configure_utf8_text_io
+
+configure_utf8_text_io()
+
 from PyQt6.QtWidgets import QApplication
 
 from dpt_extractor.gui.main_window import MainWindow

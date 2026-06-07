@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import ast
 import re
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QPen, QPolygonF
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QPen, QPolygonF
 from PyQt6.QtWidgets import (
     QFrame,
+    QDialog,
+    QDialogButtonBox,
+    QGridLayout,
+    QGraphicsRectItem,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMenu,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QGraphicsItem,
@@ -212,6 +218,123 @@ class ChannelBox(QFrame):
     def set_box_style(self, style: str) -> None:
         self.setStyleSheet(style)
 
+
+class MathFormulaDialog(QDialog):
+    """Small oscilloscope-style editor for a display math trace."""
+
+    def __init__(self, plot: "WaveformPlot", key: str, parent=None):
+        super().__init__(parent)
+        self._plot = plot
+        self._key = key
+        self.setWindowTitle(f"{key} Formula")
+        self.setMinimumWidth(560)
+        self.setStyleSheet(
+            "QDialog{background:#d6d8df;color:#111;}"
+            "QLabel{color:#111;}"
+            "QPushButton{background:#eeeeee;color:#111;border:1px solid #999;"
+            "border-radius:4px;padding:7px 10px;min-width:58px;}"
+            "QPushButton:hover{background:#f8f8f8;}"
+            "QLineEdit{background:#f8fbff;color:#111;border:2px solid #4bc0d9;"
+            "border-radius:5px;padding:7px;font-family:Consolas,'Courier New',monospace;}"
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(10)
+
+        root.addWidget(QLabel(f"{key} ="))
+        self._edit = QLineEdit(plot._math_formulas.get(key, ""))
+        self._edit.setPlaceholderText("Example: INTG(CH2 * (CH3 + CH4))")
+        root.addWidget(self._edit)
+
+        src_grid = QGridLayout()
+        src_grid.setSpacing(6)
+        names = plot._formula_source_names()
+        for i, name in enumerate(names):
+            btn = QPushButton(name.title().replace("Math", "Math "))
+            btn.clicked.connect(lambda _checked=False, text=name: self._insert(text))
+            src_grid.addWidget(btn, i // 6, i % 6)
+        root.addWidget(QLabel("Sources"))
+        root.addLayout(src_grid)
+
+        fn_grid = QGridLayout()
+        fn_grid.setSpacing(6)
+        funcs = [
+            "INTG()",
+            "DERIV()",
+            "MAX()",
+            "MIN()",
+            "ABS()",
+            "SQRT()",
+            "LOG()",
+            "LN()",
+            "EXP()",
+            "SIN()",
+            "COS()",
+            "TAN()",
+            "+",
+            "-",
+            "*",
+            "/",
+            "(",
+            ")",
+            ",",
+            "AND",
+            "OR",
+            "XOR",
+            "NAND()",
+            "NOR()",
+            "EQV()",
+            "PI",
+            "E",
+        ]
+        for i, text in enumerate(funcs):
+            btn = QPushButton(text)
+            btn.clicked.connect(lambda _checked=False, value=text: self._insert_func(value))
+            fn_grid.addWidget(btn, i // 6, i % 6)
+        root.addWidget(QLabel("Functions"))
+        root.addLayout(fn_grid)
+
+        self._error = QLabel("")
+        self._error.setStyleSheet("color:#b00020;")
+        root.addWidget(self._error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Apply
+            | QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._apply)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _insert(self, text: str) -> None:
+        self._edit.insert(text)
+        self._edit.setFocus()
+
+    def _insert_func(self, text: str) -> None:
+        if text.endswith("()"):
+            self._edit.insert(text[:-1])
+        elif text in {"AND", "OR", "XOR"}:
+            op = "^" if text == "XOR" else text.lower()
+            self._edit.insert(f" {op} ")
+        else:
+            self._edit.insert(text.lower() if text in {"PI", "E"} else text)
+        self._edit.setFocus()
+
+    def _apply(self) -> bool:
+        try:
+            self._plot._set_math_formula(self._key, self._edit.text())
+        except Exception as exc:  # noqa: BLE001 - show formula errors in the editor
+            self._error.setText(str(exc))
+            return False
+        self._error.setText("")
+        return True
+
+    def _accept(self) -> None:
+        if self._apply():
+            self.accept()
+
 from dpt_extractor.gui.theme import (
     WAVEFORM_EDGE_COLORS,
     WAVEFORM_GRID_ALPHA,
@@ -221,7 +344,6 @@ from dpt_extractor.gui.theme import (
 )
 from dpt_extractor.models.bridge_profile import BridgeProfile
 from dpt_extractor.models.results import ExtractResult, SegmentIndices
-from dpt_extractor.io.wfm_scope_display import scope_vdiv_by_logical
 from dpt_extractor.models.waveform import (
     WaveformBundle,
     bundle_reverse_recovery_current,
@@ -278,6 +400,79 @@ CHANNEL_UNITS = {
     "v_diode": "V",
     "vge_other": "V",
 }
+
+MATH_TRACE_COLORS = (
+    "#008000",
+    "#B22222",
+    "#FF1010",
+    "#98B33A",
+    "#F28A1D",
+    "#742D8E",
+    "#B22222",
+    "#98B33A",
+)
+MATH_VDIV_LADDER = (
+    1e-9,
+    2e-9,
+    5e-9,
+    1e-8,
+    2e-8,
+    5e-8,
+    1e-7,
+    2e-7,
+    5e-7,
+    1e-6,
+    2e-6,
+    5e-6,
+    1e-5,
+    2e-5,
+    5e-5,
+    1e-4,
+    2e-4,
+    5e-4,
+    1e-3,
+    2e-3,
+    5e-3,
+    1e-2,
+    2e-2,
+    5e-2,
+    1e-1,
+    2e-1,
+    5e-1,
+    *VDIV_LADDER,
+)
+
+
+def _source_channel_sort_key(name: str) -> tuple[int, int, str]:
+    m = re.fullmatch(r"(CH|MATH)(\d+)", name.upper())
+    if not m:
+        return (2, 0, name.upper())
+    return (0 if m.group(1) == "CH" else 1, int(m.group(2)), name.upper())
+
+
+def _is_math_trace_key(key: str) -> bool:
+    return bool(re.fullmatch(r"MATH\d+", key.upper()))
+
+
+def _math_color(key: str) -> str:
+    m = re.fullmatch(r"MATH(\d+)", key.upper())
+    idx = int(m.group(1)) - 1 if m else 0
+    return MATH_TRACE_COLORS[idx % len(MATH_TRACE_COLORS)]
+
+
+def _source_channel_legend(key: str, labels: dict[str, str]) -> str:
+    key = key.upper()
+    label = (labels.get(key) or "").strip()
+    if label:
+        return label
+    m = re.fullmatch(r"MATH(\d+)", key)
+    if m:
+        return f"Math {int(m.group(1))}"
+    return key
+
+
+def _vdiv_ladder_for_channel(key: str) -> tuple[float, ...]:
+    return MATH_VDIV_LADDER if _is_math_trace_key(key) else VDIV_LADDER
 
 
 def _nice_per_div(peak: float, target_div: float = 4.0) -> float:
@@ -367,6 +562,28 @@ def _pick_vdiv_ladder(required: float, key: str) -> float:
         if float(v) <= cap:
             return float(v)
     return float(VDIV_LADDER[0])
+
+
+def _vdiv_max_for_channel(key: str) -> float:
+    if CHANNEL_UNITS.get(key) == "A":
+        return CURRENT_VDIV_MAX
+    return float(_vdiv_ladder_for_channel(key)[-1])
+
+
+def _pick_vdiv_ladder(required: float, key: str) -> float:
+    """Pick the smallest vertical scale that can contain required units/div."""
+    required = max(float(required), 1e-12)
+    cap = _vdiv_max_for_channel(key)
+    ladder = _vdiv_ladder_for_channel(key)
+    for v in ladder:
+        if float(v) > cap:
+            break
+        if float(v) >= required:
+            return float(v)
+    for v in reversed(ladder):
+        if float(v) <= cap:
+            return float(v)
+    return float(ladder[0])
 
 
 def _raw_value_span(raw: np.ndarray) -> tuple[float, float, float, float]:
@@ -493,6 +710,8 @@ class WaveformPlot(QWidget):
       - "dvdt"/"didt": Ha=Top、Hb=Base；A/B 卡在两者之间百分比穿越时刻（随 Ha/Hb 联动）
     """
 
+    channelMappingRequested = pyqtSignal(str, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -557,6 +776,20 @@ class WaveformPlot(QWidget):
         )
         self._x_scale_edit.returnPressed.connect(self._on_x_scale_committed)
         self._x_scale_edit.editingFinished.connect(self._on_x_scale_committed)
+        self._zoom_select_btn = QPushButton("⌕")
+        self._zoom_select_btn.setCheckable(True)
+        self._zoom_select_btn.setFixedSize(42, 32)
+        self._zoom_select_btn.setToolTip("框选局部放大：点击后在波形区左键拖出范围框")
+        self._zoom_select_btn.setStyleSheet(
+            "QPushButton{background-color:#2f3038;color:#d9e3f0;"
+            "border:1px solid #60636f;border-radius:4px;"
+            "font-size:20px;font-weight:700;padding:0;}"
+            "QPushButton:hover{background-color:#3a3c46;}"
+            "QPushButton:checked{background-color:#1f6feb;color:#ffffff;"
+            "border-color:#8fd3ff;}"
+        )
+        self._zoom_select_btn.toggled.connect(self._set_selection_zoom_enabled)
+        scale_lay.addWidget(self._zoom_select_btn)
         scale_lay.addWidget(self._x_scale_caption)
         scale_lay.addWidget(self._x_scale_edit)
         header.addWidget(scale_box, stretch=0)
@@ -580,6 +813,7 @@ class WaveformPlot(QWidget):
         ax_left.setTicks(
             [[(i, str(i)) for i in range(-int(DISP_HALF_DIV), int(DISP_HALF_DIV) + 1)]]
         )
+        ax_left.setWidth(72)
         # 图例不再画在波形内（改用顶部 _legend_label）
         self.plot.setMenuEnabled(False)
         self.plot.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -599,6 +833,14 @@ class WaveformPlot(QWidget):
             _vb_wheel(ev, axis)
 
         vb.wheelEvent = _vb_wheel
+        _orig_vb_drag = vb.mouseDragEvent
+
+        def _vb_drag(ev, axis=None):
+            if self._on_selection_drag(ev):
+                return
+            _orig_vb_drag(ev, axis)
+
+        vb.mouseDragEvent = _vb_drag
         layout.addWidget(self.plot, stretch=1)
 
         # ---- 底部通道盒（横向滚动，窄屏不挤出）----
@@ -657,6 +899,7 @@ class WaveformPlot(QWidget):
         self._trace_style: dict[str, tuple[str, float]] = {}
         self._trace_yrange: dict[str, tuple[float, float]] = {}
         self._trace_legend: dict[str, str] = {}
+        self._trace_units: dict[str, str] = {}
         self._highlighted_key: str | None = None
         self._hidden_channels: set[str] = set()
 
@@ -670,6 +913,12 @@ class WaveformPlot(QWidget):
         # 原始波形缓存（改刻度/位置时重算显示坐标）
         self._trace_t_us: np.ndarray | None = None
         self._trace_raw: dict[str, np.ndarray] = {}
+        self._formula_t_s: np.ndarray | None = None
+        self._formula_sources: dict[str, np.ndarray] = {}
+        self._math_formulas: dict[str, str] = {}
+        self._math_source_keys: set[str] = set()
+        self._logical_display_keys: dict[str, str] = {}
+        self._display_channel_roles: dict[str, list[str]] = {}
         # 每通道 0 值箭头手柄（波形右缘，拖动调垂直位置）
         self._zero_handles: dict[str, ChannelZeroHandle] = {}
         # 横向光标当前对应的通道（决定 Ha/Hb/Δy 的真实单位换算）
@@ -717,6 +966,11 @@ class WaveformPlot(QWidget):
         # 视图限制
         self._full_x_range: tuple[float, float] | None = None
         self._last_x_window: tuple[float, float] | None = None
+        self._selection_start_scene: QPointF | None = None
+        self._selection_rect_item: QGraphicsRectItem | None = None
+        self._selection_zoom_enabled = False
+        self._axis_last_signature: tuple | None = None
+        self._context_menu_group = "cursor"
 
         # 持久光标回调（global 模式拖动时触发）
         self._global_callback = None
@@ -768,6 +1022,7 @@ class WaveformPlot(QWidget):
 
     def _soft_clear(self) -> None:
         """清除波形/分区，但保留持久光标。"""
+        self._clear_selection_rect()
         self._remove_zero_handles()
         keep = self._items_to_keep()
         plot_item = self.plot.getPlotItem()
@@ -783,6 +1038,7 @@ class WaveformPlot(QWidget):
         self._cursor_b = None
         self._h_cursor_a = None
         self._h_cursor_b = None
+        self._clear_selection_rect()
         self._remove_cursor_plot_labels()
         self._remove_zero_handles()
         self._interactive_vce_t_us = None
@@ -855,9 +1111,15 @@ class WaveformPlot(QWidget):
                 line.setMovable(True)
         self._h_cursor_a_locked = False
 
-    def _show_context_menu(self, pos) -> None:
-        menu = QMenu(self)
-        t_us, y_div = self._view_coords_at_context_pos(pos)
+    def set_context_menu_group(self, group: str) -> None:
+        if group not in {"cursor", "zoom", "view", "y", "all"}:
+            group = "cursor"
+        self._context_menu_group = group
+
+    def context_menu_group(self) -> str:
+        return self._context_menu_group
+
+    def _populate_cursor_menu(self, menu: QMenu, t_us: float, y_div: float) -> None:
         has_cursors = self._cursor_a is not None and self._cursor_b is not None
         if has_cursors:
             act_a = QAction("将光标 A 移到此处", self)
@@ -881,46 +1143,85 @@ class WaveformPlot(QWidget):
                     lambda: self._jump_horizontal_cursor("b", y_div)
                 )
                 menu.addAction(act_hb)
-            menu.addSeparator()
-            mode_menu = menu.addMenu("光标模式")
-            act_linked = QAction("联动", self)
-            act_independent = QAction("独立", self)
-            act_linked.setCheckable(True)
-            act_independent.setCheckable(True)
-            act_linked.setChecked(self._cursor_linked)
-            act_independent.setChecked(not self._cursor_linked)
-            mode_group = QActionGroup(mode_menu)
-            mode_group.setExclusive(True)
-            mode_group.addAction(act_linked)
-            mode_group.addAction(act_independent)
-            act_linked.triggered.connect(
-                lambda checked=False: self._set_cursor_link_mode(linked=True)
-            )
-            act_independent.triggered.connect(
-                lambda checked=False: self._set_cursor_link_mode(linked=False)
-            )
-            mode_menu.addAction(act_linked)
-            mode_menu.addAction(act_independent)
-            menu.addSeparator()
+        else:
+            act_no_cursor = QAction("尚未安装光标", self)
+            act_no_cursor.setEnabled(False)
+            menu.addAction(act_no_cursor)
 
+        menu.addSeparator()
+        mode_menu = menu.addMenu("光标模式")
+        act_linked = QAction("联动", self)
+        act_independent = QAction("独立", self)
+        act_linked.setCheckable(True)
+        act_independent.setCheckable(True)
+        act_linked.setChecked(self._cursor_linked)
+        act_independent.setChecked(not self._cursor_linked)
+        mode_group = QActionGroup(mode_menu)
+        mode_group.setExclusive(True)
+        mode_group.addAction(act_linked)
+        mode_group.addAction(act_independent)
+        act_linked.triggered.connect(
+            lambda checked=False: self._set_cursor_link_mode(linked=True)
+        )
+        act_independent.triggered.connect(
+            lambda checked=False: self._set_cursor_link_mode(linked=False)
+        )
+        mode_menu.addAction(act_linked)
+        mode_menu.addAction(act_independent)
+
+    def _populate_zoom_menu(self, menu: QMenu) -> None:
+        act_zoom_select = QAction("框选局部放大", self)
+        act_zoom_select.setCheckable(True)
+        act_zoom_select.setChecked(self._selection_zoom_enabled)
+        act_zoom_select.triggered.connect(lambda checked=False: self._arm_selection_zoom())
+        menu.addAction(act_zoom_select)
+
+    def _populate_view_menu(self, menu: QMenu) -> None:
         act_fit = QAction("自适应铺满波形", self)
         act_full = QAction("铺满全部双脉冲波形", self)
         act_reset = QAction("重置视图", self)
-        act_auto_y = QAction("自动纵轴", self)
-        act_lock_y = QAction("锁定纵轴缩放(1.00x)", self)
 
         act_fit.triggered.connect(self._fit_last_window)
         act_full.triggered.connect(self._fit_full_range)
         act_reset.triggered.connect(self._reset_view)
-        act_auto_y.triggered.connect(self._apply_disp_yrange)
-        act_lock_y.triggered.connect(self._lock_y_mouse)
 
         menu.addAction(act_fit)
         menu.addAction(act_full)
         menu.addAction(act_reset)
-        menu.addSeparator()
+
+    def _populate_y_axis_menu(self, menu: QMenu) -> None:
+        act_auto_y = QAction("自动纵轴", self)
+        act_lock_y = QAction("锁定纵轴缩放(1.00x)", self)
+
+        act_auto_y.triggered.connect(self._apply_disp_yrange)
+        act_lock_y.triggered.connect(self._lock_y_mouse)
+
         menu.addAction(act_auto_y)
         menu.addAction(act_lock_y)
+
+    def _show_context_menu(self, pos) -> None:
+        t_us, y_div = self._view_coords_at_context_pos(pos)
+        group = self._context_menu_group
+        menu = QMenu(self)
+
+        if group == "all":
+            cursor_menu = menu.addMenu("光标")
+            self._populate_cursor_menu(cursor_menu, t_us, y_div)
+            zoom_menu = menu.addMenu("缩放")
+            self._populate_zoom_menu(zoom_menu)
+            view_menu = menu.addMenu("视图")
+            self._populate_view_menu(view_menu)
+            y_menu = menu.addMenu("纵轴")
+            self._populate_y_axis_menu(y_menu)
+        elif group == "zoom":
+            self._populate_zoom_menu(menu)
+        elif group == "view":
+            self._populate_view_menu(menu)
+        elif group == "y":
+            self._populate_y_axis_menu(menu)
+        else:
+            self._populate_cursor_menu(menu, t_us, y_div)
+
         menu.exec(self.plot.mapToGlobal(pos))
 
     def _lock_y_mouse(self) -> None:
@@ -932,6 +1233,7 @@ class WaveformPlot(QWidget):
         vb = self.plot.getPlotItem().getViewBox()
         vb.setYRange(-DISP_HALF_DIV, DISP_HALF_DIV, padding=0.0)
         vb.setMouseEnabled(x=True, y=False)
+        self._update_y_ticks()
 
     def _update_x_ticks(self) -> None:
         """时间轴只画 ~10 等分整刻度线（无细密小网格），随缩放自适应。"""
@@ -1064,13 +1366,221 @@ class WaveformPlot(QWidget):
         self._apply_x_us_per_div(parsed)
         self._remember_user_x_scale(parsed)
 
+    def _set_selection_zoom_enabled(self, enabled: bool) -> None:
+        self._selection_zoom_enabled = bool(enabled)
+        if self._selection_zoom_enabled:
+            self.plot.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.plot.unsetCursor()
+            self._clear_selection_rect()
+
+    def _finish_selection_zoom_mode(self) -> None:
+        if self._zoom_select_btn.isChecked():
+            self._zoom_select_btn.setChecked(False)
+        else:
+            self._set_selection_zoom_enabled(False)
+
+    def _arm_selection_zoom(self) -> None:
+        self._zoom_select_btn.setChecked(True)
+
     # ---- 每通道垂直刻度换算（显示坐标 = 原始值 / 刻度 + 位置偏移）----
+    def _selection_button_is_left(self, ev) -> bool:
+        btn_fn = getattr(ev, "button", None)
+        btn = btn_fn() if callable(btn_fn) else None
+        return btn in (None, Qt.MouseButton.LeftButton)
+
+    def _ensure_selection_rect(self, start: QPointF) -> None:
+        if self._selection_rect_item is None:
+            item = QGraphicsRectItem(QRectF(start, start))
+            pen = QPen(QColor("#8fd3ff"), 1.4, Qt.PenStyle.DashLine)
+            fill = QColor("#1e90ff")
+            fill.setAlpha(45)
+            item.setPen(pen)
+            item.setBrush(QBrush(fill))
+            item.setZValue(200)
+            self.plot.scene().addItem(item)
+            self._selection_rect_item = item
+        else:
+            self._selection_rect_item.setRect(QRectF(start, start))
+            self._selection_rect_item.show()
+
+    def _clear_selection_rect(self) -> None:
+        if self._selection_rect_item is not None:
+            self.plot.scene().removeItem(self._selection_rect_item)
+            self._selection_rect_item = None
+        self._selection_start_scene = None
+
+    def _apply_selection_zoom(self, p0: QPointF, p1: QPointF) -> None:
+        vb = self.plot.getPlotItem().getViewBox()
+        v0 = vb.mapSceneToView(p0)
+        v1 = vb.mapSceneToView(p1)
+        x0, x1 = sorted((float(v0.x()), float(v1.x())))
+        y0, y1 = sorted((float(v0.y()), float(v1.y())))
+        if self._full_x_range is not None:
+            f0, f1 = self._full_x_range
+            x0 = max(f0, min(f1, x0))
+            x1 = max(f0, min(f1, x1))
+        if x1 - x0 < MIN_X_SPAN_US or y1 - y0 < 0.05:
+            return
+        vb.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0.0)
+        self._last_x_window = (x0, x1)
+        self._x_target_us_per_div = _quantize_x_us_per_div(
+            _exact_x_us_per_div(x1 - x0)
+        )
+        self._x_us_per_div = self._x_target_us_per_div
+        self._remember_user_x_scale(self._x_target_us_per_div)
+        self._sync_x_scale_readout()
+        self._update_y_ticks()
+
+    def _on_selection_drag(self, ev) -> bool:
+        if (
+            not self._selection_zoom_enabled
+            or self._full_x_range is None
+            or not self._selection_button_is_left(ev)
+        ):
+            return False
+        is_start = getattr(ev, "isStart", lambda: False)
+        is_finish = getattr(ev, "isFinish", lambda: False)
+        if is_start():
+            self._selection_start_scene = QPointF(ev.scenePos())
+            self._ensure_selection_rect(self._selection_start_scene)
+            ev.accept()
+            return True
+        if self._selection_start_scene is None:
+            return False
+
+        cur = QPointF(ev.scenePos())
+        rect = QRectF(self._selection_start_scene, cur).normalized()
+        if self._selection_rect_item is not None:
+            self._selection_rect_item.setRect(rect)
+
+        if is_finish():
+            start = QPointF(self._selection_start_scene)
+            self._clear_selection_rect()
+            if rect.width() >= 8 and rect.height() >= 8:
+                self._apply_selection_zoom(start, cur)
+            self._finish_selection_zoom_mode()
+            ev.accept()
+            return True
+
+        ev.accept()
+        return True
+
+    def _axis_channel(self) -> str | None:
+        if (
+            self._highlighted_key is not None
+            and self._highlighted_key in self._trace_items
+            and self._highlighted_key not in self._hidden_channels
+        ):
+            return self._highlighted_key
+        ch = self._readout_channel()
+        if ch in self._trace_items and ch not in self._hidden_channels:
+            return ch
+        for key in self._trace_items:
+            if key not in self._hidden_channels:
+                return key
+        return None
+
+    @staticmethod
+    def _format_axis_value(value: float, unit: str) -> str:
+        abs_v = abs(float(value))
+        prefix = ""
+        scale = 1.0
+        if abs_v >= 1000.0 and unit in {"V", "A"}:
+            prefix = "k"
+            scale = 1000.0
+        disp = float(value) / scale
+        if abs(disp) < 1e-9:
+            disp = 0.0
+        if abs(disp - round(disp)) < 1e-6:
+            text = f"{int(round(disp))}"
+        elif abs(disp) >= 10.0:
+            text = f"{disp:.1f}".rstrip("0").rstrip(".")
+        else:
+            text = f"{disp:.2f}".rstrip("0").rstrip(".")
+        suffix = f" {prefix}{unit}" if unit else ""
+        return f"{text}{suffix}"
+
+    def _update_y_ticks(self) -> None:
+        vb = self.plot.getPlotItem().getViewBox()
+        try:
+            y0, y1 = vb.viewRange()[1]
+        except Exception:
+            return
+        ch = self._axis_channel()
+        if ch is None:
+            ticks = [
+                (i, str(i))
+                for i in range(-int(DISP_HALF_DIV), int(DISP_HALF_DIV) + 1)
+            ]
+            signature = (None, round(y0, 9), round(y1, 9))
+            label = "div"
+            color = WAVEFORM_PLOT_FG
+        else:
+            import math
+
+            unit = self._unit_for_channel(ch)
+            scale = self._disp_scale.get(ch, 1.0)
+            offset = self._disp_offset.get(ch, 0.0)
+            span = max(abs(float(y1) - float(y0)), 1e-9)
+            div_step = max(1, int(math.ceil(span / 12.0)))
+            for candidate in (1, 2, 5, 10, 20, 50):
+                if candidate >= div_step:
+                    div_step = candidate
+                    break
+            start_n = math.ceil((float(y0) - offset) / div_step - 1e-9)
+            end_n = math.floor((float(y1) - offset) / div_step + 1e-9)
+            ticks = []
+            n = int(start_n)
+            count = 0
+            while n <= int(end_n) and count < 80:
+                y = offset + n * div_step
+                raw_value = n * div_step * scale
+                ticks.append((y, self._format_axis_value(raw_value, unit)))
+                n += 1
+                count += 1
+            color = self._trace_style.get(ch, (WAVEFORM_PLOT_FG, 1.0))[0]
+            try:
+                idx = list(self._trace_items.keys()).index(ch) + 1
+            except ValueError:
+                idx = 0
+            legend = self._trace_legend.get(ch, ch)
+            vdiv = self._disp_scale.get(ch, 1.0)
+            vdiv_txt = (
+                f"{int(round(vdiv))}"
+                if abs(vdiv - round(vdiv)) < 1e-9
+                else f"{vdiv:g}"
+            )
+            label = (
+                f"C{idx} {legend}  {vdiv_txt} {unit}/div"
+                if idx
+                else f"{legend} {unit}"
+            )
+            signature = (
+                ch,
+                round(float(y0), 9),
+                round(float(y1), 9),
+                round(float(scale), 9),
+                round(float(offset), 9),
+                self._highlighted_key,
+            )
+        if signature == self._axis_last_signature:
+            return
+        self._axis_last_signature = signature
+        ax = self.plot.getPlotItem().getAxis("left")
+        ax.setTicks([ticks])
+        ax.setPen(pg.mkPen(color))
+        ax.setTextPen(pg.mkPen(color))
+        self.plot.setLabel("left", label, color=color)
+
     def _to_disp(self, channel: str, value: float) -> float:
+        channel = self._display_key_for_channel(channel)
         scale = self._disp_scale.get(channel, 1.0)
         offset = self._disp_offset.get(channel, 0.0)
         return (float(value) / scale if scale else float(value)) + offset
 
     def _from_disp(self, channel: str, y_div: float) -> float:
+        channel = self._display_key_for_channel(channel)
         scale = self._disp_scale.get(channel, 1.0)
         offset = self._disp_offset.get(channel, 0.0)
         return (float(y_div) - offset) * scale
@@ -1094,6 +1604,399 @@ class WaveformPlot(QWidget):
         vb.setXRange(x0, x1, padding=0.0)
         self._apply_disp_yrange()
 
+    def _unit_for_channel(self, key: str) -> str:
+        key = self._display_key_for_channel(key)
+        return self._trace_units.get(key, CHANNEL_UNITS.get(key, ""))
+
+    def _formula_source_names(self) -> list[str]:
+        def _sort_key(name: str) -> tuple[int, int, str]:
+            m = re.search(r"\d+", name)
+            return (
+                0 if name.upper().startswith("CH") else 1,
+                int(m.group(0)) if m else 0,
+                name,
+            )
+
+        return sorted(self._formula_sources, key=_sort_key)
+
+    def _normalize_formula(self, expr: str) -> str:
+        expr = expr.strip()
+        expr = re.sub(r"\bMath\s*(\d+)\b", r"MATH\1", expr, flags=re.I)
+        expr = re.sub(r"\bCh\s*(\d+)\b", r"CH\1", expr, flags=re.I)
+        expr = re.sub(r"\bAND\b(?!\s*\()", "and", expr, flags=re.I)
+        expr = re.sub(r"\bOR\b(?!\s*\()", "or", expr, flags=re.I)
+        expr = re.sub(r"\bXOR\b(?!\s*\()", "^", expr, flags=re.I)
+        return expr
+
+    @staticmethod
+    def _logic_array(value) -> np.ndarray:
+        return np.asarray(value) != 0
+
+    @staticmethod
+    def _logic_float(value) -> np.ndarray:
+        return np.asarray(value, dtype=bool).astype(np.float64)
+
+    def _formula_unit(self, expr: str) -> str:
+        text = expr.upper()
+        if "INTG" in text or "INTEG" in text:
+            return "J"
+        if re.search(r"\bCH[1-6]\b", text) and "*" in text:
+            return "W"
+        for name in re.findall(r"\b(?:CH[1-6]|MATH\d+)\b", text):
+            unit = self._trace_units.get(name) or CHANNEL_UNITS.get(name, "")
+            if unit:
+                return unit
+        return ""
+
+    @staticmethod
+    def _physical_channel_units(profile: BridgeProfile) -> dict[str, str]:
+        units: dict[str, str] = {}
+        for channel, unit in (
+            (profile.vge, "V"),
+            (profile.vce, "V"),
+            (profile.ic, "A"),
+            (profile.irr, "A"),
+            (profile.il, "A"),
+            (profile.v_diode, "V"),
+            (profile.vge_other, "V"),
+        ):
+            if channel:
+                units[channel.upper()] = unit
+        return units
+
+    @staticmethod
+    def _logical_display_key_map(profile: BridgeProfile) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for logical, channel in (
+            ("vge", profile.vge),
+            ("vce", profile.vce),
+            ("ic", profile.ic),
+            ("il", profile.il),
+            ("irr", profile.irr),
+            ("v_diode", profile.v_diode),
+            ("vge_other", profile.vge_other),
+        ):
+            if channel:
+                mapping[logical] = channel.upper()
+        if profile.ic_from_sum_irr_il:
+            mapping["ic"] = (profile.irr or profile.il or profile.ic).upper()
+        if profile.irr_from_ic_minus_il:
+            mapping["irr"] = (profile.irr or profile.ic or profile.il).upper()
+        return mapping
+
+    @staticmethod
+    def _build_display_channel_roles(
+        profile: BridgeProfile, logical_map: dict[str, str] | None = None
+    ) -> dict[str, list[str]]:
+        labels = {
+            "vge": "Vge",
+            "vce": "Vce",
+            "ic": "Ic",
+            "il": "IL",
+            "irr": "Irr",
+            "v_diode": "V_二极管",
+            "vge_other": "对管Vge",
+        }
+        roles: dict[str, list[str]] = {}
+        display_map = logical_map or WaveformPlot._logical_display_key_map(profile)
+        for logical, channel in display_map.items():
+            if channel:
+                roles.setdefault(channel, []).append(labels.get(logical, logical))
+        if profile.ic_from_sum_irr_il:
+            for channel in (profile.irr, profile.il):
+                if channel:
+                    role_list = roles.setdefault(channel.upper(), [])
+                    if "Ic" in role_list:
+                        role_list.remove("Ic")
+                    if "Ic=Irr+IL" not in role_list:
+                        role_list.append("Ic=Irr+IL")
+        if profile.irr_from_ic_minus_il:
+            for channel in (profile.ic, profile.il):
+                if channel:
+                    role_list = roles.setdefault(channel.upper(), [])
+                    if "Irr" in role_list:
+                        role_list.remove("Irr")
+                    if "Irr=Ic-IL" not in role_list:
+                        role_list.append("Irr=Ic-IL")
+        return roles
+
+    @staticmethod
+    def _formula_tokens(expr: str) -> tuple[list[str], list[str]]:
+        text = re.sub(r"\s+", "", expr.upper())
+        tokens = re.findall(r"(?:CH[1-6]|MATH\d+)", text)
+        ops = re.findall(r"[+\-*/]", text)
+        return tokens, ops
+
+    @staticmethod
+    def _is_sum_formula(expr: str, a: str, b: str) -> bool:
+        tokens, ops = WaveformPlot._formula_tokens(expr)
+        return len(tokens) == 2 and set(tokens) == {a.upper(), b.upper()} and ops == ["+"]
+
+    @staticmethod
+    def _is_difference_formula(expr: str, a: str, b: str) -> bool:
+        tokens, ops = WaveformPlot._formula_tokens(expr)
+        return tokens == [a.upper(), b.upper()] and ops == ["-"]
+
+    def _prefer_math_display_keys_for_derived_currents(
+        self,
+        profile: BridgeProfile,
+        formulas: dict[str, str],
+    ) -> None:
+        """Bind derived logical currents to visible TSS Math traces when available."""
+        if profile.ic_from_sum_irr_il and profile.irr and profile.il:
+            for key, expr in formulas.items():
+                if self._is_sum_formula(expr, profile.irr, profile.il):
+                    self._logical_display_keys["ic"] = key.upper()
+                    break
+        if profile.irr_from_ic_minus_il and profile.ic and profile.il:
+            for key, expr in formulas.items():
+                if self._is_difference_formula(expr, profile.ic, profile.il):
+                    self._logical_display_keys["irr"] = key.upper()
+                    break
+
+    def _display_key_for_channel(self, channel: str) -> str:
+        logical = channel.strip().lower()
+        if logical in self._logical_display_keys:
+            return self._logical_display_keys[logical]
+        return channel.upper()
+
+    def _logical_role_for_source(self, source_key: str) -> str:
+        source_key = source_key.upper()
+        for logical, display_key in self._logical_display_keys.items():
+            if display_key == source_key:
+                return logical
+        return source_key.lower()
+
+    def mapping_role_for_source(self, source_key: str) -> str:
+        source_key = source_key.upper()
+        for logical, display_key in self._logical_display_keys.items():
+            if display_key == source_key:
+                return logical
+        return ""
+
+    def request_channel_mapping(self, source_key: str, logical_role: str) -> None:
+        self.channelMappingRequested.emit(source_key.upper(), logical_role)
+
+    def _formula_eval_context(self, target_key: str) -> dict[str, np.ndarray | float]:
+        ctx: dict[str, np.ndarray | float] = {}
+        for name, arr in self._formula_sources.items():
+            if name.upper() != target_key.upper():
+                ctx[name.upper()] = arr
+        ctx["PI"] = float(np.pi)
+        ctx["E"] = float(np.e)
+        return ctx
+
+    def _eval_formula_ast(self, node: ast.AST, ctx: dict[str, np.ndarray | float]):
+        if isinstance(node, ast.Expression):
+            return self._eval_formula_ast(node.body, ctx)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float)):
+                return float(node.value)
+            raise ValueError("Only numeric constants are allowed.")
+        if isinstance(node, ast.Name):
+            name = node.id.upper()
+            if name not in ctx:
+                raise ValueError(f"Unknown source: {node.id}")
+            return ctx[name]
+        if isinstance(node, ast.UnaryOp):
+            val = self._eval_formula_ast(node.operand, ctx)
+            if isinstance(node.op, ast.USub):
+                return -val
+            if isinstance(node.op, ast.UAdd):
+                return val
+            raise ValueError("Unsupported unary operator.")
+        if isinstance(node, ast.BinOp):
+            left = self._eval_formula_ast(node.left, ctx)
+            right = self._eval_formula_ast(node.right, ctx)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+            if isinstance(node.op, ast.Pow):
+                return np.power(left, right)
+            if isinstance(node.op, ast.BitAnd):
+                return self._logic_float(np.logical_and(self._logic_array(left), self._logic_array(right)))
+            if isinstance(node.op, ast.BitOr):
+                return self._logic_float(np.logical_or(self._logic_array(left), self._logic_array(right)))
+            if isinstance(node.op, ast.BitXor):
+                return self._logic_float(np.logical_xor(self._logic_array(left), self._logic_array(right)))
+            raise ValueError("Unsupported operator.")
+        if isinstance(node, ast.BoolOp):
+            vals = [self._eval_formula_ast(v, ctx) for v in node.values]
+            out = vals[0] != 0
+            for val in vals[1:]:
+                if isinstance(node.op, ast.And):
+                    out = np.logical_and(out, val != 0)
+                elif isinstance(node.op, ast.Or):
+                    out = np.logical_or(out, val != 0)
+                else:
+                    raise ValueError("Unsupported boolean operator.")
+            return self._logic_float(out)
+        if isinstance(node, ast.Compare):
+            left = self._eval_formula_ast(node.left, ctx)
+            out = None
+            for op, comp in zip(node.ops, node.comparators):
+                right = self._eval_formula_ast(comp, ctx)
+                if isinstance(op, ast.Eq):
+                    cur = left == right
+                elif isinstance(op, ast.NotEq):
+                    cur = left != right
+                elif isinstance(op, ast.Lt):
+                    cur = left < right
+                elif isinstance(op, ast.LtE):
+                    cur = left <= right
+                elif isinstance(op, ast.Gt):
+                    cur = left > right
+                elif isinstance(op, ast.GtE):
+                    cur = left >= right
+                else:
+                    raise ValueError("Unsupported comparison.")
+                out = cur if out is None else np.logical_and(out, cur)
+                left = right
+            return self._logic_float(out)
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name):
+                raise ValueError("Unsupported function.")
+            name = node.func.id.upper()
+            args = [self._eval_formula_ast(arg, ctx) for arg in node.args]
+            if name in {"INTG", "INTEG"}:
+                if len(args) != 1:
+                    raise ValueError("INTG() takes one argument.")
+                y = np.asarray(args[0], dtype=np.float64)
+                out = np.zeros_like(y, dtype=np.float64)
+                if self._formula_t_s is None or len(self._formula_t_s) != len(y) or len(y) <= 1:
+                    return out
+                dt = np.diff(self._formula_t_s)
+                out[1:] = np.cumsum(0.5 * (y[1:] + y[:-1]) * dt)
+                return out
+            if name in {"DERIV", "DDX"}:
+                if len(args) != 1:
+                    raise ValueError("DERIV() takes one argument.")
+                y = np.asarray(args[0], dtype=np.float64)
+                if self._formula_t_s is None or len(self._formula_t_s) != len(y) or len(y) <= 1:
+                    return np.zeros_like(y, dtype=np.float64)
+                return np.gradient(y, self._formula_t_s)
+            funcs = {
+                "ABS": np.abs,
+                "SQRT": np.sqrt,
+                "LOG": np.log10,
+                "LN": np.log,
+                "EXP": np.exp,
+                "SIN": np.sin,
+                "COS": np.cos,
+                "TAN": np.tan,
+                "CEIL": np.ceil,
+                "FLOOR": np.floor,
+                "INV": lambda x: 1.0 / x,
+                "MIN": np.minimum if len(args) == 2 else np.nanmin,
+                "MAX": np.maximum if len(args) == 2 else np.nanmax,
+                "AND": lambda a, b: self._logic_float(np.logical_and(self._logic_array(a), self._logic_array(b))),
+                "OR": lambda a, b: self._logic_float(np.logical_or(self._logic_array(a), self._logic_array(b))),
+                "XOR": lambda a, b: self._logic_float(np.logical_xor(self._logic_array(a), self._logic_array(b))),
+                "NAND": lambda a, b: self._logic_float(~np.logical_and(self._logic_array(a), self._logic_array(b))),
+                "NOR": lambda a, b: self._logic_float(~np.logical_or(self._logic_array(a), self._logic_array(b))),
+                "EQV": lambda a, b: self._logic_float(~np.logical_xor(self._logic_array(a), self._logic_array(b))),
+            }
+            if name not in funcs:
+                raise ValueError(f"Unsupported function: {name}")
+            return funcs[name](*args)
+        raise ValueError("Unsupported formula syntax.")
+
+    def _evaluate_math_formula(self, key: str, expr: str) -> np.ndarray:
+        expr = self._normalize_formula(expr)
+        if not expr:
+            raise ValueError("Formula is empty.")
+        parsed = ast.parse(expr, mode="eval")
+        value = self._eval_formula_ast(parsed, self._formula_eval_context(key))
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim == 0:
+            if self._formula_t_s is None:
+                raise ValueError("No waveform time base is loaded.")
+            arr = np.full(len(self._formula_t_s), float(arr), dtype=np.float64)
+        if self._formula_t_s is None or len(arr) != len(self._formula_t_s):
+            raise ValueError("Formula result length does not match the waveform.")
+        return arr
+
+    def _add_trace_item(
+        self, key: str, raw: np.ndarray, legend: str, color: str, width: float
+    ) -> None:
+        if self._trace_t_us is None:
+            return
+        raw = np.asarray(raw, dtype=np.float64)
+        self._trace_raw[key] = raw
+        if key in self._manual_vdiv:
+            scale = float(self._manual_vdiv[key])
+            if not _is_math_trace_key(key) and not _waveform_fits_at_center(raw, scale):
+                scale = _auto_vdiv_for_channel(key, raw)
+        else:
+            scale = _auto_vdiv_for_channel(key, raw)
+        self._disp_scale[key] = scale
+        self._disp_offset[key] = _auto_center_offset_div(raw, scale)
+        item = self.plot.plot(
+            self._trace_t_us,
+            raw / scale + self._disp_offset[key],
+            pen=pg.mkPen(color, width=width),
+        )
+        item.setZValue(0)
+        self._trace_items[key] = item
+        self._trace_style[key] = (color, width)
+        self._trace_legend[key] = legend
+        if len(raw):
+            self._trace_yrange[key] = (float(np.nanmin(raw)), float(np.nanmax(raw)))
+        else:
+            self._trace_yrange[key] = (0.0, 0.0)
+
+    def _set_math_formula(self, key: str, expr: str) -> None:
+        key = key.upper()
+        expr = self._normalize_formula(expr)
+        if self._formula_t_s is None:
+            raise ValueError("No waveform time base is loaded.")
+        raw_full = self._evaluate_math_formula(key, expr)
+        _t_disp, arrs = _downsample(self._formula_t_s, raw_full)
+        raw = np.asarray(arrs[0], dtype=np.float64)
+        self._math_formulas[key] = expr
+        self._math_source_keys.add(key)
+        self._formula_sources[key] = raw_full
+        self._trace_units[key] = self._formula_unit(expr)
+        if key not in self._trace_items:
+            self._add_trace_item(key, raw, key.title().replace("Math", "Math "), _math_color(key), 1.5)
+            self._build_channel_bar()
+            return
+        self._trace_raw[key] = raw
+        self._trace_yrange[key] = (float(np.nanmin(raw)), float(np.nanmax(raw))) if len(raw) else (0.0, 0.0)
+        self._disp_scale[key] = _auto_vdiv_for_channel(key, raw)
+        self._disp_offset[key] = _auto_center_offset_div(raw, self._disp_scale[key])
+        self._trace_items[key].setData(self._trace_t_us, raw / self._disp_scale[key] + self._disp_offset[key])
+        self._refresh_legend_styles()
+        self._update_zero_handle_positions()
+        self._update_y_ticks()
+
+    def _next_math_key(self) -> str:
+        used = {
+            int(m.group(1))
+            for name in list(self._trace_items) + list(self._math_formulas)
+            if (m := re.fullmatch(r"MATH(\d+)", name.upper()))
+        }
+        n = 1
+        while n in used:
+            n += 1
+        return f"MATH{n}"
+
+    def _add_math_channel(self) -> None:
+        if self._trace_t_us is None:
+            return
+        key = self._next_math_key()
+        self._set_math_formula(key, "CH1")
+        self._show_math_formula_editor(key)
+
+    def _show_math_formula_editor(self, key: str) -> None:
+        dlg = MathFormulaDialog(self, key, parent=self)
+        dlg.exec()
+
     # ------------------------------------------------------------------ 主入口 ----
     def plot_waveforms(
         self,
@@ -1107,11 +2010,13 @@ class WaveformPlot(QWidget):
             self._loaded_source_path = source
             self.reset_interaction_state()
             saved_offset: dict[str, float] = {}
-            scope_vdiv = scope_vdiv_by_logical(bundle.meta, profile)
-            if scope_vdiv:
-                self._manual_vdiv = {k: float(v) for k, v in scope_vdiv.items()}
-            else:
-                self._manual_vdiv.clear()
+            self._math_formulas.clear()
+            self._math_source_keys.clear()
+            self._manual_vdiv.clear()
+            for ch, scale in bundle.meta.channel_vdiv.items():
+                ch_key = ch.upper()
+                if re.fullmatch(r"(CH[1-6]|MATH\d+)", ch_key):
+                    self._manual_vdiv[ch_key] = float(scale)
         else:
             saved_offset = dict(self._disp_offset) if self._trace_items else {}
         self._soft_clear()
@@ -1132,31 +2037,57 @@ class WaveformPlot(QWidget):
         self._interactive_ic = ic
         self._interactive_dt = float(bundle.dt)
 
-        t_us, arrs = _downsample(t, vge, vce, ic, irr, v_diode, vge_other)
-        vge_d, vce_d, ic_d, irr_d, vd_d, vgeo_d = arrs
-        t_us = t_us * 1e6
-
+        source_items = [
+            (ch.upper(), np.asarray(raw, dtype=np.float64))
+            for ch, raw in bundle.channels.items()
+            if re.fullmatch(r"(CH[1-6]|MATH\d+)", ch.upper())
+        ]
+        source_items.sort(key=lambda item: _source_channel_sort_key(item[0]))
+        downsampled = _downsample(t, *(raw for _ch, raw in source_items))
+        t_us = downsampled[0] * 1e6
+        source_downsampled = [
+            np.asarray(arr, dtype=np.float64) for arr in downsampled[1]
+        ]
         self._trace_items.clear()
         self._trace_style.clear()
         self._trace_yrange.clear()
         self._trace_legend.clear()
+        self._trace_units.clear()
         self._disp_scale.clear()
         self._trace_raw.clear()
+        self._formula_sources.clear()
+        self._formula_t_s = np.asarray(t, dtype=np.float64)
         self._trace_t_us = t_us
-        for key, data, legend in [
-            ("vge", vge_d, "Vge"),
-            ("vce", vce_d, "Vce"),
-            ("ic", ic_d, "Ic"),
-            ("irr", irr_d, "Irr"),
-            ("v_diode", vd_d, "V_二极管"),
-            ("vge_other", vgeo_d, "对管Vge"),
-        ]:
-            color, width = WAVEFORM_TRACE_STYLES[key]
+        imported_math_formulas = {
+            ch.upper(): self._normalize_formula(expr)
+            for ch, expr in bundle.meta.channel_math_formulas.items()
+        }
+        self._logical_display_keys = self._logical_display_key_map(profile)
+        self._prefer_math_display_keys_for_derived_currents(
+            profile, imported_math_formulas
+        )
+        self._display_channel_roles = self._build_display_channel_roles(
+            profile, self._logical_display_keys
+        )
+        source_units = self._physical_channel_units(profile)
+        for (key, _raw_full), data in zip(source_items, source_downsampled):
+            if _is_math_trace_key(key):
+                color, width = _math_color(key), 1.5
+            else:
+                color, width = WAVEFORM_TRACE_STYLES.get(
+                    self._logical_role_for_source(key),
+                    (_math_color(key), 1.5),
+                )
+            legend = _source_channel_legend(key, bundle.meta.channel_labels)
             raw = np.asarray(data, dtype=np.float64)
             self._trace_raw[key] = raw
+            expr = imported_math_formulas.get(key)
+            self._trace_units[key] = (
+                self._formula_unit(expr) if expr else source_units.get(key, "")
+            )
             if key in self._manual_vdiv:
                 scale = float(self._manual_vdiv[key])
-                if not _waveform_fits_at_center(raw, scale):
+                if not _is_math_trace_key(key) and not _waveform_fits_at_center(raw, scale):
                     scale = _auto_vdiv_for_channel(key, raw)
             else:
                 scale = _auto_vdiv_for_channel(key, raw)
@@ -1171,6 +2102,8 @@ class WaveformPlot(QWidget):
             self._trace_items[key] = item
             self._trace_style[key] = (color, width)
             self._trace_legend[key] = legend
+            if expr:
+                self._math_formulas[key] = expr
             if len(data):
                 self._trace_yrange[key] = (
                     float(np.nanmin(data)),
@@ -1178,8 +2111,25 @@ class WaveformPlot(QWidget):
                 )
         # 重建底部通道盒（含每通道 V/div）
         self._highlighted_key = None
+        for key in list(self._trace_items):
+            self._trace_units.setdefault(key, CHANNEL_UNITS.get(key, ""))
+
+        for ch, raw_full in bundle.channels.items():
+            ch_key = ch.upper()
+            if not re.fullmatch(r"(CH[1-6]|MATH\d+)", ch_key):
+                continue
+            self._formula_sources[ch_key] = np.asarray(raw_full, dtype=np.float64)
+
+        for ch_key, expr in list(self._math_formulas.items()):
+            if ch_key in bundle.channels and ch_key not in self._math_source_keys:
+                continue
+            try:
+                self._set_math_formula(ch_key, expr)
+            except Exception:
+                self._math_formulas.pop(ch_key, None)
+
         self._hidden_channels.clear()
-        self._active_channel = "ic"
+        self._active_channel = self._display_key_for_channel("ic")
         self._build_channel_bar()
 
         if result and result.segments:
@@ -1253,6 +2203,16 @@ class WaveformPlot(QWidget):
             box.visibilityToggleRequested.connect(self._toggle_channel_visibility)
             self._channel_boxes[key] = box
             self._channel_layout.addWidget(box)
+        add_math = QPushButton("+ Math")
+        add_math.setToolTip("Add a custom math waveform")
+        add_math.setFixedSize(82, 42)
+        add_math.setStyleSheet(
+            "QPushButton{background:#2b2d3f;color:#cdd6f4;"
+            "border:1px dashed #6c7086;border-radius:4px;padding:0;}"
+            "QPushButton:hover{background:#373a52;border-color:#89b4fa;}"
+        )
+        add_math.clicked.connect(self._add_math_channel)
+        self._channel_layout.addWidget(add_math)
         self._channel_layout.addStretch(1)
         self._refresh_legend_styles()
         self._rebuild_zero_handles()
@@ -1267,7 +2227,7 @@ class WaveformPlot(QWidget):
 
     def _zero_handle_tooltip(self, key: str, legend: str) -> str:
         text = self._zero_handle_label(key, legend)
-        unit = CHANNEL_UNITS.get(key, "")
+        unit = self._unit_for_channel(key)
         off = self._disp_offset.get(key, 0.0)
         try:
             idx = list(self._trace_items.keys()).index(key) + 1
@@ -1282,10 +2242,22 @@ class WaveformPlot(QWidget):
 
     def _vdiv_text(self, key: str) -> str:
         scale = self._disp_scale.get(key, 1.0)
-        unit = CHANNEL_UNITS.get(key, "")
+        unit = self._unit_for_channel(key)
         if abs(scale - round(scale)) < 1e-9:
             return f"{int(round(scale))} {unit}/格"
         return f"{scale:g} {unit}/格"
+
+    def _vdiv_text(self, key: str) -> str:
+        scale = self._disp_scale.get(key, 1.0)
+        unit = self._unit_for_channel(key)
+        disp_scale = scale
+        disp_unit = unit
+        if unit == "J" and 0 < abs(scale) < 1.0:
+            disp_scale = scale * 1000.0
+            disp_unit = "mJ"
+        if abs(disp_scale - round(disp_scale)) < 1e-9:
+            return f"{int(round(disp_scale))} {disp_unit}/div"
+        return f"{disp_scale:g} {disp_unit}/div"
 
     def _refresh_legend_styles(self) -> None:
         keys = list(self._channel_boxes.keys())
@@ -1357,6 +2329,7 @@ class WaveformPlot(QWidget):
                 self._clear_highlight()
         self._refresh_legend_styles()
         self._refresh_zero_handle_styles()
+        self._update_y_ticks()
 
     # ------------------------------------------------------------------ 每通道垂直位置 ----
     def _auto_center_channel(self, key: str) -> None:
@@ -1377,6 +2350,7 @@ class WaveformPlot(QWidget):
         if raw is not None:
             self._trace_items[key].setData(self._trace_t_us, raw / scale + offset)
         self._refresh_legend_styles()
+        self._update_y_ticks()
         self._update_zero_handle_positions()
         self._update_readout()
 
@@ -1512,6 +2486,7 @@ class WaveformPlot(QWidget):
                 item.setZValue(0)
         self._refresh_legend_styles()
         self._refresh_zero_handle_styles()
+        self._update_y_ticks()
 
     def _clear_highlight(self) -> None:
         self._highlighted_key = None
@@ -1521,6 +2496,7 @@ class WaveformPlot(QWidget):
             item.setZValue(0)
         self._refresh_legend_styles()
         self._refresh_zero_handle_styles()
+        self._update_y_ticks()
 
     # ------------------------------------------------------------------ 光标安装 ----
     def _install_persistent_cursors(self, a_us: float, b_us: float, peak_ic: float) -> None:
@@ -1712,8 +2688,8 @@ class WaveformPlot(QWidget):
                 ha_val = abs(ha_val)
             if hb_ch == "irr":
                 hb_val = abs(hb_val)
-            u_ha = CHANNEL_UNITS.get(ha_ch, "")
-            u_hb = CHANNEL_UNITS.get(hb_ch, "")
+            u_ha = self._unit_for_channel(ha_ch)
+            u_hb = self._unit_for_channel(hb_ch)
             ha_html = _level_html(ha_val, u_ha, CURSOR_PEN_A)
             hb_html = _level_html(hb_val, u_hb, CURSOR_PEN_B)
             if ha_ch != hb_ch or u_ha != u_hb:
@@ -1721,7 +2697,7 @@ class WaveformPlot(QWidget):
             return ha_html, hb_html, _delta_html(hb_val - ha_val, u_ha)
 
         ch = self._readout_channel()
-        unit = CHANNEL_UNITS.get(ch, "")
+        unit = self._unit_for_channel(ch)
         ha_val = self._from_disp(ch, ha_div)
         hb_val = self._from_disp(ch, hb_div)
         if ch == "irr":
@@ -1856,6 +2832,7 @@ class WaveformPlot(QWidget):
 
     def _on_view_range_changed(self) -> None:
         self._update_zero_handle_positions()
+        self._update_y_ticks()
         if self._cursor_a is None or self._cursor_b is None:
             return
         a = float(self._cursor_a.value())
@@ -1913,6 +2890,7 @@ class WaveformPlot(QWidget):
         ha_div = float(self._h_cursor_a.value()) if self._h_cursor_a is not None else 0.0
         hb_div = float(self._h_cursor_b.value()) if self._h_cursor_b is not None else 0.0
         dt_us = b - a
+        self._update_y_ticks()
         self._update_v_cursor_plot_labels(a, b)
         self._update_h_cursor_plot_labels(a, b, ha_div, hb_div, dt_us)
         if abs(dt_us) > 1e-9:
@@ -1937,12 +2915,12 @@ class WaveformPlot(QWidget):
             return
         if self._interactive_mode == "energy_loss":
             ha_ch = getattr(self, "_energy_ha_channel", "vce")
-            ha_u = CHANNEL_UNITS.get(ha_ch, "")
+            ha_u = self._unit_for_channel(ha_ch)
             ha_val = self._from_disp(ha_ch, ha_div)
             if ha_ch == "irr":
                 ha_val = abs(ha_val)
             hb_ch = getattr(self, "_energy_hb_channel", "ic")
-            hb_u = CHANNEL_UNITS.get(hb_ch, "")
+            hb_u = self._unit_for_channel(hb_ch)
             hb_val = self._from_disp(hb_ch, hb_div)
             if hb_ch == "irr":
                 hb_val = abs(hb_val)
@@ -1965,7 +2943,7 @@ class WaveformPlot(QWidget):
             return
         # Ha/Hb/Δy 按当前活动通道的真实单位显示
         ch = self._readout_channel()
-        unit = CHANNEL_UNITS.get(ch, "")
+        unit = self._unit_for_channel(ch)
         ha = self._from_disp(ch, ha_div)
         hb = self._from_disp(ch, hb_div)
         dy = hb - ha
@@ -2094,7 +3072,7 @@ class WaveformPlot(QWidget):
         if channel == "ic":
             return self._interactive_ic_t_us, self._interactive_ic
         if channel == "v_diode" and self._trace_t_us is not None:
-            raw = self._trace_raw.get("v_diode")
+            raw = self._trace_raw.get(self._display_key_for_channel("v_diode"))
             if raw is not None:
                 return self._trace_t_us, raw
         return None, None
@@ -2153,13 +3131,13 @@ class WaveformPlot(QWidget):
 
     def _readout_channel(self) -> str:
         if self._interactive_mode == "turn_on_current":
-            return "ic"
+            return self._display_key_for_channel("ic")
         if (
             self._interactive_mode in self._BASE_TOP_SLOPE_MODES
             and self._slope_channel is not None
         ):
-            return self._slope_channel
-        return self._active_channel
+            return self._display_key_for_channel(self._slope_channel)
+        return self._display_key_for_channel(self._active_channel)
 
     def _ensure_h_cursor_zero(self, channel: str, zero_v: float) -> None:
         pos = self._to_disp(channel, float(zero_v))
@@ -2867,6 +3845,7 @@ class WaveformPlot(QWidget):
         use_abs: bool = False,
     ) -> float | None:
         """A–B 窗口内绘图曲线（降采样后）的显示坐标峰值，与屏幕上波形对齐。"""
+        channel = self._display_key_for_channel(channel)
         tt = self._trace_t_us
         raw = self._trace_raw.get(channel)
         if tt is None or raw is None or len(tt) == 0:
@@ -2887,6 +3866,7 @@ class WaveformPlot(QWidget):
         self, channel: str, t0_us: float, t1_us: float
     ) -> float | None:
         """A–B 窗口内绘图曲线（降采样后）的显示坐标谷值，与屏幕上波形对齐。"""
+        channel = self._display_key_for_channel(channel)
         tt = self._trace_t_us
         raw = self._trace_raw.get(channel)
         if tt is None or raw is None or len(tt) == 0:

@@ -1,10 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 规格：Windows 单文件 GUI 可执行程序。"""
+import re
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 ROOT = Path(SPECPATH)
+VERSION_FILE = ROOT / "dpt_extractor" / "__init__.py"
+VERSION_MATCH = re.search(
+    r'__version__\s*=\s*["\']([^"\']+)["\']',
+    VERSION_FILE.read_text(encoding="utf-8"),
+)
+VERSION = VERSION_MATCH.group(1) if VERSION_MATCH else "0.0.0"
 
 datas = [
     (str(ROOT / "dpt_extractor" / "config" / "default.yaml"), "dpt_extractor/config"),
@@ -52,7 +59,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="DPT_双脉冲参数提取工具",
+    name=f"DPT_双脉冲参数提取工具_v{VERSION}",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

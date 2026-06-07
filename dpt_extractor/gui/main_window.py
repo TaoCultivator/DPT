@@ -6,6 +6,7 @@ import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QResizeEvent
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -25,7 +26,7 @@ from PyQt6.QtWidgets import (
 
 from dpt_extractor.config.loader import AppConfig, load_config
 from dpt_extractor.export.excel_export import default_export_path, export_to_excel
-from dpt_extractor.gui.channel_mapping_dialog import ChannelMappingDialog, resolve_profile
+from dpt_extractor.gui.channel_mapping_dialog import resolve_profile
 from dpt_extractor.gui.recent_paths import (
     open_dialog_start_dir,
     save_dialog_initial_path,
@@ -36,8 +37,11 @@ from dpt_extractor.gui.result_table import ResultTable
 from dpt_extractor.gui.theme import DARK_STYLESHEET, SUMMARY_STYLE
 from dpt_extractor.gui.waveform_plot import WaveformPlot
 from dpt_extractor.models.channel_mapping import (
+    LOGICAL_SIGNAL_KEYS,
+    ChannelMapping,
     ChannelMappingStore,
     infer_mapping_from_bundle,
+    validate_mapping,
 )
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.models.bridge_profile import (
@@ -78,9 +82,13 @@ from dpt_extractor.metrics.slopes import (
 )
 from dpt_extractor.metrics.derived import crosstalk_extrema
 from dpt_extractor.metrics.iec_timings import (
+    turn_off_ic_fall_window,
+    turn_on_ic_top,
     turn_off_timing_instants,
+    turn_on_vce_top_from_ic_rise,
     turn_on_timing_instants,
 )
+from dpt_extractor.metrics.plateau_level import _turn_on_vce_pre_fall_slice
 from dpt_extractor.models.test_mode import MODE_UI_LABELS, TestMode, parse_test_mode
 from dpt_extractor.pipeline.extract import _turn_on_delta_vce_knee_point
 from dpt_extractor.pipeline.run_extract import run_extraction
@@ -128,8 +136,13 @@ class MainWindow(QMainWindow):
         # 持久 A/B 光标：global 模式拖动时显示测量读数；横向 Ha/Hb 同步
         self.wave_plot.set_global_cursor_handler(self._on_global_cursors_moved)
         self.wave_plot.set_horizontal_cursor_handler(self._on_horizontal_cursors_moved)
+        self.wave_plot.channelMappingRequested.connect(
+            self._on_waveform_channel_mapping_requested
+        )
 
     def _build_ui(self) -> None:
+        self.wave_plot = WaveformPlot()
+
         toolbar = QFrame()
         toolbar.setObjectName("toolbar")
         tb_root = QVBoxLayout(toolbar)
@@ -174,10 +187,6 @@ class MainWindow(QMainWindow):
         self.btn_export = QPushButton("💾  导出 Excel")
         self.btn_export.clicked.connect(self._export_excel)
 
-        self.btn_channel_map = QPushButton("🔌  通道映射")
-        self.btn_channel_map.setToolTip("自定义 CH/MATH 与 Vge、Vce、Ic 等逻辑信号的对应关系")
-        self.btn_channel_map.clicked.connect(self._open_channel_mapping)
-
         self.lbl_map_status = QLabel("")
         self.lbl_map_status.setStyleSheet("color:#f9e2af;font-size:11px;")
         self.lbl_map_status.setSizePolicy(
@@ -197,7 +206,7 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.spin_vdc)
         row1.addWidget(self.btn_recalc)
         row1.addWidget(self.btn_export)
-        row1.addWidget(self.btn_channel_map)
+        row1.addWidget(self._build_context_menu_selector())
         row1.addWidget(self.lbl_map_status, stretch=1)
         row1.addWidget(QLabel("测试"))
         self.combo_test_mode = QComboBox()
@@ -264,7 +273,6 @@ class MainWindow(QMainWindow):
         tb_root.addLayout(row1)
         tb_root.addLayout(row2)
 
-        self.wave_plot = WaveformPlot()
         self.result_table = ResultTable()
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -300,6 +308,54 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("请打开 Tekscope CSV 或 TSS 会话文件")
         self._apply_test_mode_ui()
+
+    def _build_context_menu_selector(self) -> QWidget:
+        box = QFrame()
+        box.setObjectName("contextMenuSelector")
+        box.setStyleSheet(
+            "QFrame#contextMenuSelector{background:#181a28;"
+            "border:1px solid #34374a;border-radius:5px;}"
+            "QLabel#contextMenuSelectorLabel{color:#aeb6d8;font-size:12px;"
+            "padding-left:8px;padding-right:2px;}"
+            "QPushButton#contextMenuSelectorButton{background:#2b2d3f;"
+            "color:#cdd6f4;border:1px solid #44475f;border-radius:4px;"
+            "padding:4px 9px;min-height:22px;}"
+            "QPushButton#contextMenuSelectorButton:hover{background:#373a52;}"
+            "QPushButton#contextMenuSelectorButton:checked{background:#1f6feb;"
+            "color:#ffffff;border-color:#8fd3ff;}"
+        )
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(4, 3, 4, 3)
+        lay.setSpacing(4)
+
+        label = QLabel("右键菜单")
+        label.setObjectName("contextMenuSelectorLabel")
+        lay.addWidget(label)
+
+        group = QButtonGroup(box)
+        group.setExclusive(True)
+        self._context_menu_button_group = group
+        for text, key, tip in (
+            ("光标", "cursor", "右键直接显示光标移动与光标模式"),
+            ("缩放", "zoom", "右键直接显示缩放功能"),
+            ("视图", "view", "右键直接显示视图铺满与重置"),
+            ("纵轴", "y", "右键直接显示纵轴功能"),
+            ("全部", "all", "右键显示完整分组菜单"),
+        ):
+            btn = QPushButton(text)
+            btn.setObjectName("contextMenuSelectorButton")
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.clicked.connect(
+                lambda checked=False, menu_key=key: self.wave_plot.set_context_menu_group(
+                    menu_key
+                )
+            )
+            group.addButton(btn)
+            lay.addWidget(btn)
+            if key == self.wave_plot.context_menu_group():
+                btn.setChecked(True)
+        return box
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -456,21 +512,56 @@ class MainWindow(QMainWindow):
         if self.bundle:
             self._recalculate(reset_manual=True)
 
-    def _open_channel_mapping(self) -> None:
+    def _on_waveform_channel_mapping_requested(self, source_key: str, logical_role: str) -> None:
+        if self.bundle is None:
+            return
+        source_key = source_key.upper()
         phase = self.combo_phase.currentData()
         bridge = self.combo_bridge.currentData()
-        dlg = ChannelMappingDialog(
-            self,
-            phase=phase,
-            bridge=bridge,
-            bundle=self.bundle,
-            store=self._channel_store,
+        current = ChannelMapping.from_profile(self.profile)
+        parts = {key: getattr(current, key) for key in LOGICAL_SIGNAL_KEYS}
+        ic_sum = bool(current.ic_from_sum_irr_il)
+        irr_diff = bool(current.irr_from_ic_minus_il)
+
+        if logical_role:
+            if logical_role not in LOGICAL_SIGNAL_KEYS:
+                return
+            parts[logical_role] = source_key
+            if logical_role == "ic":
+                ic_sum = False
+            if logical_role == "irr":
+                irr_diff = False
+        else:
+            for key in LOGICAL_SIGNAL_KEYS:
+                if parts.get(key) == source_key:
+                    parts[key] = ""
+            if parts.get("irr") == "" and ic_sum:
+                ic_sum = False
+            if parts.get("ic") == "" and irr_diff:
+                irr_diff = False
+
+        mapping = ChannelMapping(
+            **parts,
+            ic_from_sum_irr_il=ic_sum,
+            irr_from_ic_minus_il=irr_diff,
         )
-        if dlg.exec() == dlg.DialogCode.Accepted and dlg.was_applied():
-            self.profile = self._current_profile()
-            if self.bundle:
-                self._recalculate(reset_manual=True)
-            self.statusBar().showMessage(f"已更新 {self.profile.display_name} 通道映射")
+        errors = validate_mapping(mapping, self.bundle)
+        if errors:
+            QMessageBox.warning(
+                self,
+                "映射无效",
+                "该设置会导致参数计算通道不完整或重复：\n\n"
+                + "\n".join(f"- {err}" for err in errors),
+            )
+            return
+
+        self._channel_store.set(phase, bridge, mapping)
+        self.profile = self._current_profile()
+        self._mapping_custom = True
+        self._update_map_status_label()
+        self._recalculate(reset_manual=True)
+        role_label = logical_role or "未映射"
+        self.statusBar().showMessage(f"{source_key} 已映射为 {role_label}")
 
     def _set_profile_combos(self, profile: BridgeProfile) -> None:
         pi = self.combo_phase.findData(profile.phase)
@@ -2882,6 +2973,123 @@ class MainWindow(QMainWindow):
             return None
         return ta, tb
 
+    def _turn_on_ic_max_window_indices(self) -> tuple[int, int] | None:
+        """Window used by extract._turn_on_ic_max_in_base_window."""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        dt = max(float(self.bundle.dt), 1e-15)
+        segs = self.result.segments
+        ic = bundle_total_current(self.bundle, self.profile)
+        vce = self.bundle.get(self.profile.vce)
+        n = len(ic)
+        if n == 0:
+            return None
+        on0, on1 = segs.turn_on
+        s0 = max(0, min(on0, n - 2))
+        s1 = max(s0 + 2, min(on1, n - 1))
+        ic_top = turn_on_ic_top(ic, segs.pulse2_on, segs.pulse2_off, dt)
+        vce_top = turn_on_vce_top_from_ic_rise(
+            ic, vce, segs.pulse2_on, segs.pulse2_off, dt
+        )
+        abs_ic = np.abs(ic)
+        pre0 = max(0, s0 - int(300e-9 / dt))
+        pre1 = max(pre0 + 5, s0)
+        ic_base = float(np.percentile(abs_ic[pre0:pre1], 50)) if pre1 > pre0 else 0.0
+        ic_rise_th = ic_base + max(0.02 * max(ic_top, 1.0), 3.0)
+
+        i_start = s0
+        for k in range(s0, s1):
+            if abs_ic[k] >= ic_rise_th:
+                i_start = k
+                break
+
+        post0 = min(n - 1, max(i_start + int(120e-9 / dt), s0))
+        post1 = max(post0 + 10, min(s1, post0 + int(700e-9 / dt)))
+        if post1 <= post0 + 5:
+            post0 = max(s0, s1 - int(500e-9 / dt))
+            post1 = s1
+        vce_base = (
+            float(np.percentile(vce[post0:post1], 20))
+            if post1 > post0
+            else float(np.min(vce[s0:s1]))
+        )
+        vce_base_th = vce_base + max(0.02 * max(vce_top, 1.0), 2.0)
+
+        i_end = s1
+        for k in range(i_start, s1):
+            if vce[k] <= vce_base_th:
+                i_end = k
+                break
+        if i_end <= i_start + 2:
+            i_end = s1
+        return int(i_start), int(i_end)
+
+    def _parameter_max_interval_indices(
+        self, section: str, name: str
+    ) -> tuple[int, int] | None:
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        segs = self.result.segments
+        t = self.bundle.t
+        dt = max(float(self.bundle.dt), 1e-15)
+        n = len(t)
+        if n == 0:
+            return None
+
+        def _clip_pair(a: int, b: int) -> tuple[int, int]:
+            i0 = max(0, min(int(a), n - 1))
+            i1 = max(i0, min(int(b), n - 1))
+            return i0, i1
+
+        if section == "关断过程" and name == "Ic_off_max":
+            vge = self.bundle.get(self.profile.vge)
+            win = turn_off_ic_fall_window(
+                t,
+                vge,
+                segs.turn_off[0],
+                segs.turn_off[1],
+                segs.pulse1_on,
+                segs.pulse1_off,
+                segs.pulse2_on,
+                dt,
+                self.cfg,
+            )
+            return _clip_pair(*(win if win is not None else segs.turn_off))
+
+        if section == "开通" and name == "Ic_on_max":
+            return self._turn_on_ic_max_window_indices()
+
+        if section == "开通" and name == "Vce_on_max":
+            from dpt_extractor.models.waveform import bundle_total_current
+
+            ic = bundle_total_current(self.bundle, self.profile)
+            vce = self.bundle.get(self.profile.vce)
+            vce_top = turn_on_vce_top_from_ic_rise(
+                ic, vce, segs.pulse2_on, segs.pulse2_off, dt
+            )
+            return _clip_pair(
+                *_turn_on_vce_pre_fall_slice(
+                    vce, segs.turn_on[0], segs.turn_on[1], dt, vce_top
+                )
+            )
+
+        if section == "反向恢复" and name == "Irr":
+            from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+            irr = bundle_reverse_recovery_current(self.bundle, self.profile)
+            on0, on1 = segs.turn_on
+            rr0, _rr1 = segs.reverse_recovery
+            s0 = max(0, min(max(rr0, segs.pulse2_on), on1 - 1))
+            s1 = max(s0 + 1, min(on1, len(irr)))
+            if s1 <= s0:
+                s0 = max(0, min(on0, len(irr) - 1))
+                s1 = max(s0 + 1, min(on1, len(irr)))
+            return _clip_pair(s0, s1 - 1)
+
+        return None
+
     def _parameter_interval_us(self, section: str, name: str) -> tuple[float, float] | None:
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
@@ -2932,6 +3140,11 @@ class MainWindow(QMainWindow):
                 self.bundle.dt,
             )
             return w.t_start * 1e6, w.t_end * 1e6
+
+        max_interval = self._parameter_max_interval_indices(section, name)
+        if max_interval is not None:
+            i0, i1 = max_interval
+            return t[i0] * 1e6, t[i1] * 1e6
 
         # 时间参数：用当前结果值近似定位
         if section == "关断过程":
