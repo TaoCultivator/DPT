@@ -1,0 +1,8 @@
+build/
+dist/
+示例文件/
+*.spec.bak
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/

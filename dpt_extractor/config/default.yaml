@@ -1,0 +1,45 @@
+# DPT extractor default configuration (IEC 60747-9 / JEDEC style)
+
+thresholds:
+  low_pct: 0.10
+  mid_pct: 0.50
+  high_pct: 0.90
+
+pulse_detection:
+  smooth_ns: 40.0
+  min_pulse_width_us: 0.3
+  hysteresis_ratio: 0.25
+
+# 多脉冲：关断/开通各取第几个门极脉冲（1-based，默认第 1 波关断、第 2 波开通）
+pulse_selection:
+  off_pulse: 1
+  on_pulse: 2
+
+# 测试模式：dpt | short_circuit（短路计算与双脉冲 pipeline 隔离，后者待实现）
+test_mode:
+  mode: dpt
+
+segments:
+  turn_off_pre_ns: 200.0
+  turn_off_post_ns: 500.0
+  turn_on_pre_ns: 100.0
+  turn_on_post_ns: 800.0
+
+smoothing:
+  slope_window_ns: 20.0
+  detect_window_ns: 15.0
+
+slopes:
+  percentile: 95
+  ma_points: 21
+
+energy:
+  warn_relative_diff: 0.15
+  eoff_pre_ns: 450.0
+
+standard:
+  name: IEC60747-9
+
+vdc:
+  use_plateau_before_off: true
+  plateau_ic_fraction: 0.85

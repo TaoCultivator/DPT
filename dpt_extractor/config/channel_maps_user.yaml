@@ -1,0 +1,31 @@
+mappings:
+  W_upper:
+    vge: CH1
+    vce: CH2
+    ic: ''
+    il: CH4
+    irr: CH3
+    v_diode: CH5
+    vge_other: CH6
+    ic_from_sum_irr_il: true
+    irr_from_ic_minus_il: false
+  W_lower:
+    vge: CH6
+    vce: CH5
+    ic: CH3
+    il: CH4
+    irr: ''
+    v_diode: CH2
+    vge_other: CH1
+    ic_from_sum_irr_il: false
+    irr_from_ic_minus_il: true
+  U_lower:
+    vge: CH6
+    vce: CH5
+    ic: CH3
+    il: CH4
+    irr: ''
+    v_diode: CH2
+    vge_other: CH1
+    ic_from_sum_irr_il: false
+    irr_from_ic_minus_il: true

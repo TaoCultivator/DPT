@@ -1,0 +1,332 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from dpt_extractor.models.channel_mapping import ChannelMapping
+
+_CHANNEL_RE = re.compile(r"^(CH[1-6]|MATH\d+)$")
+_LABEL_ROW = "Label"
+_CHANNEL_ROW = "Channel"
+
+# 电感电流（IGBT / MOSFET 通用）
+_IL_PATTERNS = (r"^IL$",)
+
+# --- 被测管门极（上桥 / 下桥）---
+_UPPER_VGE_PATTERNS = (
+    r"VGEVH$",
+    r"VGESH$",
+    r"^HVGE",
+    r"VGEH",
+    r"VGE.*H",
+    r"VGSVH$",
+    r"VGSSH$",
+    r"^HVGS",
+    r"VGSH",
+    r"VGS.*H",
+)
+_LOWER_VGE_PATTERNS = (
+    r"VGEVL$",
+    r"VGESL$",
+    r"^LVGE",
+    r"VGEL",
+    r"VGE.*L",
+    r"VGSVL$",
+    r"VGSSL$",
+    r"^LVGS",
+    r"VGSL",
+    r"VGS.*L",
+)
+
+# --- 被测管主电压 Vce(IGBT) / Vds(MOSFET) ---
+_UPPER_VCE_PATTERNS = (
+    r"VCEVH$",
+    r"VCEH$",
+    r"^HVCE",
+    r"VCE.*H",
+    r"VDSVH$",
+    r"VDSH$",
+    r"^HVDS",
+    r"VDS.*H",
+)
+_LOWER_VCE_PATTERNS = (
+    r"VCEVL$",
+    r"VCEL$",
+    r"^LVCE",
+    r"VCE.*L",
+    r"VDSVL$",
+    r"VDSL$",
+    r"^LVDS",
+    r"VDS.*L",
+)
+
+# --- 对管/换流二极管侧电压（上桥看低侧 Vce/Vds，下桥看高侧）---
+_UPPER_VDIODE_PATTERNS = _LOWER_VCE_PATTERNS
+_LOWER_VDIODE_PATTERNS = _UPPER_VCE_PATTERNS
+
+# --- 对管门极 ---
+_UPPER_VGE_OTHER_PATTERNS = _LOWER_VGE_PATTERNS
+_LOWER_VGE_OTHER_PATTERNS = _UPPER_VGE_PATTERNS
+
+# 上桥：下桥支路电流（IGBT: IC_VL / Ic；MOSFET: IVL / Id 低侧支路）
+_UPPER_LOWER_ARM_PATTERNS = (
+    r"ICVL$",
+    r"IC.*VL$",
+    r"IVL$",
+    r"IDVL$",
+    r"ID.*VL$",
+    r"^IRR$",
+    r"ILOW",
+    r"ICLOW",
+    r"IDLOW",
+    r"^IC$",  # WH 等：Ic 接下桥回路
+)
+
+# 下桥：被测管总电流（IGBT: Ic；MOSFET: Id / Ids / IVL）
+_LOWER_TOTAL_IC_PATTERNS = (
+    r"^ICTOTAL$",
+    r"^IDTOTAL$",
+    r"^IC$",
+    r"^ID$",
+    r"^IDS$",
+    r"IVL$",  # 下桥被测时低侧漏极电流探头常标 IVL
+    r"IDVL$",
+    r"ICDUT",
+    r"IDDUT",
+    r"ICMAIN",
+    r"IDMAIN",
+)
+
+# 下桥总电流列排除：高侧支路分量（非被测管总电流）
+_LOWER_IC_EXCLUDE_NORM = (
+    r"ICVH$",
+    r"IDVH$",
+    r"IC.*VH$",
+    r"ID.*VH$",
+    r"^IRR$",
+    r"ILOW",
+    r"ICLOW",
+    r"IDLOW",
+)
+
+
+def _norm_label(text: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
+
+
+def parse_channel_labels(path: str | Path, header_row: int) -> dict[str, str]:
+    """Parse Tekscope ``Channel`` / ``Label`` metadata rows into {CHx: label}."""
+    channel_line: str | None = None
+    label_line: str | None = None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for i, line in enumerate(f):
+            if i >= header_row:
+                break
+            if line.startswith(f"{_CHANNEL_ROW},"):
+                channel_line = line
+            elif line.startswith(f"{_LABEL_ROW},"):
+                label_line = line
+
+    if not channel_line or not label_line:
+        return {}
+
+    def _wide_values(prefix: str, line: str) -> list[str]:
+        parts = line.split(",")
+        out: list[str] = []
+        i = 0
+        while i < len(parts):
+            if parts[i].strip() == prefix and i + 1 < len(parts):
+                out.append(parts[i + 1].strip())
+            i += 1
+        return out
+
+    channels = _wide_values(_CHANNEL_ROW, channel_line)
+    labels = _wide_values(_LABEL_ROW, label_line)
+    result: dict[str, str] = {}
+    for ch, lab in zip(channels, labels):
+        if ch and lab and _CHANNEL_RE.match(ch):
+            result[ch] = lab
+    return result
+
+
+def _pick_channel(
+    labeled: list[tuple[str, str]],
+    patterns: tuple[str, ...],
+    used: set[str],
+    *,
+    exclude_norm: tuple[str, ...] = (),
+) -> str | None:
+    best_ch: str | None = None
+    best_score = 0
+    for ch, norm in labeled:
+        if ch in used or not norm:
+            continue
+        if any(re.search(ex, norm) for ex in exclude_norm):
+            continue
+        for prio, pat in enumerate(patterns):
+            if re.search(pat, norm):
+                score = 1000 - prio
+                if score > best_score:
+                    best_score = score
+                    best_ch = ch
+                break
+    return best_ch
+
+
+def _is_lower_arm_current_norm(norm: str) -> bool:
+    """是否为「下桥支路电流」类标签（非 IL、非被测管总电流）。"""
+    if norm == "IL":
+        return False
+    if any(re.search(ex, norm) for ex in _LOWER_IC_EXCLUDE_NORM):
+        return True
+    if re.search(r"ICVL|IDVL|IVL|ILOW|ICLOW|IDLOW", norm):
+        return True
+    if norm in ("IC", "ID"):
+        return True
+    if re.search(r"^IRR$", norm):
+        return True
+    return False
+
+
+def _pick_upper_lower_arm_current(
+    labeled: list[tuple[str, str]],
+    used: set[str],
+    il_ch: str | None,
+) -> str | None:
+    """上桥：下桥支路电流探头（IGBT/MOS 标签均可）。"""
+    ch = _pick_channel(labeled, _UPPER_LOWER_ARM_PATTERNS, used)
+    if ch:
+        return ch
+    for ch, norm in labeled:
+        if ch in used or ch == il_ch:
+            continue
+        if _is_lower_arm_current_norm(norm):
+            return ch
+    return None
+
+
+def _pick_lower_total_ic(
+    labeled: list[tuple[str, str]],
+    used: set[str],
+) -> str | None:
+    """下桥：被测管总电流列（IGBT Ic / MOSFET Id）。"""
+    return _pick_channel(
+        labeled,
+        _LOWER_TOTAL_IC_PATTERNS,
+        used,
+        exclude_norm=_LOWER_IC_EXCLUDE_NORM,
+    )
+
+
+def _apply_upper_current_logic(
+    m: ChannelMapping,
+    labeled: list[tuple[str, str]],
+    used: set[str],
+) -> bool:
+    """
+    上桥被测：Ic = 下桥支路电流 + 电感电流（两探头逐点相加）。
+    """
+    il_ch = _pick_channel(labeled, _IL_PATTERNS, used)
+    if not il_ch:
+        return False
+    m.il = il_ch
+    used.add(il_ch)
+
+    lower_arm = _pick_upper_lower_arm_current(labeled, used, il_ch)
+    if not lower_arm or lower_arm == il_ch:
+        return False
+
+    m.irr = lower_arm
+    m.ic = ""
+    m.ic_from_sum_irr_il = True
+    m.irr_from_ic_minus_il = False
+    used.add(lower_arm)
+    return True
+
+
+def _apply_lower_current_logic(
+    m: ChannelMapping,
+    labeled: list[tuple[str, str]],
+    used: set[str],
+) -> bool:
+    """
+    下桥被测：总电流直接测量；Irr = 总电流 − 电感电流。
+    """
+    il_ch = _pick_channel(labeled, _IL_PATTERNS, used)
+    if not il_ch:
+        return False
+    m.il = il_ch
+    used.add(il_ch)
+
+    ic_ch = _pick_lower_total_ic(labeled, used)
+    if not ic_ch or ic_ch == il_ch:
+        return False
+
+    m.ic = ic_ch
+    m.irr = ""
+    m.ic_from_sum_irr_il = False
+    m.irr_from_ic_minus_il = True
+    used.add(ic_ch)
+    return True
+
+
+def infer_channel_mapping(
+    labels: dict[str, str],
+    bridge: str,
+    available: set[str] | None = None,
+) -> ChannelMapping | None:
+    """
+    根据示波器 Label 推断映射（兼容 IGBT：Vge/Vce/Ic 与 MOSFET：Vgs/Vds/Id/IVL）。
+
+    电流逻辑：
+    - 上桥：Ic = 下桥支路电流 + IL
+    - 下桥：Irr = 总电流 − IL
+    """
+    if not labels:
+        return None
+
+    avail = available or set(labels.keys())
+    labeled = [
+        (ch, _norm_label(lab))
+        for ch, lab in labels.items()
+        if ch in avail and lab
+    ]
+    if not labeled:
+        return None
+
+    is_upper = bridge.lower() == "upper"
+    used: set[str] = set()
+
+    if is_upper:
+        vge_p = _UPPER_VGE_PATTERNS
+        vce_p = _UPPER_VCE_PATTERNS
+        vdiode_p = _UPPER_VDIODE_PATTERNS
+        vge_other_p = _UPPER_VGE_OTHER_PATTERNS
+    else:
+        vge_p = _LOWER_VGE_PATTERNS
+        vce_p = _LOWER_VCE_PATTERNS
+        vdiode_p = _LOWER_VDIODE_PATTERNS
+        vge_other_p = _LOWER_VGE_OTHER_PATTERNS
+
+    m = ChannelMapping()
+    for attr, patterns in (
+        ("vge", vge_p),
+        ("vce", vce_p),
+        ("v_diode", vdiode_p),
+        ("vge_other", vge_other_p),
+    ):
+        ch = _pick_channel(labeled, patterns, used)
+        if ch:
+            setattr(m, attr, ch)
+            used.add(ch)
+
+    if is_upper:
+        if not _apply_upper_current_logic(m, labeled, used):
+            return None
+    else:
+        if not _apply_lower_current_logic(m, labeled, used):
+            return None
+
+    if not m.vge or not m.vce or not m.il:
+        return None
+    return m
