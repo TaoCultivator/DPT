@@ -202,10 +202,6 @@ class ChannelMappingDialog(QDialog):
         if custom:
             self._apply_mapping_to_ui(custom)
             return
-        inferred = infer_mapping_from_bundle(self._bundle, self._bridge)
-        if inferred:
-            self._apply_mapping_to_ui(inferred)
-            return
         self._apply_mapping_to_ui(default_mapping_for(self._phase, self._bridge))
 
     def _on_infer_labels(self) -> None:

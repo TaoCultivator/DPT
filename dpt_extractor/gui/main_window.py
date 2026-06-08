@@ -45,7 +45,6 @@ from dpt_extractor.models.channel_mapping import (
     ChannelMapping,
     ChannelMappingStore,
     apply_mapping,
-    infer_mapping_from_bundle,
     validate_mapping,
 )
 from dpt_extractor.io.waveform_loader import load_waveform
@@ -123,14 +122,14 @@ def _compute_waveform_load_outcome(
     load_t1 = time.perf_counter()
 
     guessed = guess_profile_from_path(path)
-    inferred = infer_mapping_from_bundle(bundle, guessed.bridge)
     base_profile = make_profile(guessed.phase, guessed.bridge)
-    mapping_custom = False
-    if inferred is not None:
-        profile = apply_mapping(base_profile, inferred)
-        mapping_custom = True
-    else:
-        profile = base_profile
+    custom_mapping = ChannelMappingStore().get(guessed.phase, guessed.bridge)
+    mapping_custom = custom_mapping is not None
+    profile = (
+        apply_mapping(base_profile, custom_mapping)
+        if custom_mapping is not None
+        else base_profile
+    )
 
     extract_t0 = time.perf_counter()
     try:
@@ -146,7 +145,7 @@ def _compute_waveform_load_outcome(
         bundle=bundle,
         guessed=guessed,
         profile=profile,
-        inferred=inferred,
+        inferred=None,
         mapping_custom=mapping_custom,
         result=result,
         short_circuit_not_ready=short_circuit_not_ready,
@@ -235,6 +234,9 @@ class MainWindow(QMainWindow):
         self.wave_plot.set_horizontal_cursor_handler(self._on_horizontal_cursors_moved)
         self.wave_plot.channelMappingRequested.connect(
             self._on_waveform_channel_mapping_requested
+        )
+        self.wave_plot.channelLabelChanged.connect(
+            self._on_waveform_channel_label_changed
         )
 
     def _build_ui(self) -> None:
@@ -665,6 +667,20 @@ class MainWindow(QMainWindow):
         role_label = logical_role or "未映射"
         self.statusBar().showMessage(f"{source_key} 已映射为 {role_label}")
 
+    def _on_waveform_channel_label_changed(self, source_key: str, label: str) -> None:
+        if self.bundle is None:
+            return
+        source_key = source_key.upper()
+        if source_key not in self.bundle.channels:
+            return
+        label = label.strip()
+        if label:
+            self.bundle.meta.channel_labels[source_key] = label
+            self.statusBar().showMessage(f"{source_key} 标签已改为 {label}")
+        else:
+            self.bundle.meta.channel_labels.pop(source_key, None)
+            self.statusBar().showMessage(f"{source_key} 标签已清空")
+
     def _set_profile_combos(self, profile: BridgeProfile) -> None:
         pi = self.combo_phase.findData(profile.phase)
         if pi >= 0:
@@ -772,8 +788,8 @@ class MainWindow(QMainWindow):
             f"已加载: {Path(outcome.path).name}  |  "
             f"读取 {outcome.load_ms:.0f} ms  提取 {outcome.extract_ms:.0f} ms"
         )
-        if inferred is not None:
-            msg += "（已根据通道标签自动映射）"
+        if outcome.mapping_custom:
+            msg += "（已应用自定义通道映射）"
         if outcome.bundle.meta.channel_vdiv:
             msg += f"（已应用 TSS 垂直刻度 {len(outcome.bundle.meta.channel_vdiv)} 通道）"
         return msg
@@ -784,27 +800,10 @@ class MainWindow(QMainWindow):
         self.bundle = outcome.bundle
         self._current_path = path
 
-        if inferred is not None:
-            self._channel_store.set(
-                outcome.guessed.phase,
-                outcome.guessed.bridge,
-                inferred,
-            )
         self._set_profile_combos(outcome.guessed)
-        if inferred is not None:
-            self.profile = apply_mapping(
-                make_profile(outcome.guessed.phase, outcome.guessed.bridge),
-                inferred,
-            )
-            self._mapping_custom = True
-            self._update_map_status_label()
-        else:
-            # TSS exports in the sample corpus often preserve scale but omit labels.
-            # In that case the filename phase/bridge is more reliable than stale
-            # per-phase user mapping overrides from previous sessions.
-            self.profile = make_profile(outcome.guessed.phase, outcome.guessed.bridge)
-            self._mapping_custom = False
-            self._update_map_status_label()
+        self.profile = outcome.profile
+        self._mapping_custom = outcome.mapping_custom
+        self._update_map_status_label()
 
         self.spin_vdc.blockSignals(True)
         self.spin_vdc.setValue(0)
@@ -3306,6 +3305,62 @@ class MainWindow(QMainWindow):
             i_end = s1
         return int(i_start), int(i_end)
 
+    def _turn_off_vce_max_window_indices(self) -> tuple[int, int] | None:
+        """Narrow the default Vce_off_max cursor window to the turn-off spike."""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        vce = np.asarray(self.bundle.get(self.profile.vce), dtype=np.float64)
+        n = len(vce)
+        if n == 0:
+            return None
+        dt = max(float(self.bundle.dt), 1e-15)
+        off0, off1 = self.result.segments.turn_off
+        s0 = max(0, min(int(off0), n - 2))
+        s1 = max(s0 + 2, min(int(off1), n - 1))
+        seg = vce[s0 : s1 + 1]
+        if len(seg) == 0:
+            return None
+
+        peak_idx = s0 + int(np.nanargmax(seg))
+        peak_v = float(vce[peak_idx])
+        off = self.result.turn_off
+        top_v = float(off.vce_off_max - off.delta_vce)
+        if not np.isfinite(top_v) or top_v <= 0.0 or top_v >= peak_v:
+            post0 = min(s1, peak_idx + max(3, int(40e-9 / dt)))
+            post1 = min(s1 + 1, peak_idx + max(10, int(500e-9 / dt)))
+            if post1 > post0 + 3:
+                top_v = float(np.percentile(vce[post0:post1], 50))
+            else:
+                top_v = float(np.percentile(seg, 75))
+
+        overshoot = peak_v - top_v
+        min_margin = max(5.0, 0.01 * max(abs(peak_v), 1.0))
+        if overshoot > min_margin:
+            threshold = top_v + max(0.12 * overshoot, min_margin)
+            left = peak_idx
+            while left > s0 and float(vce[left]) >= threshold:
+                left -= 1
+            right = peak_idx
+            while right < s1 and float(vce[right]) >= threshold:
+                right += 1
+        else:
+            left = peak_idx
+            right = peak_idx
+
+        pad = max(3, int(60e-9 / dt))
+        i0 = max(s0, left - pad)
+        i1 = min(s1, right + pad)
+        min_half = max(3, int(80e-9 / dt))
+        i0 = min(i0, max(s0, peak_idx - min_half))
+        i1 = max(i1, min(s1, peak_idx + min_half))
+
+        max_half = max(min_half, int(350e-9 / dt))
+        if peak_idx - i0 > max_half:
+            i0 = peak_idx - max_half
+        if i1 - peak_idx > max_half:
+            i1 = peak_idx + max_half
+        return int(max(s0, i0)), int(min(s1, i1))
+
     def _parameter_max_interval_indices(
         self, section: str, name: str
     ) -> tuple[int, int] | None:
@@ -3337,6 +3392,9 @@ class MainWindow(QMainWindow):
                 self.cfg,
             )
             return _clip_pair(*(win if win is not None else segs.turn_off))
+
+        if section == "关断过程" and name == "Vce_off_max":
+            return self._turn_off_vce_max_window_indices()
 
         if section == "开通" and name == "Ic_on_max":
             return self._turn_on_ic_max_window_indices()

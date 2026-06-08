@@ -8,6 +8,7 @@ WH = sample_tss("WH_480V_800A_000.tss")
 VH = sample_tss("VH_750V_1050A_000.tss")
 WL = sample_tss("WL_480V_800A_000.tss")
 UL = sample_tss("UL_750V_1050A_000.tss")
+UL_2577 = sample_tss("UL_750V_1048A_000.tss")
 VH_MOS = sample_tss("VH_750V_805A_000.tss")
 VL_MOS = sample_tss("VL_750V_805A_000.tss")
 
@@ -65,6 +66,26 @@ class TestLabelMapping(unittest.TestCase):
         assert m is not None
         self.assertEqual(m.ic, "CH3")
         self.assertEqual(m.il, "CH4")
+        self.assertTrue(m.irr_from_ic_minus_il)
+        self.assertFalse(m.ic_from_sum_irr_il)
+
+    @unittest.skipUnless(UL_2577.exists(), "UL 2577 sample missing")
+    def test_infer_ul_lower_keeps_raw_ic_when_math_label_says_ic(self):
+        bundle = load_waveform(UL_2577)
+        self.assertEqual(bundle.meta.channel_labels.get("CH3"), "Irr")
+        self.assertEqual(bundle.meta.channel_labels.get("MATH1"), "Ic")
+        self.assertEqual(bundle.meta.channel_math_formulas.get("MATH1"), "CH3-CH4")
+
+        m = infer_mapping_from_bundle(bundle, "lower")
+        self.assertIsNotNone(m)
+        assert m is not None
+        self.assertEqual(m.vge, "CH6")
+        self.assertEqual(m.vce, "CH5")
+        self.assertEqual(m.ic, "CH3")
+        self.assertEqual(m.il, "CH4")
+        self.assertEqual(m.v_diode, "CH2")
+        self.assertEqual(m.vge_other, "CH1")
+        self.assertEqual(m.irr, "")
         self.assertTrue(m.irr_from_ic_minus_il)
         self.assertFalse(m.ic_from_sum_irr_il)
 

@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -155,11 +156,12 @@ QComboBox QAbstractItemView::item {
     padding: 4px 8px;
     color: #050505;
 }
-QLabel#chTagValue {
+QLineEdit#chTagValue {
+    min-height: 34px;
     background-color: rgba(246, 246, 246, 250);
     border: 1px solid rgba(95, 95, 95, 210);
     border-radius: 3px;
-    padding: 7px 10px;
+    padding: 2px 10px;
     font-size: 13px;
     color: #050505;
 }
@@ -255,8 +257,6 @@ class ChannelSettingsPanel(QDialog):
         self.setFixedWidth(430)
 
         ch_idx = list(plot._trace_items.keys()).index(key) + 1
-        legend = plot._trace_legend.get(key, key).strip().lstrip("-━— ")
-        color = plot._trace_style.get(key, ("#cdd6f4", 1.0))[0]
         unit = plot._unit_for_channel(key)
         hidden = key in plot._hidden_channels
 
@@ -365,10 +365,12 @@ class ChannelSettingsPanel(QDialog):
 
         body_lay.addLayout(grid)
 
-        # --- 标签（只读，显示通道逻辑名）---
-        tag_val = QLabel(legend)
-        tag_val.setObjectName("chTagValue")
-        body_lay.addWidget(_cell("标签", tag_val))
+        # --- 标签（只编辑 TSS 标签；源通道名 CH/MATH 保持原始值）---
+        self._label_edit = QLineEdit(plot._channel_labels.get(key.upper(), ""))
+        self._label_edit.setObjectName("chTagValue")
+        self._label_edit.setPlaceholderText(key.upper())
+        self._label_edit.editingFinished.connect(self._on_label_changed)
+        body_lay.addWidget(_cell("标签", self._label_edit))
 
         mapping_row = QHBoxLayout()
         mapping_row.setContentsMargins(0, 0, 0, 0)
@@ -473,6 +475,9 @@ class ChannelSettingsPanel(QDialog):
         role = self._mapping_combo.currentData()
         self._plot.request_channel_mapping(self._key, str(role or ""))
         self.close()
+
+    def _on_label_changed(self) -> None:
+        self._plot.set_channel_label(self._key, self._label_edit.text().strip())
 
     def _on_formula_edit(self) -> None:
         self.close()

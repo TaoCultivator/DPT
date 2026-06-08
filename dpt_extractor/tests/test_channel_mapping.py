@@ -37,6 +37,14 @@ class TestChannelMapping(unittest.TestCase):
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded.vge, "CH5")
 
+    def test_store_ignores_default_template_as_custom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "maps.yaml"
+            store = ChannelMappingStore(path)
+            store.set("U", "lower", default_mapping_for("U", "lower"))
+            self.assertIsNone(store.get("U", "lower"))
+            self.assertFalse(store.has_custom("U", "lower"))
+
     def test_validate_duplicate(self):
         m = ChannelMapping(vge="CH1", vce="CH1")
         errs = validate_mapping(m, None)

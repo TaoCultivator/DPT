@@ -675,11 +675,8 @@ def _math_color(key: str) -> str:
 def _source_channel_legend(key: str, labels: dict[str, str]) -> str:
     key = key.upper()
     label = (labels.get(key) or "").strip()
-    if label:
-        return label
-    m = re.fullmatch(r"MATH(\d+)", key)
-    if m:
-        return f"Math {int(m.group(1))}"
+    if label and label.upper() != key:
+        return f"{key} {label}"
     return key
 
 
@@ -943,6 +940,7 @@ class WaveformPlot(QWidget):
     """
 
     channelMappingRequested = pyqtSignal(str, str)
+    channelLabelChanged = pyqtSignal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1256,6 +1254,7 @@ class WaveformPlot(QWidget):
         self._trace_style: dict[str, tuple[str, float]] = {}
         self._trace_yrange: dict[str, tuple[float, float]] = {}
         self._trace_legend: dict[str, str] = {}
+        self._channel_labels: dict[str, str] = {}
         self._trace_units: dict[str, str] = {}
         self._highlighted_key: str | None = None
         self._hidden_channels: set[str] = set()
@@ -1381,6 +1380,8 @@ class WaveformPlot(QWidget):
             self._cursor_ha_v_label,
             self._cursor_hb_v_label,
             self._cursor_hb_ha_delta_label,
+            self._cursor_a_wave_marker,
+            self._cursor_b_wave_marker,
         ):
             if it is not None:
                 keep.append(it)
@@ -2136,10 +2137,6 @@ class WaveformPlot(QWidget):
                 n += 1
                 count += 1
             color = self._trace_style.get(ch, (WAVEFORM_PLOT_FG, 1.0))[0]
-            try:
-                idx = list(self._trace_items.keys()).index(ch) + 1
-            except ValueError:
-                idx = 0
             legend = self._trace_legend.get(ch, ch)
             vdiv = self._disp_scale.get(ch, 1.0)
             vdiv_txt = (
@@ -2147,11 +2144,7 @@ class WaveformPlot(QWidget):
                 if abs(vdiv - round(vdiv)) < 1e-9
                 else f"{vdiv:g}"
             )
-            label = (
-                f"C{idx} {legend}  {vdiv_txt} {unit}/div"
-                if idx
-                else f"{legend} {unit}"
-            )
+            label = f"{legend}  {vdiv_txt} {unit}/div"
             signature = (
                 ch,
                 round(float(y0), 9),
@@ -2783,7 +2776,7 @@ class WaveformPlot(QWidget):
         self._formula_sources[key] = raw
         self._trace_units[key] = self._formula_unit(expr)
         if key not in self._trace_items:
-            self._add_trace_item(key, raw, key.title().replace("Math", "Math "), _math_color(key), 1.5)
+            self._add_trace_item(key, raw, key, _math_color(key), 1.5)
             self._build_channel_bar()
             return
         self._trace_raw[key] = raw
@@ -2872,6 +2865,11 @@ class WaveformPlot(QWidget):
         self._trace_units.clear()
         self._disp_scale.clear()
         self._trace_raw.clear()
+        self._channel_labels = {
+            ch.upper(): str(label).strip()
+            for ch, label in bundle.meta.channel_labels.items()
+            if re.fullmatch(r"(CH[1-6]|MATH\d+)", ch.upper()) and str(label).strip()
+        }
         self._formula_sources.clear()
         self._formula_t_s = np.asarray(t, dtype=np.float64)
         self._trace_t_us = t_us
@@ -2897,7 +2895,7 @@ class WaveformPlot(QWidget):
                     self._logical_role_for_source(key),
                     (_math_color(key), 1.5),
                 )
-            legend = _source_channel_legend(key, bundle.meta.channel_labels)
+            legend = _source_channel_legend(key, self._channel_labels)
             raw = np.asarray(data, dtype=np.float64)
             self._trace_raw[key] = raw
             expr = imported_math_formulas.get(key)
@@ -3051,14 +3049,9 @@ class WaveformPlot(QWidget):
         text = self._zero_handle_label(key, legend)
         unit = self._unit_for_channel(key)
         off = self._disp_offset.get(key, 0.0)
-        try:
-            idx = list(self._trace_items.keys()).index(key) + 1
-            ch = f"C{idx}"
-        except ValueError:
-            ch = key
         return (
             '<div style="white-space:nowrap;">'
-            f"<b>{ch} · {text}</b><br>"
+            f"<b>{key.upper()} · {text}</b><br>"
             f"0{unit} 基准线：{off:+.2f} div<br>"
             "拖动箭头：调整垂直位置"
             "</div>"
@@ -3085,12 +3078,11 @@ class WaveformPlot(QWidget):
 
     def _refresh_legend_styles(self) -> None:
         keys = list(self._channel_boxes.keys())
-        for i, key in enumerate(keys):
+        for key in keys:
             box = self._channel_boxes[key]
             color, _ = self._trace_style[key]
             legend = self._trace_legend[key]
             vdiv = self._vdiv_text(key)
-            ch_tag = f"C{i + 1}"
             hidden = key in self._hidden_channels
             highlighted = (not hidden) and key == self._highlighted_key
             dim = (
@@ -3114,7 +3106,7 @@ class WaveformPlot(QWidget):
                 mark = " ◀" if highlighted else ""
             box.set_texts(
                 f"<span style='font-weight:700;font-size:12px'>"
-                f"{ch_tag} {legend}{mark}</span>",
+                f"{legend}{mark}</span>",
                 f"<span style='font-size:12px'>{vdiv}</span>",
             )
             box.set_box_style(
@@ -3142,19 +3134,12 @@ class WaveformPlot(QWidget):
 
     def _channel_menu_display_name(self, key: str) -> str:
         key = key.upper()
-        math_match = re.fullmatch(r"MATH(\d+)", key)
-        if math_match:
-            return f"数学 {int(math_match.group(1))}"
-        ch_match = re.fullmatch(r"CH(\d+)", key)
-        if ch_match:
-            return f"Ch {int(ch_match.group(1))}"
         legend = self._trace_legend.get(key, key).strip()
         return legend or key
 
     def _channel_menu_action_text(self, verb: str, key: str) -> str:
         name = self._channel_menu_display_name(key)
-        spacer = " " if re.fullmatch(r"Ch \d+", name) else ""
-        return f"{verb}{spacer}{name}"
+        return f"{verb} {name}"
 
     def _build_channel_box_menu(self, key: str) -> QMenu:
         key = key.upper()
@@ -3217,22 +3202,31 @@ class WaveformPlot(QWidget):
         key = key.upper()
         if key not in self._trace_items:
             return
-        current = self._trace_legend.get(key, self._channel_menu_display_name(key))
+        current = self._channel_labels.get(key, "")
         text, ok = QInputDialog.getText(
             self,
             "标签",
-            f"{self._channel_menu_display_name(key)} 标签：",
+            f"{key} 标签：",
             text=current,
         )
         if not ok:
             return
-        label = text.strip()
+        self.set_channel_label(key, text.strip())
+
+    def set_channel_label(self, key: str, label: str) -> None:
+        key = key.upper()
+        if key not in self._trace_items:
+            return
+        label = label.strip()
         if not label:
-            label = self._channel_menu_display_name(key)
-        self._trace_legend[key] = label
+            self._channel_labels.pop(key, None)
+        else:
+            self._channel_labels[key] = label
+        self._trace_legend[key] = _source_channel_legend(key, self._channel_labels)
         self._refresh_legend_styles()
         self._update_zero_handle_positions()
         self._sync_channel_bar_width()
+        self.channelLabelChanged.emit(key, label)
 
     def _delete_math_channel(self, key: str) -> None:
         key = key.upper()
@@ -3331,10 +3325,10 @@ class WaveformPlot(QWidget):
         self._remove_zero_handles()
         vb = self.plot.getPlotItem().getViewBox()
         scene = self._plot_scene()
-        for idx, key in enumerate(self._trace_items, start=1):
+        for key in self._trace_items:
             color, _ = self._trace_style[key]
             legend = self._trace_legend[key]
-            label = f"C{idx}"
+            label = key.upper()
             handle = ChannelZeroHandle(key, label, color, vb)
             handle.setToolTip(self._zero_handle_tooltip(key, legend))
             handle.clicked.connect(self._on_legend_clicked)
@@ -3651,13 +3645,7 @@ class WaveformPlot(QWidget):
         if channel is None:
             return ""
         legend = self._trace_legend.get(channel, channel)
-        if re.fullmatch(r"CH\d+", channel.upper()):
-            try:
-                idx = list(self._trace_items.keys()).index(channel) + 1
-                return f"C{idx}"
-            except ValueError:
-                return channel.title()
-        return legend if len(legend) <= 8 else legend[:7] + "…"
+        return legend if len(legend) <= 12 else legend[:11] + "…"
 
     def _sample_cursor_channel(
         self, channel: str | None, t_us: float
@@ -3675,14 +3663,15 @@ class WaveformPlot(QWidget):
         return value, self._to_disp(channel, value)
 
     def _ensure_waveform_cursor_markers(self) -> None:
-        if self._cursor_a_wave_marker is None:
-            self._cursor_a_wave_marker = pg.ScatterPlotItem(size=9, pxMode=True)
-            self._cursor_a_wave_marker.setZValue(70)
-            self.plot.addItem(self._cursor_a_wave_marker)
-        if self._cursor_b_wave_marker is None:
-            self._cursor_b_wave_marker = pg.ScatterPlotItem(size=9, pxMode=True)
-            self._cursor_b_wave_marker.setZValue(70)
-            self.plot.addItem(self._cursor_b_wave_marker)
+        plot_items = self.plot.getPlotItem().items
+        for attr in ("_cursor_a_wave_marker", "_cursor_b_wave_marker"):
+            item = getattr(self, attr)
+            if item is None:
+                item = pg.ScatterPlotItem(size=9, pxMode=True)
+                item.setZValue(70)
+                setattr(self, attr, item)
+            if item not in plot_items:
+                self.plot.addItem(item)
 
     def _hide_waveform_cursor_markers(self) -> None:
         for item in (self._cursor_a_wave_marker, self._cursor_b_wave_marker):

@@ -221,7 +221,10 @@ class ChannelMappingStore:
         key = self._key(phase, bridge)
         if key not in self._data:
             return None
-        return ChannelMapping.from_dict(self._data[key])
+        mapping = ChannelMapping.from_dict(self._data[key])
+        if mapping.to_dict() == default_mapping_for(phase, bridge).to_dict():
+            return None
+        return mapping
 
     def set(self, phase: str, bridge: str, mapping: ChannelMapping) -> None:
         self._data[self._key(phase, bridge)] = mapping.to_dict()
@@ -234,4 +237,4 @@ class ChannelMappingStore:
             self.save()
 
     def has_custom(self, phase: str, bridge: str) -> bool:
-        return self._key(phase, bridge) in self._data
+        return self.get(phase, bridge) is not None

@@ -109,6 +109,47 @@ def _norm_label(text: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
 
 
+def _is_raw_scope_channel(ch: str) -> bool:
+    return bool(re.fullmatch(r"CH[1-6]", ch.upper()))
+
+
+def _default_mapping_for_bridge(bridge: str) -> ChannelMapping:
+    if bridge.lower() == "upper":
+        return ChannelMapping(
+            vge="CH1",
+            vce="CH2",
+            ic="",
+            il="CH4",
+            irr="CH3",
+            v_diode="CH5",
+            vge_other="CH6",
+            ic_from_sum_irr_il=True,
+            irr_from_ic_minus_il=False,
+        )
+    return ChannelMapping(
+        vge="CH6",
+        vce="CH5",
+        ic="CH3",
+        il="CH4",
+        irr="",
+        v_diode="CH2",
+        vge_other="CH1",
+        ic_from_sum_irr_il=False,
+        irr_from_ic_minus_il=True,
+    )
+
+
+def _fallback_raw_channel(
+    available: set[str],
+    channel: str,
+    used: set[str],
+) -> str | None:
+    channel = channel.upper()
+    if channel in available and channel not in used:
+        return channel
+    return None
+
+
 def _pick_channel(
     labeled: list[tuple[str, str]],
     patterns: tuple[str, ...],
@@ -182,17 +223,22 @@ def _apply_upper_current_logic(
     m: ChannelMapping,
     labeled: list[tuple[str, str]],
     used: set[str],
+    available: set[str],
 ) -> bool:
     """
     上桥被测：Ic = 下桥支路电流 + 电感电流（两探头逐点相加）。
     """
     il_ch = _pick_channel(labeled, _IL_PATTERNS, used)
     if not il_ch:
+        il_ch = _fallback_raw_channel(available, "CH4", used)
+    if not il_ch:
         return False
     m.il = il_ch
     used.add(il_ch)
 
     lower_arm = _pick_upper_lower_arm_current(labeled, used, il_ch)
+    if not lower_arm:
+        lower_arm = _fallback_raw_channel(available, "CH3", used)
     if not lower_arm or lower_arm == il_ch:
         return False
 
@@ -208,17 +254,22 @@ def _apply_lower_current_logic(
     m: ChannelMapping,
     labeled: list[tuple[str, str]],
     used: set[str],
+    available: set[str],
 ) -> bool:
     """
     下桥被测：总电流直接测量；Irr = 总电流 − 电感电流。
     """
     il_ch = _pick_channel(labeled, _IL_PATTERNS, used)
     if not il_ch:
+        il_ch = _fallback_raw_channel(available, "CH4", used)
+    if not il_ch:
         return False
     m.il = il_ch
     used.add(il_ch)
 
     ic_ch = _pick_lower_total_ic(labeled, used)
+    if not ic_ch:
+        ic_ch = _fallback_raw_channel(available, "CH3", used)
     if not ic_ch or ic_ch == il_ch:
         return False
 
@@ -245,17 +296,18 @@ def infer_channel_mapping(
     if not labels:
         return None
 
-    avail = available or set(labels.keys())
+    avail = {ch.upper() for ch in (available or set(labels.keys()))}
     labeled = [
-        (ch, _norm_label(lab))
+        (ch.upper(), _norm_label(lab))
         for ch, lab in labels.items()
-        if ch in avail and lab
+        if ch.upper() in avail and _is_raw_scope_channel(ch) and lab
     ]
     if not labeled:
         return None
 
     is_upper = bridge.lower() == "upper"
     used: set[str] = set()
+    m = _default_mapping_for_bridge(bridge)
 
     if is_upper:
         vge_p = _UPPER_VGE_PATTERNS
@@ -268,7 +320,6 @@ def infer_channel_mapping(
         vdiode_p = _LOWER_VDIODE_PATTERNS
         vge_other_p = _LOWER_VGE_OTHER_PATTERNS
 
-    m = ChannelMapping()
     for attr, patterns in (
         ("vge", vge_p),
         ("vce", vce_p),
@@ -281,10 +332,10 @@ def infer_channel_mapping(
             used.add(ch)
 
     if is_upper:
-        if not _apply_upper_current_logic(m, labeled, used):
+        if not _apply_upper_current_logic(m, labeled, used, avail):
             return None
     else:
-        if not _apply_lower_current_logic(m, labeled, used):
+        if not _apply_lower_current_logic(m, labeled, used, avail):
             return None
 
     if not m.vge or not m.vce or not m.il:

@@ -71,10 +71,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             mid_disp = mid_raw / scale + plot._disp_offset[display_key]
             self.assertAlmostEqual(mid_disp, 0.0, places=2, msg=key)
 
-    def _make_synthetic_plot(self):
+    def _make_synthetic_bundle(self):
         import numpy as np
 
-        from dpt_extractor.gui.waveform_plot import WaveformPlot
         from dpt_extractor.models.bridge_profile import make_profile
         from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
 
@@ -92,8 +91,20 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 profile.vge_other: np.linspace(-10.0, 10.0, n),
                 "MATH1": np.linspace(0.0, 1.0, n),
             },
-            meta=TekMetadata(source_path="/fake/synthetic.tss"),
+            meta=TekMetadata(
+                source_path="/fake/synthetic.tss",
+                channel_labels={
+                    "CH3": "Irr",
+                    "MATH1": "Ic",
+                },
+            ),
         )
+        return bundle, profile
+
+    def _make_synthetic_plot(self):
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+
+        bundle, profile = self._make_synthetic_bundle()
         plot = WaveformPlot()
         plot.plot_waveforms(bundle, profile, None)
         return plot
@@ -109,6 +120,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(plot._display_channel_roles["CH3"], ["Ic", "Irr=Ic-IL"])
         self.assertIn("MATH1", plot._channel_boxes)
         self.assertIn("MATH1", plot._trace_items)
+        self.assertIn("CH3 Irr", plot._channel_boxes["CH3"].name_lbl.text())
+        self.assertIn("MATH1 Ic", plot._channel_boxes["MATH1"].name_lbl.text())
+        self.assertNotIn(">C3 ", plot._channel_boxes["CH3"].name_lbl.text())
 
         plot._set_math_formula("MATH2", "CH3 + CH4")
         self.assertIn("MATH2", plot._channel_boxes)
@@ -121,6 +135,122 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot._set_math_formula("MATH3", "INTG(CH2 * MATH2)")
         self.assertIn("MATH3", plot._channel_boxes)
         self.assertEqual(plot._unit_for_channel("MATH3"), "J")
+
+    def test_channel_label_edit_updates_source_label(self):
+        plot = self._make_synthetic_plot()
+        seen: list[tuple[str, str]] = []
+        plot.channelLabelChanged.connect(lambda key, label: seen.append((key, label)))
+
+        plot.set_channel_label("CH3", "Ic")
+
+        self.assertEqual(plot._channel_labels["CH3"], "Ic")
+        self.assertIn("CH3 Ic", plot._trace_legend["CH3"])
+        self.assertIn("CH3 Ic", plot._channel_boxes["CH3"].name_lbl.text())
+        self.assertEqual(seen[-1], ("CH3", "Ic"))
+
+        plot.set_channel_label("CH3", "")
+        self.assertNotIn("CH3", plot._channel_labels)
+        self.assertEqual(plot._trace_legend["CH3"], "CH3")
+        self.assertEqual(seen[-1], ("CH3", ""))
+
+    def test_main_window_channel_label_edit_updates_bundle_metadata(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        win = MainWindow()
+        win.bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 8),
+            channels={"CH1": np.zeros(8)},
+            meta=TekMetadata(channel_labels={"CH1": "Old"}),
+        )
+
+        win._on_waveform_channel_label_changed("CH1", "Vge")
+        self.assertEqual(win.bundle.meta.channel_labels["CH1"], "Vge")
+
+        win._on_waveform_channel_label_changed("CH1", "")
+        self.assertNotIn("CH1", win.bundle.meta.channel_labels)
+        win.close()
+
+    def test_mapping_dialog_starts_from_defaults_not_bad_labels(self):
+        import tempfile
+        import numpy as np
+
+        from dpt_extractor.gui.channel_mapping_dialog import ChannelMappingDialog
+        from dpt_extractor.models.channel_mapping import ChannelMappingStore
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 8
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, n),
+            channels={f"CH{i}": np.zeros(n) for i in range(1, 7)},
+            meta=TekMetadata(
+                channel_labels={
+                    "CH1": "L-Vge",
+                    "CH2": "L-Vce",
+                    "CH5": "H-Vce",
+                    "CH6": "H-Vge",
+                }
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChannelMappingStore(Path(tmp) / "maps.yaml")
+            dlg = ChannelMappingDialog(
+                phase="U",
+                bridge="lower",
+                bundle=bundle,
+                store=store,
+            )
+            self.assertEqual(dlg._combos["vge"].currentData(), "CH6")
+            self.assertEqual(dlg._combos["vce"].currentData(), "CH5")
+            self.assertEqual(dlg._combos["ic"].currentData(), "CH3")
+            self.assertEqual(dlg._combos["il"].currentData(), "CH4")
+            self.assertEqual(dlg._combos["v_diode"].currentData(), "CH2")
+            self.assertEqual(dlg._combos["vge_other"].currentData(), "CH1")
+            dlg.close()
+
+    def test_upper_mapping_dialog_starts_from_defaults_not_bad_labels(self):
+        import tempfile
+        import numpy as np
+
+        from dpt_extractor.gui.channel_mapping_dialog import ChannelMappingDialog
+        from dpt_extractor.models.channel_mapping import ChannelMappingStore
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 8
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, n),
+            channels={f"CH{i}": np.zeros(n) for i in range(1, 7)}
+            | {"MATH1": np.zeros(n)},
+            meta=TekMetadata(
+                channel_labels={
+                    "CH1": "L-Vge",
+                    "CH2": "L-Vce",
+                    "CH3": "Ic",
+                    "CH4": "IL",
+                    "CH5": "H-Vce",
+                    "CH6": "H-Vge",
+                    "MATH1": "Vge",
+                }
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChannelMappingStore(Path(tmp) / "maps.yaml")
+            dlg = ChannelMappingDialog(
+                phase="U",
+                bridge="upper",
+                bundle=bundle,
+                store=store,
+            )
+            self.assertEqual(dlg._combos["vge"].currentData(), "CH1")
+            self.assertEqual(dlg._combos["vce"].currentData(), "CH2")
+            self.assertEqual(dlg._combos["irr"].currentData(), "CH3")
+            self.assertEqual(dlg._combos["il"].currentData(), "CH4")
+            self.assertEqual(dlg._combos["v_diode"].currentData(), "CH5")
+            self.assertEqual(dlg._combos["vge_other"].currentData(), "CH6")
+            self.assertTrue(dlg._ic_sum_cb.isChecked())
+            dlg.close()
 
     def test_added_math_channel_can_be_deleted(self):
         plot = self._make_synthetic_plot()
@@ -157,15 +287,15 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         self.assertEqual(
             menu_texts("MATH2"),
-            ["禁用数学 2", "配置数学 2...", "|", "标签...", "|", "删除数学 2"],
+            ["禁用 MATH2", "配置 MATH2...", "|", "标签...", "|", "删除 MATH2"],
         )
         self.assertEqual(
             menu_texts("CH6"),
-            ["禁用 Ch 6", "配置 Ch 6...", "|", "标签..."],
+            ["禁用 CH6", "配置 CH6...", "|", "标签..."],
         )
 
         plot._toggle_channel_visibility("MATH2")
-        self.assertEqual(menu_texts("MATH2")[0], "启用数学 2")
+        self.assertEqual(menu_texts("MATH2")[0], "启用 MATH2")
 
     def test_zoom_overview_region_tracks_and_pans_view(self):
         from PyQt6.QtWidgets import QSizePolicy
@@ -325,6 +455,26 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         panel = ChannelSettingsPanel(plot, "MATH1", QPoint(0, 0), parent=plot)
         self.assertGreaterEqual(panel._mapping_combo.findData("ic"), 0)
         self.assertEqual(panel._mapping_combo.findData(""), 0)
+        self.assertEqual(panel._label_edit.text(), "Ic")
+        panel.close()
+
+    def test_channel_settings_label_edits_raw_label_only(self):
+        from PyQt6.QtCore import QPoint
+
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
+        plot = self._make_synthetic_plot()
+        panel = ChannelSettingsPanel(plot, "CH3", QPoint(0, 0), parent=plot)
+        self.assertEqual(panel._label_edit.text(), "Irr")
+        self.assertNotIn("CH3", panel._label_edit.text())
+
+        panel._label_edit.setText("Ic")
+        panel._on_label_changed()
+
+        self.assertEqual(plot._channel_labels["CH3"], "Ic")
+        self.assertIn("CH3 Ic", plot._trace_legend["CH3"])
+        self.assertIn("CH3 Ic", plot._channel_boxes["CH3"].name_lbl.text())
+        panel.close()
 
     def test_parameter_max_default_intervals_use_algorithm_windows(self):
         import numpy as np
@@ -333,7 +483,11 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.models.bridge_profile import make_profile
-        from dpt_extractor.models.results import ExtractResult, SegmentIndices
+        from dpt_extractor.models.results import (
+            ExtractResult,
+            SegmentIndices,
+            TurnOffResult,
+        )
         from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
 
         off = "\u5173\u65ad\u8fc7\u7a0b"
@@ -349,6 +503,8 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         vge[620:900] = 15.0
         vce = np.ones(n) * 800.0
         vce[100:420] = 50.0
+        vce[420:450] = np.linspace(50.0, 1100.0, 30)
+        vce[450:480] = np.linspace(1100.0, 800.0, 30)
         vce[760:900] = 50.0
         ic = np.zeros(n)
         ic[120:390] = 100.0
@@ -372,7 +528,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 profile.v_diode: vd,
                 profile.vge_other: vgo,
             },
-            meta=TekMetadata(),
+            meta=TekMetadata(sample_interval=dt),
         )
         segs = SegmentIndices(
             turn_off=(350, 520),
@@ -386,20 +542,33 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         win = MainWindow()
         win.bundle = bundle
         win.profile = profile
-        win.result = ExtractResult(segments=segs)
+        win.result = ExtractResult(
+            segments=segs,
+            turn_off=TurnOffResult(delta_vce=300.0, vce_off_max=1100.0),
+        )
 
         off_ic = win._parameter_max_interval_indices(off, "Ic_off_max")
+        off_vce = win._parameter_max_interval_indices(off, "Vce_off_max")
         on_ic = win._parameter_max_interval_indices(on, "Ic_on_max")
         on_vce = win._parameter_max_interval_indices(on, "Vce_on_max")
         rr_irr = win._parameter_max_interval_indices(rr, "Irr")
 
         self.assertIsNotNone(off_ic)
+        self.assertIsNotNone(off_vce)
         self.assertIsNotNone(on_ic)
         self.assertIsNotNone(on_vce)
         self.assertIsNotNone(rr_irr)
-        assert off_ic is not None and on_ic is not None and on_vce is not None and rr_irr is not None
+        assert off_ic is not None and off_vce is not None and on_ic is not None and on_vce is not None and rr_irr is not None
 
         self.assertLess(off_ic[1], segs.turn_off[1])
+        self.assertGreater(off_vce[0], segs.turn_off[0])
+        self.assertLess(off_vce[1], segs.turn_off[1])
+        self.assertLess(
+            off_vce[1] - off_vce[0],
+            segs.turn_off[1] - segs.turn_off[0],
+        )
+        self.assertLessEqual(off_vce[0], int(np.argmax(vce)))
+        self.assertGreaterEqual(off_vce[1], int(np.argmax(vce)))
         self.assertGreater(on_ic[0], segs.turn_on[0])
         self.assertLess(on_vce[1], segs.turn_on[1])
         self.assertEqual(
@@ -409,6 +578,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         for section, name, idx in (
             (off, "Ic_off_max", off_ic),
+            (off, "Vce_off_max", off_vce),
             (on, "Ic_on_max", on_ic),
             (on, "Vce_on_max", on_vce),
             (rr, "Irr", rr_irr),
@@ -761,6 +931,24 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertFalse(plot._cursor_a.isVisible())
         self.assertFalse(plot._h_cursor_a.isVisible())
         self.assertFalse(plot._cursor_a_wave_marker.isVisible())
+
+    def test_waveform_cursor_markers_survive_replot(self):
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+
+        bundle, profile = self._make_synthetic_bundle()
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+        plot._set_cursor_type("waveform")
+        marker = plot._cursor_a_wave_marker
+        self.assertIsNotNone(marker)
+        self.assertIn(marker, plot.plot.getPlotItem().items)
+        self.assertTrue(marker.isVisible())
+
+        plot.plot_waveforms(bundle, profile, None)
+
+        self.assertIs(plot._cursor_a_wave_marker, marker)
+        self.assertIn(marker, plot.plot.getPlotItem().items)
+        self.assertTrue(marker.isVisible())
 
 
 @unittest.skipUnless(WH.exists() and UH.exists(), "WH/UH sample missing")
