@@ -79,6 +79,16 @@ def _waveform_arrays(wfm) -> tuple[np.ndarray, np.ndarray]:
     return t, y
 
 
+def _sample_interval_from_time(t: np.ndarray, fallback: float) -> float:
+    """Return the waveform sampling interval from the WFM time axis when possible."""
+    if len(t) > 1:
+        dt = np.diff(np.asarray(t, dtype=np.float64))
+        dt = dt[np.isfinite(dt) & (dt > 0)]
+        if len(dt):
+            return float(np.median(dt))
+    return float(fallback)
+
+
 @dataclass
 class _MathSetup:
     formulas: dict[str, str] = field(default_factory=dict)
@@ -411,7 +421,9 @@ class TssParser:
                     channels[channel] = y
                     if t_ref is None:
                         t_ref = t
-                        meta.sample_interval = float(wfm.x_axis_spacing or meta.sample_interval)
+                        meta.sample_interval = _sample_interval_from_time(
+                            t, float(wfm.x_axis_spacing or meta.sample_interval)
+                        )
                         meta.zero_index = float(wfm.trigger_index or 0.0)
                         meta.record_length = int(y.size)
                         if wfm.meta_info is not None:

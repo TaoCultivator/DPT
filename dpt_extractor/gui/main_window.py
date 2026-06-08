@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QApplication,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -199,7 +200,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DPT 双脉冲参数提取工具")
         self.resize(1280, 800)
         self.setMinimumSize(960, 620)
-        self.setStyleSheet(DARK_STYLESHEET + SUMMARY_STYLE)
+        stylesheet = DARK_STYLESHEET + SUMMARY_STYLE
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(stylesheet)
+        self.setStyleSheet(stylesheet)
 
         self.cfg: AppConfig = load_config()
         self.bundle: WaveformBundle | None = None
@@ -414,22 +419,22 @@ class MainWindow(QMainWindow):
         box = QFrame()
         box.setObjectName("contextMenuSelector")
         box.setStyleSheet(
-            "QFrame#contextMenuSelector{background:#181a28;"
-            "border:1px solid #34374a;border-radius:5px;}"
+            "QFrame#contextMenuSelector{background:#2a2a2a;"
+            "border:1px solid #585858;border-radius:5px;}"
             "QLabel#contextMenuSelectorLabel{color:#aeb6d8;font-size:12px;"
             "padding-left:8px;padding-right:2px;}"
-            "QPushButton#contextMenuSelectorButton{background:#2b2d3f;"
-            "color:#cdd6f4;border:1px solid #44475f;border-radius:4px;"
-            "padding:4px 9px;min-height:22px;}"
-            "QPushButton#contextMenuSelectorButton:hover{background:#373a52;}"
-            "QPushButton#contextMenuSelectorButton:checked{background:#1f6feb;"
-            "color:#ffffff;border-color:#8fd3ff;}"
+            "QPushButton#contextMenuSelectorButton{background:#3d3d3d;"
+            "color:#f0f0f0;border:1px solid #6a6a6a;border-radius:5px;"
+            "padding:4px 10px;min-height:26px;min-width:52px;}"
+            "QPushButton#contextMenuSelectorButton:hover{background:#505050;}"
+            "QPushButton#contextMenuSelectorButton:checked{background:#28bce8;"
+            "color:#061014;border-color:#8fd3ff;}"
         )
         lay = QHBoxLayout(box)
         lay.setContentsMargins(4, 3, 4, 3)
         lay.setSpacing(4)
 
-        label = QLabel("右键菜单")
+        label = QLabel("功能菜单")
         label.setObjectName("contextMenuSelectorLabel")
         lay.addWidget(label)
 
@@ -437,22 +442,27 @@ class MainWindow(QMainWindow):
         group.setExclusive(True)
         self._context_menu_button_group = group
         for text, key, tip in (
-            ("光标", "cursor", "右键直接显示光标移动与光标模式"),
-            ("缩放", "zoom", "右键直接显示缩放功能"),
-            ("视图", "view", "右键直接显示视图铺满与重置"),
-            ("纵轴", "y", "右键直接显示纵轴功能"),
-            ("全部", "all", "右键显示完整分组菜单"),
+            ("光标", "cursor", "右键菜单显示光标类型、模式与配置"),
+            ("缩放", "zoom", "右键菜单显示框选局部放大、水平缩放与重置"),
+            ("视图", "view", "右键菜单显示视图配置与显示模式"),
+            ("纵轴", "y", "右键菜单显示纵轴功能"),
+            ("截图", "capture", "复制当前窗口截图到剪贴板"),
+            ("更多", "all", "右键菜单显示完整示波器功能"),
         ):
             btn = QPushButton(text)
             btn.setObjectName("contextMenuSelectorButton")
-            btn.setCheckable(True)
             btn.setToolTip(tip)
-            btn.clicked.connect(
-                lambda checked=False, menu_key=key: self.wave_plot.set_context_menu_group(
-                    menu_key
+            if key == "capture":
+                btn.setCheckable(False)
+                btn.clicked.connect(lambda checked=False: self.wave_plot._copy_screenshot_to_clipboard())
+            else:
+                btn.setCheckable(True)
+                btn.clicked.connect(
+                    lambda checked=False, menu_key=key: self.wave_plot.set_context_menu_group(
+                        menu_key
+                    )
                 )
-            )
-            group.addButton(btn)
+                group.addButton(btn)
             lay.addWidget(btn)
             if key == self.wave_plot.context_menu_group():
                 btn.setChecked(True)
@@ -905,6 +915,16 @@ class MainWindow(QMainWindow):
         )
 
     def _on_value_clicked(self, section: str, name: str) -> None:
+        if (
+            self.result is not None
+            and self.result.single_pulse_mode
+            and section in {"开通", "反向恢复"}
+        ):
+            self.wave_plot.disable_interactive_cursors()
+            self.statusBar().showMessage(
+                f"{section}-{name}: 单脉冲模式下该参数不适用"
+            )
+            return
         if section == "开通" and name in {"ΔVce", "Ls_on"}:
             self._enable_turn_on_delta_vce_interaction(focus_name=name)
             return
@@ -2123,7 +2143,12 @@ class MainWindow(QMainWindow):
             ha_channel, a_channel, hb_channel = "ic", "ic", "vce"
             b_channel = "vce"
             b_level_vce = None
-            a_anchor_us = float(t[segs.pulse2_on] * 1e6) - 50.0
+            on_ref = (
+                segs.pulse2_on
+                if segs.turn_on[0] <= segs.pulse2_on <= segs.turn_on[1]
+                else segs.turn_on[0]
+            )
+            a_anchor_us = float(t[on_ref] * 1e6) - 50.0
             rise_a_mode = "eon_ic"
             fall_b_mode = "eon_vce_fall"
             search_t0 = float(t[segs.turn_on[0]] * 1e6)
@@ -2274,7 +2299,13 @@ class MainWindow(QMainWindow):
             val = float(self._irr_peak_interactive(irr, i0, i1))
             self._touch_manual_waveform_source()
             self._manual_intervals[("反向恢复", "Irr")] = (min(t0_us, t1_us), max(t0_us, t1_us))
-            self.wave_plot.set_interval_peak_on_hb(val, channel="irr")
+            self.wave_plot.set_interval_peak_on_hb(
+                val,
+                channel="irr",
+                t0_us=min(t0_us, t1_us),
+                t1_us=max(t0_us, t1_us),
+                use_abs_peak=True,
+            )
             if self.result is None:
                 return
             self.result.reverse_recovery.irr = val
@@ -2290,7 +2321,11 @@ class MainWindow(QMainWindow):
             _on_irr_interval(t0_us, t1_us)
         elif self.result is not None:
             self.wave_plot.set_interval_peak_on_hb(
-                float(self.result.reverse_recovery.irr), channel="irr"
+                float(self.result.reverse_recovery.irr),
+                channel="irr",
+                t0_us=min(t0_us, t1_us),
+                t1_us=max(t0_us, t1_us),
+                use_abs_peak=True,
             )
             self.statusBar().showMessage(
                 f"反向恢复 Irr: {self.result.reverse_recovery.irr:.3f}A（拖动 A/B 后重算）  "
@@ -2301,12 +2336,16 @@ class MainWindow(QMainWindow):
         """Trr：Ha 参考线 + A/B 与 Ha 交点；拖 Ha 联动 A(上升沿)、B(下降沿) 首个交点。"""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return
-        from dpt_extractor.metrics.irr_measure import measure_irr_trr
+        from dpt_extractor.metrics.irr_measure import (
+            irr_parameter_peak_index,
+            measure_irr_trr,
+        )
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 
         t = self.bundle.t
         segs = self.result.segments
         i0, i1 = segs.reverse_recovery
+        on0, on1 = segs.turn_on
         t0_us = float(t[i0] * 1e6)
         t1_us = float(t[i1] * 1e6)
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
@@ -2314,18 +2353,39 @@ class MainWindow(QMainWindow):
         saved = self._saved_trr_measure_state()
         if saved is None:
             self._auto_align_irr_channel_baseline(irr, i0, i1)
+            peak_idx = irr_parameter_peak_index(
+                irr,
+                i0,
+                i1,
+                segs.pulse2_on,
+                on0,
+                on1,
+            )
+            peak_idx = max(i0, min(int(peak_idx), min(on1, len(t) - 1)))
+            measure_i1 = max(i1, peak_idx)
             # Ha=软恢复尾段参考（主峰后 300–600ns）；硬恢复回退算法默认尖峰前平台
             ha_override = None
-            pk_us = self._recovery_peak_us()
-            if pk_us is not None:
-                ha_override = self._window_mid(irr, pk_us + 0.3, pk_us + 0.6)
-            on1 = segs.turn_on[1]
+            pk_us = float(t[peak_idx]) * 1e6
+            ha_override = self._window_mid(irr, pk_us + 0.3, pk_us + 0.6)
             m = measure_irr_trr(
-                t, irr, i0, i1, ha=ha_override, i_fall_end=on1
+                t,
+                irr,
+                i0,
+                measure_i1,
+                ha=ha_override,
+                peak_idx=peak_idx,
+                i_fall_end=on1,
             )
             if m is None and ha_override is not None:
                 # 软恢复(Ha≈0)时该参考线交点可能取不到，回退默认 Ha
-                m = measure_irr_trr(t, irr, i0, i1, i_fall_end=on1)
+                m = measure_irr_trr(
+                    t,
+                    irr,
+                    i0,
+                    measure_i1,
+                    peak_idx=peak_idx,
+                    i_fall_end=on1,
+                )
             if m is None:
                 self._enable_generic_parameter_interaction("反向恢复", "Trr")
                 return
@@ -2365,7 +2425,7 @@ class MainWindow(QMainWindow):
             tb_us,
             _on_trr_measure,
             peak_idx=peak_idx,
-            i_fall_end_idx=segs.turn_on[1],
+            i_fall_end_idx=on1,
         )
         if saved is not None:
             _on_trr_measure(ha_a, hb_a, ta_us, tb_us, trr_init)
@@ -2538,6 +2598,7 @@ class MainWindow(QMainWindow):
                     channel=self._channel_for_param(section, name),
                     t0_us=ta,
                     t1_us=tb,
+                    use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
                 )
             if section == "关断过程" and name in {"Ic_off_max", "Vce_off_max"} and self.result is not None:
                 cur = (
@@ -2608,10 +2669,7 @@ class MainWindow(QMainWindow):
         i1 = int(np.searchsorted(t, max(t0_us, t1_us) * 1e-6, side="left"))
         i0 = max(0, min(i0, len(t) - 1))
         i1 = max(i0 + 1, min(i1, len(t) - 1))
-        if restored is not None or name not in _MAX_INTERVAL_NAMES:
-            peak_y = self._peak_y_for_param(section, name, i0, i1)
-        else:
-            peak_y = self._stored_param_value(section, name)
+        peak_y = self._peak_y_for_param(section, name, i0, i1)
         if peak_y is not None:
             ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
             self.wave_plot.set_interval_peak_horizontal(
@@ -2619,6 +2677,7 @@ class MainWindow(QMainWindow):
                 channel=self._channel_for_param(section, name),
                 t0_us=ta,
                 t1_us=tb,
+                use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
             )
         if name in {"Ic_off_max", "Vce_off_max", "Ic_on_max", "Vce_on_max", "Vrr"}:
             self.statusBar().showMessage(
@@ -2854,12 +2913,18 @@ class MainWindow(QMainWindow):
 
         if section == "关断过程":
             if name == "Ic_off_max":
-                return float(np.max(np.abs(ic[i0 : i1 + 1])))
+                seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
+                if len(seg) == 0:
+                    return 0.0
+                return float(seg[int(np.argmax(np.abs(seg)))])
             if name == "Vce_off_max":
                 return float(np.max(vce[i0 : i1 + 1]))
         if section == "开通":
             if name == "Ic_on_max":
-                return float(np.max(np.abs(ic[i0 : i1 + 1])))
+                seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
+                if len(seg) == 0:
+                    return 0.0
+                return float(seg[int(np.argmax(np.abs(seg)))])
             if name == "Vce_on_max":
                 return float(np.max(vce[i0 : i1 + 1]))
         if section == "反向恢复":
@@ -2914,7 +2979,7 @@ class MainWindow(QMainWindow):
         seg = np.asarray(irr[i0 : i1 + 1], dtype=np.float64)
         if len(seg) == 0:
             return 0.0
-        ipk = _find_recovery_peak_index(seg)
+        ipk = _find_recovery_peak_index(seg, self.bundle.dt)
         return float(_default_ha(seg, ipk))
 
     def _irr_default_crossings(

@@ -33,9 +33,7 @@ def _interp_cross_time(
 
 
 def _find_recovery_peak_index(seg: np.ndarray, dt: float) -> int:
-    """IRM 主峰：正向主瓣占优时用 argmax(Irr)，否则用 Err 定向主峰。"""
-    from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
-
+    """Irr/Trr 主峰：取反向恢复电流主瓣的绝对峰值。"""
     seg = np.asarray(seg, dtype=np.float64)
     if len(seg) < 3:
         return int(np.argmax(np.abs(seg))) if len(seg) else 0
@@ -43,7 +41,78 @@ def _find_recovery_peak_index(seg: np.ndarray, dt: float) -> int:
     neg_min = float(np.min(seg))
     if pos_max >= abs(neg_min):
         return int(np.argmax(seg))
-    return err_recovery_peak_index(seg, dt)
+    return int(np.argmin(seg))
+
+
+def irr_parameter_peak_index(
+    irr: np.ndarray,
+    rr0: int,
+    rr1: int,
+    on_edge: int,
+    on0: int,
+    on1: int,
+) -> int:
+    """Index for the Irr parameter peak, matching extraction's main-lobe rule."""
+    arr = np.asarray(irr, dtype=np.float64)
+    n = len(arr)
+    if n == 0:
+        return 0
+    s0 = max(0, min(max(int(rr0), int(on_edge)), int(on1) - 1, n - 1))
+    s1 = max(s0 + 1, min(int(on1), n))
+    if s1 <= s0:
+        s0 = max(0, min(int(on0), n - 1))
+        s1 = max(s0 + 1, min(int(on1), n))
+    seg = arr[s0:s1]
+    if len(seg) == 0:
+        return s0
+
+    pos_i = int(np.argmax(seg))
+    neg_i = int(np.argmin(seg))
+    peak_pos = float(seg[pos_i])
+    peak_neg = abs(float(seg[neg_i]))
+    amp = max(peak_pos, peak_neg, 1.0)
+    if peak_pos >= 0.1 * amp:
+        return s0 + pos_i
+    if peak_neg >= 0.1 * amp:
+        return s0 + neg_i
+
+    k = max(8, len(seg) // 5)
+    head = seg[:k]
+    ref = float(np.median(head)) if len(head) else float(np.median(seg))
+    th = 0.02 * amp
+    if ref < 0:
+        cross = np.where(seg > th)[0]
+        if len(cross):
+            start = int(cross[0])
+            return s0 + start + int(np.argmax(seg[start:]))
+        return s0 + neg_i
+    cross = np.where(seg < -th)[0]
+    if len(cross):
+        start = int(cross[0])
+        return s0 + start + int(np.argmin(seg[start:]))
+    return s0 + pos_i
+
+
+def irr_parameter_peak_value(
+    irr: np.ndarray,
+    rr0: int,
+    rr1: int,
+    on_edge: int,
+    on0: int,
+    on1: int,
+) -> float:
+    """Magnitude of the Irr parameter peak, matching ``irr_parameter_peak_index``."""
+    arr = np.asarray(irr, dtype=np.float64)
+    if len(arr) == 0:
+        return 0.0
+    idx = max(
+        0,
+        min(
+            irr_parameter_peak_index(arr, rr0, rr1, on_edge, on0, on1),
+            len(arr) - 1,
+        ),
+    )
+    return abs(float(arr[idx]))
 
 
 def _lobe_valley_before_peak(seg: np.ndarray, ipk: int) -> int:
@@ -122,39 +191,43 @@ def _trr_cross_indices_at_ha(
     ipk = max(1, min(int(ipk), len(seg) - 2))
     peak = float(seg[ipk])
     level_f = float(level)
-    j_lo = _lobe_valley_before_peak(seg, ipk)
-    j_on = _plateau_end_before_spike(seg, ipk)
+    polarity = 1.0 if peak >= level_f else -1.0
+    work = np.asarray(seg, dtype=np.float64) * polarity
+    level_w = level_f * polarity
+    peak_w = float(work[ipk])
+    j_lo = _lobe_valley_before_peak(work, ipk)
+    j_on = _plateau_end_before_spike(work, ipk)
     jf = min(len(seg) - 2, j_fall_end if j_fall_end is not None else len(seg) - 2)
 
     # A：主瓣上升沿与 Ha 的第一个上升穿越（从谷底起搜，勿用 j_on 以免跳过抬升脚前的首交点）
     ja: int | None = None
     search_lo = max(0, j_lo)
     for j in range(search_lo, ipk):
-        y1, y2 = float(seg[j]), float(seg[j + 1])
-        if y1 <= level_f < y2 or (
-            (y1 - level_f) * (y2 - level_f) <= 0.0 and y2 > y1 and abs(y2 - y1) > 1e-12
+        y1, y2 = float(work[j]), float(work[j + 1])
+        if y1 <= level_w < y2 or (
+            (y1 - level_w) * (y2 - level_w) <= 0.0 and y2 > y1 and abs(y2 - y1) > 1e-12
         ):
             ja = j
             break
     if ja is None:
         for j in range(search_lo, ipk):
-            y1, y2 = float(seg[j]), float(seg[j + 1])
-            if (y1 - level_f) * (y2 - level_f) <= 0.0 and y2 > y1:
+            y1, y2 = float(work[j]), float(work[j + 1])
+            if (y1 - level_w) * (y2 - level_w) <= 0.0 and y2 > y1:
                 ja = j
                 break
 
     # B：尖峰下降沿与 Ha 的第一个下降穿越
     jb: int | None = None
     for j in range(ipk, jf):
-        y1, y2 = float(seg[j]), float(seg[j + 1])
-        if y1 >= y2 and y1 > level_f >= y2:
+        y1, y2 = float(work[j]), float(work[j + 1])
+        if y1 >= y2 and y1 > level_w >= y2:
             jb = j
             break
-    if jb is None and peak > max(5.0, 3.0 * abs(level_f)):
-        lvl = abs(level_f)
+    if jb is None and peak_w > max(5.0, 3.0 * abs(level_w)):
+        lvl = abs(level_w)
         for j in range(ipk, jf):
-            y1, y2 = abs(float(seg[j])), abs(float(seg[j + 1]))
-            if float(seg[j]) >= float(seg[j + 1]) and y1 > lvl >= y2:
+            y1, y2 = abs(float(work[j])), abs(float(work[j + 1]))
+            if float(work[j]) >= float(work[j + 1]) and y1 > lvl >= y2:
                 jb = j
                 break
     return ja, jb

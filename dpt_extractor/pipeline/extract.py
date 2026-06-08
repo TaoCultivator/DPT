@@ -34,6 +34,7 @@ from dpt_extractor.metrics.iec_windows import (
     integrate_vi_window,
     rr_slope_window_indices,
 )
+from dpt_extractor.metrics.irr_measure import irr_parameter_peak_value
 from dpt_extractor.metrics.slopes import (
     didt_diode_recovery,
     didt_max,
@@ -345,38 +346,7 @@ def _irr_peak(
     Reverse-recovery peak current magnitude from Irr channel.
     口径：从第二脉冲开通沿之后，在反向恢复窗内取主瓣同极性峰值（对齐示波器 Max 读数）。
     """
-    # 与分段器一致：在开通沿至开通窗末搜索主瓣（下桥正向 Irr 可能晚于 rr 子窗右界）
-    s0 = max(0, min(max(rr0, on_edge), on1 - 1))
-    s1 = max(s0 + 1, min(on1, len(irr)))
-    if s1 <= s0:
-        s0 = max(0, min(on0, len(irr) - 1))
-        s1 = max(s0 + 1, min(on1, len(irr)))
-    seg_irr = irr[s0:s1].astype(np.float64)
-    if len(seg_irr) == 0:
-        return 0.0
-
-    peak_pos = float(np.max(seg_irr))
-    peak_neg = abs(float(np.min(seg_irr)))
-    amp = max(peak_pos, peak_neg, 1.0)
-    # 主瓣为正向（上桥 CH3 / 下桥 Ic−IL 正向峰）；否则取负向主瓣幅值
-    if peak_pos >= 0.1 * amp:
-        return peak_pos
-    if peak_neg >= 0.1 * amp:
-        return peak_neg
-
-    k = max(8, len(seg_irr) // 5)
-    head = seg_irr[:k]
-    ref = float(np.median(head)) if len(head) else float(np.median(seg_irr))
-    th = 0.02 * amp
-    if ref < 0:
-        cross = np.where(seg_irr > th)[0]
-        if len(cross):
-            return float(np.max(seg_irr[cross[0] :]))
-        return peak_neg
-    cross = np.where(seg_irr < -th)[0]
-    if len(cross):
-        return float(abs(np.min(seg_irr[cross[0] :])))
-    return peak_pos
+    return irr_parameter_peak_value(irr, rr0, rr1, on_edge, on0, on1)
 
 
 def extract_all(

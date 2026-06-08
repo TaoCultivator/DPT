@@ -40,12 +40,13 @@ QComboBox QAbstractItemView::item {
 }
 QLabel { color: #bac2de; }
 QToolTip {
-    background-color: #f4f5f7;
-    color: #101014;
-    border: 1px solid #28bce8;
-    border-radius: 4px;
-    padding: 7px 9px;
-    opacity: 245;
+    background-color: #fffdf5;
+    color: #111827;
+    border: 2px solid #28bce8;
+    border-radius: 6px;
+    padding: 8px 10px;
+    opacity: 255;
+    font-size: 13px;
 }
 QMenu {
     background-color: #f2f3f5;

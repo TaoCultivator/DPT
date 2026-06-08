@@ -96,7 +96,26 @@ class TestTssParser(unittest.TestCase):
             self.assertEqual(bundle.meta.channel_vdiv["CH1"], 5.0)
             self.assertEqual(bundle.meta.channel_vdiv["CH2"], 200.0)
             self.assertEqual(bundle.n, 8)
+            self.assertAlmostEqual(bundle.dt, 8e-11)
             np.testing.assert_allclose(bundle.t, t)
+
+    def test_sample_interval_can_come_from_explicit_time_axis(self):
+        wfm = self._make_wfm(n=6)
+        wfm.x_axis_spacing = 0.0
+        wfm.x_axis_values = np.arange(6, dtype=np.float64) * 2e-9 - 4e-9
+        with tempfile.TemporaryDirectory() as tmp:
+            tss_path = Path(tmp) / "WH_time_axis.tss"
+            with zipfile.ZipFile(tss_path, "w") as zf:
+                zf.writestr("CH1.wfm", b"placeholder")
+
+            with (
+                patch("dpt_extractor.io.tss_parser.read_file", return_value=wfm),
+                patch("dpt_extractor.io.tss_parser.read_wfm_vertical_scale_per_div", return_value=None),
+            ):
+                bundle = TssParser().parse(tss_path)
+
+        np.testing.assert_allclose(bundle.t, wfm.x_axis_values)
+        self.assertAlmostEqual(bundle.dt, 2e-9)
 
     def test_parse_session_math_from_setup(self):
         n = 5

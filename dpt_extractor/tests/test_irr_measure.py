@@ -18,7 +18,12 @@ from dpt_extractor.config.loader import load_config
 
 from dpt_extractor.io.tek_parser import TekParser
 
-from dpt_extractor.metrics.irr_measure import measure_irr_trr, trr_crossings_at_ha
+from dpt_extractor.metrics.irr_measure import (
+    irr_parameter_peak_index,
+    irr_parameter_peak_value,
+    measure_irr_trr,
+    trr_crossings_at_ha,
+)
 
 from dpt_extractor.models.bridge_profile import guess_profile_from_path
 
@@ -63,6 +68,64 @@ class TestIrrMeasure(unittest.TestCase):
         self.assertGreater(m.trr_ns, 50.0)
 
         self.assertLess(m.ta_s, m.tb_s)
+
+
+    def test_negative_lobe_uses_absolute_main_peak(self):
+
+        n = 500
+
+        t = np.linspace(0, 1.2e-6, n)
+
+        irr = np.full(n, 20.0)
+
+        irr[90:150] = np.linspace(20.0, -900.0, 60)
+
+        irr[150:230] = np.linspace(-900.0, 20.0, 80)
+
+        irr[280:320] = np.linspace(20.0, 120.0, 40)
+
+        irr[320:360] = np.linspace(120.0, 20.0, 40)
+
+        m = measure_irr_trr(t, irr, 0, n - 1, ha=20.0)
+
+        self.assertIsNotNone(m)
+
+        assert m is not None
+
+        self.assertAlmostEqual(m.hb, -900.0, delta=5.0)
+
+        self.assertAlmostEqual(m.irr, 900.0, delta=5.0)
+
+        self.assertLess(m.ta_s, m.tb_s)
+
+        self.assertLess(m.peak_idx, 230)
+
+
+    def test_parameter_peak_matches_extraction_main_lobe_rule(self):
+
+        n = 400
+
+        irr = np.zeros(n)
+
+        irr[100:130] = np.linspace(0.0, -260.0, 30)
+
+        irr[130:170] = np.linspace(-260.0, 0.0, 40)
+
+        irr[210:240] = np.linspace(0.0, 145.0, 30)
+
+        irr[240:280] = np.linspace(145.0, 0.0, 40)
+
+        idx = irr_parameter_peak_index(irr, 90, 180, 90, 80, n - 1)
+
+        self.assertGreater(idx, 200)
+
+        self.assertAlmostEqual(float(irr[idx]), 145.0, delta=5.0)
+
+        self.assertAlmostEqual(
+            irr_parameter_peak_value(irr, 90, 180, 90, 80, n - 1),
+            145.0,
+            delta=5.0,
+        )
 
 
 

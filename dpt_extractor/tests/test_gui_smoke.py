@@ -165,6 +165,47 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot._toggle_channel_visibility("MATH2")
         self.assertEqual(menu_texts("MATH2")[0], "启用数学 2")
 
+    def test_zoom_overview_region_tracks_and_pans_view(self):
+        from PyQt6.QtWidgets import QSizePolicy
+
+        plot = self._make_synthetic_plot()
+        self.assertTrue(plot._overview_plot.isHidden())
+
+        plot._apply_x_us_per_div(0.02, center_us=0.5)
+        self.assertFalse(plot._overview_plot.isHidden())
+        self.assertFalse(plot._scope_scale_bar.isHidden())
+        self.assertFalse(plot._zoom_toggle_btn.isHidden())
+        self.assertEqual(
+            plot._scope_scale_bar.sizePolicy().horizontalPolicy(),
+            QSizePolicy.Policy.Expanding,
+        )
+        self.assertEqual(plot._scope_scale_bar.maximumHeight(), 20)
+        self.assertEqual(plot._local_zoom_close_btn.height(), 16)
+        self.assertIs(plot._zoom_toggle_btn.parentWidget(), plot._overview_plot)
+        r0, r1 = plot._overview_region.getRegion()
+        self.assertAlmostEqual(r0, 0.25, places=3)
+        self.assertAlmostEqual(r1, 0.75, places=3)
+
+        plot._overview_region.setRegion((0.2, 0.4))
+        x0, x1 = plot.plot.getPlotItem().getViewBox().viewRange()[0]
+        self.assertAlmostEqual(x0, 0.2, places=3)
+        self.assertAlmostEqual(x1, 0.4, places=3)
+
+        plot._fit_full_range()
+        self.assertTrue(plot._overview_plot.isHidden())
+        self.assertTrue(plot._scope_scale_bar.isHidden())
+        self.assertFalse(plot._zoom_toggle_btn.isHidden())
+        self.assertIs(plot._zoom_toggle_btn.parentWidget(), plot.plot)
+
+        plot._toggle_zoom_preview()
+        self.assertFalse(plot._overview_plot.isHidden())
+        self.assertFalse(plot._scope_scale_bar.isHidden())
+        self.assertIs(plot._zoom_toggle_btn.parentWidget(), plot._overview_plot)
+
+        plot._exit_local_zoom()
+        self.assertTrue(plot._overview_plot.isHidden())
+        self.assertTrue(plot._scope_scale_bar.isHidden())
+
     def test_tss_derived_ic_max_cursor_uses_imported_math_trace(self):
         import numpy as np
 
@@ -213,10 +254,64 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(plot._readout_channel(), "MATH1")
         self.assertIsNotNone(plot._h_cursor_a)
         assert plot._h_cursor_a is not None
+        win = (t >= 0.2e-6) & (t <= 0.8e-6)
+        expected_peak = float(np.max(math_ic[win]))
         self.assertAlmostEqual(
             plot._from_disp("ic", float(plot._h_cursor_a.value())),
-            peak,
+            expected_peak,
             delta=1.0,
+        )
+
+    def test_peak_cursor_uses_full_resolution_signed_current(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import MAX_PLOT_POINTS, WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = MAX_PLOT_POINTS * 3
+        t = np.arange(n, dtype=np.float64) * 1e-9
+        profile = make_profile("W", "lower")
+        ic = np.full(n, -20.0, dtype=np.float64)
+        peak_idx = MAX_PLOT_POINTS + 123
+        ic[peak_idx] = -900.0
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                profile.vge: np.zeros(n),
+                profile.vce: np.linspace(0.0, 900.0, n),
+                profile.ic: ic,
+                profile.il: np.zeros(n),
+                profile.v_diode: np.linspace(0.0, 700.0, n),
+                profile.vge_other: np.zeros(n),
+            },
+            meta=TekMetadata(source_path="/fake/full-resolution.tss"),
+        )
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+
+        t_peak_us = float(t[peak_idx] * 1e6)
+        plot.enable_interval_interaction(
+            t_peak_us - 0.02,
+            t_peak_us + 0.02,
+            lambda *_args: None,
+            show_horizontal_peak=True,
+        )
+        plot.set_interval_peak_horizontal(
+            900.0,
+            channel="ic",
+            t0_us=t_peak_us - 0.02,
+            t1_us=t_peak_us + 0.02,
+            use_abs_peak=True,
+        )
+
+        self.assertEqual(len(plot._trace_raw[profile.ic]), n)
+        self.assertIsNotNone(plot._h_cursor_a)
+        assert plot._h_cursor_a is not None
+        self.assertAlmostEqual(
+            plot._from_disp("ic", float(plot._h_cursor_a.value())),
+            -900.0,
+            places=6,
         )
 
     def test_math_channel_can_open_settings_for_mapping(self):
@@ -350,7 +445,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         plot._set_math_formula("MATH1", "INTG(CH2 * CH3)")
         self.assertEqual(len(plot._formula_sources["MATH1"]), n)
-        self.assertLess(len(plot._trace_raw["MATH1"]), n)
+        self.assertEqual(len(plot._trace_raw["MATH1"]), n)
+        display_x, _display_y = plot._trace_items["MATH1"].getData()
+        self.assertLess(len(display_x), n)
         self.assertAlmostEqual(plot._formula_sources["MATH1"][-1], t[-1] - t[0], places=12)
 
     def test_formula_functions_match_numpy_reference(self):
@@ -553,13 +650,115 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
     def test_context_menu_group_selection(self):
         plot = self._make_synthetic_plot()
-        self.assertEqual(plot.context_menu_group(), "cursor")
+        self.assertEqual(plot.context_menu_group(), "all")
         plot.set_context_menu_group("zoom")
         self.assertEqual(plot.context_menu_group(), "zoom")
         plot.set_context_menu_group("view")
         self.assertEqual(plot.context_menu_group(), "view")
         plot.set_context_menu_group("bad-value")
-        self.assertEqual(plot.context_menu_group(), "cursor")
+        self.assertEqual(plot.context_menu_group(), "all")
+
+    def test_scope_context_menu_has_cursor_modes_and_clipboard_capture(self):
+        from PyQt6.QtWidgets import QApplication
+
+        plot = self._make_synthetic_plot()
+        self.assertTrue(plot._readout_scroll.isHidden())
+        menu = plot._build_scope_context_menu(0.5, 0.0)
+        texts = [
+            "|" if action.isSeparator() else action.text()
+            for action in menu.actions()
+        ]
+        self.assertIn("光标", texts)
+        self.assertIn("复制截图到剪贴板", texts)
+
+        cursor_menu = next(
+            action.menu() for action in menu.actions() if action.text() == "光标"
+        )
+        cursor_texts = [action.text() for action in cursor_menu.actions()]
+        self.assertEqual(cursor_texts[0], "关闭光标")
+        self.assertIn("光标类型", cursor_texts)
+        self.assertIn("光标模式", cursor_texts)
+
+        type_menu = next(
+            action.menu() for action in cursor_menu.actions() if action.text() == "光标类型"
+        )
+        self.assertEqual(
+            [action.text() for action in type_menu.actions()],
+            ["波形", "竖条", "横条", "竖条与横条"],
+        )
+        cursor_menu.actions()[0].trigger()
+        self.assertEqual(plot._cursor_type, "none")
+        self.assertFalse(plot._cursor_a.isVisible())
+        menu_after_close = plot._build_scope_context_menu(0.5, 0.0)
+        cursor_menu_after_close = next(
+            action.menu()
+            for action in menu_after_close.actions()
+            if action.text() == "光标"
+        )
+        self.assertEqual(cursor_menu_after_close.actions()[0].text(), "打开光标")
+        cursor_menu_after_close.actions()[0].trigger()
+        self.assertEqual(plot._cursor_type, "both")
+        self.assertTrue(plot._cursor_a.isVisible())
+
+        plot.resize(900, 520)
+        plot.show()
+        QApplication.processEvents()
+        plot._copy_screenshot_to_clipboard()
+        self.assertFalse(QApplication.clipboard().pixmap().isNull())
+        plot.close()
+
+    def test_cursor_type_visibility_modes(self):
+        import numpy as np
+
+        plot = self._make_synthetic_plot()
+        plot._set_cursor_type("waveform")
+        self.assertTrue(plot._cursor_a.isVisible())
+        self.assertTrue(plot._cursor_b.isVisible())
+        self.assertFalse(plot._h_cursor_a.isVisible())
+        self.assertFalse(plot._h_cursor_b.isVisible())
+        self.assertIsNotNone(plot._cursor_a_wave_marker)
+        self.assertTrue(plot._cursor_a_wave_marker.isVisible())
+
+        plot._on_legend_clicked("CH2")
+        marker_x, marker_y = plot._cursor_a_wave_marker.getData()
+        self.assertGreater(len(marker_x), 0)
+        self.assertGreater(len(marker_y), 0)
+        expected = float(
+            np.interp(
+                float(marker_x[0]),
+                plot._trace_t_us,
+                plot._trace_raw["CH2"],
+            )
+        )
+        self.assertAlmostEqual(
+            plot._from_disp("CH2", float(marker_y[0])),
+            expected,
+            places=6,
+        )
+
+        plot._set_cursor_type("vertical")
+        self.assertTrue(plot._cursor_a.isVisible())
+        self.assertTrue(plot._cursor_b.isVisible())
+        self.assertFalse(plot._h_cursor_a.isVisible())
+        self.assertFalse(plot._h_cursor_b.isVisible())
+        self.assertFalse(plot._cursor_a_wave_marker.isVisible())
+
+        plot._set_cursor_type("horizontal")
+        self.assertFalse(plot._cursor_a.isVisible())
+        self.assertFalse(plot._cursor_b.isVisible())
+        self.assertTrue(plot._h_cursor_a.isVisible())
+        self.assertTrue(plot._h_cursor_b.isVisible())
+        self.assertFalse(plot._cursor_a_wave_marker.isVisible())
+
+        plot._set_cursor_type("both")
+        self.assertTrue(plot._cursor_a.isVisible())
+        self.assertTrue(plot._h_cursor_a.isVisible())
+        self.assertTrue(plot._cursor_a_wave_marker.isVisible())
+
+        plot._set_cursor_type("none")
+        self.assertFalse(plot._cursor_a.isVisible())
+        self.assertFalse(plot._h_cursor_a.isVisible())
+        self.assertFalse(plot._cursor_a_wave_marker.isVisible())
 
 
 @unittest.skipUnless(WH.exists() and UH.exists(), "WH/UH sample missing")
@@ -591,7 +790,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertIsNotNone(plot._cursor_b)
         self.assertIsNotNone(plot._h_cursor_a)
         self.assertIsNotNone(plot._h_cursor_b)
-        # 顶部信息栏文字（不在波形上）
+        # 顶部 readout 已隐藏，读数保留为内部状态/状态栏信息。
+        self.assertTrue(plot._readout_scroll.isHidden())
         self.assertNotEqual(plot._readout_label.text(), "")
         # 底部通道盒含全部 6 条逻辑通道，并可附加原始 Math
         self.assertGreaterEqual(len(plot._channel_boxes), 6)

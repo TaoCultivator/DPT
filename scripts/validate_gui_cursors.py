@@ -165,6 +165,9 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
         rows.append((path.name, section, name, status, detail))
 
     for section, name in INTERACTIVE_PARAMS:
+        if result.single_pulse_mode and section in {"开通", "反向恢复"}:
+            record(section, name, "INFO", "单脉冲模式不适用")
+            continue
         seg_name = SECTION_SEGMENT[section]
         s0, s1 = seg_idx[seg_name]
         cap.reset()
@@ -257,10 +260,19 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             if not (ta > tb):
                 problems.append(f"A({ta:.3f})应晚于B({tb:.3f})")
             on1 = seg_idx["turn_on"][1]
+            from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
+
+            ipk = s0 + err_recovery_peak_index(
+                np.asarray(chan["irr"][s0 : s1 + 1], dtype=np.float64),
+                bundle.dt,
+            )
+            tpk_us = float(t[ipk]) * 1e6
+            ha_win = (tpk_us + 0.4, tpk_us + 0.8)
+            hb_win = (tpk_us - 0.6, tpk_us - 0.2)
             check_time(ta, "A", (s0, on1))
             check_time(tb, "B", (s0, on1))
-            check_level(ha_a, "irr", "Ha")
-            check_level(hb_v, "v_diode", "Hb")
+            check_level(ha_a, "irr", "Ha", ha_win)
+            check_level(hb_v, "v_diode", "Hb", hb_win)
             detail = f"Ha(irr)={ha_a:.2f} Hb(vd)={hb_v:.2f} A={ta:.3f} B={tb:.3f}"
 
         elif name == "Irr":

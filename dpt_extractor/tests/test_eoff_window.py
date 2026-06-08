@@ -32,6 +32,32 @@ WH = ROOT / "WH_480V_800A_000_ALL.csv"
 
 
 class TestEoffWindow(unittest.TestCase):
+    def test_eon_markers_fall_back_when_pulse2_on_outside_turn_on_segment(self):
+        dt = 1e-9
+        t = np.arange(2000, dtype=np.float64) * dt
+        ic = np.zeros_like(t)
+        vce = np.full_like(t, 500.0)
+        i0, i1 = 1000, 1500
+        ic[i0 : i1 + 1] = np.linspace(0.0, 100.0, i1 - i0 + 1)
+        ic[i1 + 1 :] = 100.0
+        vce[i0 : i1 + 1] = np.linspace(500.0, 5.0, i1 - i0 + 1)
+        vce[i1 + 1 :] = 5.0
+
+        mk = eon_energy_markers(
+            t,
+            ic,
+            vce,
+            i0,
+            i1,
+            on_idx=100,
+            dt=dt,
+            pulse1_off=900,
+        )
+
+        self.assertGreaterEqual(mk.i_start, i0)
+        self.assertLessEqual(mk.i_end, i1)
+        self.assertGreater(mk.t_end, mk.t_start)
+
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_scope_window_near_manual_reference(self):
         bundle = TekParser().parse(UH)

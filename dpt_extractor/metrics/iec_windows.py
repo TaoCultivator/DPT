@@ -589,24 +589,29 @@ def eon_energy_markers(
     开通损耗卡尺：Ha=Ic 抬升前低平台；Hb=Vce 回落后平稳均值；
     A=|Ic| 上升沿与 Ha 的第一个交点；B=Vce 下降沿与 Hb 的第一个交点。
     """
+    on_ref = int(on_idx)
+    if on_ref < int(i0) or on_ref > int(i1):
+        on_ref = int(i0)
     i_base, v_top, i_top, v_base, w0, w1 = scope_turn_on_bases(
-        vce, ic, on_idx, i0, i1, dt, pulse1_off=pulse1_off
+        vce, ic, on_ref, i0, i1, dt, pulse1_off=pulse1_off
     )
     if w1 <= w0 + 10:
         return EnergyLossMarkers(
             float(i_base), float(i_top), float(t[w0]), float(t[w1]), w0, w1
         )
 
-    ha_ic = _plateau_mean_ic_before_on(ic, on_idx, w0, dt)
-    hb_v = _plateau_mean_vce_after_on(vce, ic, on_idx, w1, dt)
+    ha_ic = _plateau_mean_ic_before_on(ic, on_ref, w0, dt)
+    hb_v = _plateau_mean_vce_after_on(vce, ic, on_ref, w1, dt)
 
-    sw0 = max(w0, i0, on_idx - int(200e-9 / dt))
-    win1 = min(w1, i1, on_idx + int(1200e-9 / dt))
+    sw0 = max(w0, i0, on_ref - int(200e-9 / dt))
+    win1 = min(w1, i1, on_ref + int(1200e-9 / dt))
+    if win1 <= sw0 + 2:
+        win1 = min(len(t) - 1, max(i1, sw0 + int(350e-9 / dt)))
     # 带符号：下桥导通前基线为负，A=Ic 上升沿与 Ha 交点须在真实波形上
     i_seg = ic[sw0 : win1 + 1].astype(np.float64)
     v_seg = vce[sw0 : win1 + 1].astype(np.float64)
     t_sw = t[sw0 : win1 + 1]
-    local_on = on_idx - sw0
+    local_on = on_ref - sw0
 
     anchor = max(0, local_on - int(15e-9 / dt))
     i_start_local = _eon_ic_rise_start_index(i_seg, ha_ic, anchor, dt, float(i_top))
