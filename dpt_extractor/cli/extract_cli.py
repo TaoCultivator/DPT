@@ -12,6 +12,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from dpt_extractor.utils.app_paths import configure_numba_cache_dir
+
+configure_numba_cache_dir()
+
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.models.bridge_profile import PROFILES, guess_profile_from_path, make_profile

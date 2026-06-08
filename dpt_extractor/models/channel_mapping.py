@@ -188,17 +188,34 @@ class ChannelMappingStore:
         return f"{phase.upper()}_{bridge.lower()}"
 
     def load(self) -> None:
-        if not self.path.exists():
+        try:
+            exists = self.path.exists()
+        except OSError:
             self._data = {}
             return
-        with open(self.path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
+        if not exists:
+            self._data = {}
+            return
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+        except OSError:
+            self._data = {}
+            return
         self._data = dict(raw.get("mappings", {}))
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            yaml.safe_dump({"mappings": self._data}, f, allow_unicode=True, sort_keys=False)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(
+                    {"mappings": self._data},
+                    f,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+        except OSError:
+            return
 
     def get(self, phase: str, bridge: str) -> ChannelMapping | None:
         key = self._key(phase, bridge)

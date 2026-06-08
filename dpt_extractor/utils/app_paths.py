@@ -38,6 +38,35 @@ def user_data_dir() -> Path:
     return root
 
 
+def configure_numba_cache_dir() -> Path | None:
+    """
+    Pin Numba's cache to an application-controlled writable directory.
+
+    Tektronix ``tm_data_types`` imports Numba during WFM parsing. On some Windows
+    setups Numba's default cache probe can stall on temp/cache directories, so we
+    set the location before that dependency is imported.
+    """
+    if os.environ.get("NUMBA_CACHE_DIR"):
+        return Path(os.environ["NUMBA_CACHE_DIR"])
+
+    candidates: list[Path] = []
+    try:
+        candidates.append(user_data_dir() / "numba_cache")
+    except OSError:
+        pass
+    if not is_frozen():
+        candidates.append(bundle_root() / ".numba_cache")
+
+    for cache_dir in candidates:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        os.environ["NUMBA_CACHE_DIR"] = str(cache_dir)
+        return cache_dir
+    return None
+
+
 def user_channel_maps_path() -> Path:
     return user_data_dir() / "channel_maps_user.yaml"
 
@@ -45,8 +74,14 @@ def user_channel_maps_path() -> Path:
 def seed_user_channel_maps_if_missing() -> None:
     """首次运行：将内置默认通道映射模板复制到用户目录。"""
     dst = user_channel_maps_path()
-    if dst.exists():
+    try:
+        if dst.exists():
+            return
+    except OSError:
         return
     src = package_config_dir() / "channel_maps_user.yaml"
     if src.is_file():
-        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        try:
+            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        except OSError:
+            return

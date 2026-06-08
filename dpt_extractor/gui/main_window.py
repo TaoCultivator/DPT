@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
+import time
 import numpy as np
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
 from PyQt6.QtGui import QResizeEvent
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -40,6 +43,7 @@ from dpt_extractor.models.channel_mapping import (
     LOGICAL_SIGNAL_KEYS,
     ChannelMapping,
     ChannelMappingStore,
+    apply_mapping,
     infer_mapping_from_bundle,
     validate_mapping,
 )
@@ -95,6 +99,100 @@ from dpt_extractor.pipeline.run_extract import run_extraction
 from dpt_extractor.pipeline.short_circuit_extract import ShortCircuitExtractNotReady
 
 
+@dataclass
+class _WaveformLoadOutcome:
+    path: str
+    bundle: WaveformBundle
+    guessed: BridgeProfile
+    profile: BridgeProfile
+    inferred: ChannelMapping | None
+    mapping_custom: bool
+    result: ExtractResult | None
+    short_circuit_not_ready: bool
+    load_ms: float
+    extract_ms: float
+
+
+def _compute_waveform_load_outcome(
+    path: str,
+    cfg: AppConfig,
+    stored_mapping: ChannelMapping | None,
+) -> _WaveformLoadOutcome:
+    load_t0 = time.perf_counter()
+    bundle = load_waveform(path)
+    load_t1 = time.perf_counter()
+
+    guessed = guess_profile_from_path(path)
+    inferred = infer_mapping_from_bundle(bundle, guessed.bridge)
+    base_profile = make_profile(guessed.phase, guessed.bridge)
+    mapping_custom = False
+    if inferred is not None:
+        profile = apply_mapping(base_profile, inferred)
+        mapping_custom = True
+    elif Path(path).suffix.lower() == ".tss":
+        profile = base_profile
+    elif stored_mapping is not None:
+        profile = apply_mapping(base_profile, stored_mapping)
+        mapping_custom = True
+    else:
+        profile = base_profile
+
+    extract_t0 = time.perf_counter()
+    try:
+        result = run_extraction(bundle, profile, cfg)
+        short_circuit_not_ready = False
+    except ShortCircuitExtractNotReady:
+        result = None
+        short_circuit_not_ready = True
+    extract_t1 = time.perf_counter()
+
+    return _WaveformLoadOutcome(
+        path=path,
+        bundle=bundle,
+        guessed=guessed,
+        profile=profile,
+        inferred=inferred,
+        mapping_custom=mapping_custom,
+        result=result,
+        short_circuit_not_ready=short_circuit_not_ready,
+        load_ms=(load_t1 - load_t0) * 1000.0,
+        extract_ms=(extract_t1 - extract_t0) * 1000.0,
+    )
+
+
+class _WaveformLoadSignals(QObject):
+    finished = pyqtSignal(int, object)
+    failed = pyqtSignal(int, str, str)
+
+
+class _WaveformLoadTask(QRunnable):
+    def __init__(
+        self,
+        request_id: int,
+        path: str,
+        cfg: AppConfig,
+        stored_mapping: ChannelMapping | None,
+    ) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.path = path
+        self.cfg = cfg
+        self.stored_mapping = stored_mapping
+        self.signals = _WaveformLoadSignals()
+
+    def run(self) -> None:
+        try:
+            outcome = _compute_waveform_load_outcome(
+                self.path,
+                self.cfg,
+                self.stored_mapping,
+            )
+        except Exception as exc:
+            self.signals.failed.emit(self.request_id, self.path, str(exc))
+            return
+        self.signals.finished.emit(self.request_id, outcome)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -127,6 +225,9 @@ class MainWindow(QMainWindow):
         # Trr：Ha、Hb、A/B (µs)、尖峰索引（与 Irr 区间模式分离）
         self._manual_trr_measure: tuple[float, float, float, float, int | None] | None = None
         self._active_slope_param: tuple[str, str] | None = None
+        self._load_request_id = 0
+        self._load_tasks: dict[int, _WaveformLoadTask] = {}
+        self._load_pool = QThreadPool.globalInstance()
 
         self._build_ui()
         self.result_table.set_range_handler(self._on_slope_range_changed)
@@ -590,42 +691,175 @@ class MainWindow(QMainWindow):
             "波形文件 (*.csv *.tss);;CSV (*.csv);;TSS 会话 (*.tss);;All (*)",
         )
         if path:
-            self._load_file(path)
+            self._load_file(path, background=True)
 
-    def _load_file(self, path: str) -> None:
+    def _load_cfg_for_new_file(self) -> AppConfig:
+        cfg = deepcopy(self.cfg)
+        cfg.vdc_override = None
+        cfg.slope_ranges = default_slope_ranges()
+        return cfg
+
+    def _stored_mapping_for_file(self, path: str) -> ChannelMapping | None:
+        guessed = guess_profile_from_path(path)
+        return self._channel_store.get(guessed.phase, guessed.bridge)
+
+    def _set_load_busy(self, busy: bool, path: str = "") -> None:
+        self.btn_open.setEnabled(not busy)
+        self.btn_recalc.setEnabled(not busy)
+        self.btn_export.setEnabled(
+            (not busy) and parse_test_mode(self.cfg.test_mode.mode) == TestMode.DPT
+        )
+        if busy:
+            self.statusBar().showMessage(f"正在后台加载: {Path(path).name}")
+
+    def _start_background_load(self, path: str) -> None:
+        self._load_request_id += 1
+        request_id = self._load_request_id
+        cfg = self._load_cfg_for_new_file()
+        task = _WaveformLoadTask(
+            request_id,
+            path,
+            cfg,
+            self._stored_mapping_for_file(path),
+        )
+        task.signals.finished.connect(self._on_background_load_finished)
+        task.signals.failed.connect(self._on_background_load_failed)
+        self._load_tasks[request_id] = task
+        self._set_load_busy(True, path)
+        self._load_pool.start(task)
+
+    def _on_background_load_finished(
+        self,
+        request_id: int,
+        outcome: _WaveformLoadOutcome,
+    ) -> None:
+        self._load_tasks.pop(request_id, None)
+        if request_id != self._load_request_id:
+            return
         try:
-            self.bundle = load_waveform(path)
-            self._current_path = path
-            guessed = guess_profile_from_path(path)
-            self._set_profile_combos(guessed)
-            inferred = infer_mapping_from_bundle(self.bundle, guessed.bridge)
-            if inferred is not None:
-                self._channel_store.set(guessed.phase, guessed.bridge, inferred)
-                self.profile = self._current_profile()
-            elif Path(path).suffix.lower() == ".tss":
-                # TSS exports in the sample corpus often preserve scale but omit labels.
-                # In that case the filename phase/bridge is more reliable than stale
-                # per-phase user mapping overrides from previous sessions.
-                self.profile = make_profile(guessed.phase, guessed.bridge)
-                self._mapping_custom = False
-                self._update_map_status_label()
-            else:
-                self.profile = self._current_profile()
-            self.spin_vdc.blockSignals(True)
-            self.spin_vdc.setValue(0)
-            self.spin_vdc.blockSignals(False)
-            self.cfg.vdc_override = None
-            self._slope_ranges = default_slope_ranges()
-            self.result_table.set_slope_ranges(self._slope_ranges)
-            self._recalculate(reset_manual=True)
-            set_last_open_path(path)
-            msg = f"已加载: {Path(path).name}"
-            if inferred is not None:
-                msg += "（已根据通道标签自动映射）"
-            if self.bundle.meta.channel_vdiv:
-                n = len(self.bundle.meta.channel_vdiv)
-                msg += f"（已应用 TSS 垂直刻度 {n} 通道）"
-            self.statusBar().showMessage(msg)
+            self._apply_loaded_waveform(outcome)
+        except Exception as exc:
+            QMessageBox.critical(self, "加载失败", str(exc))
+        finally:
+            self._set_load_busy(False)
+
+    def _on_background_load_failed(
+        self,
+        request_id: int,
+        _path: str,
+        message: str,
+    ) -> None:
+        self._load_tasks.pop(request_id, None)
+        if request_id != self._load_request_id:
+            return
+        self._set_load_busy(False)
+        QMessageBox.critical(self, "加载失败", message)
+
+    def _clear_manual_adjustments(self, *, reset_plot: bool = True) -> None:
+        self._manual_intervals.clear()
+        self._manual_turn_on_current = None
+        self._manual_delta_vce.clear()
+        self._manual_dvdt.clear()
+        self._manual_didt.clear()
+        self._manual_trr_measure = None
+        self._manual_waveform_source = ""
+        self._active_slope_param = None
+        if reset_plot:
+            self.wave_plot.reset_interaction_state()
+
+    def _loaded_status_message(
+        self,
+        outcome: _WaveformLoadOutcome,
+        inferred: ChannelMapping | None,
+    ) -> str:
+        msg = (
+            f"已加载: {Path(outcome.path).name}  |  "
+            f"读取 {outcome.load_ms:.0f} ms  提取 {outcome.extract_ms:.0f} ms"
+        )
+        if inferred is not None:
+            msg += "（已根据通道标签自动映射）"
+        if outcome.bundle.meta.channel_vdiv:
+            msg += f"（已应用 TSS 垂直刻度 {len(outcome.bundle.meta.channel_vdiv)} 通道）"
+        return msg
+
+    def _apply_loaded_waveform(self, outcome: _WaveformLoadOutcome) -> None:
+        path = outcome.path
+        inferred = outcome.inferred
+        self.bundle = outcome.bundle
+        self._current_path = path
+
+        if inferred is not None:
+            self._channel_store.set(
+                outcome.guessed.phase,
+                outcome.guessed.bridge,
+                inferred,
+            )
+        self._set_profile_combos(outcome.guessed)
+        if inferred is not None:
+            self.profile = apply_mapping(
+                make_profile(outcome.guessed.phase, outcome.guessed.bridge),
+                inferred,
+            )
+            self._mapping_custom = True
+            self._update_map_status_label()
+        elif Path(path).suffix.lower() == ".tss":
+            # TSS exports in the sample corpus often preserve scale but omit labels.
+            # In that case the filename phase/bridge is more reliable than stale
+            # per-phase user mapping overrides from previous sessions.
+            self.profile = make_profile(outcome.guessed.phase, outcome.guessed.bridge)
+            self._mapping_custom = False
+            self._update_map_status_label()
+        else:
+            self.profile = outcome.profile
+            self._mapping_custom = outcome.mapping_custom
+            self._update_map_status_label()
+
+        self.spin_vdc.blockSignals(True)
+        self.spin_vdc.setValue(0)
+        self.spin_vdc.blockSignals(False)
+        self.cfg.vdc_override = None
+        self._slope_ranges = default_slope_ranges()
+        self.result_table.set_slope_ranges(self._slope_ranges)
+        self._clear_manual_adjustments()
+        set_last_open_path(path)
+
+        if outcome.short_circuit_not_ready:
+            self.result = None
+            self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
+            self.result_table.set_mode_placeholder(
+                "短路计算",
+                "功能开发中。当前仅显示波形，参数提取与 Excel 导出将在后续版本提供。",
+            )
+            self.statusBar().showMessage("短路计算：功能开发中，当前仅显示波形")
+            return
+
+        if outcome.result is None:
+            raise ValueError("提取失败：后台任务未返回参数结果")
+        self.result = outcome.result
+        self.result_table.set_result(self.result)
+        if self.result.detected_pulse_count > 0:
+            self._update_pulse_toolbar(
+                self.result.detected_pulse_count,
+                self.result.off_pulse_index,
+                self.result.on_pulse_index,
+            )
+        self.result_table.setMaximumWidth(self.result_table.preferred_panel_width())
+        if not self._splitter_user_moved:
+            self._sync_splitter_sizes()
+        self.wave_plot.plot_waveforms(self.bundle, self.profile, self.result)
+        self.statusBar().showMessage(self._loaded_status_message(outcome, inferred))
+
+    def _load_file(self, path: str, *, background: bool = False) -> None:
+        if background:
+            self._start_background_load(path)
+            return
+        try:
+            outcome = _compute_waveform_load_outcome(
+                path,
+                self._load_cfg_for_new_file(),
+                self._stored_mapping_for_file(path),
+            )
+            self._apply_loaded_waveform(outcome)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", str(e))
 
@@ -3187,27 +3421,13 @@ class MainWindow(QMainWindow):
             self.cfg.slope_ranges = dict(self._slope_ranges)
             active_param = self._active_slope_param
             if reset_manual:
-                self._manual_intervals.clear()
-                self._manual_turn_on_current = None
-                self._manual_delta_vce.clear()
-                self._manual_dvdt.clear()
-                self._manual_didt.clear()
-                self._manual_trr_measure = None
-                self._manual_waveform_source = ""
-                self._active_slope_param = None
+                self._clear_manual_adjustments()
                 active_param = None
-                self.wave_plot.reset_interaction_state()
             try:
                 self.result = run_extraction(self.bundle, self.profile, self.cfg)
             except ShortCircuitExtractNotReady:
                 self.result = None
-                self._manual_intervals.clear()
-                self._manual_turn_on_current = None
-                self._manual_delta_vce.clear()
-                self._manual_dvdt.clear()
-                self._manual_didt.clear()
-                self._manual_trr_measure = None
-                self._active_slope_param = None
+                self._clear_manual_adjustments(reset_plot=False)
                 self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
                 self.result_table.set_mode_placeholder(
                     "短路计算",

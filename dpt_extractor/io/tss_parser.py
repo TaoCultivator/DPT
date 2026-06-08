@@ -37,6 +37,9 @@ def _channel_from_member(member: str) -> str | None:
 
 
 def read_file(path: str | Path):
+    from dpt_extractor.utils.app_paths import configure_numba_cache_dir
+
+    configure_numba_cache_dir()
     from tm_data_types import read_file as _read_file
 
     return _read_file(path)

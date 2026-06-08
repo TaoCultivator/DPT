@@ -5,6 +5,10 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+from dpt_extractor.utils.app_paths import configure_numba_cache_dir
+
+configure_numba_cache_dir()
+
 from tm_data_types.files_and_formats.wfm.wfm import WFMFile
 from tm_data_types.files_and_formats.wfm.wfm_format import WfmFormat
 from tm_data_types.helpers.byte_data_types import String8

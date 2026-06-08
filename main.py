@@ -10,8 +10,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from dpt_extractor.utils.text_encoding import configure_utf8_text_io
+from dpt_extractor.utils.app_paths import configure_numba_cache_dir
 
 configure_utf8_text_io()
+configure_numba_cache_dir()
 
 from PyQt6.QtWidgets import QApplication
 

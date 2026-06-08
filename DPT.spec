@@ -1,11 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 规格：Windows 单文件 GUI 可执行程序。"""
 import re
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 ROOT = Path(SPECPATH)
+os.environ.setdefault("NUMBA_CACHE_DIR", str(ROOT / ".numba_cache"))
 VERSION_FILE = ROOT / "dpt_extractor" / "__init__.py"
 VERSION_MATCH = re.search(
     r'__version__\s*=\s*["\']([^"\']+)["\']',
@@ -20,7 +22,7 @@ user_map = ROOT / "dpt_extractor" / "config" / "channel_maps_user.yaml"
 if user_map.is_file():
     datas.append((str(user_map), "dpt_extractor/config"))
 
-hiddenimports = collect_submodules("scipy") + collect_submodules("tm_data_types") + [
+hiddenimports = collect_submodules("tm_data_types") + [
     "dpt_extractor",
     "dpt_extractor.gui",
     "dpt_extractor.gui.main_window",
@@ -28,6 +30,8 @@ hiddenimports = collect_submodules("scipy") + collect_submodules("tm_data_types"
     "dpt_extractor.gui.waveform_plot",
     "dpt_extractor.pipeline.extract",
     "dpt_extractor.export.mcu2506_layout",
+    "scipy.ndimage",
+    "scipy.ndimage._nd_image",
 ]
 
 binaries = []
