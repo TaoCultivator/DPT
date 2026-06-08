@@ -68,7 +68,15 @@ U/V/W 三相 **通道接线相同**，仅被测器件与文件命名不同：
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
-产物：`dist\DPT_双脉冲参数提取工具_v1.1.1.exe`（单文件，可拷贝到其他 Windows 电脑运行）。
+产物：`dist\DPT_双脉冲参数提取工具_v1.1.2.exe`（单文件，可拷贝到其他 Windows 电脑运行）。
+
+## 版本规则
+
+版本号统一使用 `vMAJOR.MINOR.PATCH`，例如 `v1.0.0`。
+
+- 大版本更新：修改第一位，例如 `v1.0.0` → `v2.0.0`
+- 小版本/功能迭代：修改后两位，例如 `v1.1.1` → `v1.1.2`
+- Python 包内版本写在 [`dpt_extractor/__init__.py`](dpt_extractor/__init__.py)，Git tag 与 GitHub Release 使用同一个 `v` 前缀版本号
 
 ## 测试
 

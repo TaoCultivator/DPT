@@ -120,6 +120,51 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn("MATH3", plot._channel_boxes)
         self.assertEqual(plot._unit_for_channel("MATH3"), "J")
 
+    def test_added_math_channel_can_be_deleted(self):
+        plot = self._make_synthetic_plot()
+        self.assertFalse(plot._can_delete_channel("CH1"))
+        self.assertTrue(plot._can_delete_channel("MATH1"))
+
+        plot._set_math_formula("MATH2", "CH3 + CH4")
+        self.assertTrue(plot._can_delete_channel("MATH2"))
+        self.assertIn("MATH2", plot._channel_boxes)
+        self.assertIn("MATH2", plot._zero_handles)
+
+        plot._toggle_channel_visibility("MATH2")
+        self.assertIn("MATH2", plot._hidden_channels)
+        plot._delete_math_channel("MATH2")
+
+        self.assertNotIn("MATH2", plot._trace_items)
+        self.assertNotIn("MATH2", plot._channel_boxes)
+        self.assertNotIn("MATH2", plot._zero_handles)
+        self.assertNotIn("MATH2", plot._math_formulas)
+        self.assertNotIn("MATH2", plot._math_source_keys)
+        self.assertNotIn("MATH2", plot._formula_sources)
+        self.assertNotIn("MATH2", plot._hidden_channels)
+        self.assertEqual(plot._next_math_key(), "MATH2")
+
+    def test_channel_context_menu_uses_scope_style_actions(self):
+        plot = self._make_synthetic_plot()
+        plot._set_math_formula("MATH2", "CH3 + CH4")
+
+        def menu_texts(key):
+            return [
+                "|" if action.isSeparator() else action.text()
+                for action in plot._build_channel_box_menu(key).actions()
+            ]
+
+        self.assertEqual(
+            menu_texts("MATH2"),
+            ["禁用数学 2", "配置数学 2...", "|", "标签...", "|", "删除数学 2"],
+        )
+        self.assertEqual(
+            menu_texts("CH6"),
+            ["禁用 Ch 6", "配置 Ch 6...", "|", "标签..."],
+        )
+
+        plot._toggle_channel_visibility("MATH2")
+        self.assertEqual(menu_texts("MATH2")[0], "启用数学 2")
+
     def test_tss_derived_ic_max_cursor_uses_imported_math_trace(self):
         import numpy as np
 

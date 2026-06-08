@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGraphicsRectItem,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -163,11 +164,12 @@ class ChannelZeroHandle(pg.GraphicsObject):
 
 
 class ChannelBox(QFrame):
-    """示波器风格底部通道盒：左键选中、双击改垂直、右键显隐。"""
+    """示波器风格底部通道盒：左键选中、双击改垂直、右键菜单。"""
 
     highlightClicked = pyqtSignal(str)
     verticalSettingsRequested = pyqtSignal(str)
     visibilityToggleRequested = pyqtSignal(str)
+    contextMenuRequested = pyqtSignal(str, QPoint)
 
     def __init__(self, key: str, name: str, color: str, parent=None):
         super().__init__(parent)
@@ -195,7 +197,11 @@ class ChannelBox(QFrame):
 
     def mousePressEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.MouseButton.RightButton:
-            self.visibilityToggleRequested.emit(self._key)
+            if hasattr(ev, "globalPosition"):
+                global_pos = ev.globalPosition().toPoint()
+            else:
+                global_pos = ev.globalPos()
+            self.contextMenuRequested.emit(self._key, global_pos)
             ev.accept()
             return
         if ev.button() == Qt.MouseButton.LeftButton:
@@ -217,6 +223,34 @@ class ChannelBox(QFrame):
 
     def set_box_style(self, style: str) -> None:
         self.setStyleSheet(style)
+
+
+_CHANNEL_CONTEXT_MENU_STYLE = """
+QMenu {
+    background-color: #d2d2d2;
+    color: #111111;
+    border: 1px solid #777777;
+    padding: 6px 0;
+    font-size: 15px;
+}
+QMenu::item {
+    min-width: 188px;
+    padding: 11px 42px 11px 22px;
+    background-color: transparent;
+}
+QMenu::item:selected {
+    background-color: #28bce8;
+    color: #f3fbff;
+}
+QMenu::item:disabled {
+    color: #777777;
+}
+QMenu::separator {
+    height: 2px;
+    background-color: #f3f3f3;
+    margin: 6px 0;
+}
+"""
 
 
 class MathFormulaDialog(QDialog):
@@ -917,6 +951,7 @@ class WaveformPlot(QWidget):
         self._formula_sources: dict[str, np.ndarray] = {}
         self._math_formulas: dict[str, str] = {}
         self._math_source_keys: set[str] = set()
+        self._base_logical_display_keys: dict[str, str] = {}
         self._logical_display_keys: dict[str, str] = {}
         self._display_channel_roles: dict[str, list[str]] = {}
         # 每通道 0 值箭头手柄（波形右缘，拖动调垂直位置）
@@ -2063,6 +2098,7 @@ class WaveformPlot(QWidget):
             for ch, expr in bundle.meta.channel_math_formulas.items()
         }
         self._logical_display_keys = self._logical_display_key_map(profile)
+        self._base_logical_display_keys = dict(self._logical_display_keys)
         self._prefer_math_display_keys_for_derived_currents(
             profile, imported_math_formulas
         )
@@ -2195,12 +2231,13 @@ class WaveformPlot(QWidget):
             box.setToolTip(
                 "左键单击：选中并置顶高亮\n"
                 "左键双击：打开垂直设置面板（显示/刻度/位置）\n"
-                "右键：关闭/重新显示该通道波形\n"
+                "右键：打开通道菜单（删除数学通道/关闭波形显示）\n"
                 "波形区内 0 值箭头：箭尾贴 Y 轴，垂直对齐 0V/0A 基准线，按住拖动调节垂直位置"
             )
             box.highlightClicked.connect(self._on_legend_clicked)
             box.verticalSettingsRequested.connect(self._show_channel_settings_panel)
             box.visibilityToggleRequested.connect(self._toggle_channel_visibility)
+            box.contextMenuRequested.connect(self._show_channel_box_menu)
             self._channel_boxes[key] = box
             self._channel_layout.addWidget(box)
         add_math = QPushButton("+ Math")
@@ -2315,6 +2352,146 @@ class WaveformPlot(QWidget):
                 "font-family:Consolas,'Courier New',monospace;"
                 "}"
             )
+
+    def _channel_menu_display_name(self, key: str) -> str:
+        key = key.upper()
+        math_match = re.fullmatch(r"MATH(\d+)", key)
+        if math_match:
+            return f"数学 {int(math_match.group(1))}"
+        ch_match = re.fullmatch(r"CH(\d+)", key)
+        if ch_match:
+            return f"Ch {int(ch_match.group(1))}"
+        legend = self._trace_legend.get(key, key).strip()
+        return legend or key
+
+    def _channel_menu_action_text(self, verb: str, key: str) -> str:
+        name = self._channel_menu_display_name(key)
+        spacer = " " if re.fullmatch(r"Ch \d+", name) else ""
+        return f"{verb}{spacer}{name}"
+
+    def _build_channel_box_menu(self, key: str) -> QMenu:
+        key = key.upper()
+        menu = QMenu(self)
+        menu.setStyleSheet(_CHANNEL_CONTEXT_MENU_STYLE)
+
+        hidden = key in self._hidden_channels
+        visibility_text = self._channel_menu_action_text(
+            "启用" if hidden else "禁用", key
+        )
+        visibility_action = QAction(visibility_text, menu)
+        visibility_action.triggered.connect(
+            lambda _checked=False, ch=key: self._toggle_channel_visibility(ch)
+        )
+        menu.addAction(visibility_action)
+
+        configure_action = QAction(
+            f"{self._channel_menu_action_text('配置', key)}...", menu
+        )
+        if _is_math_trace_key(key):
+            configure_action.triggered.connect(
+                lambda _checked=False, ch=key: self._show_math_formula_editor(ch)
+            )
+        else:
+            configure_action.triggered.connect(
+                lambda _checked=False, ch=key: self._show_channel_settings_panel(ch)
+            )
+        menu.addAction(configure_action)
+
+        menu.addSeparator()
+        label_action = QAction("标签...", menu)
+        label_action.triggered.connect(
+            lambda _checked=False, ch=key: self._show_channel_label_editor(ch)
+        )
+        menu.addAction(label_action)
+
+        if _is_math_trace_key(key):
+            menu.addSeparator()
+            delete_action = QAction(
+                self._channel_menu_action_text("删除", key), menu
+            )
+            delete_action.setEnabled(self._can_delete_channel(key))
+            delete_action.triggered.connect(
+                lambda _checked=False, ch=key: self._delete_math_channel(ch)
+            )
+            menu.addAction(delete_action)
+        return menu
+
+    def _show_channel_box_menu(self, key: str, global_pos: QPoint) -> None:
+        if key not in self._trace_items:
+            return
+        menu = self._build_channel_box_menu(key)
+        menu.exec(global_pos)
+
+    def _can_delete_channel(self, key: str) -> bool:
+        key = key.upper()
+        return _is_math_trace_key(key) and key in self._trace_items
+
+    def _show_channel_label_editor(self, key: str) -> None:
+        key = key.upper()
+        if key not in self._trace_items:
+            return
+        current = self._trace_legend.get(key, self._channel_menu_display_name(key))
+        text, ok = QInputDialog.getText(
+            self,
+            "标签",
+            f"{self._channel_menu_display_name(key)} 标签：",
+            text=current,
+        )
+        if not ok:
+            return
+        label = text.strip()
+        if not label:
+            label = self._channel_menu_display_name(key)
+        self._trace_legend[key] = label
+        self._refresh_legend_styles()
+        self._update_zero_handle_positions()
+        self._sync_channel_bar_width()
+
+    def _delete_math_channel(self, key: str) -> None:
+        key = key.upper()
+        if key not in self._trace_items or not self._can_delete_channel(key):
+            return
+        if self._highlighted_key == key:
+            self._clear_highlight()
+
+        panel = self._channel_settings_panel
+        if panel is not None and getattr(panel, "_key", None) == key:
+            panel.close()
+            self._channel_settings_panel = None
+
+        item = self._trace_items.pop(key)
+        self.plot.removeItem(item)
+        self._trace_style.pop(key, None)
+        self._trace_yrange.pop(key, None)
+        self._trace_legend.pop(key, None)
+        self._trace_units.pop(key, None)
+        self._trace_raw.pop(key, None)
+        self._formula_sources.pop(key, None)
+        self._math_formulas.pop(key, None)
+        self._math_source_keys.discard(key)
+        self._disp_scale.pop(key, None)
+        self._disp_offset.pop(key, None)
+        self._manual_vdiv.pop(key, None)
+        self._hidden_channels.discard(key)
+
+        for logical, display_key in list(self._logical_display_keys.items()):
+            if display_key.upper() == key:
+                fallback = self._base_logical_display_keys.get(logical, "")
+                if fallback and fallback.upper() != key and fallback in self._trace_items:
+                    self._logical_display_keys[logical] = fallback
+                else:
+                    self._logical_display_keys.pop(logical, None)
+        self._display_channel_roles = {
+            channel: [role for role in roles if channel.upper() != key]
+            for channel, roles in self._display_channel_roles.items()
+            if channel.upper() != key
+        }
+        if self._active_channel.upper() == key:
+            self._active_channel = self._axis_channel() or "ic"
+
+        self._build_channel_bar()
+        self._update_y_ticks()
+        self._update_readout()
 
     def _toggle_channel_visibility(self, key: str) -> None:
         if key not in self._trace_items:
