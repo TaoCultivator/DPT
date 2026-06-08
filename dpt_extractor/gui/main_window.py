@@ -331,7 +331,7 @@ class MainWindow(QMainWindow):
         pulse_sep.setStyleSheet("color:#45475a;")
 
         self.lbl_pulse_count = QLabel("— 波")
-        self.lbl_pulse_count.setStyleSheet("color:#6c7086;font-size:11px;")
+        self.lbl_pulse_count.setStyleSheet("color:#a6adc8;font-size:11px;")
 
         self.lbl_off_pulse = QLabel("关断")
         self.spin_off_pulse = QSpinBox()

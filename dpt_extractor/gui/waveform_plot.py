@@ -240,14 +240,14 @@ QMenu::item {
 }
 QMenu::item:selected {
     background-color: #28bce8;
-    color: #f3fbff;
+    color: #061014;
 }
 QMenu::item:disabled {
-    color: #777777;
+    color: #555966;
 }
 QMenu::separator {
-    height: 2px;
-    background-color: #f3f3f3;
+    height: 1px;
+    background-color: #b8bbc4;
     margin: 6px 0;
 }
 """
@@ -1238,6 +1238,7 @@ class WaveformPlot(QWidget):
         t_us, y_div = self._view_coords_at_context_pos(pos)
         group = self._context_menu_group
         menu = QMenu(self)
+        menu.setStyleSheet(_CHANNEL_CONTEXT_MENU_STYLE)
 
         if group == "all":
             cursor_menu = menu.addMenu("光标")
@@ -2314,14 +2315,14 @@ class WaveformPlot(QWidget):
             title_fg = "#111111" if qcolor.lightness() > 145 else "#f7f7f7"
             if hidden:
                 title_bg = "#3a3d4d"
-                title_fg = "#85889a"
-                scale_fg = "#626678"
+                title_fg = "#b8bece"
+                scale_fg = "#a9afbf"
                 border = "#2d3040"
                 body_bg = "#10111a"
                 mark = " 关闭"
             else:
                 title_bg = color if not dim else "#3b3f4f"
-                scale_fg = "#f0f0f0" if highlighted else ("#8b8f9f" if dim else "#cfd3dc")
+                scale_fg = "#f0f0f0" if highlighted else ("#b7bdcc" if dim else "#d9deea")
                 border = "#f5f5f5" if highlighted else color
                 body_bg = "#202230" if highlighted else "#151722"
                 mark = " ◀" if highlighted else ""

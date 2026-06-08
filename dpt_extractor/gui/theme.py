@@ -26,7 +26,50 @@ QComboBox, QDoubleSpinBox, QLineEdit {
     min-height: 26px;
 }
 QComboBox::drop-down { border: none; }
+QComboBox QAbstractItemView {
+    background-color: #f2f3f5;
+    color: #101014;
+    selection-background-color: #28bce8;
+    selection-color: #061014;
+    border: 1px solid #6f7280;
+    outline: 0;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 24px;
+    padding: 4px 8px;
+}
 QLabel { color: #bac2de; }
+QToolTip {
+    background-color: #f4f5f7;
+    color: #101014;
+    border: 1px solid #28bce8;
+    border-radius: 4px;
+    padding: 7px 9px;
+    opacity: 245;
+}
+QMenu {
+    background-color: #f2f3f5;
+    color: #101014;
+    border: 1px solid #6f7280;
+    padding: 6px 0;
+}
+QMenu::item {
+    min-width: 160px;
+    padding: 9px 32px 9px 18px;
+    background-color: transparent;
+}
+QMenu::item:selected {
+    background-color: #28bce8;
+    color: #061014;
+}
+QMenu::item:disabled {
+    color: #555966;
+}
+QMenu::separator {
+    height: 1px;
+    background-color: #b8bbc4;
+    margin: 6px 0;
+}
 QStatusBar {
     background-color: #181825;
     color: #a6adc8;
@@ -38,6 +81,10 @@ QTableWidget {
     gridline-color: #45475a;
     border: 1px solid #45475a;
     border-radius: 6px;
+}
+QTableWidget::item:selected {
+    background-color: #28bce8;
+    color: #061014;
 }
 QHeaderView::section {
     background-color: #313244;

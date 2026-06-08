@@ -68,7 +68,7 @@ U/V/W 三相 **通道接线相同**，仅被测器件与文件命名不同：
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
-产物：`dist\DPT_双脉冲参数提取工具_v1.1.2.exe`（单文件，可拷贝到其他 Windows 电脑运行）。
+产物：`dist\DPT_双脉冲参数提取工具_v1.1.3.exe`（单文件，可拷贝到其他 Windows 电脑运行）。
 
 ## 版本规则
 

@@ -35,11 +35,22 @@ if TYPE_CHECKING:
 
 _PANEL_STYLE = """
 QDialog#ChannelSettingsPanel {
-    background-color: rgba(188, 188, 188, 232);
+    background-color: transparent;
+    border: none;
+}
+QFrame#chPanelFrame {
+    background-color: rgba(126, 126, 126, 218);
     border: 3px solid rgba(255, 73, 88, 235);
     border-radius: 2px;
 }
-QDialog#ChannelSettingsPanel QLabel { color: #111111; }
+QFrame#chPanelBody {
+    background-color: rgba(142, 142, 138, 224);
+}
+QWidget#chPanelCell, QWidget#chPanelRow {
+    background-color: transparent;
+    color: #101010;
+}
+QDialog#ChannelSettingsPanel QLabel { color: #101010; }
 QLabel#chPanelHeader {
     color: #f4f4f4;
     background-color: rgba(55, 55, 58, 225);
@@ -49,14 +60,18 @@ QLabel#chPanelHeader {
     letter-spacing: 1px;
 }
 QLabel#chPanelSection {
-    color: #171717;
-    font-size: 13px;
+    color: #080808;
+    background-color: rgba(225, 225, 225, 232);
+    border-top: 1px solid rgba(255, 255, 255, 185);
+    border-bottom: 1px solid rgba(82, 82, 82, 140);
+    font-size: 14px;
     font-weight: bold;
-    padding: 12px 12px 4px 12px;
+    padding: 10px 12px;
 }
 QLabel#chCellCaption {
     color: #050505;
-    font-size: 12px;
+    background-color: transparent;
+    font-size: 14px;
     font-weight: bold;
     padding: 0 0 2px 2px;
 }
@@ -106,13 +121,14 @@ QPushButton#chZeroBtn:pressed { background-color: #cccccc; }
 QPushButton#chLinkBtn {
     border: none;
     background: transparent;
-    color: #00aaff;
+    color: #002838;
     font-size: 12px;
+    font-weight: bold;
     text-align: left;
     padding: 3px 2px;
     min-height: 22px;
 }
-QPushButton#chLinkBtn:hover { text-decoration: underline; }
+QPushButton#chLinkBtn:hover { color: #001f2e; text-decoration: underline; }
 QDoubleSpinBox, QComboBox {
     min-height: 34px;
     background-color: rgba(246, 246, 246, 250);
@@ -206,6 +222,7 @@ def _vdiv_neighbor(cur: float, key: str, up: bool) -> float:
 def _cell(caption: str, widget: QWidget) -> QWidget:
     """示波器风格单元：标题在上、控件在下。"""
     box = QWidget()
+    box.setObjectName("chPanelCell")
     lay = QVBoxLayout(box)
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(2)
@@ -243,17 +260,28 @@ class ChannelSettingsPanel(QDialog):
         unit = plot._unit_for_channel(key)
         hidden = key in plot._hidden_channels
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        dialog_lay = QVBoxLayout(self)
+        dialog_lay.setContentsMargins(0, 0, 0, 0)
+        dialog_lay.setSpacing(0)
+
+        frame = QFrame()
+        frame.setObjectName("chPanelFrame")
+        frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        dialog_lay.addWidget(frame)
+
+        root = QVBoxLayout(frame)
+        root.setContentsMargins(3, 3, 3, 3)
         root.setSpacing(0)
 
         header = QLabel(f"CHANNEL {ch_idx}    {key}")
         header.setObjectName("chPanelHeader")
         root.addWidget(header)
 
-        body = QWidget()
+        body = QFrame()
+        body.setObjectName("chPanelBody")
+        body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(12, 4, 12, 12)
+        body_lay.setContentsMargins(12, 0, 12, 12)
         body_lay.setSpacing(6)
 
         sec = QLabel("垂直设置")
@@ -284,6 +312,7 @@ class ChannelSettingsPanel(QDialog):
         disp_row.addWidget(self._btn_on)
         disp_row.addWidget(self._btn_off)
         disp_w = QWidget()
+        disp_w.setObjectName("chPanelRow")
         disp_w.setLayout(disp_row)
         grid.addWidget(_cell("显示", disp_w), 0, 0)
 
@@ -308,6 +337,7 @@ class ChannelSettingsPanel(QDialog):
         vdiv_row.addWidget(btn_up)
         vdiv_row.addWidget(btn_dn)
         vdiv_w = QWidget()
+        vdiv_w.setObjectName("chPanelRow")
         vdiv_w.setLayout(vdiv_row)
         grid.addWidget(_cell("垂直刻度", vdiv_w), 0, 1)
 
@@ -329,6 +359,7 @@ class ChannelSettingsPanel(QDialog):
         pos_row.addWidget(self._pos_spin, stretch=1)
         pos_row.addWidget(btn_zero)
         pos_w = QWidget()
+        pos_w.setObjectName("chPanelRow")
         pos_w.setLayout(pos_row)
         grid.addWidget(_cell("位置", pos_w), 1, 0, 1, 2)
 
@@ -355,6 +386,7 @@ class ChannelSettingsPanel(QDialog):
         mapping_row.addWidget(self._mapping_combo, stretch=1)
         mapping_row.addWidget(self._mapping_apply)
         mapping_w = QWidget()
+        mapping_w.setObjectName("chPanelRow")
         mapping_w.setLayout(mapping_row)
         body_lay.addWidget(_cell("DPT 映射", mapping_w))
 
