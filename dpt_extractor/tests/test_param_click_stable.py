@@ -12,21 +12,19 @@ from PyQt6.QtWidgets import QApplication
 
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.gui.main_window import MainWindow
-from dpt_extractor.io.tek_parser import TekParser
+from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.models.bridge_profile import (
     LOWER_BRIDGE,
     UPPER_BRIDGE,
-    guess_profile_from_path,
 )
 from dpt_extractor.pipeline.extract import extract_all
-
-ROOT = Path(__file__).resolve().parents[2]
+from dpt_extractor.tests.sample_paths import sample_tss
 
 CASES = (
-    ("UH", ROOT / "UH_750V_1050A_000_ALL.csv", UPPER_BRIDGE),
-    ("UL", ROOT / "UL_750V_1050A_000_ALL.csv", LOWER_BRIDGE),
-    ("WH", ROOT / "WH_480V_800A_000_ALL.csv", UPPER_BRIDGE),
-    ("WL", ROOT / "WL_480V_800A_000_ALL.csv", LOWER_BRIDGE),
+    ("UH", sample_tss("UH_750V_1050A_000.tss"), UPPER_BRIDGE),
+    ("UL", sample_tss("UL_750V_1050A_000.tss"), LOWER_BRIDGE),
+    ("WH", sample_tss("WH_480V_800A_000.tss"), UPPER_BRIDGE),
+    ("WL", sample_tss("WL_480V_800A_000.tss"), LOWER_BRIDGE),
 )
 
 CLICKABLE = [
@@ -88,8 +86,8 @@ class TestParamClickStable(unittest.TestCase):
 
     def _run_case(self, tag: str, path: Path, profile) -> None:
         if not path.is_file():
-            self.skipTest(f"{tag} CSV 不在仓库根目录")
-        bundle = TekParser().parse(path)
+            self.skipTest(f"{tag} TSS 样本缺失")
+        bundle = load_waveform(path)
         win = MainWindow()
         win.bundle = bundle
         win.profile = profile

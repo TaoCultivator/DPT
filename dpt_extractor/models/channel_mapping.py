@@ -27,7 +27,7 @@ def infer_mapping_from_bundle(
     bundle: WaveformBundle | None,
     bridge: str,
 ) -> ChannelMapping | None:
-    """Infer mapping from CSV channel labels; returns None if labels are missing."""
+    """Infer mapping from waveform channel labels; returns None if labels are missing."""
     if bundle is None or not bundle.meta.channel_labels:
         return None
     from dpt_extractor.io.label_mapping import infer_channel_mapping
@@ -40,7 +40,7 @@ def infer_mapping_from_bundle(
 
 
 def channels_for_mapping(bundle: WaveformBundle | None) -> list[str]:
-    """Channel names available in the mapping UI (from loaded CSV only)."""
+    """Channel names available in the mapping UI from the loaded TSS."""
     if bundle is None:
         return []
     return sort_channel_names(bundle.channels.keys())
@@ -69,7 +69,7 @@ LOGICAL_SIGNAL_KEYS: tuple[str, ...] = tuple(k for k, _, _ in LOGICAL_SIGNALS)
 
 @dataclass
 class ChannelMapping:
-    """Maps logical DPT signals to CSV column names."""
+    """Maps logical DPT signals to waveform channel names."""
 
     vge: str = "CH1"
     vce: str = "CH2"
@@ -133,7 +133,7 @@ def validate_mapping(mapping: ChannelMapping, bundle: WaveformBundle | None) -> 
         if not col:
             return
         if bundle is not None and col not in bundle.channels:
-            errors.append(f"{col} 在当前 CSV 中不存在")
+            errors.append(f"{col} 在当前 TSS 中不存在")
         if col in seen and seen[col] != key:
             errors.append(f"{col} 被重复分配给 {seen[col]} 与 {key}")
         seen[col] = key

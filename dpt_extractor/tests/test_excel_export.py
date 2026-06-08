@@ -8,21 +8,22 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-ROOT = Path(__file__).resolve().parents[2]
-WH = ROOT / "WH_480V_800A_000_ALL.csv"
-UH = ROOT / "UH_750V_1050A_000_ALL.csv"
+from dpt_extractor.tests.sample_paths import sample_tss
+
+WH = sample_tss("WH_480V_800A_000.tss")
+UH = sample_tss("UH_750V_1050A_000.tss")
 
 
 @unittest.skipUnless(WH.exists() and UH.exists(), "WH/UH sample missing")
 class TestExcelExport(unittest.TestCase):
-    def test_default_export_path_uses_csv_stem(self):
+    def test_default_export_path_uses_source_stem(self):
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.export.excel_export import default_export_path
-        from dpt_extractor.io.tek_parser import TekParser
+        from dpt_extractor.io.waveform_loader import load_waveform
         from dpt_extractor.models.bridge_profile import guess_profile_from_path
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(UH)
+        bundle = load_waveform(UH)
         profile = guess_profile_from_path(UH.name)
         result = extract_all(bundle, profile, load_config())
         result.source_path = str(UH)
@@ -41,11 +42,11 @@ class TestExcelExport(unittest.TestCase):
             MERGE_SUMMARY,
             SHEET_ZOOM_PERCENT,
         )
-        from dpt_extractor.io.tek_parser import TekParser
+        from dpt_extractor.io.waveform_loader import load_waveform
         from dpt_extractor.models.bridge_profile import guess_profile_from_path
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(WH)
+        bundle = load_waveform(WH)
         profile = guess_profile_from_path(WH.name)
         result = extract_all(bundle, profile, load_config())
         result.source_path = str(WH)
@@ -82,11 +83,11 @@ class TestExcelExport(unittest.TestCase):
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.export.excel_export import export_to_excel
         from dpt_extractor.export.mcu2506_layout import DATA_ROW
-        from dpt_extractor.io.tek_parser import TekParser
+        from dpt_extractor.io.waveform_loader import load_waveform
         from dpt_extractor.models.bridge_profile import guess_profile_from_path
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(UH)
+        bundle = load_waveform(UH)
         profile = guess_profile_from_path(UH.name)
         result = extract_all(bundle, profile, load_config())
         result.source_path = str(UH)

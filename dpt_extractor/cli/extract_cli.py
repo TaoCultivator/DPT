@@ -1,4 +1,4 @@
-"""Headless extraction: python -m dpt_extractor.cli.extract_cli file.csv [--bridge upper|lower]"""
+"""Headless extraction: python -m dpt_extractor.cli.extract_cli file.tss [--bridge upper|lower]"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from dpt_extractor.pipeline.extract import extract_all
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="DPT parameter extraction (CLI)")
-    parser.add_argument("csv", type=Path, help="Tekscope CSV or TSS session path")
+    parser.add_argument("tss", type=Path, help="Tektronix TSS session path")
     parser.add_argument(
         "--bridge",
         choices=[
@@ -43,7 +43,7 @@ def main() -> int:
     if args.vdc is not None:
         cfg.vdc_override = args.vdc
 
-    profile = guess_profile_from_path(args.csv)
+    profile = guess_profile_from_path(args.tss)
     if args.bridge:
         key = args.bridge
         if key in ("upper", "lower") and args.phase:
@@ -56,7 +56,7 @@ def main() -> int:
         else:
             profile = PROFILES[key.upper()]
 
-    bundle = load_waveform(args.csv)
+    bundle = load_waveform(args.tss)
     result = extract_all(bundle, profile, cfg)
 
     out = {

@@ -1,11 +1,7 @@
-__all__ = ["TekParser", "TssParser", "load_waveform"]
+__all__ = ["TssParser", "load_waveform"]
 
 
 def __getattr__(name: str):
-    if name == "TekParser":
-        from .tek_parser import TekParser
-
-        return TekParser
     if name == "TssParser":
         from .tss_parser import TssParser
 

@@ -12,10 +12,10 @@ from dpt_extractor.models.channel_mapping import (
     sort_channel_names,
     validate_mapping,
 )
-from dpt_extractor.io.tek_parser import TekParser
+from dpt_extractor.io.waveform_loader import load_waveform
+from dpt_extractor.tests.sample_paths import sample_tss
 
-ROOT = Path(__file__).resolve().parents[2]
-WH = ROOT / "WH_480V_800A_000_ALL.csv"
+WH = sample_tss("WH_480V_800A_000.tss")
 
 
 class TestChannelMapping(unittest.TestCase):
@@ -63,8 +63,8 @@ class TestChannelMapping(unittest.TestCase):
         self.assertTrue(any("Irr" in e and "IL" in e for e in errs))
 
     @unittest.skipUnless(WH.exists(), "WH sample missing")
-    def test_channels_from_csv_bundle(self):
-        bundle = TekParser().parse(WH)
+    def test_channels_from_tss_bundle(self):
+        bundle = load_waveform(WH)
         names = channels_for_mapping(bundle)
         self.assertEqual(names[0], "CH1")
         self.assertIn("MATH3", names)

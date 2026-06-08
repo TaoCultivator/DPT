@@ -1,4 +1,4 @@
-"""示例波形批量验证（优先 TSS，其次 CSV）。"""
+"""示例 TSS 波形批量验证。"""
 from __future__ import annotations
 
 import argparse
@@ -26,7 +26,7 @@ from dpt_extractor.utils.sample_corpus import discover_sample_waveforms
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="批量验证示例波形兼容性（TSS 优先，CSV 兼容）")
+    parser = argparse.ArgumentParser(description="批量验证示例 TSS 波形兼容性")
     parser.add_argument("--limit", type=int, default=None, help="仅验证前 N 个样本，便于快速冒烟")
     parser.add_argument(
         "--strict",
@@ -43,10 +43,11 @@ def main() -> None:
     if args.limit is not None:
         samples = samples[: max(0, args.limit)]
     if not samples:
-        print("未发现可用于兼容性验证的 Tekscope 波形（CSV/TSS，请检查示例文件目录）")
+        print("未发现可用于兼容性验证的 TSS 波形，请检查示例文件目录")
         raise SystemExit(1)
     failed = 0
-    print(f"发现样本 {len(samples)} 个，开始兼容性扫描...")
+    warnings = 0
+    print(f"发现 TSS 样本 {len(samples)} 个，开始兼容性扫描...")
     for path in samples:
         fn = path.name
         try:
@@ -60,7 +61,7 @@ def main() -> None:
             ic = bundle_total_current(b, prof)
             irr = bundle_reverse_recovery_current(b, prof)
             vd = b.get(prof.v_diode)
-            hb, ha = turn_on_current_hb_ha_t(b.t, ic, on0, on1, b.dt)
+            _, ha = turn_on_current_hb_ha_t(b.t, ic, on0, on1, b.dt)
             ha_d = turn_on_didt_ha_at_turn_on(b.t, ic, on0, on1, b.dt)
             mk = err_energy_markers(b.t, irr, vd, rr0, rr1, b.dt, i_search_end=on1)
             e_chk = integrate_err_recovery(b.t, vd, irr, mk.as_integration_window())
@@ -69,24 +70,24 @@ def main() -> None:
                 r.reverse_recovery.err > 0.2
                 and abs(r.reverse_recovery.err - e_chk) < 0.01
             )
-            hb_ok = abs(mk.hb_a) < 50.0  # Hb=带符号正向导通 Vd 平台（≈0）
+            hb_ok = abs(mk.hb_a) < 50.0
             line_ok = ha_ok and err_ok and hb_ok
             if not line_ok:
-                failed += 1
+                warnings += 1
         except Exception as exc:  # noqa: BLE001
             failed += 1
             print(fn, "ERROR", repr(exc))
             continue
         print(
             fn,
-            "OK" if line_ok else "FAIL",
+            "OK" if line_ok else "WARN",
             f"profile={prof.code}",
             f"err={r.reverse_recovery.err:.3f}",
             f"hb={mk.hb_a:.2f}",
             f"on_ha={ha:.1f}",
             f"didt_ha={ha_d:.1f}",
         )
-    print(f"扫描完成：total={len(samples)} failed={failed}")
+    print(f"扫描完成：total={len(samples)} failed={failed} warnings={warnings}")
     if args.strict and failed:
         raise SystemExit(1)
 

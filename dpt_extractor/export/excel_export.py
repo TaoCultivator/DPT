@@ -12,7 +12,7 @@ def export_to_excel(result: ExtractResult, path: str | Path) -> None:
 
 
 def default_export_path(result: ExtractResult) -> Path:
-    """默认导出路径：与导入 CSV 同名，扩展名 .xlsx。"""
+    """默认导出路径：与导入 TSS 同名，扩展名 .xlsx。"""
     if result.source_path:
         return Path(result.source_path).with_suffix(".xlsx")
     code = result.profile_code or "DPT"

@@ -117,7 +117,6 @@ class _WaveformLoadOutcome:
 def _compute_waveform_load_outcome(
     path: str,
     cfg: AppConfig,
-    stored_mapping: ChannelMapping | None,
 ) -> _WaveformLoadOutcome:
     load_t0 = time.perf_counter()
     bundle = load_waveform(path)
@@ -129,11 +128,6 @@ def _compute_waveform_load_outcome(
     mapping_custom = False
     if inferred is not None:
         profile = apply_mapping(base_profile, inferred)
-        mapping_custom = True
-    elif Path(path).suffix.lower() == ".tss":
-        profile = base_profile
-    elif stored_mapping is not None:
-        profile = apply_mapping(base_profile, stored_mapping)
         mapping_custom = True
     else:
         profile = base_profile
@@ -172,13 +166,11 @@ class _WaveformLoadTask(QRunnable):
         request_id: int,
         path: str,
         cfg: AppConfig,
-        stored_mapping: ChannelMapping | None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
         self.path = path
         self.cfg = cfg
-        self.stored_mapping = stored_mapping
         self.signals = _WaveformLoadSignals()
 
     def run(self) -> None:
@@ -186,7 +178,6 @@ class _WaveformLoadTask(QRunnable):
             outcome = _compute_waveform_load_outcome(
                 self.path,
                 self.cfg,
-                self.stored_mapping,
             )
         except Exception as exc:
             self.signals.failed.emit(self.request_id, self.path, str(exc))
@@ -256,7 +247,7 @@ class MainWindow(QMainWindow):
         tb_root.setSpacing(4)
 
         self.btn_open = QPushButton("📂  打开文件")
-        self.btn_open.setToolTip("支持 Tekscope CSV 与 Tektronix TSS 会话文件")
+        self.btn_open.setToolTip("支持 Tektronix TSS 会话文件")
         self.btn_open.clicked.connect(self._open_waveform)
 
         self.combo_phase = QComboBox()
@@ -412,7 +403,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, stretch=1)
         self.setCentralWidget(root)
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("请打开 Tekscope CSV 或 TSS 会话文件")
+        self.statusBar().showMessage("请打开 Tektronix TSS 会话文件")
         self._apply_test_mode_ui()
 
     def _build_context_menu_selector(self) -> QWidget:
@@ -698,7 +689,7 @@ class MainWindow(QMainWindow):
             self,
             "打开波形文件",
             open_dialog_start_dir(fallback),
-            "波形文件 (*.csv *.tss);;CSV (*.csv);;TSS 会话 (*.tss);;All (*)",
+            "TSS 会话 (*.tss);;All (*)",
         )
         if path:
             self._load_file(path, background=True)
@@ -708,10 +699,6 @@ class MainWindow(QMainWindow):
         cfg.vdc_override = None
         cfg.slope_ranges = default_slope_ranges()
         return cfg
-
-    def _stored_mapping_for_file(self, path: str) -> ChannelMapping | None:
-        guessed = guess_profile_from_path(path)
-        return self._channel_store.get(guessed.phase, guessed.bridge)
 
     def _set_load_busy(self, busy: bool, path: str = "") -> None:
         self.btn_open.setEnabled(not busy)
@@ -730,7 +717,6 @@ class MainWindow(QMainWindow):
             request_id,
             path,
             cfg,
-            self._stored_mapping_for_file(path),
         )
         task.signals.finished.connect(self._on_background_load_finished)
         task.signals.failed.connect(self._on_background_load_failed)
@@ -812,16 +798,12 @@ class MainWindow(QMainWindow):
             )
             self._mapping_custom = True
             self._update_map_status_label()
-        elif Path(path).suffix.lower() == ".tss":
+        else:
             # TSS exports in the sample corpus often preserve scale but omit labels.
             # In that case the filename phase/bridge is more reliable than stale
             # per-phase user mapping overrides from previous sessions.
             self.profile = make_profile(outcome.guessed.phase, outcome.guessed.bridge)
             self._mapping_custom = False
-            self._update_map_status_label()
-        else:
-            self.profile = outcome.profile
-            self._mapping_custom = outcome.mapping_custom
             self._update_map_status_label()
 
         self.spin_vdc.blockSignals(True)
@@ -867,7 +849,6 @@ class MainWindow(QMainWindow):
             outcome = _compute_waveform_load_outcome(
                 path,
                 self._load_cfg_for_new_file(),
-                self._stored_mapping_for_file(path),
             )
             self._apply_loaded_waveform(outcome)
         except Exception as e:

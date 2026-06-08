@@ -14,16 +14,16 @@ class TestBridgeProfile(unittest.TestCase):
         self.assertEqual(codes, {"UH", "UL", "VH", "VL", "WH", "WL"})
 
     def test_guess_from_filename(self):
-        self.assertEqual(guess_profile_from_path("UH_480V_800A.csv").code, "UH")
-        self.assertEqual(guess_profile_from_path("VL_test.csv").code, "VL")
-        self.assertEqual(guess_profile_from_path("WH_480V_800A_000_ALL.csv").code, "WH")
-        self.assertEqual(guess_profile_from_path("WL_480V_800A_000_ALL.csv").code, "WL")
+        self.assertEqual(guess_profile_from_path("UH_480V_800A.tss").code, "UH")
+        self.assertEqual(guess_profile_from_path("VL_test.tss").code, "VL")
+        self.assertEqual(guess_profile_from_path("WH_480V_800A_000.tss").code, "WH")
+        self.assertEqual(guess_profile_from_path("WL_480V_800A_000.tss").code, "WL")
         self.assertEqual(
-            guess_profile_from_path("projectA_phaseA_upper_run001.csv").code,
+            guess_profile_from_path("projectA_phaseA_upper_run001.tss").code,
             "UH",
         )
         self.assertEqual(
-            guess_profile_from_path("projectB_phaseC_lowside_final.csv").code,
+            guess_profile_from_path("projectB_phaseC_lowside_final.tss").code,
             "WL",
         )
 

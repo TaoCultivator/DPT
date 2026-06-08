@@ -11,9 +11,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-ROOT = Path(__file__).resolve().parents[2]
-WL = ROOT / "WL_480V_800A_000_ALL.csv"
-UH = ROOT / "UH_750V_1050A_000_ALL.csv"
+from dpt_extractor.tests.sample_paths import sample_tss
+
+WL = sample_tss("WL_480V_800A_000.tss")
+UH = sample_tss("UH_750V_1050A_000.tss")
 
 
 def _excel_cell(path: Path, row: int, col: int) -> float:
@@ -29,12 +30,12 @@ class TestExcelExportManualAdjust(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
-    def _load_win(self, csv_path: Path):
+    def _load_win(self, sample_path: Path):
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.export.excel_export import export_to_excel
         from dpt_extractor.export.mcu2506_layout import COL_OFF, COL_ON, COL_RR, DATA_ROW
         from dpt_extractor.gui.main_window import MainWindow
-        from dpt_extractor.io.tek_parser import TekParser
+        from dpt_extractor.io.waveform_loader import load_waveform
         from dpt_extractor.models.bridge_profile import (
             LOWER_BRIDGE,
             UPPER_BRIDGE,
@@ -42,10 +43,10 @@ class TestExcelExportManualAdjust(unittest.TestCase):
         )
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(csv_path)
+        bundle = load_waveform(sample_path)
         profile = (
             LOWER_BRIDGE
-            if "WL" in csv_path.name.upper() or "UL" in csv_path.name.upper()
+            if "WL" in sample_path.name.upper() or "UL" in sample_path.name.upper()
             else UPPER_BRIDGE
         )
         win = MainWindow()
@@ -62,11 +63,11 @@ class TestExcelExportManualAdjust(unittest.TestCase):
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.export.excel_export import export_to_excel
         from dpt_extractor.export.mcu2506_layout import COL_ON, DATA_ROW
-        from dpt_extractor.io.tek_parser import TekParser
+        from dpt_extractor.io.waveform_loader import load_waveform
         from dpt_extractor.models.bridge_profile import LOWER_BRIDGE
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(WL)
+        bundle = load_waveform(WL)
         result = extract_all(bundle, LOWER_BRIDGE, load_config())
         marker = result.turn_on.turn_on_current + 111.0
         result.turn_on.turn_on_current = marker

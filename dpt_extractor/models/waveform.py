@@ -31,7 +31,7 @@ class TekMetadata:
 
 @dataclass
 class WaveformBundle:
-    """All channels keyed by CSV column name (CH1..CH6, MATH1.., etc.)."""
+    """All channels keyed by waveform channel name (CH1..CH6, MATH1.., etc.)."""
 
     t: np.ndarray
     channels: dict[str, np.ndarray]

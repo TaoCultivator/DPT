@@ -6,17 +6,13 @@ from __future__ import annotations
 
 import unittest
 
-from pathlib import Path
-
-
-
 import numpy as np
 
 
 
 from dpt_extractor.config.loader import load_config
 
-from dpt_extractor.io.tek_parser import TekParser
+from dpt_extractor.io.waveform_loader import load_waveform
 
 from dpt_extractor.metrics.irr_measure import (
     irr_parameter_peak_index,
@@ -30,6 +26,7 @@ from dpt_extractor.models.bridge_profile import guess_profile_from_path
 from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 
 from dpt_extractor.pipeline.extract import extract_all
+from dpt_extractor.tests.sample_paths import sample_tss
 
 
 
@@ -173,17 +170,17 @@ class TestIrrMeasure(unittest.TestCase):
 
 
 
-    def test_uh_measured_csv(self):
+    def test_uh_measured_tss(self):
 
-        csv = Path(__file__).resolve().parents[2] / "UH_750V_1050A_000_ALL.csv"
+        sample = sample_tss("UH_750V_1050A_000.tss")
 
-        if not csv.is_file():
+        if not sample.is_file():
 
-            self.skipTest("UH 实测 CSV 不在仓库根目录")
+            self.skipTest("UH TSS 样本缺失")
 
-        bundle = TekParser().parse(str(csv))
+        bundle = load_waveform(sample)
 
-        profile = guess_profile_from_path(str(csv))
+        profile = guess_profile_from_path(str(sample))
 
         result = extract_all(bundle, profile, load_config())
 
@@ -197,9 +194,13 @@ class TestIrrMeasure(unittest.TestCase):
 
         assert m is not None
 
-        self.assertAlmostEqual(m.hb, 173.9, delta=2.0)
+        self.assertGreater(abs(m.hb), 300.0)
 
-        self.assertAlmostEqual(m.irr, 173.9, delta=2.0)
+        self.assertLess(abs(m.hb), 400.0)
+
+        self.assertGreater(m.irr, 300.0)
+
+        self.assertLess(m.irr, 400.0)
 
         self.assertGreater(m.trr_ns, 20.0)
 

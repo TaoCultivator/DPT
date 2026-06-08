@@ -1,10 +1,10 @@
 # DPT 双脉冲测试参数提取工具
 
-从 Tekscope 导出的双脉冲测试（Double Pulse Test）CSV 波形中，自动提取关断、开通、反向恢复参数，并提供与测试表格一致的分区 GUI 展示与 Excel 导出。
+从 Tektronix TSS 会话文件中的双脉冲测试（Double Pulse Test）波形中，自动提取关断、开通、反向恢复参数，并提供与测试表格一致的分区 GUI 展示与 Excel 导出。
 
 ## 功能
 
-- 解析 TekscopeSW 宽表 CSV（自动识别 CH1–CH6、MATH1… 等列）
+- 解析 Tektronix TSS 会话文件（自动识别 CH1–CH6、MATH1… 等通道）
 - 多脉冲（最多 10 个门极脉冲）：参数表右上角可选「关断第 N 波 / 开通第 N 波」，默认第 1 波关断、第 2 波开通
 - 支持 **U / V / W 三相**，每相 **上桥 (H)** / **下桥 (L)** 共 6 种组合（UH/UL/VH/VL/WH/WL）
 - 自动识别双脉冲并分割：脉冲1关断、脉冲2开通、反向恢复
@@ -26,11 +26,11 @@ pip install -r requirements.txt
 python main.py
 ```
 
-1. 点击 **打开 CSV**，选择对应相别文件（如 `UH_*.csv`、`VL_*.csv`、`WH_*.csv`）
+1. 点击 **打开文件**，选择对应相别的 `.tss` 文件（如 `UH_*.tss`、`VL_*.tss`、`WH_*.tss`）
 2. 工具栏 **相别 (U/V/W)** + **桥臂 (上桥/下桥)** 可手动切换；文件名含 `UH/UL/VH/VL/WH/WL` 时会自动识别
 3. **Vdc** 默认为「自动」（波形测量）；输入数值后点击 **重新计算** 可固定 Vdc
-4. **通道映射**：将各逻辑量映射到 CSV 列；**上桥默认**总电流为 **Irr(CH3)+IL(CH4)** 软件相加，可不使用示波器 MATH1（下桥仍可映射单通道 Ic）
-5. **导出 Excel** 按 MCU2506 列序**自动生成**工作簿（不复制外部模板）；默认文件名为 **与 CSV 同名**（`.xlsx`），测试数据写入第 5 行
+4. **通道映射**：将各逻辑量映射到 TSS 通道；**上桥默认**总电流为 **Irr(CH3)+IL(CH4)** 软件相加，可不使用示波器 MATH1（下桥仍可映射单通道 Ic）
+5. **导出 Excel** 按 MCU2506 列序**自动生成**工作簿（不复制外部模板）；默认文件名为 **与 TSS 同名**（`.xlsx`），测试数据写入第 5 行
 
 ### Excel 报告
 
@@ -38,7 +38,7 @@ python main.py
 
 ## 通道映射
 
-加载 CSV 时会根据示波器 **Label 行**自动匹配通道，兼容 **IGBT**（Vge/Vce/Ic/IC_VL）与 **MOSFET**（Vgs/Vds/Id/IVL）命名。电流逻辑：上桥总电流 = 下桥支路电流 + IL；下桥反向恢复 = 总电流 − IL。可在「通道映射」中手动调整，或点 **按标签识别** 重新识别。
+加载 TSS 时会根据示波器通道 **Label** 自动匹配通道，兼容 **IGBT**（Vge/Vce/Ic/IC_VL）与 **MOSFET**（Vgs/Vds/Id/IVL）命名。电流逻辑：上桥总电流 = 下桥支路电流 + IL；下桥反向恢复 = 总电流 − IL。可在「通道映射」中手动调整，或点 **按标签识别** 重新识别。
 
 U/V/W 三相 **通道接线相同**，仅被测器件与文件命名不同：
 
@@ -68,7 +68,7 @@ U/V/W 三相 **通道接线相同**，仅被测器件与文件命名不同：
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
-产物：`dist\DPT_双脉冲参数提取工具_v1.1.3.exe`（单文件，可拷贝到其他 Windows 电脑运行）。
+产物：`dist\DPT_双脉冲参数提取工具_v{版本号}.exe`（单文件，可拷贝到其他 Windows 电脑运行）。
 
 ## 版本规则
 
@@ -88,7 +88,7 @@ python -m unittest dpt_extractor.tests.test_extract -v
 
 ```
 dpt_extractor/
-  io/tek_parser.py       # CSV 解析
+  io/tss_parser.py       # TSS 解析
   models/                # 通道映射与结果结构
   detect/                # 脉冲检测与时间窗
   metrics/               # 参数算法
@@ -111,4 +111,4 @@ main.py
 ## 说明
 
 - 界面为深色主题；损耗以 V×I 积分为准
-- 下桥 CSV 表头 Label 与上桥相同，程序仅按 `BridgeProfile` 映射，不读 Label 行
+- TSS 标签缺失或无法识别时，程序按文件名识别的 `BridgeProfile` 默认映射处理

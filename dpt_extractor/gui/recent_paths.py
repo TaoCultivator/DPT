@@ -1,4 +1,4 @@
-"""记住上次打开/保存 CSV、Excel 的路径（QSettings 持久化）。"""
+"""记住上次打开 TSS、保存 Excel 的路径（QSettings 持久化）。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -37,7 +37,7 @@ def _valid_dir(raw: object) -> Path | None:
 
 
 def last_open_path() -> Path | None:
-    """上次成功打开的 CSV 完整路径。"""
+    """上次成功打开的 TSS 完整路径。"""
     return _valid_file_path(_settings().value(_KEY_LAST_OPEN, ""))
 
 
@@ -60,7 +60,7 @@ def set_last_export_path(path: str | Path) -> None:
 
 
 def open_dialog_start_dir(fallback: str | Path) -> str:
-    """打开 CSV 对话框的初始目录。"""
+    """打开 TSS 对话框的初始目录。"""
     last = last_open_path()
     if last is not None:
         return str(last.parent)

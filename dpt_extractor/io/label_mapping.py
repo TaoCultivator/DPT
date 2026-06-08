@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from dpt_extractor.models.channel_mapping import ChannelMapping
-
-_CHANNEL_RE = re.compile(r"^(CH[1-6]|MATH\d+)$")
-_LABEL_ROW = "Label"
-_CHANNEL_ROW = "Channel"
 
 # 电感电流（IGBT / MOSFET 通用）
 _IL_PATTERNS = (r"^IL$",)
@@ -112,41 +107,6 @@ _LOWER_IC_EXCLUDE_NORM = (
 
 def _norm_label(text: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
-
-
-def parse_channel_labels(path: str | Path, header_row: int) -> dict[str, str]:
-    """Parse Tekscope ``Channel`` / ``Label`` metadata rows into {CHx: label}."""
-    channel_line: str | None = None
-    label_line: str | None = None
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for i, line in enumerate(f):
-            if i >= header_row:
-                break
-            if line.startswith(f"{_CHANNEL_ROW},"):
-                channel_line = line
-            elif line.startswith(f"{_LABEL_ROW},"):
-                label_line = line
-
-    if not channel_line or not label_line:
-        return {}
-
-    def _wide_values(prefix: str, line: str) -> list[str]:
-        parts = line.split(",")
-        out: list[str] = []
-        i = 0
-        while i < len(parts):
-            if parts[i].strip() == prefix and i + 1 < len(parts):
-                out.append(parts[i + 1].strip())
-            i += 1
-        return out
-
-    channels = _wide_values(_CHANNEL_ROW, channel_line)
-    labels = _wide_values(_LABEL_ROW, label_line)
-    result: dict[str, str] = {}
-    for ch, lab in zip(channels, labels):
-        if ch and lab and _CHANNEL_RE.match(ch):
-            result[ch] = lab
-    return result
 
 
 def _pick_channel(

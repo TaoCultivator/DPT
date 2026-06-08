@@ -6,31 +6,30 @@ from pathlib import Path
 import numpy as np
 
 from dpt_extractor.config.loader import load_config
-from dpt_extractor.io.tek_parser import TekParser
+from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
 from dpt_extractor.metrics.slopes import analyze_rr_recovery_current, didt_rr_recovery
 from dpt_extractor.models.bridge_profile import guess_profile_from_path
 from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 from dpt_extractor.pipeline.extract import extract_all
+from dpt_extractor.tests.sample_paths import sample_tss
 
-ROOT = Path(__file__).resolve().parents[2]
-
-CSV_CASES = [
-    ("UH_750V_1050A_000_ALL.csv", 13.0, 14.5),
-    ("WH_480V_800A_000_ALL.csv", 1.8, 2.5),
-    ("UL_750V_1050A_000_ALL.csv", 10.0, 11.5),
-    ("WL_480V_800A_000_ALL.csv", 1.5, 2.2),
+TSS_CASES = [
+    ("UH_750V_1050A_000.tss", 23.0, 25.0),
+    ("WH_480V_800A_000.tss", 8.0, 9.5),
+    ("UL_750V_1050A_000.tss", 19.0, 22.0),
+    ("WL_480V_800A_000.tss", 1.2, 1.6),
 ]
 
 
-class TestRrDidtFourCsv(unittest.TestCase):
+class TestRrDidtFourTss(unittest.TestCase):
     def test_idm_90_10_spec_on_all_samples(self) -> None:
-        for name, lo, hi in CSV_CASES:
+        for name, lo, hi in TSS_CASES:
             with self.subTest(name=name):
-                path = ROOT / name
+                path = sample_tss(name)
                 if not path.exists():
                     self.skipTest(f"{name} missing")
-                bundle = TekParser().parse(path)
+                bundle = load_waveform(path)
                 profile = guess_profile_from_path(name)
                 result = extract_all(bundle, profile, load_config())
                 irr = bundle_reverse_recovery_current(bundle, profile)

@@ -1,4 +1,4 @@
-"""基准示例波形与 UH 逻辑的一致性（重型 TSS 语料由脚本验证）。"""
+"""基准 TSS 示例波形与 UH 逻辑的一致性（重型 TSS 语料由脚本验证）。"""
 from __future__ import annotations
 
 import unittest
@@ -25,17 +25,18 @@ from dpt_extractor.models.waveform import (
     bundle_total_current,
 )
 from dpt_extractor.pipeline.extract import extract_all
+from dpt_extractor.tests.sample_paths import sample_tss
 
 ROOT = Path(__file__).resolve().parents[2]
 SAMPLES = (
-    ROOT / "UH_750V_1050A_000_ALL.csv",
-    ROOT / "UL_750V_1050A_000_ALL.csv",
-    ROOT / "WH_480V_800A_000_ALL.csv",
-    ROOT / "WL_480V_800A_000_ALL.csv",
+    sample_tss("UH_750V_1050A_000.tss"),
+    sample_tss("UL_750V_1050A_000.tss"),
+    sample_tss("WH_480V_800A_000.tss"),
+    sample_tss("WL_480V_800A_000.tss"),
 )
 
 
-class TestFourCsvCompatibility(unittest.TestCase):
+class TestFourTssCompatibility(unittest.TestCase):
   @classmethod
   def setUpClass(cls) -> None:
       cls.cfg = load_config()
@@ -48,7 +49,7 @@ class TestFourCsvCompatibility(unittest.TestCase):
 
   def test_err_positive_and_marker_order(self) -> None:
       for path in SAMPLES:
-          with self.subTest(csv=path.name):
+          with self.subTest(sample=path.name):
               if not path.exists():
                   self.skipTest(f"missing {path.name}")
               profile, bundle, result = self._load(path)
@@ -118,7 +119,7 @@ class TestFourCsvCompatibility(unittest.TestCase):
       from dpt_extractor.metrics.iec_windows import eoff_energy_markers
 
       for path in SAMPLES:
-          with self.subTest(csv=path.name):
+          with self.subTest(sample=path.name):
               if not path.exists():
                   self.skipTest(f"missing {path.name}")
               profile, bundle, result = self._load(path)
@@ -149,7 +150,7 @@ class TestFourCsvCompatibility(unittest.TestCase):
 
   def test_turn_on_current_and_didt_ha_aligned(self) -> None:
       for path in SAMPLES:
-          with self.subTest(csv=path.name):
+          with self.subTest(sample=path.name):
               if not path.exists():
                   self.skipTest(f"missing {path.name}")
               profile, bundle, result = self._load(path)

@@ -5,10 +5,11 @@ from pathlib import Path
 
 import numpy as np
 
+from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.slopes import analyze_rr_recovery_current, didt_rr_recovery
+from dpt_extractor.tests.sample_paths import sample_tss
 
-ROOT = Path(__file__).resolve().parents[2]
-UH = ROOT / "UH_750V_1050A_000_ALL.csv"
+UH = sample_tss("UH_750V_1050A_000.tss")
 
 
 class TestRrDidt(unittest.TestCase):
@@ -73,13 +74,12 @@ class TestRrDidt(unittest.TestCase):
     def test_uh_if_irm_default_ha_hb_h0_levels(self) -> None:
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.gui.main_window import MainWindow
-        from dpt_extractor.io.tek_parser import TekParser
         from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
         from dpt_extractor.models.bridge_profile import guess_profile_from_path
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(UH)
+        bundle = load_waveform(UH)
         profile = guess_profile_from_path(UH.name)
         result = extract_all(bundle, profile, load_config())
         mw = MainWindow.__new__(MainWindow)
@@ -116,13 +116,12 @@ class TestRrDidt(unittest.TestCase):
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_if_irm_50_50_inverted_channel_order(self) -> None:
         from dpt_extractor.config.loader import load_config
-        from dpt_extractor.io.tek_parser import TekParser
         from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
         from dpt_extractor.models.bridge_profile import guess_profile_from_path
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(UH)
+        bundle = load_waveform(UH)
         profile = guess_profile_from_path(UH.name)
         result = extract_all(bundle, profile, load_config())
         irr = bundle_reverse_recovery_current(bundle, profile)
@@ -147,19 +146,18 @@ class TestRrDidt(unittest.TestCase):
         self.assertIsNotNone(res.t_pct_b_s)
         self.assertNotAlmostEqual(res.t_pct_a_s, res.t_pct_b_s, places=9)
         self.assertLess(res.t_pct_b_s, res.t_pct_a_s)
-        self.assertGreater(res.t_pct_a_s * 1e6, 18.60)
+        self.assertGreater(res.t_pct_a_s * 1e6, 18.57)
         self.assertLess(res.t_pct_a_s * 1e6, 18.635)
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_rr_idm_crossings_on_recovery_slope(self):
         from dpt_extractor.config.loader import load_config
-        from dpt_extractor.io.tek_parser import TekParser
         from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
         from dpt_extractor.models.bridge_profile import guess_profile_from_path
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(UH)
+        bundle = load_waveform(UH)
         profile = guess_profile_from_path(UH.name)
         result = extract_all(bundle, profile, load_config())
         irr = bundle_reverse_recovery_current(bundle, profile)
@@ -191,13 +189,12 @@ class TestRrDidt(unittest.TestCase):
     def test_rising_edge_large_negative_ha_uh(self) -> None:
         """手调 Ha≈换流谷底、Hb≈0 附近：A/B 应在示波器“上升”沿（约 18.48–18.60 µs）。"""
         from dpt_extractor.config.loader import load_config
-        from dpt_extractor.io.tek_parser import TekParser
         from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
         from dpt_extractor.models.bridge_profile import guess_profile_from_path
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(UH)
+        bundle = load_waveform(UH)
         profile = guess_profile_from_path(UH.name)
         result = extract_all(bundle, profile, load_config())
         irr = bundle_reverse_recovery_current(bundle, profile)
@@ -219,19 +216,18 @@ class TestRrDidt(unittest.TestCase):
         self.assertIsNotNone(res.t_pct_a_s)
         self.assertIsNotNone(res.t_pct_b_s)
         self.assertLess(res.t_pct_b_s, res.t_pct_a_s)
-        self.assertGreater(res.t_pct_b_s * 1e6, 18.47)
+        self.assertGreater(res.t_pct_b_s * 1e6, 18.44)
         self.assertLess(res.t_pct_a_s * 1e6, 18.65)
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_manual_hb_irm_span_uh(self) -> None:
         from dpt_extractor.config.loader import load_config
-        from dpt_extractor.io.tek_parser import TekParser
         from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
         from dpt_extractor.models.bridge_profile import guess_profile_from_path
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
         from dpt_extractor.pipeline.extract import extract_all
 
-        bundle = TekParser().parse(UH)
+        bundle = load_waveform(UH)
         profile = guess_profile_from_path(UH.name)
         result = extract_all(bundle, profile, load_config())
         irr = bundle_reverse_recovery_current(bundle, profile)

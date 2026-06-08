@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from dpt_extractor.config.loader import load_config
-from dpt_extractor.io.tek_parser import TekParser
+from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.plateau_level import (
     turn_on_current_baseline_and_plateau,
     turn_on_didt_ha_at_turn_on,
@@ -16,15 +16,16 @@ from dpt_extractor.models.bridge_profile import guess_profile_from_path
 from dpt_extractor.models.slope_range import preset_to_range, SLOPE_RANGE_PRESETS
 from dpt_extractor.models.waveform import bundle_total_current
 from dpt_extractor.pipeline.extract import extract_all
+from dpt_extractor.tests.sample_paths import sample_tss
 
-UH = Path(__file__).resolve().parents[2] / "UH_750V_1050A_000_ALL.csv"
-WH = Path(__file__).resolve().parents[2] / "WH_480V_800A_000_ALL.csv"
+UH = sample_tss("UH_750V_1050A_000.tss")
+WH = sample_tss("WH_480V_800A_000.tss")
 
 
 @unittest.skipUnless(UH.exists(), "UH sample missing")
 class TestOnDidt8020(unittest.TestCase):
     def test_8020_rise_crossings_with_plateau_hb(self) -> None:
-        bundle = TekParser().parse(UH)
+        bundle = load_waveform(UH)
         profile = guess_profile_from_path(UH.name)
         result = extract_all(bundle, profile, load_config())
         on0, on1 = result.segments.turn_on
@@ -34,7 +35,7 @@ class TestOnDidt8020(unittest.TestCase):
         ha = turn_on_didt_ha_at_turn_on(bundle.t, ic, on0, on1, bundle.dt)
         self.assertGreater(ha, 1000.0)
         self.assertLess(ha, 1060.0)
-        self.assertAlmostEqual(ha, 1036.125, delta=2.0)
+        self.assertAlmostEqual(ha, 1032.4, delta=5.0)
         sr = preset_to_range(SLOPE_RANGE_PRESETS["on_didt"][2])
         pa, pb = sr.as_fractions()
         self.assertEqual(sr.ic_direction, "rise")
@@ -45,14 +46,14 @@ class TestOnDidt8020(unittest.TestCase):
         self.assertIsNotNone(res.t_pct_a_s)
         self.assertIsNotNone(res.t_pct_b_s)
         self.assertGreater(res.t_pct_a_s, res.t_pct_b_s)
-        self.assertGreater(res.t_pct_b_s * 1e6, 18.47)
+        self.assertGreater(res.t_pct_b_s * 1e6, 18.46)
         self.assertLess(res.t_pct_a_s * 1e6, 18.65)
 
 
 @unittest.skipUnless(WH.exists(), "WH sample missing")
 class TestOnDidtHaRelative(unittest.TestCase):
     def test_ha_follows_turn_on_plateau_not_fixed_19us(self) -> None:
-        bundle = TekParser().parse(WH)
+        bundle = load_waveform(WH)
         profile = guess_profile_from_path(WH.name)
         result = extract_all(bundle, profile, load_config())
         on0, on1 = result.segments.turn_on

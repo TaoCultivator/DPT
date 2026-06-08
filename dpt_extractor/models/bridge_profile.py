@@ -9,7 +9,7 @@ PHASES = ("U", "V", "W")
 
 @dataclass(frozen=True)
 class BridgeProfile:
-    """Logical signal name -> physical CSV column."""
+    """Logical signal name -> physical waveform channel."""
 
     name: str
     display_name: str

@@ -29,21 +29,6 @@ _SAMPLE_DIR_HINTS = (
 )
 
 
-def _is_tekscope_csv(path: Path) -> bool:
-    """Cheap CSV sniff: Tekscope data header contains a leading TIME column."""
-    try:
-        with path.open(encoding="utf-8", errors="replace") as f:
-            for i, line in enumerate(f):
-                if i > 300:
-                    break
-                first = line.split(",", 1)[0].strip()
-                if first == "TIME":
-                    return True
-    except OSError:
-        return False
-    return False
-
-
 def _is_tss_session(path: Path) -> bool:
     """Quick TSS sniff: valid zip with at least one .wfm member."""
     if path.suffix.lower() != ".tss":
@@ -74,10 +59,9 @@ def _candidate_roots(root: Path) -> list[Path]:
 
 def discover_sample_waveforms(root: str | Path) -> list[Path]:
     """
-    Discover Tekscope sample waveforms for compatibility regression/training.
-    Priority:
-    1) root-level waveform samples (legacy behavior)
-    2) project sample folders (e.g. 示例文件/samples/examples/...)
+    Discover TSS sample waveforms for compatibility regression/training.
+    Priority is root-level waveforms first, then project sample folders
+    such as 示例文件/samples/examples.
     """
     base = Path(root).resolve()
     seen: set[Path] = set()
@@ -86,27 +70,16 @@ def discover_sample_waveforms(root: str | Path) -> list[Path]:
         for path in candidate.rglob("*"):
             if not path.is_file():
                 continue
-            ext = path.suffix.lower()
-            if ext not in (".csv", ".tss"):
+            if path.suffix.lower() != ".tss":
                 continue
             if any(part in _SKIP_DIRS for part in path.parts):
                 continue
             full = path.resolve()
             if full in seen:
                 continue
-            if ext == ".csv":
-                ok = _is_tekscope_csv(full)
-            else:
-                ok = _is_tss_session(full)
-            if not ok:
+            if not _is_tss_session(full):
                 continue
             seen.add(full)
             picked.append(full)
-    # Train with TSS first to preserve scope display scale consistency.
-    picked.sort(key=lambda p: (0 if p.suffix.lower() == ".tss" else 1, str(p.parent), p.name))
+    picked.sort(key=lambda p: (str(p.parent), p.name))
     return picked
-
-
-def discover_sample_csvs(root: str | Path) -> list[Path]:
-    """Backward-compatible CSV-only alias used by older call sites."""
-    return [p for p in discover_sample_waveforms(root) if p.suffix.lower() == ".csv"]

@@ -31,7 +31,7 @@ from dpt_extractor.models.waveform import WaveformBundle
 
 
 class ChannelMappingDialog(QDialog):
-    """Map logical signals (Vge, Vce, …) to oscilloscope CSV columns."""
+    """Map logical signals (Vge, Vce, …) to waveform channels."""
 
     def __init__(
         self,
@@ -78,11 +78,11 @@ class ChannelMappingDialog(QDialog):
         if ch_list:
             ch_hint = "、".join(ch_list)
             hint_text = (
-                f"为每个逻辑信号指定当前 CSV 中的列：{ch_hint}。"
+                f"为每个逻辑信号指定当前 TSS 波形中的通道：{ch_hint}。"
                 "适用于探头接线与默认 U/V/W 模板不一致的情况。"
             )
         else:
-            hint_text = "请先加载示波器 CSV；下拉列表将显示该文件中的 CH/MATH 列。"
+            hint_text = "请先加载 TSS 波形；下拉列表将显示该文件中的 CH/MATH 通道。"
         hint = QLabel(hint_text)
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#a6adc8;font-size:12px;")
@@ -141,7 +141,7 @@ class ChannelMappingDialog(QDialog):
 
         btn_row = QHBoxLayout()
         self.btn_infer = QPushButton("按标签识别")
-        self.btn_infer.setToolTip("根据 CSV 中各通道的 Label 名称自动填充映射")
+        self.btn_infer.setToolTip("根据 TSS 中各通道的 Label 名称自动填充映射")
         self.btn_infer.clicked.connect(self._on_infer_labels)
         self.btn_reset = QPushButton("恢复默认")
         self.btn_reset.clicked.connect(self._on_reset)
@@ -214,7 +214,7 @@ class ChannelMappingDialog(QDialog):
             QMessageBox.information(
                 self,
                 "无法识别",
-                "当前 CSV 无通道标签信息，或标签与上/下桥无法匹配。",
+                "当前 TSS 无通道标签信息，或标签与上/下桥无法匹配。",
             )
             return
         self._apply_mapping_to_ui(inferred)
@@ -241,8 +241,8 @@ class ChannelMappingDialog(QDialog):
         if not channels_for_mapping(self._bundle):
             QMessageBox.warning(
                 self,
-                "未加载 CSV",
-                "请先加载示波器 CSV 文件，再配置通道映射。",
+                "未加载 TSS",
+                "请先加载 TSS 波形文件，再配置通道映射。",
             )
             return
         mapping = self._collect_mapping()

@@ -50,12 +50,12 @@ class TestRecentPaths(unittest.TestCase):
             set_last_open_path,
         )
 
-        csv = Path(self._td.name) / "data" / "wave.csv"
-        csv.parent.mkdir(parents=True)
-        csv.write_text("x", encoding="utf-8")
-        set_last_open_path(csv)
-        self.assertEqual(last_open_path(), csv.resolve())
-        self.assertEqual(open_dialog_start_dir("/fallback"), str(csv.parent.resolve()))
+        tss = Path(self._td.name) / "data" / "wave.tss"
+        tss.parent.mkdir(parents=True)
+        tss.write_text("x", encoding="utf-8")
+        set_last_open_path(tss)
+        self.assertEqual(last_open_path(), tss.resolve())
+        self.assertEqual(open_dialog_start_dir("/fallback"), str(tss.parent.resolve()))
 
 
 if __name__ == "__main__":
