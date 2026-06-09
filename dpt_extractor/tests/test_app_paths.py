@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dpt_extractor.utils.app_paths import (
+    COMMERCIAL_NOTICE_POSTER_NAME,
+    commercial_notice_poster_path,
     copy_default_report_template,
     copy_report_template,
     configure_numba_cache_dir,
@@ -29,6 +31,11 @@ class TestAppPaths(unittest.TestCase):
         p = default_report_template_path()
         self.assertTrue(p.is_file(), p)
         self.assertEqual(p.name, "默认报告模板.xlsx")
+
+    def test_commercial_notice_poster_exists_in_dev(self):
+        p = commercial_notice_poster_path()
+        self.assertTrue(p.is_file(), p)
+        self.assertEqual(p.name, COMMERCIAL_NOTICE_POSTER_NAME)
 
     def test_copy_default_report_template_adds_xlsx_suffix(self):
         with tempfile.TemporaryDirectory() as td:

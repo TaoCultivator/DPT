@@ -2,6 +2,8 @@
 
 从 Tektronix TSS 会话文件中的双脉冲测试（Double Pulse Test）与短路测试波形中，自动提取关断、开通、反向恢复、短路电流/能量/应力电压等参数，并提供与测试表格一致的分区 GUI 展示、Excel 导出和项目报告写入。
 
+![DPT 非商业用途授权海报](assets/noncommercial_authorization_poster.png)
+
 ## v2.0.0 大版本更新
 
 - 新增短路测试模式，与双脉冲计算流程隔离，可提取短路电流 Imax、短路时间 Tsc、本管/对管短路能量 Esc、应力 Vpeak，并预留 Desat 动作时间识别。
@@ -31,6 +33,13 @@
 - 改进 Eoff 能量光标读数：A/B 光标同时显示 Vce 与 Ic 的采样值，并在波形上标记对应采样点。
 - 修正 Irr 交互光标，使 Hb 跟随实际反向恢复电流尖峰，而不是被预尖峰或绝对值方向干扰。
 - 缩短 GUI 光标审计默认样本集，并新增关键实测样本回归测试，方便发布前快速验证。
+
+## v2.0.5 更新
+
+- 新增固定非商业用途授权海报 `assets/noncommercial_authorization_poster.png`，并放在项目发布首页展示。
+- 打包版首次运行时显示海报式授权提示；用户确认后写入本机设置，后续启动不再重复弹窗。
+- PyInstaller 打包时内置同一张海报，确保 Release 程序与项目首页使用一致的授权提示。
+- 该海报是固定发布资产，后续版本发布说明和首页应继续引用它，不得在常规发布更新中覆盖或替换。
 
 ## 功能
 
@@ -116,6 +125,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 - 大版本更新：修改第一位，例如 `v1.0.0` → `v2.0.0`
 - 小版本/功能迭代：修改后两位，例如 `v1.1.1` → `v1.1.2`
 - Python 包内版本写在 [`dpt_extractor/__init__.py`](dpt_extractor/__init__.py)，Git tag 与 GitHub Release 使用同一个 `v` 前缀版本号
+- 固定授权海报位于 `assets/noncommercial_authorization_poster.png`，后续发布更新不得覆盖或替换该文件，只引用它
 
 ## 测试
 

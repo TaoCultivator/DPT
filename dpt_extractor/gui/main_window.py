@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, Qt, QSettings, QTimer, pyqtSignal
-from PyQt6.QtGui import QResizeEvent
+from PyQt6.QtGui import QPixmap, QResizeEvent
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -36,9 +36,9 @@ from dpt_extractor.config.loader import AppConfig, load_config
 from dpt_extractor.export.excel_export import default_export_path, export_to_excel
 from dpt_extractor.export.report_template import (
     DPT_OVERVIEW_IMAGE_PARAM,
-    DPT_REPORT_IMAGE_PARAMS,
     SHORT_REPORT_IMAGE_PARAMS,
     ReportWriteSummary,
+    dpt_report_image_params_for_result,
     write_report_template,
 )
 from dpt_extractor.gui.channel_mapping_dialog import resolve_profile
@@ -56,6 +56,7 @@ from dpt_extractor.gui.result_table import ResultTable
 from dpt_extractor.gui.theme import DARK_STYLESHEET, SUMMARY_STYLE
 from dpt_extractor.gui.waveform_plot import WaveformPlot
 from dpt_extractor.utils.app_paths import (
+    commercial_notice_poster_path,
     copy_report_template,
     default_report_template_path,
 )
@@ -586,38 +587,44 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle(NONCOMMERCIAL_NOTICE_TITLE)
         dlg.setModal(True)
-        dlg.setMinimumWidth(520)
+        dlg.setMinimumWidth(820)
         layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setContentsMargins(18, 18, 18, 14)
         layout.setSpacing(12)
 
-        title = QLabel(NONCOMMERCIAL_NOTICE_TITLE)
-        title.setStyleSheet("font-size:18px;font-weight:700;color:#f9e2af;")
-        layout.addWidget(title)
+        poster = QPixmap(str(commercial_notice_poster_path()))
+        if not poster.isNull():
+            poster_label = QLabel()
+            poster_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            poster_label.setPixmap(
+                poster.scaledToWidth(
+                    780,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            poster_label.setStyleSheet(
+                "background:#07111d;border:1px solid #28bce8;border-radius:8px;"
+            )
+            layout.addWidget(poster_label)
+        else:
+            title = QLabel(NONCOMMERCIAL_NOTICE_TITLE)
+            title.setStyleSheet("font-size:18px;font-weight:700;color:#f9e2af;")
+            layout.addWidget(title)
 
-        body = QLabel(commercial_authorization_message())
-        body.setWordWrap(True)
-        body.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
-        )
-        body.setStyleSheet("line-height:1.35;color:#f5f5f5;")
-        layout.addWidget(body)
-
-        contact = QLabel(f"商务授权 QQ：{COMMERCIAL_AUTH_QQ}")
-        contact.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
-        )
-        contact.setStyleSheet(
-            "font-size:16px;font-weight:700;color:#a6e3a1;"
-            "background:#263727;border:1px solid #5b8f5f;border-radius:6px;"
-            "padding:8px 10px;"
-        )
-        layout.addWidget(contact)
+            body = QLabel(commercial_authorization_message())
+            body.setWordWrap(True)
+            body.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
+            body.setStyleSheet("line-height:1.35;color:#f5f5f5;")
+            layout.addWidget(body)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("我知道了")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("OK")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
+            "font-family:Arial;font-size:13px;min-width:64px;"
+        )
         buttons.accepted.connect(dlg.accept)
         layout.addWidget(buttons)
         if blocking:
@@ -4537,7 +4544,7 @@ class MainWindow(QMainWindow):
         if self.result is None:
             return ()
         if not self.result.short_circuit_mode:
-            return DPT_REPORT_IMAGE_PARAMS
+            return dpt_report_image_params_for_result(self.result)
         return tuple(
             param
             for param in SHORT_REPORT_IMAGE_PARAMS

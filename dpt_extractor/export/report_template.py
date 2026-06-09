@@ -64,6 +64,8 @@ DPT_REPORT_IMAGE_PARAMS: tuple[tuple[str, str], ...] = (
     ("反向恢复", "Err"),
 )
 
+_SINGLE_PULSE_SKIPPED_IMAGE_SECTIONS = {"开通", "反向恢复"}
+
 SHORT_REPORT_IMAGE_PARAMS: tuple[tuple[str, str], ...] = (
     ("短路过程", "短路电流Imax"),
     ("短路过程", "应力Vpeak_本管"),
@@ -142,6 +144,19 @@ class _DptDataTarget:
     group_start_row: int
     row_offset: int
     inserted_row: bool = False
+
+
+def dpt_report_image_params_for_result(
+    result: ExtractResult,
+) -> tuple[tuple[str, str], ...]:
+    if not result.single_pulse_mode:
+        return DPT_REPORT_IMAGE_PARAMS
+    return tuple(
+        param
+        for param in DPT_REPORT_IMAGE_PARAMS
+        if param == DPT_OVERVIEW_IMAGE_PARAM
+        or param[0] not in _SINGLE_PULSE_SKIPPED_IMAGE_SECTIONS
+    )
 
 
 def _path_parts(path: str) -> list[str]:
@@ -1298,10 +1313,12 @@ def _write_dpt_images(
     ws: Worksheet,
     anchor_row: int | None,
     images: ImageMap,
+    result: ExtractResult,
 ) -> int:
     if anchor_row is None:
         _normalize_dpt_waveform_text(ws)
         return 0
+    allowed_params = set(dpt_report_image_params_for_result(result))
     block_rows = {
         "off": anchor_row,
         "on": anchor_row + 17,
@@ -1309,13 +1326,19 @@ def _write_dpt_images(
     }
     written = 0
     overview_items: list[tuple[str | Path, CellRange]] = []
-    overview_path = images.get(DPT_OVERVIEW_IMAGE_PARAM)
+    overview_path = (
+        images.get(DPT_OVERVIEW_IMAGE_PARAM)
+        if DPT_OVERVIEW_IMAGE_PARAM in allowed_params
+        else None
+    )
     if overview_path is not None:
         target = _left_merged_range_at(ws, anchor_row + 34)
         overview_items.append((overview_path, target))
     regular_items: list[tuple[str | Path, CellRange]] = []
     for key, image_path in images.items():
         if key == DPT_OVERVIEW_IMAGE_PARAM:
+            continue
+        if key not in allowed_params:
             continue
         spec = _DPT_IMAGE_HEADERS.get(key)
         if spec is None:
@@ -1387,7 +1410,9 @@ def _short_target_row(
 
 def _write_short_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
     sc = result.short_circuit
-    vdc, _idc = _match_setpoints(result)
+    vdc = _short_voltage_from_filename(result.source_path)
+    if vdc is None:
+        vdc, _idc = _match_setpoints(result)
     _set_value(ws, row, 4, _num(vdc, 1))
     _set_value(ws, row, 5, _num(sc.ic_max, 3))
     _set_value(ws, row, 6, _num(sc.tsc, 4))
@@ -1396,6 +1421,66 @@ def _write_short_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
     _set_value(ws, row, 9, _num(sc.esc_other, 4))
     _set_value(ws, row, 10, _num(sc.vpeak_other, 3))
     _set_value(ws, row, 11, _num(sc.desat_time, 4))
+
+
+def _short_voltage_from_filename(path: str) -> float | None:
+    vdc, _idc = parse_setpoints_from_filename(path)
+    if vdc is not None:
+        return vdc
+    match = re.search(
+        r"(?<![A-Z0-9])(\d+(?:\.\d+)?)V(?![A-Z])",
+        Path(path).stem.upper(),
+    )
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def _format_measurement_with_unit(
+    value: float | None,
+    unit: str,
+    *,
+    digits: int,
+) -> str | None:
+    number = _num(value, digits)
+    if number is None:
+        return None
+    text = f"{number:.{digits}f}".rstrip("0").rstrip(".")
+    return f"{text}{unit}"
+
+
+def _write_short_picture_conditions(
+    ws: Worksheet,
+    anchor_row: int,
+    result: ExtractResult,
+) -> None:
+    values = {
+        "VCE": _format_measurement_with_unit(
+            _short_voltage_from_filename(result.source_path),
+            "V",
+            digits=1,
+        ),
+        "IMAX": _format_measurement_with_unit(
+            result.short_circuit.ic_max,
+            "A",
+            digits=3,
+        ),
+    }
+    if all(value is None for value in values.values()):
+        return
+
+    max_row = min(ws.max_row, anchor_row + 10)
+    for row in range(anchor_row, max_row + 1):
+        for col in range(1, 6):
+            label = _normalized(ws.cell(row, col).value)
+            key: str | None = None
+            if label.startswith("VCE"):
+                key = "VCE"
+            elif label.startswith("IMAX"):
+                key = "IMAX"
+            if key is None:
+                continue
+            _set_value(ws, row + 1, col, values[key])
 
 
 def _short_image_anchor_row(
@@ -1414,10 +1499,12 @@ def _write_short_images(
     ws: Worksheet,
     anchor_row: int | None,
     images: ImageMap,
+    result: ExtractResult,
 ) -> int:
     if anchor_row is None:
         _normalize_short_picture_text(ws)
         return 0
+    _write_short_picture_conditions(ws, anchor_row, result)
     written = 0
     items: list[tuple[str | Path, CellRange]] = []
     for key, image_path in images.items():
@@ -1478,7 +1565,7 @@ def write_report_template(
         if picture_sheet in wb.sheetnames:
             image_ws = wb[picture_sheet]
             anchor_row = _short_image_anchor_row(image_ws, phase_code, temp_code)
-            images_written = _write_short_images(image_ws, anchor_row, image_map)
+            images_written = _write_short_images(image_ws, anchor_row, image_map, result)
         _set_report_open_zoom(wb, target_screen_width_px)
         wb.save(path)
         return ReportWriteSummary(
@@ -1529,7 +1616,7 @@ def write_report_template(
             idc,
         )
     images_written = (
-        _write_dpt_images(waveform_ws, waveform_anchor_row, image_map)
+        _write_dpt_images(waveform_ws, waveform_anchor_row, image_map, result)
         if waveform_ws is not None
         else 0
     )

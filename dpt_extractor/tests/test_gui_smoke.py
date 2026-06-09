@@ -318,6 +318,26 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn(desat_param, win._report_image_params())
         win.close()
 
+    def test_single_pulse_report_skips_turn_on_and_reverse_recovery_screenshots(self):
+        from dpt_extractor.export.report_template import (
+            DPT_OVERVIEW_IMAGE_PARAM,
+            DPT_REPORT_IMAGE_PARAMS,
+        )
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.results import ExtractResult
+
+        win = MainWindow()
+        win.result = ExtractResult(single_pulse_mode=True)
+
+        params = win._report_image_params()
+        self.assertLess(len(params), len(DPT_REPORT_IMAGE_PARAMS))
+        self.assertIn(DPT_OVERVIEW_IMAGE_PARAM, params)
+        self.assertIn(("关断过程", "Eoff"), params)
+        self.assertFalse(
+            any(section in {"开通", "反向恢复"} for section, _name in params)
+        )
+        win.close()
+
     def test_mapping_dialog_starts_from_defaults_not_bad_labels(self):
         import tempfile
         import numpy as np

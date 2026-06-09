@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_REPORT_TEMPLATE_NAME = "默认报告模板.xlsx"
+COMMERCIAL_NOTICE_POSTER_NAME = "noncommercial_authorization_poster.png"
 
 
 def is_frozen() -> bool:
@@ -38,6 +39,16 @@ def package_templates_dir() -> Path:
 
 def default_report_template_path() -> Path:
     return package_templates_dir() / DEFAULT_REPORT_TEMPLATE_NAME
+
+
+def package_assets_dir() -> Path:
+    if is_frozen():
+        return bundle_root() / "dpt_extractor" / "assets"
+    return bundle_root() / "assets"
+
+
+def commercial_notice_poster_path() -> Path:
+    return package_assets_dir() / COMMERCIAL_NOTICE_POSTER_NAME
 
 
 def copy_default_report_template(path: str | Path) -> Path:

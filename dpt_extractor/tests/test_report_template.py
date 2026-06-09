@@ -906,6 +906,79 @@ class TestReportTemplateWriter(unittest.TestCase):
             ]
             self.assertEqual(leftovers, [])
 
+    def test_single_pulse_template_skips_turn_on_and_reverse_recovery_images(self):
+        from dpt_extractor.export.report_template import (
+            DPT_REPORT_IMAGE_PARAMS,
+            _DPT_IMAGE_HEADERS,
+            dpt_report_image_params_for_result,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "report.xlsx"
+            image = td_path / "scope_4x3.png"
+            _write_rgb_png(image, (1280, 960))
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            wave = wb.create_sheet("U相_双脉冲波形")
+            wave.merge_cells(start_row=1, start_column=1, end_row=17, end_column=8)
+            wave.cell(1, 1, "UH_RT")
+            wave.merge_cells(start_row=18, start_column=1, end_row=34, end_column=8)
+            wave.cell(18, 1, "750V_1050A")
+            wave.merge_cells(start_row=35, start_column=1, end_row=51, end_column=8)
+            wave.cell(35, 1, "总概览图")
+            block_offsets = {"off": 0, "on": 17, "rr": 34}
+            block_counts = {"off": 0, "on": 0, "rr": 0}
+            for _key, (block, header_text) in _DPT_IMAGE_HEADERS.items():
+                col = 10 + block_counts[block] * 8
+                block_counts[block] += 1
+                header_row = 1 + block_offsets[block]
+                wave.merge_cells(
+                    start_row=header_row,
+                    start_column=col,
+                    end_row=header_row,
+                    end_column=col + 7,
+                )
+                wave.cell(header_row, col, header_text)
+                wave.merge_cells(
+                    start_row=header_row + 1,
+                    start_column=col,
+                    end_row=header_row + 16,
+                    end_column=col + 7,
+                )
+            wb.save(report)
+
+            result = ExtractResult(
+                source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
+                profile_code="UH",
+                single_pulse_mode=True,
+            )
+            allowed_params = dpt_report_image_params_for_result(result)
+            self.assertFalse(
+                any(
+                    section in {"开通", "反向恢复"}
+                    for section, _name in allowed_params
+                )
+            )
+
+            summary = write_report_template(
+                result,
+                report,
+                images={param: image for param in DPT_REPORT_IMAGE_PARAMS},
+            )
+
+            saved_wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(summary.images_written, len(allowed_params))
+            self.assertEqual(len(saved_wave._images), len(allowed_params))
+
     def test_dpt_image_slots_fit_fixed_4x3_display_size(self):
         from openpyxl.worksheet.cell_range import CellRange
 
@@ -1044,6 +1117,8 @@ class TestReportTemplateWriter(unittest.TestCase):
                     end_column=5,
                 )
                 pic.cell(base, 1, phase_temp)
+                pic.cell(base + 4, 1, "Vce")
+                pic.cell(base + 4, 2, "Imax")
                 pic.merge_cells(
                     start_row=base,
                     start_column=6,
@@ -1083,6 +1158,10 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(saved["短路测试"].cell(6, 5).value, 2222)
             self.assertEqual(saved["短路测试图片"].cell(1, 1).value, "UH_RT")
             self.assertEqual(saved["短路测试图片"].cell(12, 1).value, "UL_RT")
+            self.assertEqual(saved["短路测试图片"].cell(6, 1).value, "750V")
+            self.assertEqual(saved["短路测试图片"].cell(6, 2).value, "1111A")
+            self.assertEqual(saved["短路测试图片"].cell(17, 1).value, "750V")
+            self.assertEqual(saved["短路测试图片"].cell(17, 2).value, "2222A")
             self.assertEqual(len(saved["短路测试图片"]._images), 2)
 
     def test_short_template_writes_row_and_global_image_slot(self):
@@ -1109,6 +1188,8 @@ class TestReportTemplateWriter(unittest.TestCase):
             pic = wb.create_sheet("短路测试图片")
             pic.merge_cells("A1:E4")
             pic["A1"] = "VH_RT"
+            pic["A5"] = "Vce"
+            pic["B5"] = "Imax"
             pic.merge_cells("F1:H1")
             pic["F1"] = "短路电流Imax 短路时间Tsc 短路能量Esc_本管"
             pic.merge_cells("F2:H10")
@@ -1117,7 +1198,7 @@ class TestReportTemplateWriter(unittest.TestCase):
             result = ExtractResult(
                 source_path=str(Path("samples") / "RT" / "VH_750V_000.tss"),
                 profile_code="VH",
-                vdc_set=750.0,
+                vdc_set=488.123,
                 short_circuit_mode=True,
                 short_circuit=ShortCircuitResult(ic_max=3210.5),
             )
@@ -1130,7 +1211,10 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved = load_workbook(report)
             self.assertEqual(summary.data_sheet, "短路测试")
             self.assertEqual(summary.data_row, 7)
+            self.assertEqual(saved["短路测试"].cell(7, 4).value, 750)
             self.assertEqual(saved["短路测试"].cell(7, 5).value, 3210.5)
+            self.assertEqual(saved["短路测试图片"].cell(6, 1).value, "750V")
+            self.assertEqual(saved["短路测试图片"].cell(6, 2).value, "3210.5A")
             self.assertEqual(len(saved["短路测试图片"]._images), 1)
 
 
