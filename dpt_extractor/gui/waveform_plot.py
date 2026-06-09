@@ -5005,6 +5005,13 @@ class WaveformPlot(QWidget):
             ix = _eoff_ic_fall_start_index(
                 y_seg, float(level), anchor, self._interactive_dt, y_top
             )
+            if ix < len(t_seg) - 1:
+                y0, y1 = float(y_seg[ix]), float(y_seg[ix + 1])
+                if y0 > y1:
+                    frac = (float(level) - y0) / (y1 - y0)
+                    frac = float(np.clip(frac, 0.0, 1.0))
+                    return float(t_seg[ix] + frac * (t_seg[ix + 1] - t_seg[ix]))
+                return float(t_seg[ix])
         elif use_fall_index and self._energy_fall_b_mode == "eon_vce_fall":
             from dpt_extractor.metrics.iec_windows import _eon_vce_hb_fall_start_index
 

@@ -23,7 +23,7 @@ class EnergyLossMarkers:
 
     Eoff: ha_v=Vce 导通平台(V)，hb_a=Ic 回落平台(A)。
     Eon:  ha_v=Ic 抬升前平台(A)；hb_a=Vce 回落后导通平台(V)；v_b 同 hb_a。
-    Err:  ha_v=Irr 平台(A)；hb_a=V_二极管 基线(V)；v_b 同 hb_a。
+    Err:  ha_v=Irr 平台/幅值光标(A)；hb_a=V_二极管 基线(V)；v_b 同 hb_a。
     """
 
     ha_v: float
@@ -236,6 +236,35 @@ def _eoff_vce_ha_crossing_time(
     return float(t_seg[i_lo] + frac * (t_seg[i_hi] - t_seg[i_lo]))
 
 
+def _crossing_pair_index(
+    y: np.ndarray,
+    level: float,
+    direction: str,
+    start: int = 0,
+    end: int | None = None,
+) -> int | None:
+    """Return the sample-pair index containing a threshold crossing."""
+    if end is None:
+        end = len(y) - 1
+    start = max(0, int(start))
+    end = min(len(y) - 1, int(end))
+    if end <= start:
+        return None
+    yy = np.asarray(y, dtype=np.float64)
+    lvl = float(level)
+    for k in range(start, end):
+        y0, y1 = float(yy[k]), float(yy[k + 1])
+        if direction == "falling":
+            if y0 >= lvl and y1 <= lvl and y0 > y1:
+                return k
+        elif direction == "rising":
+            if y0 <= lvl and y1 >= lvl and y1 > y0:
+                return k
+        else:
+            raise ValueError(direction)
+    return None
+
+
 def _eoff_vce_ha_crossing_at_main_rise(
     t_seg: np.ndarray,
     v_seg: np.ndarray,
@@ -244,9 +273,9 @@ def _eoff_vce_ha_crossing_at_main_rise(
     v_top: float,
     search_span_ns: float = 350.0,
     pre_rise_span_ns: float = 160.0,
-    prefer_last_base_cross: bool = False,
+    prefer_last_base_cross: bool = True,
 ) -> tuple[int, float]:
-    """关断 A：窗内主 Vce 抬升（最大 dV/dt）与 Ha 的上升穿越时刻。"""
+    """关断 A：主 Vce 抬升沿与 Ha 的上升穿越时刻。"""
     if len(t_seg) < 2:
         return 0, float(t_seg[0]) if len(t_seg) else 0.0
 
@@ -260,10 +289,9 @@ def _eoff_vce_ha_crossing_at_main_rise(
     on_hi = ha_v + max(30.0, 0.04 * max(float(v_top) - ha_v, 1.0))
 
     # 主抬升定位：先找首个越过 50% (ha_v→v_top) 的样本（仅真实关断抬升能到达，
-    # 导通态噪声尖峰幅度远不及），再在它前方局部窗口内取 Ha 的第一个上升穿越。
-    # 这与示波器卡尺一致：A 卡在 Ha 水平线和 Vce 主上升沿的第一个交点。
-    # 旧法「全窗 Vce<=on_hi 的最大 dV/dt」会被导通态噪声尖峰带偏到抬升前数百 ns
-    # （尤其关断窗起点 off0 前移、纳入更多导通态噪声时）。
+    # 导通态噪声尖峰幅度远不及），再向左回找 Ha 上升穿越。若平台在 Ha 附近抖动，
+    # 使用到达主抬升前的最后一次上穿，这才是 Vce 主上升沿与 Ha 的第一个交点。
+    # 旧法取回看窗里的第一个上穿，会把 A 放到导通平台噪声点上。
     mid = ha_v + 0.5 * max(float(v_top) - ha_v, 1.0)
     k_high: int | None = None
     for k in range(len(v_seg)):
@@ -353,7 +381,7 @@ def _eoff_vce_rise_start_index(
     v_top: float,
     t_seg: np.ndarray | None = None,
     pre_rise_span_ns: float = 160.0,
-    prefer_last_base_cross: bool = False,
+    prefer_last_base_cross: bool = True,
 ) -> int:
     """关断 A 样本索引（与 _eoff_vce_ha_crossing_at_main_rise 一致）。"""
     _ = anchor
@@ -404,10 +432,10 @@ def _eoff_ic_fall_start_index(
         if i_seg[k] > hb and i_seg[k + 1] <= hb:
             if float(np.mean(i_seg[k + 1 : k + 1 + hold])) <= hb + bounce_tol:
                 return k
-    i_end = crossing_index(i_seg, hb, "falling", anchor)
+    i_end = _crossing_pair_index(i_seg, hb, "falling", anchor)
     if i_end is None:
         di = max(float(i_top) - hb, 1.0)
-        i_end = crossing_index(
+        i_end = _crossing_pair_index(
             i_seg, hb + max(0.03 * di, 30.0), "falling", anchor
         )
     return int(i_end) if i_end is not None else max(anchor, 0)
@@ -431,10 +459,10 @@ def _eon_vce_hb_fall_start_index(
         if y0 > float(hb) and y1 <= float(hb):
             if float(np.mean(v_seg[k + 1 : k + 1 + hold])) <= float(hb) + bounce_tol:
                 return k
-    i_end = crossing_index(v_seg, float(hb), "falling", anchor)
+    i_end = _crossing_pair_index(v_seg, float(hb), "falling", anchor)
     if i_end is None:
         dv = max(float(v_top) - float(hb), 1.0)
-        i_end = crossing_index(
+        i_end = _crossing_pair_index(
             v_seg,
             float(hb) + max(0.02 * dv, 5.0),
             "falling",
@@ -521,7 +549,7 @@ def eoff_energy_markers(
         dt,
         float(v_top),
         pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
-        prefer_last_base_cross=low_current_eoff,
+        prefer_last_base_cross=True,
     )
 
     fall_anchor = max(i_start_local + 1, int(np.searchsorted(t_sw, t_start, side="left")))
@@ -914,7 +942,7 @@ def _err_ic_fall_cross_after_peak(
                 5.0, 0.15 * ha
             ):
                 return k, _err_interp_cross_time(t_seg, seg_abs, k, ha)
-    ix = crossing_index(seg_abs, ha, "falling", ipk)
+    ix = _crossing_pair_index(seg_abs, ha, "falling", ipk)
     if ix is not None:
         return int(ix), _err_interp_cross_time(t_seg, seg_abs, int(ix), ha)
     return ipk, float(t_seg[ipk])
@@ -961,7 +989,7 @@ def _err_v_rise_cross_hb(
             best_kk = kk
     if best_kk is not None:
         return best_kk, _err_interp_cross_time(t_seg, seg_v, best_kk, hb)
-    ix = crossing_index(seg_v, hb, "rising", lo)
+    ix = _crossing_pair_index(seg_v, hb, "rising", lo)
     if ix is not None and int(ix) < ipk:
         return int(ix), _err_interp_cross_time(t_seg, seg_v, int(ix), hb)
     return max(0, ipk - 1), float(t_seg[max(0, ipk - 1)])
@@ -1073,7 +1101,7 @@ def err_energy_markers(
 ) -> EnergyLossMarkers:
     """
     反向恢复损耗 Err（示波器卡尺）：
-    Ha=尖峰下降沿震荡结束后的 |Irr| 平台；Hb=电压抬升前 Vd 平台；
+    Ha=尖峰下降沿震荡结束后的 Irr 平台/幅值光标；Hb=电压抬升前 Vd 平台；
     A=下降沿与 Ha 的第一个交点；B=电压上升沿与 Hb 的第一个交点。
     调用方应传入 reverse_recovery 段索引 [i0,i1]。
     """
@@ -1098,8 +1126,15 @@ def err_energy_markers(
     irr_full = np.asarray(irr, dtype=np.float64)
     vd_full = np.asarray(v_diode, dtype=np.float64)
     tpk = float(t[ipk_global])
-    # Ha=恢复后稳定 Irr 平台 (max+min)/2（主峰后 400–800ns，带符号贴波形）
-    ha = _err_window_mid(irr_full, t, tpk + 400e-9, tpk + 800e-9)
+    # Ha=恢复后稳定 Irr 平台；正向软恢复按示波器幅值读数显示/拖动，
+    # 使横向光标与 A 点使用同一个实际交点口径。
+    ha_tail = _err_window_mid(irr_full, t, tpk + 400e-9, tpk + 800e-9)
+    peak = float(irr_full[ipk_global])
+    use_irr_mag = peak > 0.0 and (
+        float(ha_tail) > 0.0
+        or (float(ha_tail) < 0.0 and abs(peak) > 3.0 * abs(float(ha_tail)))
+    )
+    ha = abs(float(ha_tail)) if use_irr_mag else float(ha_tail)
     # Hb=恢复前正向导通 Vd 平台 (max+min)/2（主峰前 200–600ns，带符号）
     hb_v = _err_window_mid(vd_full, t, tpk - 600e-9, tpk - 200e-9)
     i_fall_end = max(

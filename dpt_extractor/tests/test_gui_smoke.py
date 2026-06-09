@@ -36,6 +36,17 @@ SMC_RT_UL = (
     / "tss"
     / "UL_750V_1048A_000.tss"
 )
+SMC_RT_UL_806 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UL_750V_806A_000.tss"
+)
 
 
 class TestWaveformImportAutoCenter(unittest.TestCase):
@@ -1656,7 +1667,7 @@ class TestMainWindowSmoke(unittest.TestCase):
         win.close()
 
     def test_uh_eoff_cursor_uses_main_rise_not_pulse_off(self):
-        """Eoff 进入时 A 应在主 Vce 抬升沿（~14.61µs），而非关断沿或 14.37µs 噪声。"""
+        """Eoff 进入时 A 应在主 Vce 抬升沿，而非关断沿或导通态噪声。"""
         import numpy as np
 
         from dpt_extractor.gui.main_window import MainWindow
@@ -1674,8 +1685,8 @@ class TestMainWindowSmoke(unittest.TestCase):
         plot = win.wave_plot
         ta = float(plot._cursor_a.value())
         tb = float(plot._cursor_b.value())
-        self.assertGreater(ta, 14.495, f"A too early/noise: {ta}")
-        self.assertLess(ta, 14.525, f"A too late/pulse_off: {ta}")
+        self.assertGreater(ta, 14.525, f"A too early/noise: {ta}")
+        self.assertLess(ta, 14.56, f"A too late/pulse_off: {ta}")
         self.assertGreater(tb, 14.77)
         self.assertLess(tb, 14.84)
         a_samples = plot._energy_cursor_samples(ta)
@@ -1722,9 +1733,33 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertAlmostEqual(
             float(np.interp(tb * 1e-6, win.bundle.t, ic)), hb_a, delta=0.5
         )
-        self.assertGreater(ta, 14.65)
-        self.assertLess(ta, 14.70)
+        self.assertGreater(ta, 14.70)
+        self.assertLess(ta, 14.74)
         self.assertAlmostEqual(ha_v, 12.34375, delta=0.5)
+        win.close()
+
+    def test_smc_rt_ul_806_eoff_a_uses_main_rise_ha_crossing(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        if not SMC_RT_UL_806.exists():
+            self.skipTest("SMC RT UL 806A sample missing")
+        win = MainWindow()
+        win._load_file(str(SMC_RT_UL_806))
+        self.assertIsNotNone(win.result)
+        win._on_value_clicked("关断过程", "Eoff")
+        plot = win.wave_plot
+        ta = float(plot._cursor_a.value())
+        tb = float(plot._cursor_b.value())
+        ha_v = plot._from_disp("vce", float(plot._h_cursor_a.value()))
+        vce = win.bundle.get(win.profile.vce)
+        self.assertAlmostEqual(
+            float(np.interp(ta * 1e-6, win.bundle.t, vce)), ha_v, delta=0.5
+        )
+        self.assertGreater(ta, 11.55)
+        self.assertLess(ta, 11.59)
+        self.assertGreater(tb, ta + 0.20)
         win.close()
 
     def test_smc_rt_irr_hb_tracks_parameter_spike_not_abs_prespike(self):

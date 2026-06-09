@@ -63,7 +63,7 @@ class TestFourTssCompatibility(unittest.TestCase):
               mk = err_energy_markers(
                   t, irr, vd, rr0, rr1, bundle.dt, i_search_end=on1
               )
-              # Hb=恢复前正向导通 Vd 平台(带符号，≈0)，Ha=恢复后稳定 Irr 平台(带符号)
+              # Hb=恢复前正向导通 Vd 平台；Ha=恢复后稳定 Irr 平台/幅值光标。
               self.assertLess(abs(mk.hb_a), 50.0, "Hb 应在二极管正向导通电平附近")
               self.assertGreater(mk.t_start, mk.t_end, "A(Irr) 应晚于 B(Vd)")
               win = mk.as_integration_window()

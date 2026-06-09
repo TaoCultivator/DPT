@@ -17,10 +17,14 @@ from openpyxl.worksheet.cell_range import CellRange
 from openpyxl.worksheet.worksheet import Worksheet
 
 from dpt_extractor.export.mcu2506_layout import (
+    COL_CURRENT,
+    COL_VOLTAGE,
+    DATA_ROW,
     COL_OFF,
     COL_ON,
     COL_RR,
     COL_TAIL,
+    LAST_COL,
     _crosstalk_str,
     _match_setpoints,
     _num,
@@ -100,6 +104,8 @@ _SHORT_IMAGE_HEADERS: dict[tuple[str, str], str] = {
 ImageMap = Mapping[tuple[str, str], str | Path]
 
 REPORT_IMAGE_DISPLAY_SIZE_PX = (320, 240)
+DPT_WAVEFORM_BLOCK_ROWS = 51
+DPT_WAVEFORM_BLOCK_STRIDE = 53
 _IMAGE_SLOT_PADDING_PX = 4
 _WAVEFORM_HEADER_ROW_HEIGHT_PX = 26
 _WAVEFORM_HEADER_FONT_SIZE = 10
@@ -119,6 +125,23 @@ class ReportWriteSummary:
     waveform_sheet: str | None = None
     waveform_anchor_row: int | None = None
     images_written: int = 0
+
+
+@dataclass(frozen=True)
+class _DptDataGroup:
+    start_row: int
+    end_row: int
+    phase: str
+    temp: str
+
+
+@dataclass(frozen=True)
+class _DptDataTarget:
+    row: int
+    group_index: int
+    group_start_row: int
+    row_offset: int
+    inserted_row: bool = False
 
 
 def _path_parts(path: str) -> list[str]:
@@ -180,17 +203,8 @@ def _condition_values(text: str | None) -> tuple[float | None, float | None]:
     return parse_setpoints_from_filename(str(text))
 
 
-def _condition_score(
-    candidate: str,
-    vdc: float | None,
-    idc: float | None,
-) -> float | None:
-    cv, ci = _condition_values(candidate)
-    if cv is None or ci is None or vdc is None or idc is None:
-        return None
-    voltage_score = abs(cv - vdc) * 10.0
-    current_score = abs(ci - idc)
-    return voltage_score + current_score
+def _condition_tolerance(idc: float | None, candidate_current: float | None) -> float:
+    return max(30.0, abs(float(idc or candidate_current or 0.0)) * 0.08)
 
 
 def _merged_value(ws: Worksheet, row: int, col: int):
@@ -247,105 +261,305 @@ def _left_merged_range_at(
     )
 
 
-def _dpt_waveform_blocks(
+def _numeric_cell_value(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        value = text
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _data_row_setpoints(ws: Worksheet, row: int) -> tuple[float | None, float | None]:
+    return (
+        _numeric_cell_value(_merged_value(ws, row, COL_VOLTAGE)),
+        _numeric_cell_value(_merged_value(ws, row, COL_CURRENT)),
+    )
+
+
+def _data_row_matches_setpoints(
     ws: Worksheet,
-    phase_temp: str,
-) -> list[tuple[int, str]]:
-    blocks: list[tuple[int, str]] = []
-    labels = _left_merged_ranges_with_value(ws)
-    phase_temp_upper = phase_temp.upper()
-    by_row = {rng.min_row: value for rng, value in labels}
-    for phase_rng, phase_label in labels:
-        if phase_label.upper() != phase_temp_upper:
-            continue
-        condition_label = by_row.get(phase_rng.min_row + 17)
-        if condition_label is None:
-            continue
-        cv, ci = _condition_values(condition_label)
-        if cv is None or ci is None:
-            continue
-        blocks.append((phase_rng.min_row, condition_label))
-    return blocks
+    row: int,
+    vdc: float | None,
+    idc: float | None,
+) -> bool:
+    row_vdc, row_idc = _data_row_setpoints(ws, row)
+    if row_vdc is None or row_idc is None or vdc is None or idc is None:
+        return False
+    score = abs(row_vdc - float(vdc)) * 10.0 + abs(row_idc - float(idc))
+    return score <= _condition_tolerance(idc, row_idc)
 
 
-def _best_condition_index(
-    candidates: list[str],
+def _data_row_has_payload(ws: Worksheet, row: int) -> bool:
+    for col in range(COL_VOLTAGE, LAST_COL + 1):
+        value = _merged_value(ws, row, col)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return True
+    return False
+
+
+def _copy_row_style(ws: Worksheet, source_row: int, target_row: int) -> None:
+    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+    for col in range(1, max(ws.max_column, LAST_COL) + 1):
+        source = ws.cell(source_row, col)
+        target = ws.cell(target_row, col)
+        if source.has_style:
+            target.font = copy(source.font)
+            target.fill = copy(source.fill)
+            target.border = copy(source.border)
+            target.alignment = copy(source.alignment)
+            target.protection = copy(source.protection)
+            target.number_format = source.number_format
+
+
+def _shift_merged_range_for_insert(
+    rng: CellRange,
+    *,
+    group_start_row: int,
+    insert_row: int,
+) -> CellRange:
+    min_row = rng.min_row
+    max_row = rng.max_row
+    if rng.min_row == group_start_row and rng.max_row == insert_row - 1 and rng.min_col <= 3:
+        max_row += 1
+    elif rng.min_row >= insert_row:
+        min_row += 1
+        max_row += 1
+    elif rng.min_row < insert_row <= rng.max_row:
+        max_row += 1
+    return CellRange(
+        min_col=rng.min_col,
+        max_col=rng.max_col,
+        min_row=min_row,
+        max_row=max_row,
+    )
+
+
+def _insert_dpt_data_row(data_ws: Worksheet, group_start_row: int, insert_row: int) -> int:
+    source_row = max(group_start_row, insert_row - 1)
+    merged_ranges = [CellRange(str(rng)) for rng in data_ws.merged_cells.ranges]
+    for rng in list(data_ws.merged_cells.ranges):
+        data_ws.unmerge_cells(str(rng))
+
+    if insert_row <= data_ws.max_row:
+        data_ws.insert_rows(insert_row)
+    _copy_row_style(data_ws, source_row, insert_row)
+
+    for rng in merged_ranges:
+        shifted = _shift_merged_range_for_insert(
+            rng,
+            group_start_row=group_start_row,
+            insert_row=insert_row,
+        )
+        data_ws.merge_cells(
+            start_row=shifted.min_row,
+            end_row=shifted.max_row,
+            start_column=shifted.min_col,
+            end_column=shifted.max_col,
+        )
+    return insert_row
+
+
+def _dpt_data_groups(data_ws: Worksheet) -> list[_DptDataGroup]:
+    phase_ranges = [
+        item
+        for item in _merged_ranges_with_value(data_ws, min_col=1, max_col=1)
+        if item[0].min_row >= DATA_ROW
+    ]
+    groups: list[_DptDataGroup] = []
+    for idx, (phase_rng, phase_value) in enumerate(phase_ranges):
+        next_row = (
+            phase_ranges[idx + 1][0].min_row
+            if idx + 1 < len(phase_ranges)
+            else data_ws.max_row + 1
+        )
+        groups.append(
+            _DptDataGroup(
+                start_row=phase_rng.min_row,
+                end_row=next_row,
+                phase=str(phase_value),
+                temp=str(_merged_value(data_ws, phase_rng.min_row, 2) or ""),
+            )
+        )
+    return groups
+
+
+def _next_dpt_data_row(
+    data_ws: Worksheet,
+    start_row: int,
+    end_row_exclusive: int,
+    *,
+    vdc: float | None,
+    idc: float | None,
+) -> tuple[int, bool]:
+    for row in range(start_row, end_row_exclusive):
+        if _data_row_matches_setpoints(data_ws, row, vdc, idc):
+            return row, False
+    for row in range(start_row, end_row_exclusive):
+        if not _data_row_has_payload(data_ws, row):
+            return row, False
+    return _insert_dpt_data_row(data_ws, start_row, end_row_exclusive), True
+
+
+def _find_dpt_data_target(
+    result: ExtractResult,
+    data_ws: Worksheet,
+    phase_code: str,
+    temp_code: str,
+) -> _DptDataTarget:
+    temp_display = TEMP_LABELS[temp_code][0]
+    vdc, idc = _match_setpoints(result)
+    for group_index, group in enumerate(_dpt_data_groups(data_ws)):
+        if group.phase.upper() != phase_code.upper():
+            continue
+        if group.temp != temp_display:
+            continue
+        row, inserted = _next_dpt_data_row(
+            data_ws,
+            group.start_row,
+            group.end_row,
+            vdc=vdc,
+            idc=idc,
+        )
+        return _DptDataTarget(
+            row=row,
+            group_index=group_index,
+            group_start_row=group.start_row,
+            row_offset=row - group.start_row,
+            inserted_row=inserted,
+        )
+
+    row = 5
+    return _DptDataTarget(row=row, group_index=0, group_start_row=row, row_offset=0)
+
+
+def _dpt_waveform_group_base(data_ws: Worksheet, group_index: int) -> int:
+    base = 1
+    for group in _dpt_data_groups(data_ws)[:group_index]:
+        base += max(0, group.end_row - group.start_row) * DPT_WAVEFORM_BLOCK_STRIDE
+    return base
+
+
+def _copy_waveform_row(ws: Worksheet, source_row: int, target_row: int) -> None:
+    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+    for col in range(1, ws.max_column + 1):
+        source = ws.cell(source_row, col)
+        target = ws.cell(target_row, col)
+        target.value = source.value
+        if source.has_style:
+            target.font = copy(source.font)
+            target.fill = copy(source.fill)
+            target.border = copy(source.border)
+            target.alignment = copy(source.alignment)
+            target.protection = copy(source.protection)
+            target.number_format = source.number_format
+
+
+def _shift_range_rows(rng: CellRange, row_delta: int) -> CellRange:
+    return CellRange(
+        min_col=rng.min_col,
+        max_col=rng.max_col,
+        min_row=rng.min_row + row_delta,
+        max_row=rng.max_row + row_delta,
+    )
+
+
+def _insert_dpt_waveform_block(ws: Worksheet, insert_row: int) -> None:
+    source_row = max(1, insert_row - DPT_WAVEFORM_BLOCK_STRIDE)
+    amount = DPT_WAVEFORM_BLOCK_STRIDE
+    source_end = source_row + amount - 1
+    max_row_before = ws.max_row
+    merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
+    copied_ranges = [
+        _shift_range_rows(rng, insert_row - source_row)
+        for rng in merged_ranges
+        if source_row <= rng.min_row and rng.max_row <= source_end
+    ]
+
+    for rng in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(rng))
+
+    if insert_row <= ws.max_row:
+        ws.insert_rows(insert_row, amount)
+    for offset in range(amount):
+        row_to_copy = source_row + offset
+        if row_to_copy > max_row_before and offset >= DPT_WAVEFORM_BLOCK_ROWS:
+            row_to_copy = max(1, source_row - (amount - offset))
+        _copy_waveform_row(ws, row_to_copy, insert_row + offset)
+
+    restored: list[CellRange] = []
+    for rng in merged_ranges:
+        if rng.min_row >= insert_row:
+            restored.append(_shift_range_rows(rng, amount))
+        elif rng.min_row < insert_row <= rng.max_row:
+            restored.append(
+                CellRange(
+                    min_col=rng.min_col,
+                    max_col=rng.max_col,
+                    min_row=rng.min_row,
+                    max_row=rng.max_row + amount,
+                )
+            )
+        else:
+            restored.append(rng)
+
+    seen: set[tuple[int, int, int, int]] = set()
+    for rng in [*restored, *copied_ranges]:
+        key = (rng.min_row, rng.min_col, rng.max_row, rng.max_col)
+        if key in seen:
+            continue
+        seen.add(key)
+        ws.merge_cells(
+            start_row=rng.min_row,
+            end_row=rng.max_row,
+            start_column=rng.min_col,
+            end_column=rng.max_col,
+        )
+
+
+def _set_range_value(ws: Worksheet, rng: CellRange, value: object) -> None:
+    ws.cell(rng.min_row, rng.min_col).value = value
+
+
+def _dpt_waveform_label(ws: Worksheet, row: int) -> str:
+    return str(_merged_value(ws, row, 1) or "").strip()
+
+
+def _ensure_dpt_waveform_anchor(
+    ws: Worksheet,
+    data_ws: Worksheet,
+    target: _DptDataTarget,
+    phase_code: str,
+    temp_code: str,
     vdc: float | None,
     idc: float | None,
 ) -> int:
-    if not candidates:
-        return 0
-    current_key = _format_condition_key(vdc, idc).upper()
-    for idx, candidate in enumerate(candidates):
-        if str(candidate).upper() == current_key:
-            return idx
-    scored = [
-        (score, idx)
-        for idx, candidate in enumerate(candidates)
-        if (score := _condition_score(candidate, vdc, idc)) is not None
-    ]
-    if not scored:
-        return 0
-    score, idx = min(scored)
-    _, candidate_current = _condition_values(candidates[idx])
-    tolerance = max(30.0, abs(float(idc or candidate_current or 0.0)) * 0.08)
-    if score <= tolerance:
-        return idx
-    return 0
-
-
-def _find_dpt_data_row(
-    wb,
-    result: ExtractResult,
-    data_ws: Worksheet,
-    waveform_ws: Worksheet | None,
-    phase_code: str,
-    temp_code: str,
-) -> tuple[int, int | None]:
-    temp_display = TEMP_LABELS[temp_code][0]
-    vdc, idc = _match_setpoints(result)
-    condition_index = 0
-    waveform_anchor_row: int | None = None
-    if waveform_ws is not None:
-        phase_temp = f"{phase_code}_{temp_code}"
-        blocks = _dpt_waveform_blocks(waveform_ws, phase_temp)
-        condition_index = _best_condition_index(
-            [condition for _base, condition in blocks],
-            vdc,
-            idc,
-        )
-        if blocks:
-            waveform_anchor_row = blocks[condition_index][0]
-
-    for phase_rng, phase_value in _merged_ranges_with_value(
-        data_ws,
-        min_col=1,
-        max_col=1,
+    group_base = _dpt_waveform_group_base(data_ws, target.group_index)
+    anchor_row = group_base + target.row_offset * DPT_WAVEFORM_BLOCK_STRIDE
+    phase_temp = f"{phase_code}_{temp_code}".upper()
+    existing_label = _dpt_waveform_label(ws, anchor_row).upper()
+    if (
+        anchor_row + DPT_WAVEFORM_BLOCK_ROWS - 1 > ws.max_row
+        or (existing_label and existing_label != phase_temp)
     ):
-        if phase_value.upper() != phase_code.upper():
-            continue
-        temp_value = str(_merged_value(data_ws, phase_rng.min_row, 2) or "")
-        if temp_value == temp_display:
-            row = phase_rng.min_row + condition_index
-            next_group_row = data_ws.max_row + 1
-            for next_rng, _next_value in _merged_ranges_with_value(
-                data_ws,
-                min_col=1,
-                max_col=1,
-            ):
-                if next_rng.min_row > phase_rng.min_row:
-                    next_group_row = next_rng.min_row
-                    break
-            if row >= next_group_row:
-                available = max(0, next_group_row - phase_rng.min_row)
-                raise ValueError(
-                    f"{data_ws.title} 中 {phase_code}/{temp_display} 仅预留 "
-                    f"{available} 个工况行，当前文件匹配到第 {condition_index + 1} "
-                    "个工况；请先扩展报告模板的数据区。"
-                )
-            return row, waveform_anchor_row
+        _insert_dpt_waveform_block(ws, anchor_row)
 
-    return 5 + condition_index, waveform_anchor_row
+    _set_range_value(ws, _left_merged_range_at(ws, anchor_row), phase_temp)
+    _set_range_value(
+        ws,
+        _left_merged_range_at(ws, anchor_row + 17),
+        _format_condition_key(vdc, idc),
+    )
+    _set_range_value(ws, _left_merged_range_at(ws, anchor_row + 34), "总概览图")
+    return anchor_row
 
 
 def _set_value(ws: Worksheet, row: int, col: int, value) -> None:
@@ -841,6 +1055,55 @@ def _remove_images_in_range(ws: Worksheet, rng: CellRange) -> None:
     ws._images = kept
 
 
+def _condition_matches_setpoints(
+    condition_label: str | None,
+    vdc: float | None,
+    idc: float | None,
+) -> bool:
+    cv, ci = _condition_values(condition_label)
+    if cv is None or ci is None or vdc is None or idc is None:
+        return False
+    score = abs(cv - float(vdc)) * 10.0 + abs(ci - float(idc))
+    return score <= _condition_tolerance(idc, ci)
+
+
+def _clear_dpt_waveform_block_payload(ws: Worksheet, anchor_row: int) -> None:
+    block_range = CellRange(
+        min_col=1,
+        max_col=max(1, ws.max_column),
+        min_row=anchor_row,
+        max_row=anchor_row + DPT_WAVEFORM_BLOCK_ROWS - 1,
+    )
+    _remove_images_in_range(ws, block_range)
+    for offset in (0, 17, 34):
+        _set_range_value(ws, _left_merged_range_at(ws, anchor_row + offset), None)
+
+
+def _clear_duplicate_dpt_waveform_blocks(
+    ws: Worksheet,
+    target_anchor_row: int | None,
+    phase_code: str,
+    temp_code: str,
+    vdc: float | None,
+    idc: float | None,
+) -> None:
+    if target_anchor_row is None:
+        return
+    phase_temp = f"{phase_code}_{temp_code}".upper()
+    labels = _left_merged_ranges_with_value(ws)
+    label_by_row = {rng.min_row: value for rng, value in labels}
+    for phase_rng, phase_label in labels:
+        anchor_row = phase_rng.min_row
+        if anchor_row == target_anchor_row:
+            continue
+        if phase_label.upper() != phase_temp:
+            continue
+        condition_label = label_by_row.get(anchor_row + 17)
+        if not _condition_matches_setpoints(condition_label, vdc, idc):
+            continue
+        _clear_dpt_waveform_block_payload(ws, anchor_row)
+
+
 def _marker_after_pixels(
     ws: Worksheet,
     *,
@@ -1140,15 +1403,37 @@ def write_report_template(
         raise ValueError(f"报告模板缺少工作表：{data_sheet}")
     data_ws = wb[data_sheet]
     waveform_ws = wb[waveform_sheet] if waveform_sheet in wb.sheetnames else None
-    data_row, waveform_anchor_row = _find_dpt_data_row(
-        wb,
+    target = _find_dpt_data_target(
         result,
         data_ws,
-        waveform_ws,
         phase_code,
         temp_code,
     )
+    data_row = target.row
     _write_dpt_data(data_ws, data_row, result)
+    vdc, idc = _match_setpoints(result)
+    waveform_anchor_row = (
+        _ensure_dpt_waveform_anchor(
+            waveform_ws,
+            data_ws,
+            target,
+            phase_code,
+            temp_code,
+            vdc,
+            idc,
+        )
+        if waveform_ws is not None
+        else None
+    )
+    if waveform_ws is not None:
+        _clear_duplicate_dpt_waveform_blocks(
+            waveform_ws,
+            waveform_anchor_row,
+            phase_code,
+            temp_code,
+            vdc,
+            idc,
+        )
     images_written = (
         _write_dpt_images(waveform_ws, waveform_anchor_row, image_map)
         if waveform_ws is not None

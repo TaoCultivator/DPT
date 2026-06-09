@@ -194,6 +194,23 @@ class TestShortCircuitMathChannels(unittest.TestCase):
         self.assertGreater(result.short_circuit.esc_dut, result.short_circuit.esc_other)
 
 
+@unittest.skipUnless(DDD_UH.exists(), "short-circuit DDD sample missing")
+class TestValidateTssSamplesScript(unittest.TestCase):
+    def test_ddd_voltage_only_sample_uses_short_circuit_validation(self):
+        from scripts.validate_tss_samples import (
+            _is_short_circuit_sample,
+            _validate_sample,
+        )
+
+        self.assertTrue(_is_short_circuit_sample(DDD_UH))
+        result = _validate_sample(DDD_UH)
+
+        self.assertEqual(result.kind, "SC")
+        self.assertEqual(result.status, "OK")
+        self.assertIn("Imax=", result.detail)
+        self.assertIn("Tsc=", result.detail)
+
+
 class TestShortCircuitTemplateLayout(unittest.TestCase):
     def test_header_merge_and_alignment(self):
         from openpyxl import load_workbook
