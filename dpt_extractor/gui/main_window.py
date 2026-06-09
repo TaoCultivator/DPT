@@ -13,6 +13,8 @@ from PyQt6.QtGui import QResizeEvent
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -125,6 +127,20 @@ from dpt_extractor.pipeline.short_circuit_extract import (
 
 
 REPORT_PLOT_CAPTURE_SIZE = QSize(1280, 960)
+COMMERCIAL_AUTH_QQ = "3796823"
+NONCOMMERCIAL_NOTICE_TITLE = "非商业用途授权提示"
+
+
+def commercial_authorization_message() -> str:
+    return (
+        "DPT 仅允许个人学习、研究、测试以及非商业组织使用。\n\n"
+        "未经版权方书面授权，禁止任何商业使用，包括但不限于：\n"
+        "1. 销售本软件、打包版或修改版；\n"
+        "2. 集成到商业产品、商业服务或内部收费平台；\n"
+        "3. 作为商业项目交付内容、外包成果或验收工具；\n"
+        "4. 提供营利性托管、代运行、培训交付或商业目的再分发。\n\n"
+        f"如需商业使用、商业集成或商务授权，请通过 QQ {COMMERCIAL_AUTH_QQ} 联系项目维护者。"
+    )
 
 
 @dataclass
@@ -406,6 +422,26 @@ class MainWindow(QMainWindow):
         self._update_report_template_tooltip()
         self._update_report_output_tooltip()
 
+        self.license_notice = QFrame()
+        self.license_notice.setObjectName("licenseNotice")
+        notice_layout = QHBoxLayout(self.license_notice)
+        notice_layout.setContentsMargins(10, 5, 10, 5)
+        notice_layout.setSpacing(8)
+        self.lbl_license_notice = QLabel()
+        self.lbl_license_notice.setObjectName("licenseNoticeLabel")
+        self.lbl_license_notice.setWordWrap(True)
+        self.lbl_license_notice.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.btn_license_notice = QPushButton("商务授权")
+        self.btn_license_notice.setObjectName("licenseNoticeButton")
+        self.btn_license_notice.setToolTip(
+            f"商业使用、商业集成或商务授权请通过 QQ {COMMERCIAL_AUTH_QQ} 联系"
+        )
+        self.btn_license_notice.clicked.connect(self._show_license_notice)
+        notice_layout.addWidget(self.lbl_license_notice, stretch=1)
+        notice_layout.addWidget(self.btn_license_notice)
+
         self.lbl_map_status = QLabel("")
         self.lbl_map_status.setStyleSheet("color:#f9e2af;font-size:11px;")
         self.lbl_map_status.setSizePolicy(
@@ -535,12 +571,53 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.toolbar)
+        layout.addWidget(self.license_notice)
         layout.addWidget(splitter, stretch=1)
         self.setCentralWidget(root)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("请打开 Tektronix TSS 会话文件")
         self._apply_toolbar_density(self.width() or 1400)
         self._apply_test_mode_ui()
+
+    def _show_license_notice(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle(NONCOMMERCIAL_NOTICE_TITLE)
+        dlg.setModal(True)
+        dlg.setMinimumWidth(520)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        title = QLabel(NONCOMMERCIAL_NOTICE_TITLE)
+        title.setStyleSheet("font-size:18px;font-weight:700;color:#f9e2af;")
+        layout.addWidget(title)
+
+        body = QLabel(commercial_authorization_message())
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        body.setStyleSheet("line-height:1.35;color:#f5f5f5;")
+        layout.addWidget(body)
+
+        contact = QLabel(f"商务授权 QQ：{COMMERCIAL_AUTH_QQ}")
+        contact.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        contact.setStyleSheet(
+            "font-size:16px;font-weight:700;color:#a6e3a1;"
+            "background:#263727;border:1px solid #5b8f5f;border-radius:6px;"
+            "padding:8px 10px;"
+        )
+        layout.addWidget(contact)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("我知道了")
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+        dlg.exec()
 
     def _build_context_menu_selector(self) -> QWidget:
         box = QFrame()
@@ -668,6 +745,10 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_template.setText("模板")
                 self.btn_select_report_output.setText("位置")
                 self.btn_write_report.setText("写入")
+                self.btn_license_notice.setText("授权")
+                self.lbl_license_notice.setText(
+                    f"仅限非商业用途；商务授权 QQ：{COMMERCIAL_AUTH_QQ}"
+                )
             elif text_mode == "compact":
                 self.btn_open.setText("打开文件")
                 self.btn_recalc.setText("重算")
@@ -675,6 +756,10 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_template.setText("模板")
                 self.btn_select_report_output.setText("位置")
                 self.btn_write_report.setText("写报告")
+                self.btn_license_notice.setText("商务授权")
+                self.lbl_license_notice.setText(
+                    f"本软件仅限非商业用途；商用请联系 QQ {COMMERCIAL_AUTH_QQ}"
+                )
             elif text_mode == "medium":
                 self.btn_open.setText("打开文件")
                 self.btn_recalc.setText("重新计算")
@@ -682,6 +767,10 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_template.setText("加载模板")
                 self.btn_select_report_output.setText("报告位置")
                 self.btn_write_report.setText("写入报告")
+                self.btn_license_notice.setText("商务授权")
+                self.lbl_license_notice.setText(
+                    f"仅限非商业用途；商业使用、集成或交付请先通过 QQ {COMMERCIAL_AUTH_QQ} 取得书面授权。"
+                )
             else:
                 self.btn_open.setText("📂  打开文件")
                 self.btn_recalc.setText("↻  重新计算")
@@ -689,6 +778,10 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_template.setText("📄  加载模板")
                 self.btn_select_report_output.setText("📁  报告位置")
                 self.btn_write_report.setText("📝  写入报告")
+                self.btn_license_notice.setText("商务授权")
+                self.lbl_license_notice.setText(
+                    f"授权提示：DPT 仅限非商业用途。商业使用、商业集成、项目交付或商业目的再分发，请先通过 QQ {COMMERCIAL_AUTH_QQ} 取得书面授权。"
+                )
             self._toolbar_text_mode = text_mode
 
         if self._toolbar_density_bucket == bucket:
@@ -741,6 +834,17 @@ class MainWindow(QMainWindow):
             "QPushButton#contextMenuSelectorButton:hover{background:#505050;}"
             "QPushButton#contextMenuSelectorButton:checked{background:#28bce8;"
             "color:#061014;border-color:#8fd3ff;}"
+        )
+        self.license_notice.setStyleSheet(
+            "QFrame#licenseNotice{background:#241f16;"
+            "border-top:1px solid #5f4b22;border-bottom:1px solid #5f4b22;}"
+            f"QLabel#licenseNoticeLabel{{color:#f9e2af;font-size:{label_px}px;"
+            "font-weight:600;}}"
+            "QPushButton#licenseNoticeButton{background:#6b4a2a;color:#fff4d6;"
+            "border:1px solid #d0a85f;border-radius:5px;"
+            f"font-size:{font_px}px;padding:{max(2, pad_v)}px {max(8, pad_h)}px;"
+            f"min-height:{min_h}px;}}"
+            "QPushButton#licenseNoticeButton:hover{background:#8a6236;}"
         )
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:

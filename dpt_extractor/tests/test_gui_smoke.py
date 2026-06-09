@@ -197,6 +197,30 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertFalse(win.lbl_map_status.isHidden())
         win.close()
 
+    def test_main_window_shows_noncommercial_notice(self):
+        from dpt_extractor.gui.main_window import (
+            COMMERCIAL_AUTH_QQ,
+            MainWindow,
+            commercial_authorization_message,
+        )
+
+        win = MainWindow()
+        self.app.processEvents()
+
+        self.assertFalse(win.license_notice.isHidden())
+        self.assertIn(COMMERCIAL_AUTH_QQ, win.lbl_license_notice.text())
+        self.assertIn("商务授权", win.btn_license_notice.text())
+        self.assertIn(COMMERCIAL_AUTH_QQ, win.btn_license_notice.toolTip())
+
+        message = commercial_authorization_message()
+        self.assertIn("禁止任何商业使用", message)
+        self.assertIn(COMMERCIAL_AUTH_QQ, message)
+
+        win._apply_toolbar_density(860)
+        self.assertIn(COMMERCIAL_AUTH_QQ, win.lbl_license_notice.text())
+        self.assertEqual(win.btn_license_notice.text(), "授权")
+        win.close()
+
     def test_report_plot_capture_size_uses_fixed_plot_baseline(self):
         from dpt_extractor.gui.main_window import (
             MainWindow,

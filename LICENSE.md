@@ -2,6 +2,7 @@
 
 Required Notice: Copyright (c) 2026 TaoCultivator.
 Required Notice: DPT may be used only for noncommercial purposes unless you receive separate written commercial permission from the copyright holder.
+Required Notice: For commercial licensing, contact the project maintainer via QQ 3796823.
 
 This project is licensed under the PolyForm Noncommercial License 1.0.0.
 

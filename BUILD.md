@@ -17,7 +17,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 成功后生成：
 
 ```
-dist\DPT_双脉冲参数提取工具_v2.0.0.exe
+dist\DPT_双脉冲参数提取工具_v2.0.1.exe
 ```
 
 可将该 `.exe` 单独拷贝到其他 Windows 电脑运行，**无需安装 Python**。
@@ -61,7 +61,7 @@ pyinstaller --noconfirm DPT.spec
 若希望 `dist\DPT\` 文件夹形式而非单文件，可在 `DPT.spec` 中把末尾 `EXE(...)` 改为 `COLLECT` 模式，或运行：
 
 ```powershell
-pyinstaller --noconfirm --windowed --name DPT_双脉冲参数提取工具_v2.0.0 --collect-all PyQt6 --collect-all pyqtgraph main.py
+pyinstaller --noconfirm --windowed --name DPT_双脉冲参数提取工具_v2.0.1 --collect-all PyQt6 --collect-all pyqtgraph main.py
 ```
 
 （体积与依赖收集方式不同，以 `DPT.spec` 为准。）
