@@ -353,6 +353,74 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(saved.cell(7, COL_CURRENT).value, 403)
             self.assertEqual(saved.cell(7, COL_OFF["delta_vce"]).value, 403)
 
+    def test_dpt_waveform_blocks_do_not_keep_blank_reserved_rows_between_groups(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            ws.merge_cells("A9:A12")
+            ws.merge_cells("B9:B12")
+            ws["A9"] = "UL"
+            ws["B9"] = "25℃"
+
+            wave = wb.create_sheet("U相_双脉冲波形")
+            blocks = (
+                ("UH_RT", "750V_1050A"),
+                ("UH_RT", "750V_805A"),
+                ("UH_RT", "750V_50A"),
+                ("UH_RT", "600V_285A"),
+                ("UL_RT", "750V_1050A"),
+                ("UL_RT", "750V_805A"),
+            )
+            for idx, (phase_temp, condition) in enumerate(blocks):
+                base = 1 + idx * 53
+                wave.merge_cells(start_row=base, start_column=1, end_row=base + 16, end_column=8)
+                wave.cell(base, 1, phase_temp)
+                wave.merge_cells(start_row=base + 17, start_column=1, end_row=base + 33, end_column=8)
+                wave.cell(base + 17, 1, condition)
+                wave.merge_cells(start_row=base + 34, start_column=1, end_row=base + 50, end_column=8)
+                wave.cell(base + 34, 1, "总概览图")
+            wb.save(report)
+
+            anchors = []
+            for phase, filename, marker in (
+                ("UH", "UH_750V_1048A_000.tss", 1048.0),
+                ("UH", "UH_750V_806A_000.tss", 806.0),
+                ("UH", "UH_600V_403A_000.tss", 403.0),
+                ("UL", "UL_750V_1048A_000.tss", 1048.0),
+                ("UL", "UL_750V_806A_000.tss", 806.0),
+            ):
+                summary = write_report_template(
+                    ExtractResult(
+                        source_path=str(Path("samples") / "RT" / filename),
+                        profile_code=phase,
+                        turn_off=TurnOffResult(delta_vce=marker),
+                    ),
+                    report,
+                )
+                anchors.append(summary.waveform_anchor_row)
+
+            saved_wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(anchors, [1, 54, 107, 160, 213])
+            self.assertEqual(saved_wave.cell(107, 1).value, "UH_RT")
+            self.assertEqual(saved_wave.cell(124, 1).value, "600V_403A")
+            self.assertEqual(saved_wave.cell(160, 1).value, "UL_RT")
+            self.assertEqual(saved_wave.cell(177, 1).value, "750V_1048A")
+            self.assertEqual(saved_wave.cell(194, 1).value, "总概览图")
+            self.assertEqual(saved_wave.cell(213, 1).value, "UL_RT")
+            self.assertEqual(saved_wave.cell(230, 1).value, "750V_806A")
+            self.assertIsNone(saved_wave.cell(266, 1).value)
+            self.assertIsNone(saved_wave.cell(283, 1).value)
+            self.assertIsNone(saved_wave.cell(300, 1).value)
+
     def test_dpt_template_inserts_extra_condition_row_with_matching_style(self):
         from openpyxl.styles import Alignment, Border, PatternFill, Side
 
@@ -949,6 +1017,73 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(summary.data_row, 9)
             self.assertEqual(summary.waveform_anchor_row, 213)
             self.assertEqual(saved["U相_双脉冲数据"].cell(9, COL_OFF["delta_vce"]).value, 555.0)
+
+    def test_short_template_uses_labeled_picture_blocks_not_row_offsets(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "short_report.xlsx"
+            image = td_path / "short.png"
+            _write_tiny_png(image)
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "短路测试"
+            ws.merge_cells("A5:A6")
+            ws["A5"] = 25
+            ws["B5"] = "UH"
+            ws["B6"] = "UL"
+            pic = wb.create_sheet("短路测试图片")
+            for base, phase_temp in ((1, "UH_RT"), (12, "UL_RT")):
+                pic.merge_cells(
+                    start_row=base,
+                    start_column=1,
+                    end_row=base + 3,
+                    end_column=5,
+                )
+                pic.cell(base, 1, phase_temp)
+                pic.merge_cells(
+                    start_row=base,
+                    start_column=6,
+                    end_row=base,
+                    end_column=8,
+                )
+                pic.cell(base, 6, "短路电流Imax 短路时间Tsc 短路能量Esc_本管")
+                pic.merge_cells(
+                    start_row=base + 1,
+                    start_column=6,
+                    end_row=base + 9,
+                    end_column=8,
+                )
+            wb.save(report)
+
+            rows_and_anchors = []
+            for phase, filename, current in (
+                ("UL", "UL_750V_000.tss", 2222.0),
+                ("UH", "UH_750V_000.tss", 1111.0),
+            ):
+                summary = write_report_template(
+                    ExtractResult(
+                        source_path=str(Path("samples") / "RT" / filename),
+                        profile_code=phase,
+                        vdc_set=750.0,
+                        short_circuit_mode=True,
+                        short_circuit=ShortCircuitResult(ic_max=current),
+                    ),
+                    report,
+                    images={("短路过程", "短路电流Imax"): image},
+                )
+                rows_and_anchors.append((summary.data_row, summary.waveform_anchor_row))
+
+            saved = load_workbook(report)
+            self.assertEqual(rows_and_anchors, [(6, 12), (5, 1)])
+            self.assertEqual(saved["短路测试"].cell(5, 5).value, 1111)
+            self.assertEqual(saved["短路测试"].cell(6, 5).value, 2222)
+            self.assertEqual(saved["短路测试图片"].cell(1, 1).value, "UH_RT")
+            self.assertEqual(saved["短路测试图片"].cell(12, 1).value, "UL_RT")
+            self.assertEqual(len(saved["短路测试图片"]._images), 2)
 
     def test_short_template_writes_row_and_global_image_slot(self):
         from dpt_extractor.export.report_template import write_report_template

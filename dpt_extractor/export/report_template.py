@@ -444,8 +444,24 @@ def _find_dpt_data_target(
 def _dpt_waveform_group_base(data_ws: Worksheet, group_index: int) -> int:
     base = 1
     for group in _dpt_data_groups(data_ws)[:group_index]:
-        base += max(0, group.end_row - group.start_row) * DPT_WAVEFORM_BLOCK_STRIDE
+        base += _dpt_group_payload_row_count(data_ws, group) * DPT_WAVEFORM_BLOCK_STRIDE
     return base
+
+
+def _dpt_group_payload_row_count(data_ws: Worksheet, group: _DptDataGroup) -> int:
+    return sum(
+        1
+        for row in range(group.start_row, group.end_row)
+        if _data_row_has_payload(data_ws, row)
+    )
+
+
+def _dpt_waveform_row_index(data_ws: Worksheet, group_start_row: int, row: int) -> int:
+    return sum(
+        1
+        for candidate in range(group_start_row, row)
+        if _data_row_has_payload(data_ws, candidate)
+    )
 
 
 def _copy_waveform_row(ws: Worksheet, source_row: int, target_row: int) -> None:
@@ -533,6 +549,70 @@ def _dpt_waveform_label(ws: Worksheet, row: int) -> str:
     return str(_merged_value(ws, row, 1) or "").strip()
 
 
+def _dpt_waveform_block_has_images(ws: Worksheet, anchor_row: int) -> bool:
+    block = CellRange(
+        min_col=1,
+        max_col=max(1, ws.max_column),
+        min_row=anchor_row,
+        max_row=anchor_row + DPT_WAVEFORM_BLOCK_ROWS - 1,
+    )
+    for image in getattr(ws, "_images", []):
+        pos = _image_anchor_position(image)
+        if pos is None:
+            continue
+        row, col = pos
+        if block.min_row <= row <= block.max_row and block.min_col <= col <= block.max_col:
+            return True
+    return False
+
+
+def _phase_temp_parts(label: str) -> tuple[str, str] | None:
+    match = re.fullmatch(r"([UVW][HL])_?(RT|HT|LT)", label.strip().upper())
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _dpt_waveform_block_has_data_match(
+    data_ws: Worksheet,
+    phase_temp_label: str,
+    condition_label: str | None,
+) -> bool:
+    phase_temp = _phase_temp_parts(phase_temp_label)
+    if phase_temp is None:
+        return False
+    phase_code, temp_code = phase_temp
+    vdc, idc = _condition_values(condition_label)
+    if vdc is None or idc is None:
+        return False
+    temp_display = TEMP_LABELS[temp_code][0]
+    for group in _dpt_data_groups(data_ws):
+        if group.phase.upper() != phase_code:
+            continue
+        if group.temp != temp_display:
+            continue
+        for row in range(group.start_row, group.end_row):
+            if _data_row_matches_setpoints(data_ws, row, vdc, idc):
+                return True
+    return False
+
+
+def _dpt_waveform_block_is_reusable(
+    ws: Worksheet,
+    data_ws: Worksheet,
+    anchor_row: int,
+    existing_label: str,
+) -> bool:
+    if _dpt_waveform_block_has_images(ws, anchor_row):
+        return False
+    condition_label = _dpt_waveform_label(ws, anchor_row + 17)
+    return not _dpt_waveform_block_has_data_match(
+        data_ws,
+        existing_label,
+        condition_label,
+    )
+
+
 def _ensure_dpt_waveform_anchor(
     ws: Worksheet,
     data_ws: Worksheet,
@@ -543,12 +623,26 @@ def _ensure_dpt_waveform_anchor(
     idc: float | None,
 ) -> int:
     group_base = _dpt_waveform_group_base(data_ws, target.group_index)
-    anchor_row = group_base + target.row_offset * DPT_WAVEFORM_BLOCK_STRIDE
+    row_index = _dpt_waveform_row_index(data_ws, target.group_start_row, target.row)
+    anchor_row = group_base + row_index * DPT_WAVEFORM_BLOCK_STRIDE
     phase_temp = f"{phase_code}_{temp_code}".upper()
     existing_label = _dpt_waveform_label(ws, anchor_row).upper()
+    mismatched_live_block = (
+        existing_label
+        and existing_label != phase_temp
+        and (
+            target.inserted_row
+            or not _dpt_waveform_block_is_reusable(
+                ws,
+                data_ws,
+                anchor_row,
+                existing_label,
+            )
+        )
+    )
     if (
         anchor_row + DPT_WAVEFORM_BLOCK_ROWS - 1 > ws.max_row
-        or (existing_label and existing_label != phase_temp)
+        or mismatched_live_block
     ):
         _insert_dpt_waveform_block(ws, anchor_row)
 
