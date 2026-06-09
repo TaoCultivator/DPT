@@ -73,6 +73,23 @@ class ReverseRecoveryResult:
 
 
 @dataclass
+class ShortCircuitResult:
+    ic_max: float = 0.0
+    tsc: float = 0.0
+    tsc_start_us: float | None = None
+    tsc_end_us: float | None = None
+    esc_dut: float = 0.0
+    vpeak_dut: float = 0.0
+    esc_other: float = 0.0
+    vpeak_other: float = 0.0
+    desat_time: float | None = None
+    tsc_range: str = ""
+    desat_range: str = ""
+    energy_dut_channel: str = ""
+    energy_other_channel: str = ""
+
+
+@dataclass
 class ExtractResult:
     vdc: float = 0.0
     idc: float = 0.0
@@ -81,6 +98,7 @@ class ExtractResult:
     turn_off: TurnOffResult = field(default_factory=TurnOffResult)
     turn_on: TurnOnResult = field(default_factory=TurnOnResult)
     reverse_recovery: ReverseRecoveryResult = field(default_factory=ReverseRecoveryResult)
+    short_circuit: ShortCircuitResult = field(default_factory=ShortCircuitResult)
     segments: SegmentIndices | None = None
     profile_name: str = ""
     profile_code: str = ""
@@ -91,3 +109,5 @@ class ExtractResult:
     on_pulse_index: int = 2
     #: 单脉冲工况：仅关断参数有效，开通/反向恢复未计算
     single_pulse_mode: bool = False
+    #: 短路工况：使用独立的短路参数表和导出模板
+    short_circuit_mode: bool = False

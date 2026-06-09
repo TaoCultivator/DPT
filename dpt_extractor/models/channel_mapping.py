@@ -39,6 +39,22 @@ def infer_mapping_from_bundle(
     )
 
 
+def infer_short_circuit_mapping_from_bundle(
+    bundle: WaveformBundle | None,
+    bridge: str,
+) -> ChannelMapping | None:
+    """Infer short-circuit mapping from waveform channel labels."""
+    if bundle is None or not bundle.meta.channel_labels:
+        return None
+    from dpt_extractor.io.label_mapping import infer_short_circuit_mapping
+
+    return infer_short_circuit_mapping(
+        bundle.meta.channel_labels,
+        bridge,
+        set(bundle.channels.keys()),
+    )
+
+
 def channels_for_mapping(bundle: WaveformBundle | None) -> list[str]:
     """Channel names available in the mapping UI from the loaded TSS."""
     if bundle is None:

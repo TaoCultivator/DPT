@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 import re
 
@@ -65,6 +66,30 @@ _LOWER_CHANNELS = dict(
     irr_from_ic_minus_il=True,
 )
 
+_SHORT_CIRCUIT_UPPER_CHANNELS = dict(
+    vge="CH1",
+    vce="CH2",
+    ic="CH3",
+    il="",
+    irr="",
+    v_diode="CH5",
+    vge_other="CH6",
+    ic_from_sum_irr_il=False,
+    irr_from_ic_minus_il=False,
+)
+
+_SHORT_CIRCUIT_LOWER_CHANNELS = dict(
+    vge="CH6",
+    vce="CH5",
+    ic="CH3",
+    il="",
+    irr="",
+    v_diode="CH2",
+    vge_other="CH1",
+    ic_from_sum_irr_il=False,
+    irr_from_ic_minus_il=False,
+)
+
 
 def make_profile(phase: str, bridge: str) -> BridgeProfile:
     phase = phase.upper()
@@ -88,6 +113,38 @@ def make_profile(phase: str, bridge: str) -> BridgeProfile:
         bridge=bridge,
         code=code,
         **channels,
+    )
+
+
+def make_short_circuit_profile(phase: str, bridge: str) -> BridgeProfile:
+    phase = phase.upper()
+    bridge = bridge.lower()
+    base = make_profile(phase, bridge)
+    channels = (
+        dict(_SHORT_CIRCUIT_UPPER_CHANNELS)
+        if bridge == "upper"
+        else dict(_SHORT_CIRCUIT_LOWER_CHANNELS)
+    )
+    return replace(
+        base,
+        name=f"{phase.lower}_{bridge}_short_circuit",
+        display_name=f"{base.display_name} 短路",
+        **channels,
+    )
+
+
+def as_short_circuit_profile(profile: BridgeProfile) -> BridgeProfile:
+    """Return a profile using direct short-circuit channels while preserving overrides."""
+    base = make_short_circuit_profile(profile.phase, profile.bridge)
+    return replace(
+        base,
+        vge=profile.vge or base.vge,
+        vce=profile.vce or base.vce,
+        ic=profile.ic if profile.ic and not profile.ic_from_sum_irr_il else base.ic,
+        v_diode=profile.v_diode or base.v_diode,
+        vge_other=profile.vge_other or base.vge_other,
+        ic_from_sum_irr_il=False,
+        irr_from_ic_minus_il=False,
     )
 
 

@@ -57,6 +57,29 @@ class TestRecentPaths(unittest.TestCase):
         self.assertEqual(last_open_path(), tss.resolve())
         self.assertEqual(open_dialog_start_dir("/fallback"), str(tss.parent.resolve()))
 
+    def test_report_template_source_roundtrip(self):
+        from dpt_extractor.gui.recent_paths import (
+            report_template_source_path,
+            set_report_template_source_path,
+        )
+
+        template = Path(self._td.name) / "templates" / "project_template.xlsx"
+        template.parent.mkdir(parents=True)
+        template.write_bytes(b"")
+        set_report_template_source_path(template)
+        self.assertEqual(report_template_source_path(), template.resolve())
+
+    def test_report_output_path_can_point_to_future_file(self):
+        from dpt_extractor.gui.recent_paths import (
+            report_output_path,
+            set_report_output_path,
+        )
+
+        report = Path(self._td.name) / "reports" / "Project_A_Report.xlsx"
+        report.parent.mkdir(parents=True)
+        set_report_output_path(report)
+        self.assertEqual(report_output_path(), report.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()

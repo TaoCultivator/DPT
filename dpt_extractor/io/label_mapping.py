@@ -341,3 +341,90 @@ def infer_channel_mapping(
     if not m.vge or not m.vce or not m.il:
         return None
     return m
+
+
+def infer_short_circuit_mapping(
+    labels: dict[str, str],
+    bridge: str,
+    available: set[str] | None = None,
+) -> ChannelMapping | None:
+    """
+    根据示波器 Label 推断短路测试映射。
+
+    短路模式只需要 DUT Vge/Vce、短路电流 Ic、对管 Vce/Vge；不使用双脉冲
+    IL/Irr 的组合电流逻辑。
+    """
+    if not labels:
+        return None
+
+    avail = {ch.upper() for ch in (available or set(labels.keys()))}
+    labeled = [
+        (ch.upper(), _norm_label(lab))
+        for ch, lab in labels.items()
+        if ch.upper() in avail and _is_raw_scope_channel(ch) and lab
+    ]
+    if not labeled:
+        return None
+
+    is_upper = bridge.lower() == "upper"
+    used: set[str] = set()
+    if is_upper:
+        m = ChannelMapping(
+            vge="CH1",
+            vce="CH2",
+            ic="CH3",
+            il="",
+            irr="",
+            v_diode="CH5",
+            vge_other="CH6",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+        vge_p = _UPPER_VGE_PATTERNS
+        vce_p = _UPPER_VCE_PATTERNS
+        vdiode_p = _UPPER_VDIODE_PATTERNS
+        vge_other_p = _UPPER_VGE_OTHER_PATTERNS
+    else:
+        m = ChannelMapping(
+            vge="CH6",
+            vce="CH5",
+            ic="CH3",
+            il="",
+            irr="",
+            v_diode="CH2",
+            vge_other="CH1",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+        vge_p = _LOWER_VGE_PATTERNS
+        vce_p = _LOWER_VCE_PATTERNS
+        vdiode_p = _LOWER_VDIODE_PATTERNS
+        vge_other_p = _LOWER_VGE_OTHER_PATTERNS
+
+    for attr, patterns in (
+        ("vge", vge_p),
+        ("vce", vce_p),
+        ("v_diode", vdiode_p),
+        ("vge_other", vge_other_p),
+    ):
+        ch = _pick_channel(labeled, patterns, used)
+        if ch:
+            setattr(m, attr, ch)
+            used.add(ch)
+
+    current = _pick_channel(
+        labeled,
+        _LOWER_TOTAL_IC_PATTERNS + _UPPER_LOWER_ARM_PATTERNS,
+        used,
+        exclude_norm=_IL_PATTERNS,
+    )
+    if not current:
+        current = _fallback_raw_channel(avail, "CH3", used)
+    if current:
+        m.ic = current
+        used.add(current)
+
+    required = (m.vge, m.vce, m.ic, m.v_diode, m.vge_other)
+    if not all(ch and ch.upper() in avail for ch in required):
+        return None
+    return m

@@ -71,4 +71,6 @@ def bundle_reverse_recovery_current(
     """Reverse recovery current: mapped Irr column, or Ic − IL when irr_from_ic_minus_il."""
     if profile.irr_from_ic_minus_il:
         return bundle_total_current(bundle, profile) - bundle.get(profile.il)
+    if not profile.irr:
+        return np.zeros_like(bundle.t, dtype=np.float64)
     return bundle.get(profile.irr)

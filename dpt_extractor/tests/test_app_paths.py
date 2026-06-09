@@ -8,7 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dpt_extractor.utils.app_paths import (
+    copy_default_report_template,
+    copy_report_template,
     configure_numba_cache_dir,
+    default_report_template_path,
     default_config_path,
     package_config_dir,
     user_channel_maps_path,
@@ -21,6 +24,36 @@ class TestAppPaths(unittest.TestCase):
         p = default_config_path()
         self.assertTrue(p.is_file(), p)
         self.assertEqual(p.name, "default.yaml")
+
+    def test_default_report_template_exists_in_dev(self):
+        p = default_report_template_path()
+        self.assertTrue(p.is_file(), p)
+        self.assertEqual(p.name, "默认报告模板.xlsx")
+
+    def test_copy_default_report_template_adds_xlsx_suffix(self):
+        with tempfile.TemporaryDirectory() as td:
+            dst = Path(td) / "generated_report"
+            copied = copy_default_report_template(dst)
+            self.assertEqual(copied, dst.with_suffix(".xlsx"))
+            self.assertTrue(copied.is_file())
+            self.assertEqual(
+                copied.stat().st_size,
+                default_report_template_path().stat().st_size,
+            )
+
+    def test_copy_default_report_template_rejects_source_path(self):
+        with self.assertRaises(ValueError):
+            copy_default_report_template(default_report_template_path())
+
+    def test_copy_report_template_uses_selected_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "private_template.xlsx"
+            src.write_bytes(b"template")
+            dst = root / "reports" / "project_report.xlsx"
+            copied = copy_report_template(src, dst)
+            self.assertEqual(copied, dst)
+            self.assertEqual(copied.read_bytes(), b"template")
 
     def test_user_paths_under_local_appdata_on_windows(self):
         ud = user_data_dir()

@@ -3,10 +3,12 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+import re
+import tempfile
 import time
 import numpy as np
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, Qt, pyqtSignal
 from PyQt6.QtGui import QResizeEvent
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -30,21 +32,37 @@ from PyQt6.QtWidgets import (
 
 from dpt_extractor.config.loader import AppConfig, load_config
 from dpt_extractor.export.excel_export import default_export_path, export_to_excel
+from dpt_extractor.export.report_template import (
+    DPT_OVERVIEW_IMAGE_PARAM,
+    DPT_REPORT_IMAGE_PARAMS,
+    SHORT_REPORT_IMAGE_PARAMS,
+    ReportWriteSummary,
+    write_report_template,
+)
 from dpt_extractor.gui.channel_mapping_dialog import resolve_profile
 from dpt_extractor.gui.recent_paths import (
     open_dialog_start_dir,
+    report_output_path,
+    report_template_source_path,
     save_dialog_initial_path,
     set_last_export_path,
     set_last_open_path,
+    set_report_output_path,
+    set_report_template_source_path,
 )
 from dpt_extractor.gui.result_table import ResultTable
 from dpt_extractor.gui.theme import DARK_STYLESHEET, SUMMARY_STYLE
 from dpt_extractor.gui.waveform_plot import WaveformPlot
+from dpt_extractor.utils.app_paths import (
+    copy_report_template,
+    default_report_template_path,
+)
 from dpt_extractor.models.channel_mapping import (
     LOGICAL_SIGNAL_KEYS,
     ChannelMapping,
     ChannelMappingStore,
     apply_mapping,
+    infer_short_circuit_mapping_from_bundle,
     validate_mapping,
 )
 from dpt_extractor.io.waveform_loader import load_waveform
@@ -52,6 +70,7 @@ from dpt_extractor.models.bridge_profile import (
     PHASES,
     UPPER_BRIDGE,
     BridgeProfile,
+    as_short_circuit_profile,
     guess_profile_from_path,
     make_profile,
 )
@@ -96,7 +115,16 @@ from dpt_extractor.metrics.plateau_level import _turn_on_vce_pre_fall_slice
 from dpt_extractor.models.test_mode import MODE_UI_LABELS, TestMode, parse_test_mode
 from dpt_extractor.pipeline.extract import _turn_on_delta_vce_knee_point
 from dpt_extractor.pipeline.run_extract import run_extraction
-from dpt_extractor.pipeline.short_circuit_extract import ShortCircuitExtractNotReady
+from dpt_extractor.pipeline.short_circuit_extract import (
+    ShortCircuitExtractNotReady,
+    find_desat_voltage_channel,
+    short_circuit_current_cursors,
+    short_circuit_energy_value,
+    short_circuit_vpeak_cursors,
+)
+
+
+REPORT_PLOT_CAPTURE_SIZE = QSize(1280, 960)
 
 
 @dataclass
@@ -109,8 +137,15 @@ class _WaveformLoadOutcome:
     mapping_custom: bool
     result: ExtractResult | None
     short_circuit_not_ready: bool
+    extraction_error: str
     load_ms: float
     extract_ms: float
+
+
+def _profile_for_test_mode(profile: BridgeProfile, cfg: AppConfig) -> BridgeProfile:
+    if parse_test_mode(cfg.test_mode.mode) == TestMode.SHORT_CIRCUIT:
+        return as_short_circuit_profile(profile)
+    return profile
 
 
 def _compute_waveform_load_outcome(
@@ -130,14 +165,32 @@ def _compute_waveform_load_outcome(
         if custom_mapping is not None
         else base_profile
     )
+    inferred = None
+    if (
+        custom_mapping is None
+        and parse_test_mode(cfg.test_mode.mode) == TestMode.SHORT_CIRCUIT
+    ):
+        inferred = infer_short_circuit_mapping_from_bundle(bundle, guessed.bridge)
+        if inferred is not None:
+            profile = apply_mapping(as_short_circuit_profile(base_profile), inferred)
+        else:
+            profile = as_short_circuit_profile(profile)
+    else:
+        profile = _profile_for_test_mode(profile, cfg)
 
     extract_t0 = time.perf_counter()
+    extraction_error = ""
     try:
         result = run_extraction(bundle, profile, cfg)
         short_circuit_not_ready = False
-    except ShortCircuitExtractNotReady:
+    except ShortCircuitExtractNotReady as exc:
         result = None
         short_circuit_not_ready = True
+        extraction_error = str(exc) or "短路参数提取未返回结果"
+    except Exception as exc:
+        result = None
+        short_circuit_not_ready = False
+        extraction_error = str(exc) or exc.__class__.__name__
     extract_t1 = time.perf_counter()
 
     return _WaveformLoadOutcome(
@@ -145,10 +198,11 @@ def _compute_waveform_load_outcome(
         bundle=bundle,
         guessed=guessed,
         profile=profile,
-        inferred=None,
+        inferred=inferred,
         mapping_custom=mapping_custom,
         result=result,
         short_circuit_not_ready=short_circuit_not_ready,
+        extraction_error=extraction_error,
         load_ms=(load_t1 - load_t0) * 1000.0,
         extract_ms=(extract_t1 - extract_t0) * 1000.0,
     )
@@ -184,6 +238,57 @@ class _WaveformLoadTask(QRunnable):
         self.signals.finished.emit(self.request_id, outcome)
 
 
+class _ReportWriteSignals(QObject):
+    finished = pyqtSignal(int, object, float)
+    failed = pyqtSignal(int, str)
+
+
+class _ReportWriteTask(QRunnable):
+    def __init__(
+        self,
+        request_id: int,
+        result: ExtractResult,
+        report_path: Path,
+        images: dict[tuple[str, str], Path],
+        tempdir: tempfile.TemporaryDirectory,
+        target_screen_width_px: int | None,
+    ) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.result = result
+        self.report_path = report_path
+        self.images = images
+        self.tempdir = tempdir
+        self.target_screen_width_px = target_screen_width_px
+        self.signals = _ReportWriteSignals()
+
+    def run(self) -> None:
+        t0 = time.perf_counter()
+        try:
+            summary = write_report_template(
+                self.result,
+                self.report_path,
+                images=self.images,
+                target_screen_width_px=self.target_screen_width_px,
+            )
+        except PermissionError as exc:
+            self.signals.failed.emit(
+                self.request_id,
+                "无法保存报告文件，通常是这个 .xlsx 正在被 Excel 打开或没有写入权限。\n"
+                "请先关闭该报告文件，再点击“写入报告”。\n\n"
+                f"文件:\n{self.report_path}\n\n"
+                f"错误:\n{exc}",
+            )
+            return
+        except Exception as exc:
+            self.signals.failed.emit(self.request_id, str(exc))
+            return
+        finally:
+            self.tempdir.cleanup()
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        self.signals.finished.emit(self.request_id, summary, elapsed_ms)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -201,6 +306,8 @@ class MainWindow(QMainWindow):
         self.profile: BridgeProfile = UPPER_BRIDGE
         self.result: ExtractResult | None = None
         self._current_path: str = ""
+        self._report_template_source_path: Path | None = report_template_source_path()
+        self._report_output_path: Path | None = report_output_path()
         self._channel_store = ChannelMappingStore()
         self._mapping_custom = False
         self._slope_ranges = default_slope_ranges()
@@ -222,6 +329,8 @@ class MainWindow(QMainWindow):
         self._active_slope_param: tuple[str, str] | None = None
         self._load_request_id = 0
         self._load_tasks: dict[int, _WaveformLoadTask] = {}
+        self._report_request_id = 0
+        self._report_tasks: dict[int, _ReportWriteTask] = {}
         self._load_pool = QThreadPool.globalInstance()
 
         self._build_ui()
@@ -242,9 +351,9 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         self.wave_plot = WaveformPlot()
 
-        toolbar = QFrame()
-        toolbar.setObjectName("toolbar")
-        tb_root = QVBoxLayout(toolbar)
+        self.toolbar = QFrame()
+        self.toolbar.setObjectName("toolbar")
+        tb_root = QVBoxLayout(self.toolbar)
         tb_root.setContentsMargins(8, 6, 8, 6)
         tb_root.setSpacing(4)
 
@@ -282,9 +391,20 @@ class MainWindow(QMainWindow):
         self.spin_vdc.valueChanged.connect(self._on_vdc_changed)
 
         self.btn_recalc = QPushButton("↻  重新计算")
+        self.btn_recalc.setToolTip("按当前设置重新计算全部参数")
         self.btn_recalc.clicked.connect(lambda: self._recalculate(reset_manual=True))
         self.btn_export = QPushButton("💾  导出 Excel")
+        self.btn_export.setToolTip("导出当前结果到 Excel")
         self.btn_export.clicked.connect(self._export_excel)
+        self.btn_select_report_template = QPushButton("📄  加载模板")
+        self.btn_select_report_template.clicked.connect(self._select_report_template)
+        self.btn_select_report_output = QPushButton("📁  报告位置")
+        self.btn_select_report_output.clicked.connect(self._select_report_output_path)
+        self.btn_write_report = QPushButton("📝  写入报告")
+        self.btn_write_report.setToolTip("将当前结果写入已设置的项目报告文件")
+        self.btn_write_report.clicked.connect(self._write_report_template)
+        self._update_report_template_tooltip()
+        self._update_report_output_tooltip()
 
         self.lbl_map_status = QLabel("")
         self.lbl_map_status.setStyleSheet("color:#f9e2af;font-size:11px;")
@@ -295,19 +415,25 @@ class MainWindow(QMainWindow):
         row1 = QHBoxLayout()
         row1.setSpacing(6)
         row1.addWidget(self.btn_open)
-        row1.addWidget(QLabel("相别"))
+        self.lbl_phase = QLabel("相别")
+        row1.addWidget(self.lbl_phase)
         row1.addWidget(self.combo_phase)
-        row1.addWidget(QLabel("桥臂"))
+        self.lbl_bridge = QLabel("桥臂")
+        row1.addWidget(self.lbl_bridge)
         row1.addWidget(self.combo_bridge)
-        row1.addWidget(QLabel("判据"))
+        self.lbl_std = QLabel("判据")
+        row1.addWidget(self.lbl_std)
         row1.addWidget(self.combo_std)
-        row1.addWidget(QLabel("Vdc"))
+        self.lbl_vdc = QLabel("Vdc")
+        row1.addWidget(self.lbl_vdc)
         row1.addWidget(self.spin_vdc)
         row1.addWidget(self.btn_recalc)
         row1.addWidget(self.btn_export)
-        row1.addWidget(self._build_context_menu_selector())
+        row1.addWidget(self.btn_select_report_template)
+        row1.addWidget(self.btn_select_report_output)
+        row1.addWidget(self.btn_write_report)
         row1.addWidget(self.lbl_map_status, stretch=1)
-        row1.addWidget(QLabel("测试"))
+        self.lbl_test_mode = QLabel("测试")
         self.combo_test_mode = QComboBox()
         for mode in (TestMode.DPT, TestMode.SHORT_CIRCUIT):
             self.combo_test_mode.addItem(MODE_UI_LABELS[mode], mode.value)
@@ -319,10 +445,9 @@ class MainWindow(QMainWindow):
         self.combo_test_mode.setMinimumContentsLength(8)
         self.combo_test_mode.setMaximumWidth(112)
         self.combo_test_mode.setToolTip(
-            "双脉冲与短路测试使用独立计算流程；短路功能后续开放"
+            "双脉冲与短路测试使用独立计算流程"
         )
         self.combo_test_mode.currentIndexChanged.connect(self._on_test_mode_changed)
-        row1.addWidget(self.combo_test_mode)
 
         pulse_sep = QFrame()
         pulse_sep.setFrameShape(QFrame.Shape.VLine)
@@ -367,7 +492,15 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.spin_off_pulse)
         row2.addWidget(self.lbl_on_pulse)
         row2.addWidget(self.spin_on_pulse)
+        self.context_menu_selector = self._build_context_menu_selector()
+        row2.addWidget(self.context_menu_selector)
+        row2.addWidget(self.lbl_test_mode)
+        row2.addWidget(self.combo_test_mode)
         row2.addStretch(1)
+
+        self._toolbar_rows = (row1, row2)
+        self._toolbar_density_bucket: str | None = None
+        self._toolbar_text_mode: str | None = None
 
         tb_root.addLayout(row1)
         tb_root.addLayout(row2)
@@ -401,39 +534,30 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(toolbar)
+        layout.addWidget(self.toolbar)
         layout.addWidget(splitter, stretch=1)
         self.setCentralWidget(root)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("请打开 Tektronix TSS 会话文件")
+        self._apply_toolbar_density(self.width() or 1400)
         self._apply_test_mode_ui()
 
     def _build_context_menu_selector(self) -> QWidget:
         box = QFrame()
         box.setObjectName("contextMenuSelector")
-        box.setStyleSheet(
-            "QFrame#contextMenuSelector{background:#2a2a2a;"
-            "border:1px solid #585858;border-radius:5px;}"
-            "QLabel#contextMenuSelectorLabel{color:#aeb6d8;font-size:12px;"
-            "padding-left:8px;padding-right:2px;}"
-            "QPushButton#contextMenuSelectorButton{background:#3d3d3d;"
-            "color:#f0f0f0;border:1px solid #6a6a6a;border-radius:5px;"
-            "padding:4px 10px;min-height:26px;min-width:52px;}"
-            "QPushButton#contextMenuSelectorButton:hover{background:#505050;}"
-            "QPushButton#contextMenuSelectorButton:checked{background:#28bce8;"
-            "color:#061014;border-color:#8fd3ff;}"
-        )
         lay = QHBoxLayout(box)
         lay.setContentsMargins(4, 3, 4, 3)
         lay.setSpacing(4)
 
         label = QLabel("功能菜单")
         label.setObjectName("contextMenuSelectorLabel")
+        self._context_menu_label = label
         lay.addWidget(label)
 
         group = QButtonGroup(box)
         group.setExclusive(True)
         self._context_menu_button_group = group
+        self._context_menu_buttons: list[QPushButton] = []
         for text, key, tip in (
             ("光标", "cursor", "右键菜单显示光标类型、模式与配置"),
             ("缩放", "zoom", "右键菜单显示框选局部放大、水平缩放与重置"),
@@ -457,13 +581,167 @@ class MainWindow(QMainWindow):
                 )
                 group.addButton(btn)
             lay.addWidget(btn)
+            self._context_menu_buttons.append(btn)
             if key == self.wave_plot.context_menu_group():
                 btn.setChecked(True)
         return box
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._apply_toolbar_density(event.size().width())
         self._sync_splitter_sizes()
+
+    def _apply_toolbar_density(self, window_width: int) -> None:
+        """Keep the top controls legible without letting them overrun small screens."""
+        if not hasattr(self, "toolbar"):
+            return
+        if window_width < 900:
+            bucket = "tiny"
+            font_px = 10
+            label_px = 10
+            min_h = 22
+            pad_v = 2
+            pad_h = 6
+            spacing = 3
+            combo_std_w = 122
+            spin_vdc_w = 92
+            test_w = 96
+            context_min_w = 38
+            context_pad_h = 5
+            show_context_label = False
+            show_map_status = False
+            text_mode = "tiny"
+        elif window_width < 1180:
+            bucket = "compact"
+            font_px = 11
+            label_px = 11
+            min_h = 24
+            pad_v = 3
+            pad_h = 8
+            spacing = 4
+            combo_std_w = 142
+            spin_vdc_w = 104
+            test_w = 104
+            context_min_w = 44
+            context_pad_h = 7
+            show_context_label = False
+            show_map_status = False
+            text_mode = "compact"
+        elif window_width < 1500:
+            bucket = "medium"
+            font_px = 12
+            label_px = 12
+            min_h = 26
+            pad_v = 4
+            pad_h = 10
+            spacing = 5
+            combo_std_w = 156
+            spin_vdc_w = 112
+            test_w = 108
+            context_min_w = 48
+            context_pad_h = 8
+            show_context_label = True
+            show_map_status = True
+            text_mode = "medium"
+        else:
+            bucket = "full"
+            font_px = 13
+            label_px = 12
+            min_h = 28
+            pad_v = 5
+            pad_h = 14
+            spacing = 6
+            combo_std_w = 168
+            spin_vdc_w = 118
+            test_w = 112
+            context_min_w = 52
+            context_pad_h = 10
+            show_context_label = True
+            show_map_status = True
+            text_mode = "full"
+
+        if self._toolbar_text_mode != text_mode:
+            if text_mode == "tiny":
+                self.btn_open.setText("打开")
+                self.btn_recalc.setText("重算")
+                self.btn_export.setText("导出")
+                self.btn_select_report_template.setText("模板")
+                self.btn_select_report_output.setText("位置")
+                self.btn_write_report.setText("写入")
+            elif text_mode == "compact":
+                self.btn_open.setText("打开文件")
+                self.btn_recalc.setText("重算")
+                self.btn_export.setText("导出")
+                self.btn_select_report_template.setText("模板")
+                self.btn_select_report_output.setText("位置")
+                self.btn_write_report.setText("写报告")
+            elif text_mode == "medium":
+                self.btn_open.setText("打开文件")
+                self.btn_recalc.setText("重新计算")
+                self.btn_export.setText("导出 Excel")
+                self.btn_select_report_template.setText("加载模板")
+                self.btn_select_report_output.setText("报告位置")
+                self.btn_write_report.setText("写入报告")
+            else:
+                self.btn_open.setText("📂  打开文件")
+                self.btn_recalc.setText("↻  重新计算")
+                self.btn_export.setText("💾  导出 Excel")
+                self.btn_select_report_template.setText("📄  加载模板")
+                self.btn_select_report_output.setText("📁  报告位置")
+                self.btn_write_report.setText("📝  写入报告")
+            self._toolbar_text_mode = text_mode
+
+        if self._toolbar_density_bucket == bucket:
+            return
+        self._toolbar_density_bucket = bucket
+
+        for row in self._toolbar_rows:
+            row.setSpacing(spacing)
+        self.combo_std.setMaximumWidth(combo_std_w)
+        self.spin_vdc.setMaximumWidth(spin_vdc_w)
+        self.combo_test_mode.setMaximumWidth(test_w)
+        self.lbl_map_status.setVisible(show_map_status)
+        self._context_menu_label.setVisible(show_context_label)
+
+        self.toolbar.setStyleSheet(
+            f"""
+            QFrame#toolbar QLabel {{
+                font-size: {label_px}px;
+            }}
+            QFrame#toolbar QPushButton {{
+                font-size: {font_px}px;
+                padding: {pad_v}px {pad_h}px;
+                min-height: {min_h}px;
+            }}
+            QFrame#toolbar QComboBox,
+            QFrame#toolbar QDoubleSpinBox,
+            QFrame#toolbar QSpinBox {{
+                background-color: #313244;
+                color: #cdd6f4;
+                border: 1px solid #45475a;
+                border-radius: 4px;
+                font-size: {font_px}px;
+                padding: {max(2, pad_v)}px {max(5, pad_h - 2)}px;
+                min-height: {min_h}px;
+            }}
+            QFrame#toolbar QSpinBox {{
+                min-width: {34 if bucket == "tiny" else 38}px;
+            }}
+            """
+        )
+        self.context_menu_selector.setStyleSheet(
+            "QFrame#contextMenuSelector{background:#2a2a2a;"
+            "border:1px solid #585858;border-radius:5px;}"
+            f"QLabel#contextMenuSelectorLabel{{color:#aeb6d8;font-size:{label_px}px;"
+            "padding-left:6px;padding-right:2px;}"
+            "QPushButton#contextMenuSelectorButton{background:#3d3d3d;"
+            "color:#f0f0f0;border:1px solid #6a6a6a;border-radius:5px;"
+            f"padding:{max(2, pad_v)}px {context_pad_h}px;"
+            f"min-height:{min_h}px;min-width:{context_min_w}px;}}"
+            "QPushButton#contextMenuSelectorButton:hover{background:#505050;}"
+            "QPushButton#contextMenuSelectorButton:checked{background:#28bce8;"
+            "color:#061014;border-color:#8fd3ff;}"
+        )
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
         sizes = self.splitter.sizes()
@@ -536,6 +814,7 @@ class MainWindow(QMainWindow):
         if data is not None:
             self.cfg.test_mode.mode = str(data)
         self._apply_test_mode_ui()
+        self.profile = self._current_profile()
         if self.bundle is not None:
             self._recalculate(reset_manual=True)
 
@@ -544,11 +823,10 @@ class MainWindow(QMainWindow):
         for w in self._pulse_toolbar_widgets:
             w.setEnabled(is_dpt)
             w.setVisible(is_dpt)
-        self.btn_export.setEnabled(is_dpt)
         if not is_dpt:
-            self.btn_export.setToolTip("短路计算模式下暂不支持导出（功能开发中）")
+            self.btn_export.setToolTip("导出短路测试 Excel")
         else:
-            self.btn_export.setToolTip("")
+            self.btn_export.setToolTip("导出当前结果到 Excel")
 
     def _on_pulse_spin_changed(self, _value: int) -> None:
         if parse_test_mode(self.cfg.test_mode.mode) != TestMode.DPT:
@@ -581,6 +859,21 @@ class MainWindow(QMainWindow):
         phase = self.combo_phase.currentData()
         bridge = self.combo_bridge.currentData()
         profile, custom = resolve_profile(phase, bridge, self._channel_store)
+        if (
+            not custom
+            and self.bundle is not None
+            and parse_test_mode(self.cfg.test_mode.mode) == TestMode.SHORT_CIRCUIT
+        ):
+            inferred = infer_short_circuit_mapping_from_bundle(self.bundle, bridge)
+            if inferred is not None:
+                profile = apply_mapping(
+                    as_short_circuit_profile(make_profile(phase, bridge)),
+                    inferred,
+                )
+            else:
+                profile = as_short_circuit_profile(profile)
+        else:
+            profile = _profile_for_test_mode(profile, self.cfg)
         self._mapping_custom = custom
         self._update_map_status_label()
         return profile
@@ -695,6 +988,7 @@ class MainWindow(QMainWindow):
         self.profile, self._mapping_custom = resolve_profile(
             profile.phase, profile.bridge, self._channel_store
         )
+        self.profile = _profile_for_test_mode(self.profile, self.cfg)
         self._update_map_status_label()
 
     def _open_waveform(self) -> None:
@@ -719,11 +1013,22 @@ class MainWindow(QMainWindow):
     def _set_load_busy(self, busy: bool, path: str = "") -> None:
         self.btn_open.setEnabled(not busy)
         self.btn_recalc.setEnabled(not busy)
-        self.btn_export.setEnabled(
-            (not busy) and parse_test_mode(self.cfg.test_mode.mode) == TestMode.DPT
-        )
+        self.btn_export.setEnabled(not busy)
+        self.btn_select_report_template.setEnabled(not busy)
+        self.btn_select_report_output.setEnabled(not busy)
+        self.btn_write_report.setEnabled(not busy)
         if busy:
             self.statusBar().showMessage(f"正在后台加载: {Path(path).name}")
+
+    def _set_report_busy(self, busy: bool) -> None:
+        self.btn_open.setEnabled(not busy)
+        self.btn_recalc.setEnabled(not busy)
+        self.btn_export.setEnabled(not busy)
+        self.btn_select_report_template.setEnabled(not busy)
+        self.btn_select_report_output.setEnabled(not busy)
+        self.btn_write_report.setEnabled(not busy)
+        if busy:
+            self.statusBar().showMessage("正在后台写入报告...")
 
     def _start_background_load(self, path: str) -> None:
         self._load_request_id += 1
@@ -784,15 +1089,25 @@ class MainWindow(QMainWindow):
         outcome: _WaveformLoadOutcome,
         inferred: ChannelMapping | None,
     ) -> str:
+        extract_label = "提取" if outcome.result is not None else "参数尝试"
         msg = (
             f"已加载: {Path(outcome.path).name}  |  "
-            f"读取 {outcome.load_ms:.0f} ms  提取 {outcome.extract_ms:.0f} ms"
+            f"读取 {outcome.load_ms:.0f} ms  {extract_label} {outcome.extract_ms:.0f} ms"
         )
         if outcome.mapping_custom:
             msg += "（已应用自定义通道映射）"
+        elif inferred is not None:
+            msg += "（已按 TSS 标签识别短路通道）"
+        if outcome.result is None:
+            reason = outcome.extraction_error or "当前波形不满足该模式的自动计算条件"
+            msg += f"（参数未计算：{reason}）"
         if outcome.bundle.meta.channel_vdiv:
             msg += f"（已应用 TSS 垂直刻度 {len(outcome.bundle.meta.channel_vdiv)} 通道）"
         return msg
+
+    def _extraction_placeholder_detail(self, error: str) -> str:
+        reason = error.strip() or "当前波形不满足该模式的自动计算条件。"
+        return f"当前波形已加载，参数未计算。原因：{reason}"
 
     def _apply_loaded_waveform(self, outcome: _WaveformLoadOutcome) -> None:
         path = outcome.path
@@ -814,18 +1129,21 @@ class MainWindow(QMainWindow):
         self._clear_manual_adjustments()
         set_last_open_path(path)
 
-        if outcome.short_circuit_not_ready:
-            self.result = None
-            self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
-            self.result_table.set_mode_placeholder(
-                "短路计算",
-                "功能开发中。当前仅显示波形，参数提取与 Excel 导出将在后续版本提供。",
-            )
-            self.statusBar().showMessage("短路计算：功能开发中，当前仅显示波形")
-            return
-
         if outcome.result is None:
-            raise ValueError("提取失败：后台任务未返回参数结果")
+            self.result = None
+            mode_label = MODE_UI_LABELS[parse_test_mode(self.cfg.test_mode.mode)]
+            self.result_table.set_mode_placeholder(
+                mode_label,
+                self._extraction_placeholder_detail(outcome.extraction_error),
+            )
+            self.result_table.setMaximumWidth(
+                self.result_table.preferred_panel_width()
+            )
+            if not self._splitter_user_moved:
+                self._sync_splitter_sizes()
+            self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
+            self.statusBar().showMessage(self._loaded_status_message(outcome, inferred))
+            return
         self.result = outcome.result
         self.result_table.set_result(self.result)
         if self.result.detected_pulse_count > 0:
@@ -895,6 +1213,19 @@ class MainWindow(QMainWindow):
         )
 
     def _on_value_clicked(self, section: str, name: str) -> None:
+        if self.result is not None and self.result.short_circuit_mode:
+            if (
+                section == "短路过程"
+                and name == "Desat动作时间"
+                and not self._short_desat_image_available()
+            ):
+                self.wave_plot.disable_interactive_cursors()
+                self.statusBar().showMessage(
+                    "短路过程-Desat动作时间: 缺少 Desat 波形通道或参数值，已跳过截图"
+                )
+                return
+            self._enable_generic_parameter_interaction(section, name)
+            return
         if (
             self.result is not None
             and self.result.single_pulse_mode
@@ -2414,6 +2745,18 @@ class MainWindow(QMainWindow):
 
     def _channel_for_param(self, section: str, name: str) -> str:
         """参数 → 波形通道（用于横向光标按该通道 V/div 换算定位）。"""
+        if section == "短路过程":
+            if name == "短路电流Imax":
+                return "ic"
+            if name in {"短路能量Esc_本管", "短路能量Esc_对管"}:
+                return "ic"
+            if name == "应力Vpeak_本管":
+                return "vce"
+            if name == "应力Vpeak_对管":
+                return "v_diode"
+            if name == "Desat动作时间":
+                return self._short_circuit_desat_channel() or "ic"
+            return "ic"
         if name in {"Ic_off_max", "Ic_on_max", "开通电流"}:
             return "ic"
         if name in {"Vce_off_max", "Vce_on_max", "ΔVce"}:
@@ -2553,6 +2896,47 @@ class MainWindow(QMainWindow):
         if interval is None:
             return
         t = self.bundle.t
+        short_ic_cursor_names = {
+            "短路电流Imax",
+            "短路时间Tsc",
+            "短路能量Esc_本管",
+            "短路能量Esc_对管",
+        }
+        short_current_level_names = {
+            "短路电流Imax",
+            "短路时间Tsc",
+            "短路能量Esc_本管",
+            "短路能量Esc_对管",
+        }
+        short_vpeak_channels = {
+            "应力Vpeak_本管": self.profile.vce,
+        }
+        short_voltage_cursor_channels = {
+            "应力Vpeak_对管": self.profile.v_diode,
+        }
+        desat_channel = self._short_circuit_desat_channel()
+        if desat_channel is not None:
+            short_voltage_cursor_channels["Desat动作时间"] = desat_channel
+        is_short_ic_cursor_param = (
+            self.result.short_circuit_mode
+            and section == "短路过程"
+            and name in short_ic_cursor_names
+        )
+        is_short_current_level_param = (
+            self.result.short_circuit_mode
+            and section == "短路过程"
+            and name in short_current_level_names
+        )
+        short_voltage_cursor_channel = (
+            short_voltage_cursor_channels.get(name)
+            if self.result.short_circuit_mode and section == "短路过程"
+            else None
+        )
+        short_vpeak_channel = (
+            short_vpeak_channels.get(name)
+            if self.result.short_circuit_mode and section == "短路过程"
+            else None
+        )
 
         def _idx_from_t_us(t_us: float) -> int:
             ts = t_us * 1e-6
@@ -2578,8 +2962,30 @@ class MainWindow(QMainWindow):
                     channel=self._channel_for_param(section, name),
                     t0_us=ta,
                     t1_us=tb,
-                    use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
+                    use_abs_peak=name in {"Ic_off_max", "Ic_on_max"}
+                    or is_short_current_level_param,
                 )
+            if is_short_current_level_param:
+                cursors = self._short_circuit_ic_default_cursors()
+                if cursors is not None:
+                    _ta, _tb, hb, _ha = cursors
+                    self.wave_plot.set_interval_base_horizontal(hb, channel="ic")
+            elif short_vpeak_channel is not None:
+                cursors = self._short_circuit_vpeak_default_cursors(
+                    short_vpeak_channel
+                )
+                if cursors is not None:
+                    _ta, _tb, hb, _ha = cursors
+                    self.wave_plot.set_interval_base_horizontal(hb, channel="vge")
+            elif short_voltage_cursor_channel is not None:
+                cursors = self._short_circuit_waveform_default_cursors(
+                    short_voltage_cursor_channel
+                )
+                if cursors is not None:
+                    _ta, _tb, hb, _ha = cursors
+                    self.wave_plot.set_interval_base_horizontal(
+                        hb, channel=self._channel_for_param(section, name)
+                    )
             if section == "关断过程" and name in {"Ic_off_max", "Vce_off_max"} and self.result is not None:
                 cur = (
                     self.result.turn_off.ic_off_max
@@ -2617,13 +3023,30 @@ class MainWindow(QMainWindow):
         # 若该参数此前手动调整过，恢复手动区间而非默认窗口
         restored = self._manual_intervals.get((section, name))
         t0_us, t1_us = restored if restored is not None else interval
-        self.wave_plot.focus_interval_us(t0_us, t1_us)
+        is_short_circuit_param = (
+            self.result.short_circuit_mode and section == "短路过程"
+        )
+        if not is_short_circuit_param:
+            self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_interval_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
             on_change=_on_interval_change,
             show_horizontal_peak=name
-            in {"Ic_off_max", "Vce_off_max", "Ic_on_max", "Vce_on_max", "Vrr"},
+            in {
+                "Ic_off_max",
+                "Vce_off_max",
+                "Ic_on_max",
+                "Vce_on_max",
+                "Vrr",
+                "短路电流Imax",
+                "短路时间Tsc",
+                "短路能量Esc_本管",
+                "应力Vpeak_本管",
+                "短路能量Esc_对管",
+                "应力Vpeak_对管",
+                "Desat动作时间",
+            },
         )
         # IEC 时间参数：点击仅对齐 A/B 光标；拖动 A/B 时由 on_change 重算并联动
         _MAX_INTERVAL_NAMES = {
@@ -2632,7 +3055,11 @@ class MainWindow(QMainWindow):
             "Ic_on_max",
             "Vce_on_max",
             "Vrr",
+            "短路电流Imax",
+            "应力Vpeak_本管",
+            "应力Vpeak_对管",
         }
+        _SHORT_ENERGY_NAMES = {"短路能量Esc_本管", "短路能量Esc_对管"}
         if (section, name) in self._IEC_TIMING_PARAMS:
             self._refresh_iec_timing_status(section, name, t0_us, t1_us)
         elif restored is not None:
@@ -2642,6 +3069,13 @@ class MainWindow(QMainWindow):
             if stored is not None:
                 self.statusBar().showMessage(
                     f"{section}-{name} 区间最大值: [{t0_us:.3f},{t1_us:.3f}]us | "
+                    f"{name}={stored:.3f}（拖动 A/B 后重算）"
+                )
+        elif name in _SHORT_ENERGY_NAMES:
+            stored = self._stored_param_value(section, name)
+            if stored is not None:
+                self.statusBar().showMessage(
+                    f"{section}-{name} 积分窗口: [{t0_us:.3f},{t1_us:.3f}]us | "
                     f"{name}={stored:.3f}（拖动 A/B 后重算）"
                 )
         # 进入模式布置峰值横线（首次点击用 extract 结果，不重算）
@@ -2657,12 +3091,38 @@ class MainWindow(QMainWindow):
                 channel=self._channel_for_param(section, name),
                 t0_us=ta,
                 t1_us=tb,
-                use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
+                use_abs_peak=name in {"Ic_off_max", "Ic_on_max"}
+                or is_short_current_level_param,
             )
-        if name in {"Ic_off_max", "Vce_off_max", "Ic_on_max", "Vce_on_max", "Vrr"}:
+        if is_short_current_level_param:
+            cursors = self._short_circuit_ic_default_cursors()
+            if cursors is not None:
+                _ta, _tb, hb, _ha = cursors
+                self.wave_plot.set_interval_base_horizontal(hb, channel="ic")
+        elif short_vpeak_channel is not None:
+            cursors = self._short_circuit_vpeak_default_cursors(short_vpeak_channel)
+            if cursors is not None:
+                _ta, _tb, hb, _ha = cursors
+                self.wave_plot.set_interval_base_horizontal(hb, channel="vge")
+        elif short_voltage_cursor_channel is not None:
+            cursors = self._short_circuit_waveform_default_cursors(
+                short_voltage_cursor_channel
+            )
+            if cursors is not None:
+                _ta, _tb, hb, _ha = cursors
+                self.wave_plot.set_interval_base_horizontal(
+                    hb, channel=self._channel_for_param(section, name)
+                )
+        if name in _MAX_INTERVAL_NAMES:
             self.statusBar().showMessage(
                 f"{section}-{name} 区间最大值模式：拖动两根纵向光标，实时取窗口内最大值"
             )
+        elif name in _SHORT_ENERGY_NAMES:
+            self.statusBar().showMessage(
+                f"{section}-{name} 积分窗口模式：拖动两根纵向光标，实时积分"
+            )
+        elif section == "短路过程":
+            self._show_stored_metric_status(section, name)
 
     def _recompute_param_from_interval(
         self, section: str, name: str, i0: int, i1: int
@@ -2682,6 +3142,65 @@ class MainWindow(QMainWindow):
         v_diode = self.bundle.get(self.profile.v_diode)
         vge_other = self.bundle.get(self.profile.vge_other)
         dur_ns = max(0.0, (t[i1] - t[i0]) * 1e9)
+
+        if section == "短路过程":
+            sc = self.result.short_circuit
+            dur_us = max(0.0, (t[i1] - t[i0]) * 1e6)
+            if name == "短路电流Imax":
+                val = float(np.max(np.abs(ic[i0 : i1 + 1])))
+                sc.ic_max = val
+                self.result.idc = val
+                self.result.idc_set = val
+                self.result_table.set_metric_value(section, name, val)
+                return val
+            if name == "短路时间Tsc":
+                sc.tsc = dur_us
+                sc.tsc_start_us = float(t[i0] * 1e6)
+                sc.tsc_end_us = float(t[i1] * 1e6)
+                self.result_table.set_metric_value(section, name, dur_us)
+                return dur_us
+            if name == "短路能量Esc_本管":
+                val, source = short_circuit_energy_value(
+                    self.bundle,
+                    self.profile,
+                    i0,
+                    i1,
+                    other=False,
+                    math_channel=sc.energy_dut_channel or None,
+                )
+                sc.esc_dut = val
+                sc.energy_dut_channel = source
+                self.result_table.set_metric_value(section, name, val)
+                return val
+            if name == "应力Vpeak_本管":
+                val = float(np.max(vce[i0 : i1 + 1]))
+                sc.vpeak_dut = val
+                self.result_table.set_metric_value(section, name, val)
+                return val
+            if name == "短路能量Esc_对管":
+                val, source = short_circuit_energy_value(
+                    self.bundle,
+                    self.profile,
+                    i0,
+                    i1,
+                    other=True,
+                    math_channel=sc.energy_other_channel or None,
+                )
+                sc.esc_other = val
+                sc.energy_other_channel = source
+                self.result_table.set_metric_value(section, name, val)
+                return val
+            if name == "应力Vpeak_对管":
+                val = float(np.max(v_diode[i0 : i1 + 1]))
+                sc.vpeak_other = val
+                self.result_table.set_metric_value(section, name, val)
+                return val
+            if name == "Desat动作时间":
+                sc.desat_time = dur_us
+                if self._short_circuit_desat_channel() is not None:
+                    sc.desat_range = "Desat-Hb交点"
+                self.result_table.set_metric_value(section, name, dur_us)
+                return dur_us
 
         if section == "关断过程":
             if name == "Ic_off_max":
@@ -2816,6 +3335,17 @@ class MainWindow(QMainWindow):
         off = self.result.turn_off
         on = self.result.turn_on
         rr = self.result.reverse_recovery
+        if self.result.short_circuit_mode and section == "短路过程":
+            sc = self.result.short_circuit
+            return {
+                "短路电流Imax": sc.ic_max,
+                "短路时间Tsc": sc.tsc,
+                "短路能量Esc_本管": sc.esc_dut,
+                "应力Vpeak_本管": sc.vpeak_dut,
+                "短路能量Esc_对管": sc.esc_other,
+                "应力Vpeak_对管": sc.vpeak_other,
+                "Desat动作时间": sc.desat_time,
+            }.get(name)
         if section == "关断过程":
             m = {
                 "ΔVce": off.delta_vce,
@@ -2890,6 +3420,26 @@ class MainWindow(QMainWindow):
         ic = bundle_total_current(self.bundle, self.profile)
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
         v_diode = self.bundle.get(self.profile.v_diode)
+
+        if section == "短路过程":
+            if name in {
+                "短路电流Imax",
+                "短路时间Tsc",
+                "短路能量Esc_本管",
+                "短路能量Esc_对管",
+            }:
+                seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
+                if len(seg) == 0:
+                    return 0.0
+                return float(seg[int(np.argmax(np.abs(seg)))])
+            if name == "应力Vpeak_本管":
+                return float(np.max(vce[i0 : i1 + 1]))
+            if name == "应力Vpeak_对管":
+                return float(np.max(v_diode[i0 : i1 + 1]))
+            if name == "Desat动作时间":
+                desat_channel = self._short_circuit_desat_channel()
+                if desat_channel is not None:
+                    return float(np.max(self.bundle.get(desat_channel)[i0 : i1 + 1]))
 
         if section == "关断过程":
             if name == "Ic_off_max":
@@ -3361,6 +3911,123 @@ class MainWindow(QMainWindow):
             i1 = peak_idx + max_half
         return int(max(s0, i0)), int(min(s1, i1))
 
+    def _short_circuit_ic_default_cursors(
+        self,
+    ) -> tuple[float, float, float, float] | None:
+        """Default Imax cursors: A/B at Ic crossings with Hb, Ha at peak."""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        t = self.bundle.t
+        if len(t) == 0:
+            return None
+        ic = np.asarray(bundle_total_current(self.bundle, self.profile), dtype=np.float64)
+        gate0, gate1 = self.result.segments.turn_off
+        cursors = short_circuit_current_cursors(
+            t,
+            ic,
+            gate0,
+            gate1,
+            self.bundle.dt,
+            smooth_ns=self.cfg.smoothing.detect_window_ns,
+        )
+        if cursors is None:
+            i0 = max(0, min(int(gate0), len(t) - 1))
+            i1 = max(i0, min(int(gate1), len(t) - 1))
+            return t[i0] * 1e6, t[i1] * 1e6, 0.0, 0.0
+        return (
+            cursors.t_a_s * 1e6,
+            cursors.t_b_s * 1e6,
+            cursors.hb_a,
+            cursors.ha_a,
+        )
+
+    def _short_circuit_waveform_default_cursors(
+        self,
+        channel: str,
+    ) -> tuple[float, float, float, float] | None:
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        t = self.bundle.t
+        if len(t) == 0:
+            return None
+        y = np.asarray(self.bundle.get(channel), dtype=np.float64)
+        gate0, gate1 = self.result.segments.turn_off
+        cursors = short_circuit_current_cursors(
+            t,
+            y,
+            gate0,
+            gate1,
+            self.bundle.dt,
+            smooth_ns=self.cfg.smoothing.detect_window_ns,
+            peak_mode="max",
+        )
+        if cursors is None:
+            i0 = max(0, min(int(gate0), len(t) - 1))
+            i1 = max(i0, min(int(gate1), len(t) - 1))
+            return t[i0] * 1e6, t[i1] * 1e6, 0.0, 0.0
+        return (
+            cursors.t_a_s * 1e6,
+            cursors.t_b_s * 1e6,
+            cursors.hb_a,
+            cursors.ha_a,
+        )
+
+    def _short_circuit_vpeak_default_cursors(
+        self,
+        voltage_channel: str,
+    ) -> tuple[float, float, float, float] | None:
+        """Default Vpeak cursors: A/B and Hb from DUT Vge, Ha from voltage max."""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        t = self.bundle.t
+        if len(t) == 0:
+            return None
+        vge = np.asarray(self.bundle.get(self.profile.vge), dtype=np.float64)
+        voltage = np.asarray(self.bundle.get(voltage_channel), dtype=np.float64)
+        gate0, gate1 = self.result.segments.turn_off
+        cursors = short_circuit_vpeak_cursors(
+            t,
+            vge,
+            voltage,
+            gate0,
+            gate1,
+            self.bundle.dt,
+            smooth_ns=self.cfg.smoothing.detect_window_ns,
+        )
+        if cursors is None:
+            i0 = max(0, min(int(gate0), len(t) - 1))
+            i1 = max(i0, min(int(gate1), len(t) - 1))
+            seg = np.asarray(voltage[i0 : i1 + 1], dtype=np.float64)
+            ha = float(np.nanmax(seg)) if len(seg) else 0.0
+            return t[i0] * 1e6, t[i1] * 1e6, 0.0, ha
+        return (
+            cursors.t_a_s * 1e6,
+            cursors.t_b_s * 1e6,
+            cursors.hb_a,
+            cursors.ha_a,
+        )
+
+    def _short_circuit_desat_channel(self) -> str | None:
+        if self.bundle is None:
+            return None
+        return find_desat_voltage_channel(self.bundle)
+
+    def _short_circuit_ic_window_indices(self) -> tuple[int, int] | None:
+        cursors = self._short_circuit_ic_default_cursors()
+        if cursors is None or self.bundle is None:
+            return None
+        t_a_us, t_b_us, _hb, _ha = cursors
+        t = self.bundle.t
+        if len(t) == 0:
+            return None
+        i0 = int(np.searchsorted(t, min(t_a_us, t_b_us) * 1e-6, side="left"))
+        i1 = int(np.searchsorted(t, max(t_a_us, t_b_us) * 1e-6, side="left"))
+        i0 = max(0, min(i0, len(t) - 1))
+        i1 = max(i0, min(i1, len(t) - 1))
+        return i0, i1
+
     def _parameter_max_interval_indices(
         self, section: str, name: str
     ) -> tuple[int, int] | None:
@@ -3433,6 +4100,38 @@ class MainWindow(QMainWindow):
             return None
         t = self.bundle.t
         segs = self.result.segments
+
+        if self.result.short_circuit_mode and section == "短路过程":
+            if name in {
+                "短路电流Imax",
+                "短路时间Tsc",
+                "短路能量Esc_本管",
+                "短路能量Esc_对管",
+            }:
+                cursors = self._short_circuit_ic_default_cursors()
+                if cursors is not None:
+                    t_a_us, t_b_us, _hb, _ha = cursors
+                    return t_a_us, t_b_us
+            if name == "应力Vpeak_本管":
+                cursors = self._short_circuit_vpeak_default_cursors(self.profile.vce)
+                if cursors is not None:
+                    t_a_us, t_b_us, _hb, _ha = cursors
+                    return t_a_us, t_b_us
+            if name == "应力Vpeak_对管":
+                cursors = self._short_circuit_waveform_default_cursors(self.profile.v_diode)
+                if cursors is not None:
+                    t_a_us, t_b_us, _hb, _ha = cursors
+                    return t_a_us, t_b_us
+            if name == "Desat动作时间":
+                desat_channel = self._short_circuit_desat_channel()
+                if desat_channel is not None:
+                    cursors = self._short_circuit_waveform_default_cursors(desat_channel)
+                    if cursors is not None:
+                        t_a_us, t_b_us, _hb, _ha = cursors
+                        return t_a_us, t_b_us
+                return None
+            i0, i1 = segs.turn_off
+            return t[i0] * 1e6, t[i1] * 1e6
 
         iec_interval = self._iec_timing_interval_us(section, name)
         if iec_interval is not None:
@@ -3529,16 +4228,31 @@ class MainWindow(QMainWindow):
                 active_param = None
             try:
                 self.result = run_extraction(self.bundle, self.profile, self.cfg)
-            except ShortCircuitExtractNotReady:
+            except ShortCircuitExtractNotReady as exc:
                 self.result = None
                 self._clear_manual_adjustments(reset_plot=False)
                 self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
                 self.result_table.set_mode_placeholder(
                     "短路计算",
-                    "功能开发中。当前仅显示波形，参数提取与 Excel 导出将在后续版本提供。",
+                    self._extraction_placeholder_detail(
+                        str(exc) or "短路参数提取未返回结果。"
+                    ),
                 )
                 self.statusBar().showMessage(
-                    "短路计算：功能开发中，当前仅显示波形"
+                    "短路计算：参数未计算，波形已保留"
+                )
+                return
+            except Exception as exc:
+                self.result = None
+                self._clear_manual_adjustments(reset_plot=False)
+                self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
+                mode_label = MODE_UI_LABELS[parse_test_mode(self.cfg.test_mode.mode)]
+                self.result_table.set_mode_placeholder(
+                    mode_label,
+                    self._extraction_placeholder_detail(str(exc)),
+                )
+                self.statusBar().showMessage(
+                    f"{mode_label}：参数未计算，波形已保留"
                 )
                 return
 
@@ -3559,6 +4273,15 @@ class MainWindow(QMainWindow):
                 section, name = active_param
                 self._on_value_clicked(section, name)
 
+            if self.result.short_circuit_mode:
+                sc = self.result.short_circuit
+                vdc_disp = self.result.vdc_set if self.result.vdc_set is not None else self.result.vdc
+                self.statusBar().showMessage(
+                    f"短路工况  Udc={vdc_disp:.1f} V  Imax={sc.ic_max:.0f} A  |  "
+                    f"Tsc={sc.tsc:.3f} us  Esc本管={sc.esc_dut:.3f} J  Esc对管={sc.esc_other:.3f} J"
+                )
+                return
+
             off, on, rr = self.result.turn_off, self.result.turn_on, self.result.reverse_recovery
             vdc_disp = self.result.vdc_set if self.result.vdc_set is not None else self.result.vdc
             idc_disp = off.ic_off_max
@@ -3576,6 +4299,307 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(msg)
         except Exception as e:
             QMessageBox.critical(self, "提取失败", str(e))
+
+    def _update_report_template_tooltip(self) -> None:
+        if self._report_template_source_path is None:
+            tip = "加载完整报告模板源；未加载时使用内置数据模板生成新报告"
+        else:
+            tip = f"当前报告模板源:\n{self._report_template_source_path}"
+        self.btn_select_report_template.setToolTip(tip)
+
+    def _update_report_output_tooltip(self) -> None:
+        if self._report_output_path is None:
+            tip = "选择当前项目的报告文件路径；写入时会记住并复用"
+        else:
+            tip = f"当前项目报告文件:\n{self._report_output_path}"
+        self.btn_select_report_output.setToolTip(tip)
+
+    def _select_report_template(self) -> None:
+        fallback = (
+            self._report_template_source_path.parent
+            if self._report_template_source_path is not None
+            else Path(self._current_path).parent
+            if self._current_path
+            else Path.home()
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "加载报告模板源",
+            str(fallback),
+            "Excel 报告 (*.xlsx);;All (*)",
+        )
+        if not path:
+            return
+        selected = Path(path)
+        self._report_template_source_path = selected
+        set_report_template_source_path(selected)
+        self._update_report_template_tooltip()
+        self.statusBar().showMessage(
+            f"已加载报告模板源: {selected.name}",
+            3500,
+        )
+
+    def _select_report_output_path(self) -> bool:
+        suggested = self._report_output_path or self._suggest_report_output_path()
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择项目报告文件",
+            save_dialog_initial_path(suggested),
+            "Excel 报告 (*.xlsx)",
+        )
+        if not path:
+            return False
+        selected = Path(path)
+        if selected.suffix.lower() != ".xlsx":
+            selected = selected.with_suffix(".xlsx")
+        template = self._current_report_template_source()
+        if template is not None and selected.resolve() == template.resolve():
+            QMessageBox.warning(
+                self,
+                "报告位置不可用",
+                "项目报告文件不能与报告模板源文件相同，请选择另一个保存位置。",
+            )
+            return False
+        self._report_output_path = selected
+        set_report_output_path(selected)
+        set_last_export_path(selected)
+        self._update_report_output_tooltip()
+        self.statusBar().showMessage(f"已设置项目报告文件: {selected.name}", 3500)
+        return True
+
+    def _safe_report_image_name(self, section: str, name: str, index: int) -> str:
+        raw = f"{index:02d}_{section}_{name}.png"
+        return re.sub(r"[^0-9A-Za-z_.\-\u4e00-\u9fff]+", "_", raw)
+
+    def _report_plot_capture_size(self) -> QSize:
+        return QSize(REPORT_PLOT_CAPTURE_SIZE)
+
+    def _report_target_screen_width_px(self) -> int | None:
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return None
+        return max(1, int(screen.availableGeometry().width()))
+
+    def _save_report_plot_capture(self, path: Path, size: QSize) -> None:
+        target = self.wave_plot
+        old_min = target.minimumSize()
+        old_max = target.maximumSize()
+        old_policy = target.sizePolicy()
+        try:
+            target.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            target.setFixedSize(size)
+            QApplication.processEvents()
+            target.grab().save(str(path), "PNG")
+        finally:
+            target.setMinimumSize(old_min)
+            target.setMaximumSize(old_max)
+            target.setSizePolicy(old_policy)
+            if self.wave_plot._zoom_toggle_btn.isVisible():
+                self.wave_plot._position_zoom_toggle_button()
+            QApplication.processEvents()
+
+    def _capture_report_images(self, directory: Path) -> dict[tuple[str, str], Path]:
+        if self.result is None:
+            return {}
+        params = self._report_image_params()
+        images: dict[tuple[str, str], Path] = {}
+        vb = self.wave_plot.plot.getPlotItem().getViewBox()
+        old_x, old_y = vb.viewRange()
+        try:
+            self.wave_plot._fit_full_range()
+            QApplication.processEvents()
+            capture_size = self._report_plot_capture_size()
+            for index, (section, name) in enumerate(params, start=1):
+                if (section, name) == DPT_OVERVIEW_IMAGE_PARAM:
+                    self.wave_plot._fit_full_range()
+                elif self.result.short_circuit_mode:
+                    self.wave_plot._fit_full_range()
+                    self._on_value_clicked(section, name)
+                    self.wave_plot._fit_full_range()
+                else:
+                    self._on_value_clicked(section, name)
+                QApplication.processEvents()
+                path = directory / self._safe_report_image_name(section, name, index)
+                self._save_report_plot_capture(path, capture_size)
+                images[(section, name)] = path
+        finally:
+            vb.setRange(
+                xRange=(float(old_x[0]), float(old_x[1])),
+                yRange=(float(old_y[0]), float(old_y[1])),
+                padding=0.0,
+            )
+        return images
+
+    def _short_desat_image_available(self) -> bool:
+        if self.result is None or not self.result.short_circuit_mode:
+            return False
+        if self.result.short_circuit.desat_time is None:
+            return False
+        return self._short_circuit_desat_channel() is not None
+
+    def _report_image_params(self) -> tuple[tuple[str, str], ...]:
+        if self.result is None:
+            return ()
+        if not self.result.short_circuit_mode:
+            return DPT_REPORT_IMAGE_PARAMS
+        return tuple(
+            param
+            for param in SHORT_REPORT_IMAGE_PARAMS
+            if param != ("短路过程", "Desat动作时间")
+            or self._short_desat_image_available()
+        )
+
+    def _current_report_template_source(self) -> Path | None:
+        if self._report_template_source_path is not None:
+            return self._report_template_source_path
+        return default_report_template_path()
+
+    def _suggest_report_output_path(self) -> Path:
+        template = self._current_report_template_source()
+        report_name = (
+            template.name
+            if template is not None and template.suffix.lower() == ".xlsx"
+            else "DPT_report.xlsx"
+        )
+        if self._current_path:
+            base_dir = Path(self._current_path).parent
+        elif self.result is not None:
+            base_dir = default_export_path(self.result).parent
+        else:
+            base_dir = Path.home()
+        suggested = base_dir / report_name
+        if template is not None:
+            try:
+                if suggested.resolve() == template.resolve():
+                    suggested = suggested.with_name(f"{suggested.stem}_报告.xlsx")
+            except OSError:
+                pass
+        return suggested
+
+    def _ensure_report_output_file(self) -> bool:
+        if self._report_output_path is None:
+            if not self._select_report_output_path():
+                return False
+        if self._report_output_path is None:
+            return False
+
+        target = self._report_output_path
+        if target.exists():
+            return True
+
+        src = self._current_report_template_source()
+        if src is None or not src.is_file():
+            QMessageBox.critical(
+                self,
+                "缺少报告模板",
+                "已加载的报告模板不存在，请重新加载模板源。\n\n"
+                f"模板:\n{src}",
+            )
+            return False
+
+        try:
+            self._report_output_path = copy_report_template(src, target)
+        except PermissionError as exc:
+            QMessageBox.critical(
+                self,
+                "生成报告失败",
+                "无法写入报告文件，请确认目标文件未被 Excel 打开且目录可写。\n\n"
+                f"文件:\n{target}\n\n错误:\n{exc}",
+            )
+            return False
+        except Exception as exc:
+            QMessageBox.critical(self, "生成报告失败", str(exc))
+            return False
+
+        set_report_output_path(self._report_output_path)
+        set_last_export_path(self._report_output_path)
+        self._update_report_output_tooltip()
+        self.statusBar().showMessage(
+            f"已从报告模板生成项目报告: {self._report_output_path.name}",
+            3500,
+        )
+        return True
+
+    def _write_report_template(self) -> None:
+        if self.result is None:
+            QMessageBox.warning(self, "提示", "无提取结果可写入报告")
+            return
+        if not self._ensure_report_output_file():
+            return
+        try:
+            tempdir = tempfile.TemporaryDirectory()
+            images = self._capture_report_images(Path(tempdir.name))
+            self._start_report_write_task(tempdir, images)
+        except PermissionError as e:
+            QMessageBox.critical(
+                self,
+                "写入报告失败",
+                "无法保存报告文件，通常是这个 .xlsx 正在被 Excel 打开或没有写入权限。\n"
+                "请先关闭该报告文件，再点击“写入报告”。\n\n"
+                f"文件:\n{self._report_output_path}\n\n"
+                f"错误:\n{e}",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "写入报告失败", str(e))
+
+    def _start_report_write_task(
+        self,
+        tempdir: tempfile.TemporaryDirectory,
+        images: dict[tuple[str, str], Path],
+    ) -> None:
+        if self.result is None or self._report_output_path is None:
+            tempdir.cleanup()
+            return
+        self._report_request_id += 1
+        request_id = self._report_request_id
+        task = _ReportWriteTask(
+            request_id,
+            self.result,
+            self._report_output_path,
+            images,
+            tempdir,
+            self._report_target_screen_width_px(),
+        )
+        task.signals.finished.connect(self._on_report_write_finished)
+        task.signals.failed.connect(self._on_report_write_failed)
+        self._report_tasks[request_id] = task
+        self._set_report_busy(True)
+        self._load_pool.start(task)
+
+    def _on_report_write_finished(
+        self,
+        request_id: int,
+        summary: ReportWriteSummary,
+        elapsed_ms: float,
+    ) -> None:
+        self._report_tasks.pop(request_id, None)
+        if request_id != self._report_request_id:
+            return
+        self._set_report_busy(False)
+        if self._report_output_path is not None:
+            set_report_output_path(self._report_output_path)
+            set_last_export_path(self._report_output_path)
+        self._update_report_output_tooltip()
+        self.statusBar().showMessage(
+            f"已写入报告: {summary.report_path.name} | "
+            f"{summary.data_sheet} 第 {summary.data_row} 行 | "
+            f"图片 {summary.images_written} 张 | 保存 {elapsed_ms:.0f} ms",
+            6000,
+        )
+        QMessageBox.information(
+            self,
+            "写入成功",
+            f"已写入:\n{summary.report_path}\n\n"
+            f"数据位置: {summary.data_sheet} 第 {summary.data_row} 行\n"
+            f"图片: {summary.images_written} 张",
+        )
+
+    def _on_report_write_failed(self, request_id: int, message: str) -> None:
+        self._report_tasks.pop(request_id, None)
+        if request_id != self._report_request_id:
+            return
+        self._set_report_busy(False)
+        QMessageBox.critical(self, "写入报告失败", message)
 
     def _export_excel(self) -> None:
         if self.result is None:

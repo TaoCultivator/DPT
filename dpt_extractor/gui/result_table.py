@@ -18,7 +18,16 @@ from PyQt6.QtWidgets import (
 )
 
 from dpt_extractor.gui.slope_range_dialog import SlopeRangeDialog
-from dpt_extractor.gui.theme import SECTION_ENERGY, SECTION_OFF, SECTION_ON, SECTION_RR, TEXT_ON_SECTION
+from dpt_extractor.gui.theme import (
+    SECTION_ENERGY,
+    SECTION_OFF,
+    SECTION_ON,
+    SECTION_RR,
+    SECTION_SHORT,
+    SECTION_SHORT_DUT,
+    SECTION_SHORT_OTHER,
+    TEXT_ON_SECTION,
+)
 from dpt_extractor.models.results import ExtractResult
 from dpt_extractor.models.slope_range import (
     CUSTOM_RANGE_LABEL,
@@ -54,6 +63,12 @@ def _fmt_energy(v: float) -> str:
     return f"{v:.4f}"
 
 
+def _fmt_optional(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return _fmt(float(v))
+
+
 def format_metric_display(section: str, name: str, value: float) -> str:
     """与 set_result 填表规则一致，避免交互写回时位数跳动。"""
     _ = section
@@ -64,6 +79,20 @@ def format_metric_display(section: str, name: str, value: float) -> str:
 
 def _range_label_for_row(section: str, name: str, result: ExtractResult) -> str:
     off, on, rr = result.turn_off, result.turn_on, result.reverse_recovery
+    if result.short_circuit_mode:
+        sc = result.short_circuit
+        if section == "短路过程" and name == "短路时间Tsc":
+            return sc.tsc_range or "A-B"
+        if section == "短路过程" and name == "Desat动作时间":
+            return sc.desat_range or "预留"
+        if section == "短路过程" and name in {
+            "短路电流Imax",
+            "短路能量Esc_本管",
+            "应力Vpeak_本管",
+            "短路能量Esc_对管",
+            "应力Vpeak_对管",
+        }:
+            return "Max"
     if section == "关断过程" and name == "dv/dt":
         return off.dvdt_range
     if section == "关断过程" and name == "di/dt":
@@ -149,6 +178,11 @@ class ResultTable(QWidget):
             item = self.table.item(r, 3)
             if item is not None:
                 rng_w = max(rng_w, fm.horizontalAdvance(item.text()) + 20)
+        param_w = 84
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 1)
+            if item is not None:
+                param_w = max(param_w, fm.horizontalAdvance(item.text()) + 18)
         char2 = fm.horizontalAdvance("00")
         val_pad = 16 + char2
         val_w = 72 + char2
@@ -156,7 +190,7 @@ class ResultTable(QWidget):
             item = self.table.item(r, 4)
             if item is not None:
                 val_w = max(val_w, fm.horizontalAdvance(item.text()) + val_pad)
-        widths = (76, 84, 40, min(rng_w, 148), min(val_w, 88 + char2))
+        widths = (76, min(param_w, 142), 40, min(rng_w, 148), min(val_w, 88 + char2))
         hdr = self.table.horizontalHeader()
         for col, w in enumerate(widths):
             self.table.setColumnWidth(col, w)
@@ -184,6 +218,24 @@ class ResultTable(QWidget):
             self._slope_ranges[key] = normalize_slope_range(key, sr)
 
     def _set_summary(self, result: ExtractResult) -> None:
+        if result.short_circuit_mode:
+            sc = result.short_circuit
+            vdc_disp = result.vdc_set if result.vdc_set is not None else result.vdc
+            html = f"""
+            <p style='margin:0;color:#cdd6f4;font-size:13px'>
+            <b style='color:#89b4fa'>短路</b>
+            {f" &nbsp; <span style='color:#cba6f7'>{result.profile_code}</span>" if result.profile_code else ""}
+            &nbsp; Udc = <b>{vdc_disp:.1f} V</b> &nbsp;|&nbsp;
+            Imax = <b>{sc.ic_max:.1f} A</b> &nbsp;|&nbsp;
+            Tsc = <b>{sc.tsc:.3f} us</b>
+            </p>
+            <p style='margin:6px 0 0 0;color:#a6adc8;font-size:12px'>
+            <b style='color:#a6e3a1'>Esc 本管</b> {_fmt(sc.esc_dut)} J &nbsp;
+            <b style='color:#89dceb'>Esc 对管</b> {_fmt(sc.esc_other)} J
+            </p>
+            """
+            self.summary.setText(html)
+            return
         off, on, rr = result.turn_off, result.turn_on, result.reverse_recovery
         vdc_disp = result.vdc_set if result.vdc_set is not None else result.vdc
         idc_disp = off.ic_off_max
@@ -231,6 +283,28 @@ class ResultTable(QWidget):
         self._set_summary(result)
         rows: list[tuple[str, str, str, str, str, str]] = []
         off, on, rr = result.turn_off, result.turn_on, result.reverse_recovery
+
+        if result.short_circuit_mode:
+            sc = result.short_circuit
+            for name, unit, val in (
+                ("短路电流Imax", "A", _fmt(sc.ic_max)),
+                ("短路时间Tsc", "us", _fmt(sc.tsc)),
+                ("短路能量Esc_本管", "J", _fmt(sc.esc_dut)),
+                ("应力Vpeak_本管", "V", _fmt(sc.vpeak_dut)),
+                ("短路能量Esc_对管", "J", _fmt(sc.esc_other)),
+                ("应力Vpeak_对管", "V", _fmt(sc.vpeak_other)),
+                ("Desat动作时间", "us", _fmt_optional(sc.desat_time)),
+            ):
+                if "本管" in name:
+                    bg = SECTION_SHORT_DUT
+                elif "对管" in name:
+                    bg = SECTION_SHORT_OTHER
+                else:
+                    bg = SECTION_SHORT
+                rng = _range_label_for_row("短路过程", name, result) or "—"
+                rows.append(("短路过程", name, unit, rng, val, bg))
+            self._populate_rows(rows)
+            return
 
         def add(
             section: str,
@@ -301,6 +375,9 @@ class ResultTable(QWidget):
                 {"Err"},
             )
 
+        self._populate_rows(rows)
+
+    def _populate_rows(self, rows: list[tuple[str, str, str, str, str, str]]) -> None:
         self.table.setRowCount(len(rows))
         self._row_keys = []
         self._row_meta = []

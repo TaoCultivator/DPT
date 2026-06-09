@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
+
+DEFAULT_REPORT_TEMPLATE_NAME = "默认报告模板.xlsx"
 
 
 def is_frozen() -> bool:
@@ -25,6 +28,34 @@ def package_config_dir() -> Path:
 
 def default_config_path() -> Path:
     return package_config_dir() / "default.yaml"
+
+
+def package_templates_dir() -> Path:
+    if is_frozen():
+        return bundle_root() / "dpt_extractor" / "templates"
+    return bundle_root()
+
+
+def default_report_template_path() -> Path:
+    return package_templates_dir() / DEFAULT_REPORT_TEMPLATE_NAME
+
+
+def copy_default_report_template(path: str | Path) -> Path:
+    return copy_report_template(default_report_template_path(), path)
+
+
+def copy_report_template(template_path: str | Path, path: str | Path) -> Path:
+    dst = Path(path)
+    if dst.suffix.lower() != ".xlsx":
+        dst = dst.with_suffix(".xlsx")
+    src = Path(template_path)
+    if not src.is_file():
+        raise FileNotFoundError(f"报告模板不存在: {src}")
+    if src.resolve() == dst.resolve():
+        raise ValueError("不能直接覆盖报告模板源文件，请另存为报告文件")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst
 
 
 def user_data_dir() -> Path:

@@ -173,6 +173,71 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertNotIn("CH1", win.bundle.meta.channel_labels)
         win.close()
 
+    def test_main_window_toolbar_compacts_on_small_width(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._apply_toolbar_density(860)
+        self.app.processEvents()
+
+        self.assertEqual(win.btn_open.text(), "打开")
+        self.assertEqual(win.btn_recalc.text(), "重算")
+        self.assertEqual(win.btn_export.text(), "导出")
+        self.assertTrue(win._context_menu_label.isHidden())
+        self.assertTrue(win.lbl_map_status.isHidden())
+        self.assertEqual(win._toolbar_rows[0].spacing(), 3)
+        self.assertLessEqual(win.toolbar.minimumSizeHint().width(), 860)
+        self.assertLessEqual(win.combo_std.maximumWidth(), 122)
+
+        win._apply_toolbar_density(1600)
+        self.assertEqual(win.btn_open.text(), "📂  打开文件")
+        self.assertEqual(win.btn_recalc.text(), "↻  重新计算")
+        self.assertEqual(win.btn_export.text(), "💾  导出 Excel")
+        self.assertFalse(win._context_menu_label.isHidden())
+        self.assertFalse(win.lbl_map_status.isHidden())
+        win.close()
+
+    def test_report_plot_capture_size_uses_fixed_plot_baseline(self):
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            REPORT_PLOT_CAPTURE_SIZE,
+        )
+
+        win = MainWindow()
+        win.wave_plot.plot.setFixedSize(320, 240)
+        small = win._report_plot_capture_size()
+        self.assertEqual(small.width(), REPORT_PLOT_CAPTURE_SIZE.width())
+        self.assertEqual(small.height(), REPORT_PLOT_CAPTURE_SIZE.height())
+
+        win.wave_plot.plot.setFixedSize(1800, 960)
+        large = win._report_plot_capture_size()
+        self.assertEqual(large.width(), REPORT_PLOT_CAPTURE_SIZE.width())
+        self.assertEqual(large.height(), REPORT_PLOT_CAPTURE_SIZE.height())
+        self.assertAlmostEqual(large.width() / large.height(), 4 / 3, places=3)
+        win.close()
+
+    def test_short_report_skips_desat_screenshot_without_value_or_channel(self):
+        from dpt_extractor.export.report_template import SHORT_REPORT_IMAGE_PARAMS
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        desat_param = ("短路过程", "Desat动作时间")
+        win = MainWindow()
+        win.result = ExtractResult(
+            short_circuit_mode=True,
+            short_circuit=ShortCircuitResult(desat_time=None),
+        )
+
+        self.assertIn(desat_param, SHORT_REPORT_IMAGE_PARAMS)
+        self.assertNotIn(desat_param, win._report_image_params())
+
+        win.result.short_circuit.desat_time = 1.23
+        self.assertNotIn(desat_param, win._report_image_params())
+
+        win._short_circuit_desat_channel = lambda: "CH7"  # type: ignore[method-assign]
+        self.assertIn(desat_param, win._report_image_params())
+        win.close()
+
     def test_mapping_dialog_starts_from_defaults_not_bad_labels(self):
         import tempfile
         import numpy as np

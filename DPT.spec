@@ -17,6 +17,7 @@ VERSION = VERSION_MATCH.group(1) if VERSION_MATCH else "0.0.0"
 
 datas = [
     (str(ROOT / "dpt_extractor" / "config" / "default.yaml"), "dpt_extractor/config"),
+    (str(ROOT / "默认报告模板.xlsx"), "dpt_extractor/templates"),
 ]
 user_map = ROOT / "dpt_extractor" / "config" / "channel_maps_user.yaml"
 if user_map.is_file():
@@ -30,6 +31,8 @@ hiddenimports = collect_submodules("tm_data_types") + [
     "dpt_extractor.gui.waveform_plot",
     "dpt_extractor.pipeline.extract",
     "dpt_extractor.export.mcu2506_layout",
+    "dpt_extractor.export.report_template",
+    "dpt_extractor.export.short_circuit_layout",
     "scipy.ndimage",
     "scipy.ndimage._nd_image",
 ]

@@ -2837,12 +2837,26 @@ class WaveformPlot(QWidget):
         self._disp_offset.clear()
         self._user_x_us_per_div = None
         t = bundle.t
-        vge = bundle.get(profile.vge)
-        vce = bundle.get(profile.vce)
-        ic = bundle_total_current(bundle, profile)
-        irr = bundle_reverse_recovery_current(bundle, profile)
-        v_diode = bundle.get(profile.v_diode)
-        vge_other = bundle.get(profile.vge_other)
+        zero_trace = np.zeros_like(np.asarray(t, dtype=np.float64), dtype=np.float64)
+
+        def safe_channel(col: str) -> np.ndarray:
+            key = str(col or "").upper()
+            if key in bundle.channels:
+                return np.asarray(bundle.channels[key], dtype=np.float64)
+            return zero_trace
+
+        def safe_derived(fn) -> np.ndarray:
+            try:
+                return np.asarray(fn(bundle, profile), dtype=np.float64)
+            except (KeyError, ValueError):
+                return zero_trace
+
+        vge = safe_channel(profile.vge)
+        vce = safe_channel(profile.vce)
+        ic = safe_derived(bundle_total_current)
+        irr = safe_derived(bundle_reverse_recovery_current)
+        v_diode = safe_channel(profile.v_diode)
+        vge_other = safe_channel(profile.vge_other)
         self._interactive_vce_t_us = t * 1e6
         self._interactive_vce = vce
         self._interactive_irr_t_us = t * 1e6
@@ -2956,14 +2970,33 @@ class WaveformPlot(QWidget):
 
         if result and result.segments:
             segs: SegmentIndices = result.segments
-            edge_marks = [(segs.pulse1_off, "关断沿", WAVEFORM_EDGE_COLORS["off"])]
-            if not result.single_pulse_mode:
-                edge_marks.append(
-                    (segs.pulse2_on, "开通沿", WAVEFORM_EDGE_COLORS["on"])
+            if result.short_circuit_mode:
+                sc = result.short_circuit
+                start_us = (
+                    float(sc.tsc_start_us)
+                    if sc.tsc_start_us is not None
+                    else float(t[segs.turn_off[0]] * 1e6)
                 )
-            for idx, label, color in edge_marks:
+                end_us = (
+                    float(sc.tsc_end_us)
+                    if sc.tsc_end_us is not None
+                    else float(t[segs.turn_off[1]] * 1e6)
+                )
+                edge_marks_us = [
+                    (start_us, "短路开始", WAVEFORM_EDGE_COLORS["on"]),
+                    (end_us, "短路结束", WAVEFORM_EDGE_COLORS["off"]),
+                ]
+            else:
+                edge_marks_us = [
+                    (float(t[segs.pulse1_off] * 1e6), "关断沿", WAVEFORM_EDGE_COLORS["off"])
+                ]
+            if not result.single_pulse_mode and not result.short_circuit_mode:
+                edge_marks_us.append(
+                    (float(t[segs.pulse2_on] * 1e6), "开通沿", WAVEFORM_EDGE_COLORS["on"])
+                )
+            for pos_us, label, color in edge_marks_us:
                 line = pg.InfiniteLine(
-                    pos=t[idx] * 1e6,
+                    pos=pos_us,
                     angle=90,
                     pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
                     label=label,
@@ -2995,8 +3028,21 @@ class WaveformPlot(QWidget):
 
         # ---- 持久 4 根光标 ----
         if result and result.segments:
-            a_us = float(t[result.segments.pulse1_off] * 1e6)
-            b_us = float(t[result.segments.pulse2_on] * 1e6)
+            if result.short_circuit_mode:
+                sc = result.short_circuit
+                a_us = (
+                    float(sc.tsc_start_us)
+                    if sc.tsc_start_us is not None
+                    else float(t[result.segments.turn_off[0]] * 1e6)
+                )
+                b_us = (
+                    float(sc.tsc_end_us)
+                    if sc.tsc_end_us is not None
+                    else float(t[result.segments.turn_off[1]] * 1e6)
+                )
+            else:
+                a_us = float(t[result.segments.pulse1_off] * 1e6)
+                b_us = float(t[result.segments.pulse2_on] * 1e6)
         else:
             a_us = full_min + 0.30 * full_span
             b_us = full_min + 0.70 * full_span
@@ -4084,6 +4130,8 @@ class WaveformPlot(QWidget):
             return
         # Ha/Hb/Δy 按当前活动通道的真实单位显示
         ch = self._readout_channel()
+        if ch not in self._trace_items:
+            ch = self._axis_channel() or ch
         unit = self._unit_for_channel(ch)
         ha = self._from_disp(ch, ha_div)
         hb = self._from_disp(ch, hb_div)
@@ -5048,6 +5096,19 @@ class WaveformPlot(QWidget):
             self._h_cursor_a.setPos(y_disp)
             self._h_cursor_a.setMovable(True)
             self._h_cursor_a_locked = False
+        finally:
+            self._interactive_syncing = False
+        self._update_readout()
+
+    def set_interval_base_horizontal(self, y: float, channel: str = "ic") -> None:
+        """interval-peak 模式下把 Hb 设到基准电平。"""
+        if not self._interval_max_hline_enabled or self._h_cursor_b is None:
+            return
+        self._active_channel = channel
+        self._interactive_syncing = True
+        try:
+            self._h_cursor_b.setPos(self._to_disp(channel, float(y)))
+            self._h_cursor_b.setMovable(True)
         finally:
             self._interactive_syncing = False
         self._update_readout()
