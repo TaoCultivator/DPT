@@ -29,6 +29,29 @@ import numpy as np
 
 UH = sample_tss("UH_750V_1050A_000.tss")
 WH = sample_tss("WH_480V_800A_000.tss")
+ROOT = Path(__file__).resolve().parents[2]
+SMC_RT_UH = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UH_750V_1048A_000.tss"
+)
+LOW_CURRENT_WH = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2506"
+    / "DCU"
+    / "SMC"
+    / "LT"
+    / "tss"
+    / "WH_480V_100A_000.tss"
+)
 
 
 class TestEoffWindow(unittest.TestCase):
@@ -103,6 +126,62 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(mk.hb_a, 5.0, "关断 Hb 应为回落后残余电流平台")
         self.assertAlmostEqual(mk.t_start, w.t_start, delta=50e-9)
         self.assertAlmostEqual(mk.t_end, w.t_end, delta=50e-9)
+
+    @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
+    def test_smc_rt_eoff_ha_uses_vce_base_not_rise_foot(self):
+        bundle = load_waveform(SMC_RT_UH)
+        profile = guess_profile_from_path(str(SMC_RT_UH))
+        cfg = load_config()
+        result = extract_all(bundle, profile, cfg)
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+        mk = eoff_energy_markers(
+            t,
+            ic,
+            vce,
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_off,
+            bundle.dt,
+            pre_ns=cfg.energy.eoff_pre_ns,
+            pulse1_on=segs.pulse1_on,
+        )
+        v_at_a = float(np.interp(mk.t_start, t, vce))
+        self.assertAlmostEqual(mk.ha_v, 12.34375, delta=0.5)
+        self.assertAlmostEqual(v_at_a, mk.ha_v, delta=0.5)
+        self.assertLess(mk.ha_v, 15.0)
+        self.assertGreater(mk.t_start * 1e6, 14.65)
+        self.assertLess(mk.t_start * 1e6, 14.70)
+
+    @unittest.skipUnless(LOW_CURRENT_WH.exists(), "low-current WH sample missing")
+    def test_low_current_eoff_ha_uses_vce_base_not_foot(self):
+        bundle = load_waveform(LOW_CURRENT_WH)
+        profile = guess_profile_from_path(str(LOW_CURRENT_WH))
+        cfg = load_config()
+        result = extract_all(bundle, profile, cfg)
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+        mk = eoff_energy_markers(
+            t,
+            ic,
+            vce,
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_off,
+            bundle.dt,
+            pre_ns=cfg.energy.eoff_pre_ns,
+            pulse1_on=segs.pulse1_on,
+        )
+        v_at_a = float(np.interp(mk.t_start, t, vce))
+        self.assertAlmostEqual(v_at_a, mk.ha_v, delta=0.5)
+        self.assertLess(mk.ha_v, 5.0)
+        self.assertLess(v_at_a, 5.0)
 
     @unittest.skipUnless(WH.exists(), "WH sample missing")
     def test_wh_eon_b_at_vce_hb_fall_cross(self):

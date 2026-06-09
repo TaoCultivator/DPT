@@ -8,7 +8,7 @@ import tempfile
 import time
 import numpy as np
 
-from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, Qt, QSettings, QTimer, pyqtSignal
 from PyQt6.QtGui import QResizeEvent
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -129,6 +129,7 @@ from dpt_extractor.pipeline.short_circuit_extract import (
 REPORT_PLOT_CAPTURE_SIZE = QSize(1280, 960)
 COMMERCIAL_AUTH_QQ = "3796823"
 NONCOMMERCIAL_NOTICE_TITLE = "非商业用途授权提示"
+NONCOMMERCIAL_NOTICE_SETTINGS_KEY = "license/noncommercial_notice_shown"
 
 
 def commercial_authorization_message() -> str:
@@ -348,6 +349,7 @@ class MainWindow(QMainWindow):
         self._report_request_id = 0
         self._report_tasks: dict[int, _ReportWriteTask] = {}
         self._load_pool = QThreadPool.globalInstance()
+        self._license_notice_dialog: QDialog | None = None
 
         self._build_ui()
         self.result_table.set_range_handler(self._on_slope_range_changed)
@@ -363,6 +365,7 @@ class MainWindow(QMainWindow):
         self.wave_plot.channelLabelChanged.connect(
             self._on_waveform_channel_label_changed
         )
+        QTimer.singleShot(0, self._show_first_run_license_notice)
 
     def _build_ui(self) -> None:
         self.wave_plot = WaveformPlot()
@@ -421,26 +424,6 @@ class MainWindow(QMainWindow):
         self.btn_write_report.clicked.connect(self._write_report_template)
         self._update_report_template_tooltip()
         self._update_report_output_tooltip()
-
-        self.license_notice = QFrame()
-        self.license_notice.setObjectName("licenseNotice")
-        notice_layout = QHBoxLayout(self.license_notice)
-        notice_layout.setContentsMargins(10, 5, 10, 5)
-        notice_layout.setSpacing(8)
-        self.lbl_license_notice = QLabel()
-        self.lbl_license_notice.setObjectName("licenseNoticeLabel")
-        self.lbl_license_notice.setWordWrap(True)
-        self.lbl_license_notice.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        self.btn_license_notice = QPushButton("商务授权")
-        self.btn_license_notice.setObjectName("licenseNoticeButton")
-        self.btn_license_notice.setToolTip(
-            f"商业使用、商业集成或商务授权请通过 QQ {COMMERCIAL_AUTH_QQ} 联系"
-        )
-        self.btn_license_notice.clicked.connect(self._show_license_notice)
-        notice_layout.addWidget(self.lbl_license_notice, stretch=1)
-        notice_layout.addWidget(self.btn_license_notice)
 
         self.lbl_map_status = QLabel("")
         self.lbl_map_status.setStyleSheet("color:#f9e2af;font-size:11px;")
@@ -571,7 +554,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.toolbar)
-        layout.addWidget(self.license_notice)
         layout.addWidget(splitter, stretch=1)
         self.setCentralWidget(root)
         self.setStatusBar(QStatusBar())
@@ -579,7 +561,28 @@ class MainWindow(QMainWindow):
         self._apply_toolbar_density(self.width() or 1400)
         self._apply_test_mode_ui()
 
-    def _show_license_notice(self) -> None:
+    def _license_settings(self) -> QSettings:
+        return QSettings("DPT", "DPTExtractor")
+
+    def _should_show_license_notice(self) -> bool:
+        raw = self._license_settings().value(
+            NONCOMMERCIAL_NOTICE_SETTINGS_KEY, False, type=bool
+        )
+        return not bool(raw)
+
+    def _mark_license_notice_shown(self) -> None:
+        self._license_settings().setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+
+    def _show_first_run_license_notice(self) -> None:
+        app = QApplication.instance()
+        if app is not None and app.platformName().lower() == "offscreen":
+            return
+        if not self._should_show_license_notice():
+            return
+        self._mark_license_notice_shown()
+        self._show_license_notice(blocking=False)
+
+    def _show_license_notice(self, *, blocking: bool = True) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle(NONCOMMERCIAL_NOTICE_TITLE)
         dlg.setModal(True)
@@ -617,7 +620,15 @@ class MainWindow(QMainWindow):
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("我知道了")
         buttons.accepted.connect(dlg.accept)
         layout.addWidget(buttons)
-        dlg.exec()
+        if blocking:
+            dlg.exec()
+        else:
+            dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            self._license_notice_dialog = dlg
+            dlg.finished.connect(
+                lambda _result: setattr(self, "_license_notice_dialog", None)
+            )
+            dlg.open()
 
     def _build_context_menu_selector(self) -> QWidget:
         box = QFrame()
@@ -745,10 +756,6 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_template.setText("模板")
                 self.btn_select_report_output.setText("位置")
                 self.btn_write_report.setText("写入")
-                self.btn_license_notice.setText("授权")
-                self.lbl_license_notice.setText(
-                    f"仅限非商业用途；商务授权 QQ：{COMMERCIAL_AUTH_QQ}"
-                )
             elif text_mode == "compact":
                 self.btn_open.setText("打开文件")
                 self.btn_recalc.setText("重算")
@@ -756,10 +763,6 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_template.setText("模板")
                 self.btn_select_report_output.setText("位置")
                 self.btn_write_report.setText("写报告")
-                self.btn_license_notice.setText("商务授权")
-                self.lbl_license_notice.setText(
-                    f"本软件仅限非商业用途；商用请联系 QQ {COMMERCIAL_AUTH_QQ}"
-                )
             elif text_mode == "medium":
                 self.btn_open.setText("打开文件")
                 self.btn_recalc.setText("重新计算")
@@ -767,10 +770,6 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_template.setText("加载模板")
                 self.btn_select_report_output.setText("报告位置")
                 self.btn_write_report.setText("写入报告")
-                self.btn_license_notice.setText("商务授权")
-                self.lbl_license_notice.setText(
-                    f"仅限非商业用途；商业使用、集成或交付请先通过 QQ {COMMERCIAL_AUTH_QQ} 取得书面授权。"
-                )
             else:
                 self.btn_open.setText("📂  打开文件")
                 self.btn_recalc.setText("↻  重新计算")
@@ -778,10 +777,6 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_template.setText("📄  加载模板")
                 self.btn_select_report_output.setText("📁  报告位置")
                 self.btn_write_report.setText("📝  写入报告")
-                self.btn_license_notice.setText("商务授权")
-                self.lbl_license_notice.setText(
-                    f"授权提示：DPT 仅限非商业用途。商业使用、商业集成、项目交付或商业目的再分发，请先通过 QQ {COMMERCIAL_AUTH_QQ} 取得书面授权。"
-                )
             self._toolbar_text_mode = text_mode
 
         if self._toolbar_density_bucket == bucket:
@@ -835,18 +830,6 @@ class MainWindow(QMainWindow):
             "QPushButton#contextMenuSelectorButton:checked{background:#28bce8;"
             "color:#061014;border-color:#8fd3ff;}"
         )
-        self.license_notice.setStyleSheet(
-            "QFrame#licenseNotice{background:#241f16;"
-            "border-top:1px solid #5f4b22;border-bottom:1px solid #5f4b22;}"
-            f"QLabel#licenseNoticeLabel{{color:#f9e2af;font-size:{label_px}px;"
-            "font-weight:600;}}"
-            "QPushButton#licenseNoticeButton{background:#6b4a2a;color:#fff4d6;"
-            "border:1px solid #d0a85f;border-radius:5px;"
-            f"font-size:{font_px}px;padding:{max(2, pad_v)}px {max(8, pad_h)}px;"
-            f"min-height:{min_h}px;}}"
-            "QPushButton#licenseNoticeButton:hover{background:#8a6236;}"
-        )
-
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
         sizes = self.splitter.sizes()
         total = sum(sizes)
@@ -2539,7 +2522,7 @@ class MainWindow(QMainWindow):
             # 须在主 Vce 抬升前搜索；勿用 pulse1_off 作 anchor（会在关断沿之后误找）
             a_anchor_us = max(
                 search_t0,
-                float(markers.t_start * 1e6) - 150.0,
+                float(markers.t_start * 1e6) - 0.15,
             )
             rise_a_mode = "eoff_vce"
             fall_b_mode = "eoff_ic_fall"
@@ -2706,46 +2689,45 @@ class MainWindow(QMainWindow):
         if restored is None:
             self._auto_align_irr_channel_baseline(irr, rr0, rr1)
 
-        def _on_irr_interval(t0_us: float, t1_us: float) -> None:
+        def _apply_irr_interval(
+            t0_us: float, t1_us: float, *, remember: bool
+        ) -> None:
             i0 = int(np.searchsorted(t, min(t0_us, t1_us) * 1e-6, side="left"))
             i1 = int(np.searchsorted(t, max(t0_us, t1_us) * 1e-6, side="left"))
             i0 = max(0, min(i0, len(t) - 1))
             i1 = max(i0 + 1, min(i1, len(t) - 1))
-            val = float(self._irr_peak_interactive(irr, i0, i1))
-            self._touch_manual_waveform_source()
-            self._manual_intervals[("反向恢复", "Irr")] = (min(t0_us, t1_us), max(t0_us, t1_us))
+            peak_idx = self._irr_peak_index_interactive(irr, i0, i1)
+            signed_peak = (
+                0.0
+                if peak_idx is None
+                else float(np.asarray(irr, dtype=np.float64)[peak_idx])
+            )
+            val = abs(float(signed_peak))
+            if remember:
+                self._touch_manual_waveform_source()
+                self._manual_intervals[("反向恢复", "Irr")] = (
+                    min(t0_us, t1_us),
+                    max(t0_us, t1_us),
+                )
             self.wave_plot.set_interval_peak_on_hb(
-                val,
+                signed_peak,
                 channel="irr",
-                t0_us=min(t0_us, t1_us),
-                t1_us=max(t0_us, t1_us),
-                use_abs_peak=True,
             )
             if self.result is None:
                 return
             self.result.reverse_recovery.irr = val
             self.result_table.set_metric_value("反向恢复", "Irr", val)
             self.statusBar().showMessage(
-                f"反向恢复 Irr: {val:.3f}A（A/B 区间内最大值，Hb 自动跟随）  "
+                f"反向恢复 Irr: {val:.3f}A（A/B 区间内反向恢复电流尖峰值，Hb 自动跟随）  "
                 f"[{min(t0_us, t1_us):.3f}~{max(t0_us, t1_us):.3f}µs]"
             )
 
+        def _on_irr_interval(t0_us: float, t1_us: float) -> None:
+            _apply_irr_interval(t0_us, t1_us, remember=True)
+
         self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_irr_peak_interaction(t0_us, t1_us, _on_irr_interval)
-        if restored is not None:
-            _on_irr_interval(t0_us, t1_us)
-        elif self.result is not None:
-            self.wave_plot.set_interval_peak_on_hb(
-                float(self.result.reverse_recovery.irr),
-                channel="irr",
-                t0_us=min(t0_us, t1_us),
-                t1_us=max(t0_us, t1_us),
-                use_abs_peak=True,
-            )
-            self.statusBar().showMessage(
-                f"反向恢复 Irr: {self.result.reverse_recovery.irr:.3f}A（拖动 A/B 后重算）  "
-                f"[{min(t0_us, t1_us):.3f}~{max(t0_us, t1_us):.3f}µs]"
-            )
+        _apply_irr_interval(t0_us, t1_us, remember=restored is not None)
 
     def _enable_trr_interaction(self) -> None:
         """Trr：Ha 参考线 + A/B 与 Ha 交点；拖 Ha 联动 A(上升沿)、B(下降沿) 首个交点。"""
@@ -3569,39 +3551,49 @@ class MainWindow(QMainWindow):
         return None
 
     def _irr_peak_interactive(self, irr: np.ndarray, i0: int, i1: int) -> float:
-        seg = irr[i0 : i1 + 1]
-        if len(seg) == 0:
+        idx = self._irr_peak_index_interactive(irr, i0, i1)
+        if idx is None:
             return 0.0
-        def _robust_pos_peak(x: np.ndarray) -> float:
-            if len(x) == 0:
-                return 0.0
-            if len(x) < 8:
-                return float(np.max(x))
-            # 交互默认线避免被单点尖峰抬高：取高分位替代绝对最大值
-            return float(np.percentile(x, 98))
+        return abs(float(np.asarray(irr, dtype=np.float64)[idx]))
 
-        def _robust_neg_peak_abs(x: np.ndarray) -> float:
-            if len(x) == 0:
-                return 0.0
-            if len(x) < 8:
-                return float(abs(np.min(x)))
-            # 对负峰同理，取低分位替代绝对最小值
-            return float(abs(np.percentile(x, 2)))
+    def _irr_peak_index_interactive(
+        self, irr: np.ndarray, i0: int, i1: int
+    ) -> int | None:
+        arr = np.asarray(irr, dtype=np.float64)
+        if len(arr) == 0:
+            return None
+        i0 = max(0, min(int(i0), len(arr) - 1))
+        i1 = max(i0, min(int(i1), len(arr) - 1))
+        if self.result is not None and self.result.segments is not None:
+            from dpt_extractor.metrics.irr_measure import irr_parameter_peak_index
 
-        k = max(8, len(seg) // 5)
-        head = seg[:k]
-        ref = float(np.median(head)) if len(head) else float(np.median(seg))
-        amp = max(abs(float(np.max(seg))), abs(float(np.min(seg))), 1.0)
-        th = 0.02 * amp
-        if ref < 0:
-            cross = np.where(seg > th)[0]
-            if len(cross):
-                return _robust_pos_peak(seg[cross[0] :])
-            return _robust_pos_peak(seg)
-        cross = np.where(seg < -th)[0]
-        if len(cross):
-            return _robust_neg_peak_abs(seg[cross[0] :])
-        return _robust_neg_peak_abs(seg)
+            segs = self.result.segments
+            idx = int(
+                irr_parameter_peak_index(
+                    arr,
+                    segs.reverse_recovery[0],
+                    segs.reverse_recovery[1],
+                    segs.pulse2_on,
+                    segs.turn_on[0],
+                    segs.turn_on[1],
+                )
+            )
+            if i0 <= idx <= i1:
+                return idx
+
+        seg = arr[i0 : i1 + 1]
+        if len(seg) == 0:
+            return None
+        pos_i = int(np.nanargmax(seg))
+        neg_i = int(np.nanargmin(seg))
+        peak_pos = float(seg[pos_i])
+        peak_neg = abs(float(seg[neg_i]))
+        amp = max(peak_pos, peak_neg, 1.0)
+        if peak_pos >= 0.1 * amp:
+            return i0 + pos_i
+        if peak_neg >= 0.1 * amp:
+            return i0 + neg_i
+        return i0 + pos_i
 
     def _irr_settled_midline(self, irr: np.ndarray, i0: int, i1: int) -> float:
         """Irr 尖峰前无震荡平台（Ha 默认，与 Trr 卡尺一致）。"""

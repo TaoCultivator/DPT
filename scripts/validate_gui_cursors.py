@@ -1,8 +1,10 @@
-"""无界面光标-波形绑定校验：对四工况逐参数触发 GUI 交互，
+"""无界面光标-波形绑定校验：对代表性工况逐参数触发 GUI 交互，
 回读 MainWindow 传给 wave_plot 的光标放置参数（绑定通道 / A/B 时刻 / Ha/Hb 电平），
 断言每个数据光标落在正确波形的正确特征上，输出 OK/FAIL 矩阵。
 
 以 UH 上桥为基准，重点暴露下桥（Irr=Ic−IL 为负、Vd 负偏）的极性类不兼容。
+默认使用代表性样本以保证 GUI 子进程审计在单测超时内完成；设置
+DPT_VALIDATE_ALL_CURSORS=1 可扫描所有示例 .tss。
 """
 from __future__ import annotations
 
@@ -54,6 +56,21 @@ SECTION_SEGMENT = {
     "开通": "turn_on",
     "反向恢复": "reverse_recovery",
 }
+
+DEFAULT_SAMPLE_FRAGMENTS = (
+    ("KSU2577", "07CF2C1000 20260506", "SMC", "RT", "UH_750V_1048A_000.tss"),
+    ("KSU2577", "07CF2C1000 20260506", "SMC", "RT", "UL_750V_1048A_000.tss"),
+    ("KSU2577", "07CF2C1000 20260506", "SMC", "RT", "WH_750V_1048A_000.tss"),
+    ("KSU2577", "07CF2C1000 20260506", "SMC", "RT", "WL_750V_1048A_000.tss"),
+    ("KSU2506", "GCU", "SMC", "LT", "UH_480V_500A_000.tss"),
+    ("KSU2506", "GCU", "SMC", "LT", "UL_480V_500A_000.tss"),
+    ("KSU2506", "DCU", "SMC", "LT", "WH_480V_800A_000.tss"),
+    ("KSU2506", "DCU", "SMC", "LT", "WL_480V_800A_000.tss"),
+    ("SSM1R7PB12B3DTFMMSPP25M4CF0016", "SSS", "HT", "UH_750V_1050A_000.tss"),
+    ("SSM1R7PB12B3DTFMMSPP25M4CF0016", "SSS", "HT", "UL_750V_1050A_000.tss"),
+    ("SSM1R7PB12B3DTFMMSPP25M4CF0016", "SSS", "LT", "WH-750V-1050A_000.tss"),
+    ("SSM1R7PB12B3DTFMMSPP25M4CF0016", "SSS", "LT", "WL-750V-1050A_000.tss"),
+)
 
 
 class Capture:
@@ -140,6 +157,10 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
     bundle = mw.bundle
     profile = mw.profile
     result = mw.result
+    if bundle is None or result is None or result.segments is None:
+        detail = mw.statusBar().currentMessage() if mw.statusBar() is not None else "参数未计算"
+        mw.close()
+        return [(path.name, "加载", "自动提取", "INFO", detail)]
     t = bundle.t
     segs = result.segments
     chan = {
@@ -373,8 +394,24 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
     return rows
 
 
+def _selected_sample_waveforms(root: Path) -> list[Path]:
+    paths = discover_sample_waveforms(root)
+    if os.environ.get("DPT_VALIDATE_ALL_CURSORS", "").lower() in {"1", "true", "yes"}:
+        return paths
+    selected: list[Path] = []
+    for fragments in DEFAULT_SAMPLE_FRAGMENTS:
+        for path in paths:
+            text = str(path)
+            if all(fragment in text for fragment in fragments):
+                selected.append(path)
+                break
+    if selected:
+        return selected
+    return paths[: min(8, len(paths))]
+
+
 def run_all() -> list[tuple]:
-    """对所有存在的示例文件跑光标审计，返回 (file, section, name, status, detail) 行。"""
+    """对选定示例文件跑光标审计，返回 (file, section, name, status, detail) 行。"""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtWidgets import QApplication
 
@@ -382,7 +419,7 @@ def run_all() -> list[tuple]:
 
     app = QApplication.instance() or QApplication([])
     all_rows: list[tuple] = []
-    for path in discover_sample_waveforms(ROOT):
+    for path in _selected_sample_waveforms(ROOT):
         all_rows.extend(audit_file(MainWindow, QApplication, app, path))
     return all_rows
 

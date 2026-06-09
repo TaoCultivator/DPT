@@ -243,6 +243,8 @@ def _eoff_vce_ha_crossing_at_main_rise(
     dt: float,
     v_top: float,
     search_span_ns: float = 350.0,
+    pre_rise_span_ns: float = 160.0,
+    prefer_last_base_cross: bool = False,
 ) -> tuple[int, float]:
     """关断 A：窗内主 Vce 抬升（最大 dV/dt）与 Ha 的上升穿越时刻。"""
     if len(t_seg) < 2:
@@ -275,8 +277,16 @@ def _eoff_vce_ha_crossing_at_main_rise(
         positive_diffs = diffs[diffs > 0.0]
         sample_dt = float(np.median(positive_diffs)) if len(positive_diffs) else float(dt)
         # t_seg 在 pipeline 中是秒，在 GUI 交互中是微秒；按采样间隔推断单位。
-        pre_rise_span = 0.145 if sample_dt > 1e-7 else 145e-9
+        # Low-current turn-off traces can leave the true Vce base for a ~30 V
+        # foot before the 50% rise point.  Keep the default lookback narrow for
+        # high-current noise immunity; callers may widen it for low-current DPT.
+        pre_rise_span = (
+            float(pre_rise_span_ns) * 1e-3
+            if sample_dt > 1e-7
+            else float(pre_rise_span_ns) * 1e-9
+        )
         t_near = float(t_seg[k_high]) - pre_rise_span
+        last_cross: tuple[int, float] | None = None
         for kk in range(0, max(0, k_high)):
             if float(t_seg[kk]) < t_near:
                 continue
@@ -284,7 +294,11 @@ def _eoff_vce_ha_crossing_at_main_rise(
             if y0 < ha_v <= y1 and y1 > y0:
                 frac = float(np.clip((ha_v - y0) / (y1 - y0), 0.0, 1.0))
                 t_cross = float(t_seg[kk] + frac * (t_seg[kk + 1] - t_seg[kk]))
-                return int(kk), t_cross
+                if not prefer_last_base_cross:
+                    return int(kk), t_cross
+                last_cross = (int(kk), t_cross)
+        if last_cross is not None:
+            return last_cross
 
         # 若局部窗口未找到 Ha 交点，回退到脚点附近插值。
         foot = k_high
@@ -338,12 +352,22 @@ def _eoff_vce_rise_start_index(
     dt: float,
     v_top: float,
     t_seg: np.ndarray | None = None,
+    pre_rise_span_ns: float = 160.0,
+    prefer_last_base_cross: bool = False,
 ) -> int:
     """关断 A 样本索引（与 _eoff_vce_ha_crossing_at_main_rise 一致）。"""
     _ = anchor
     if t_seg is None or len(t_seg) != len(v_seg):
         t_seg = np.arange(len(v_seg), dtype=np.float64) * float(dt)
-    ix, _ = _eoff_vce_ha_crossing_at_main_rise(t_seg, v_seg, ha_v, dt, v_top)
+    ix, _ = _eoff_vce_ha_crossing_at_main_rise(
+        t_seg,
+        v_seg,
+        ha_v,
+        dt,
+        v_top,
+        pre_rise_span_ns=pre_rise_span_ns,
+        prefer_last_base_cross=prefer_last_base_cross,
+    )
     return int(ix)
 
 
@@ -489,8 +513,15 @@ def eoff_energy_markers(
     t_sw = t[sw0 : w1 + 1]
     local_off = off_idx - sw0
 
+    low_current_eoff = float(i_top) < 180.0
     i_start_local, t_start = _eoff_vce_ha_crossing_at_main_rise(
-        t_sw, v_seg, ha_v, dt, float(v_top)
+        t_sw,
+        v_seg,
+        ha_v,
+        dt,
+        float(v_top),
+        pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
+        prefer_last_base_cross=low_current_eoff,
     )
 
     fall_anchor = max(i_start_local + 1, int(np.searchsorted(t_sw, t_start, side="left")))

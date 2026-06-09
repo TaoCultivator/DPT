@@ -3708,6 +3708,85 @@ class WaveformPlot(QWidget):
         value = float(np.interp(t_clamped, tt, raw))
         return value, self._to_disp(channel, value)
 
+    def _energy_cursor_channels(self) -> tuple[str, ...]:
+        raw = tuple(getattr(self, "_energy_peak_channels", ()) or ())
+        if not raw:
+            raw = (
+                getattr(self, "_energy_ha_channel", "vce"),
+                getattr(self, "_energy_hb_channel", "ic"),
+            )
+        out: list[str] = []
+        for ch in raw:
+            logical = str(ch)
+            if logical not in out:
+                out.append(logical)
+        return tuple(out)
+
+    def _energy_cursor_samples(self, t_us: float) -> list[tuple[str, str, float, float, str, str, str]]:
+        labels = {
+            "vce": "Vce",
+            "ic": "Ic",
+            "irr": "Irr",
+            "v_diode": "Vd",
+        }
+        samples: list[tuple[str, str, float, float, str, str, str]] = []
+        for logical in self._energy_cursor_channels():
+            display = self._display_key_for_channel(logical)
+            if display in self._hidden_channels:
+                continue
+            sample = self._sample_cursor_channel(display, t_us)
+            if sample is None:
+                continue
+            value, y_div = sample
+            unit = self._unit_for_channel(display)
+            tag = labels.get(logical, self._cursor_source_tag(display) or display)
+            color = self._cursor_source_color(display)
+            samples.append((logical, display, value, y_div, unit, tag, color))
+        return samples
+
+    def _energy_cursor_values_html(
+        self, samples: list[tuple[str, str, float, float, str, str, str]]
+    ) -> str:
+        lines = []
+        for _logical, _display, value, _y_div, unit, tag, color in samples:
+            sym = self._scope_wave_letter(unit)
+            lines.append(
+                f"<span style='color:{color};font-weight:700'>{tag}</span> "
+                f"{sym}: {self._scope_quantity_text(value, unit)}"
+            )
+        return "<br/>".join(lines)
+
+    def _energy_cursor_values_inline(
+        self, samples: list[tuple[str, str, float, float, str, str, str]]
+    ) -> str:
+        parts = []
+        for _logical, _display, value, _y_div, unit, tag, color in samples:
+            parts.append(
+                f"<span style='color:{color};font-weight:700'>{tag}</span> "
+                f"{self._scope_quantity_text(value, unit)}"
+            )
+        return ", ".join(parts)
+
+    def _energy_delta_values_html(
+        self,
+        a_samples: list[tuple[str, str, float, float, str, str, str]],
+        b_samples: list[tuple[str, str, float, float, str, str, str]],
+    ) -> str:
+        by_key = {logical: (value, unit, tag, color) for logical, _display, value, _y, unit, tag, color in a_samples}
+        lines = []
+        for logical, _display, b_value, _y, unit, tag, color in b_samples:
+            a = by_key.get(logical)
+            if a is None:
+                continue
+            a_value, _unit, _tag, _color = a
+            delta = float(b_value) - float(a_value)
+            sym = self._scope_wave_letter(unit)
+            lines.append(
+                f"<span style='color:{color};font-weight:700'>Δ{tag}</span> "
+                f"{sym}: {self._scope_quantity_text(delta, unit)}"
+            )
+        return "<br/>".join(lines)
+
     def _ensure_waveform_cursor_markers(self) -> None:
         plot_items = self.plot.getPlotItem().items
         for attr in ("_cursor_a_wave_marker", "_cursor_b_wave_marker"):
@@ -3731,6 +3810,34 @@ class WaveformPlot(QWidget):
             or self._cursor_b is None
         ):
             self._hide_waveform_cursor_markers()
+            return
+        if self._interactive_mode == "energy_loss":
+            a = float(self._cursor_a.value())
+            b = float(self._cursor_b.value())
+            a_samples = self._energy_cursor_samples(a)
+            b_samples = self._energy_cursor_samples(b)
+            if not a_samples and not b_samples:
+                self._hide_waveform_cursor_markers()
+                return
+            self._ensure_waveform_cursor_markers()
+            pen = pg.mkPen("#f2f2f2", width=1.2)
+
+            def _spots(x: float, samples: list[tuple[str, str, float, float, str, str, str]]):
+                return [
+                    {
+                        "pos": (x, y_div),
+                        "pen": pen,
+                        "brush": pg.mkBrush(QColor(color)),
+                    }
+                    for _logical, _display, _value, y_div, _unit, _tag, color in samples
+                ]
+
+            assert self._cursor_a_wave_marker is not None
+            assert self._cursor_b_wave_marker is not None
+            self._cursor_a_wave_marker.setData(spots=_spots(a, a_samples))
+            self._cursor_b_wave_marker.setData(spots=_spots(b, b_samples))
+            self._cursor_a_wave_marker.setVisible(bool(a_samples))
+            self._cursor_b_wave_marker.setVisible(bool(b_samples))
             return
         ch = self._cursor_source_channel()
         a_sample = self._sample_cursor_channel(ch, float(self._cursor_a.value()))
@@ -3894,6 +4001,37 @@ class WaveformPlot(QWidget):
         self._ensure_v_cursor_plot_labels()
         dt_us = b_us - a_us
         freq_txt = self._freq_text_from_dt_us(dt_us)
+        if self._interactive_mode == "energy_loss":
+            a_samples = self._energy_cursor_samples(a_us)
+            b_samples = self._energy_cursor_samples(b_us)
+            if self._cursor_waveform_visible() and a_samples and b_samples:
+                a_text = (
+                    f"t: {a_us:.3f} µs<br/>"
+                    f"{self._energy_cursor_values_html(a_samples)}"
+                )
+                b_text = (
+                    f"t: {b_us:.3f} µs<br/>"
+                    f"{self._energy_cursor_values_html(b_samples)}"
+                )
+                delta_lines = self._energy_delta_values_html(a_samples, b_samples)
+                delta_text = f"Δ t: {dt_us:.3f} µs&nbsp;&nbsp;&nbsp;1 / Δ t: {freq_txt}"
+                if delta_lines:
+                    delta_text = f"{delta_text}<br/>{delta_lines}"
+                self._cursor_a_t_label.setHtml(
+                    self._cursor_plot_label_html(a_text, CURSOR_PEN_A)
+                )
+                self._cursor_b_t_label.setHtml(
+                    self._cursor_plot_label_html(b_text, CURSOR_PEN_B)
+                )
+                self._cursor_ab_delta_label.setHtml(
+                    self._cursor_plot_label_html(delta_text, "#CDD6F4")
+                )
+                self._position_v_cursor_plot_labels(a_us, b_us)
+                self._cursor_a_t_label.show()
+                self._cursor_b_t_label.show()
+                self._cursor_ab_delta_label.show()
+                self._update_waveform_cursor_markers()
+                return
         ch = self._cursor_source_channel()
         unit = self._unit_for_channel(ch) if ch is not None else ""
         sym = self._scope_wave_letter(unit)
@@ -4119,10 +4257,16 @@ class WaveformPlot(QWidget):
             }
             ha_tag = _ch_tag.get(ha_ch, ha_ch)
             hb_tag = _ch_tag.get(hb_ch, hb_ch)
+            a_samples = self._energy_cursor_samples(a)
+            b_samples = self._energy_cursor_samples(b)
+            a_txt = self._energy_cursor_values_inline(a_samples) or "—"
+            b_txt = self._energy_cursor_values_inline(b_samples) or "—"
             txt = (
                 f"<span style='color:{ca}'>A {a:9.3f}µs</span>&nbsp;"
                 f"<span style='color:{cb}'>B {b:9.3f}µs</span>&nbsp;"
                 f"Δt {dt_us:+9.3f}µs&nbsp;|&nbsp;"
+                f"<span style='color:{ca}'>A[{a_txt}]</span>&nbsp;"
+                f"<span style='color:{cb}'>B[{b_txt}]</span>&nbsp;|&nbsp;"
                 f"<span style='color:{ca}'>[{ha_tag}] Ha {ha_val:+10.2f}{ha_u}</span>&nbsp;"
                 f"<span style='color:{cb}'>[{hb_tag}] Hb {hb_val:+10.2f}{hb_u}</span>"
             )
@@ -4588,7 +4732,6 @@ class WaveformPlot(QWidget):
         self._interactive_enabled = True
         self._interactive_on_change = on_change
         self._interactive_mode = "energy_loss"
-        self._active_channel = self._energy_ha_channel
         self._slope_channel = None
         self._interval_max_hline_enabled = False
         self._interval_peak_on_hb = False
@@ -4618,6 +4761,7 @@ class WaveformPlot(QWidget):
         self._energy_peak_channels = (
             tuple(peak_channels) if peak_channels is not None else ("vce", "ic")
         )
+        self._active_channel = self._energy_ha_channel
 
         if self._cursor_a is None or self._cursor_b is None:
             self._install_persistent_cursors(t_a_us, t_b_us, 1.0)

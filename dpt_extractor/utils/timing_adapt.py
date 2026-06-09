@@ -48,6 +48,76 @@ def adaptive_forward_samples(
     return min(cap, max(floor, n))
 
 
+def _dominant_low_plateau_mid(
+    block: np.ndarray, rough_base: float, v_top: float
+) -> float | None:
+    """Most populated low-voltage shelf in a pre-rise block, as (max+min)/2."""
+    arr = np.asarray(block, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) < 12:
+        return None
+    span = max(float(v_top) - float(rough_base), 1.0)
+    low_ceiling = float(rough_base) + 0.15 * span
+    arr = arr[arr <= low_ceiling]
+    if len(arr) < 12:
+        return None
+    bin_w = max(1.0, min(5.0, 0.003 * span))
+    lo = float(np.floor(float(np.min(arr)) / bin_w) * bin_w)
+    hi = float(np.ceil(float(np.max(arr)) / bin_w) * bin_w + bin_w)
+    edges = np.arange(lo, hi + 0.5 * bin_w, bin_w, dtype=np.float64)
+    if len(edges) < 2:
+        return None
+    hist, edges = np.histogram(arr, bins=edges)
+    if len(hist) == 0 or int(np.max(hist)) < max(12, int(0.18 * len(arr))):
+        return None
+    k = int(np.argmax(hist))
+    left = float(edges[k])
+    right = float(edges[k + 1])
+    if k == len(hist) - 1:
+        cluster = arr[(arr >= left) & (arr <= right)]
+    else:
+        cluster = arr[(arr >= left) & (arr < right)]
+    if len(cluster) < 3:
+        return None
+    return 0.5 * (float(np.max(cluster)) + float(np.min(cluster)))
+
+
+def _refined_turn_off_vce_base(
+    vce: np.ndarray,
+    w0: int,
+    w1: int,
+    i0: int,
+    dt: float,
+    rough_base: float,
+    v_top: float,
+) -> float:
+    """Prefer the stable on-state Vce shelf before the main rise over isolated lows."""
+    sw0 = max(int(w0), int(i0))
+    if w1 <= sw0 + 16:
+        return float(rough_base)
+    seg = vce[sw0 : w1 + 1].astype(np.float64)
+    span = max(float(v_top) - float(rough_base), 1.0)
+    mid = float(rough_base) + 0.5 * span
+    k_high: int | None = None
+    for k, value in enumerate(seg):
+        if float(value) >= mid:
+            k_high = int(k)
+            break
+    if k_high is None:
+        return float(rough_base)
+
+    rise_g = sw0 + k_high
+    base_lo = max(sw0, rise_g - samples_from_ns(350.0, dt))
+    base_hi = max(base_lo + 3, rise_g - samples_from_ns(80.0, dt))
+    block = vce[base_lo:base_hi].astype(np.float64)
+    candidate = _dominant_low_plateau_mid(block, rough_base, v_top)
+    if candidate is None:
+        return float(rough_base)
+    if candidate > float(rough_base) + max(2.0, 0.003 * span):
+        return float(candidate)
+    return float(rough_base)
+
+
 def scope_turn_off_bases(
     vce: np.ndarray,
     ic: np.ndarray,
@@ -94,6 +164,8 @@ def scope_turn_off_bases(
     else:
         i_base = float(np.percentile(post_i, 50))
         v_top = float(np.percentile(post_v, 80))
+
+    v_base = _refined_turn_off_vce_base(vce, w0, w1, i0, dt, v_base, v_top)
 
     return v_base, i_top, i_base, v_top, w0, w1
 

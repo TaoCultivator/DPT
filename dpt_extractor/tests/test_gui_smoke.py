@@ -14,6 +14,28 @@ from dpt_extractor.tests.sample_paths import sample_tss
 
 WH = sample_tss("WH_480V_800A_000.tss")
 UH = sample_tss("UH_750V_1050A_000.tss")
+SMC_RT_UH = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UH_750V_1048A_000.tss"
+)
+SMC_RT_UL = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UL_750V_1048A_000.tss"
+)
 
 
 class TestWaveformImportAutoCenter(unittest.TestCase):
@@ -198,27 +220,50 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         win.close()
 
     def test_main_window_shows_noncommercial_notice(self):
+        from PyQt6.QtCore import QSettings
+
         from dpt_extractor.gui.main_window import (
             COMMERCIAL_AUTH_QQ,
             MainWindow,
+            NONCOMMERCIAL_NOTICE_SETTINGS_KEY,
             commercial_authorization_message,
         )
-
-        win = MainWindow()
-        self.app.processEvents()
-
-        self.assertFalse(win.license_notice.isHidden())
-        self.assertIn(COMMERCIAL_AUTH_QQ, win.lbl_license_notice.text())
-        self.assertIn("商务授权", win.btn_license_notice.text())
-        self.assertIn(COMMERCIAL_AUTH_QQ, win.btn_license_notice.toolTip())
 
         message = commercial_authorization_message()
         self.assertIn("禁止任何商业使用", message)
         self.assertIn(COMMERCIAL_AUTH_QQ, message)
 
-        win._apply_toolbar_density(860)
-        self.assertIn(COMMERCIAL_AUTH_QQ, win.lbl_license_notice.text())
-        self.assertEqual(win.btn_license_notice.text(), "授权")
+        settings = QSettings("DPT", "DPTExtractor")
+        old_value = settings.value(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, None)
+        settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
+        try:
+            win = MainWindow()
+            self.app.processEvents()
+
+            self.assertFalse(hasattr(win, "license_notice"))
+            self.assertTrue(win._should_show_license_notice())
+            win._mark_license_notice_shown()
+            self.assertFalse(win._should_show_license_notice())
+            win.close()
+        finally:
+            if old_value is None:
+                settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
+            else:
+                settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
+
+    def test_irr_interactive_peak_uses_actual_spike(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        irr = np.zeros(120, dtype=np.float64)
+        irr[20] = -320.0
+        irr[40:80] = np.linspace(0.0, 40.0, 40)
+        irr[80] = 250.0
+        irr[81:] = 38.0
+
+        self.assertAlmostEqual(win._irr_peak_interactive(irr, 0, len(irr) - 1), 250.0)
         win.close()
 
     def test_report_plot_capture_size_uses_fixed_plot_baseline(self):
@@ -1612,6 +1657,8 @@ class TestMainWindowSmoke(unittest.TestCase):
 
     def test_uh_eoff_cursor_uses_main_rise_not_pulse_off(self):
         """Eoff 进入时 A 应在主 Vce 抬升沿（~14.61µs），而非关断沿或 14.37µs 噪声。"""
+        import numpy as np
+
         from dpt_extractor.gui.main_window import MainWindow
 
         win = MainWindow()
@@ -1631,7 +1678,70 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertLess(ta, 14.525, f"A too late/pulse_off: {ta}")
         self.assertGreater(tb, 14.77)
         self.assertLess(tb, 14.84)
+        a_samples = plot._energy_cursor_samples(ta)
+        b_samples = plot._energy_cursor_samples(tb)
+        self.assertEqual([s[0] for s in a_samples], ["vce", "ic"])
+        self.assertEqual([s[0] for s in b_samples], ["vce", "ic"])
+        ha_v = plot._from_disp("vce", float(plot._h_cursor_a.value()))
+        vce = win.bundle.get(win.profile.vce)
+        vce_at_a = float(np.interp(ta * 1e-6, win.bundle.t, vce))
+        self.assertAlmostEqual(vce_at_a, ha_v, delta=0.5)
+        marker_x, marker_y = plot._cursor_a_wave_marker.getData()
+        self.assertEqual(len(marker_x), 2)
+        self.assertEqual(len(marker_y), 2)
+        readout = plot._readout_label.text()
+        self.assertIn("A[", readout)
+        self.assertIn("B[", readout)
+        self.assertIn("Vce", readout)
+        self.assertIn("Ic", readout)
         win.close()
+
+    def test_smc_rt_eoff_ha_intersects_vce_a_cursor(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        if not SMC_RT_UH.exists():
+            self.skipTest("SMC RT UH sample missing")
+        win = MainWindow()
+        win._load_file(str(SMC_RT_UH))
+        self.assertIsNotNone(win.result)
+        win._on_value_clicked("关断过程", "Eoff")
+        plot = win.wave_plot
+        ta = float(plot._cursor_a.value())
+        tb = float(plot._cursor_b.value())
+        ha_v = plot._from_disp("vce", float(plot._h_cursor_a.value()))
+        hb_a = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+        vce = win.bundle.get(win.profile.vce)
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        ic = bundle_total_current(win.bundle, win.profile)
+        self.assertAlmostEqual(
+            float(np.interp(ta * 1e-6, win.bundle.t, vce)), ha_v, delta=0.5
+        )
+        self.assertAlmostEqual(
+            float(np.interp(tb * 1e-6, win.bundle.t, ic)), hb_a, delta=0.5
+        )
+        self.assertGreater(ta, 14.65)
+        self.assertLess(ta, 14.70)
+        self.assertAlmostEqual(ha_v, 12.34375, delta=0.5)
+        win.close()
+
+    def test_smc_rt_irr_hb_tracks_parameter_spike_not_abs_prespike(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        for path, expected in ((SMC_RT_UH, 170.4375), (SMC_RT_UL, 127.03125)):
+            if not path.exists():
+                self.skipTest(f"{path.name} sample missing")
+            win = MainWindow()
+            win._load_file(str(path))
+            self.assertIsNotNone(win.result)
+            win._on_value_clicked("反向恢复", "Irr")
+            plot = win.wave_plot
+            hb_irr = plot._from_disp("irr", float(plot._h_cursor_b.value()))
+            self.assertAlmostEqual(hb_irr, expected, delta=0.5)
+            self.assertAlmostEqual(win.result.reverse_recovery.irr, expected, delta=0.5)
+            win.close()
 
 
 if __name__ == "__main__":
