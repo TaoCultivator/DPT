@@ -88,6 +88,32 @@ class TestAppPaths(unittest.TestCase):
             self.assertEqual(cache, root / "numba_cache")
             self.assertTrue(cache.is_dir())
 
+    def test_configure_numba_cache_refreshes_stale_version_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cache_dir = root / "numba_cache"
+            cache_dir.mkdir()
+            stale_file = cache_dir / "stale-cache.bin"
+            stale_dir = cache_dir / "stale-dir"
+            stale_dir.mkdir()
+            stale_file.write_bytes(b"old")
+            (stale_dir / "item.bin").write_bytes(b"old")
+            marker = cache_dir / ".dpt_numba_cache_version"
+            marker.write_text("0.0.0", encoding="utf-8")
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("NUMBA_CACHE_DIR", None)
+                with patch(
+                    "dpt_extractor.utils.app_paths.user_data_dir",
+                    return_value=root,
+                ), patch("dpt_extractor.utils.app_paths.__version__", "9.9.9"):
+                    cache = configure_numba_cache_dir()
+
+            self.assertEqual(cache, cache_dir)
+            self.assertFalse(stale_file.exists())
+            self.assertFalse(stale_dir.exists())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "9.9.9")
+
 
 if __name__ == "__main__":
     unittest.main()

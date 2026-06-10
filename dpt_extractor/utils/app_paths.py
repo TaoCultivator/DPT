@@ -6,8 +6,11 @@ import shutil
 import sys
 from pathlib import Path
 
+from dpt_extractor import __version__
+
 DEFAULT_REPORT_TEMPLATE_NAME = "默认报告模板.xlsx"
 COMMERCIAL_NOTICE_POSTER_NAME = "noncommercial_authorization_poster.png"
+_NUMBA_CACHE_VERSION_FILE = ".dpt_numba_cache_version"
 
 
 def is_frozen() -> bool:
@@ -104,9 +107,41 @@ def configure_numba_cache_dir() -> Path | None:
             cache_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             continue
+        _refresh_numba_cache_for_version(cache_dir)
         os.environ["NUMBA_CACHE_DIR"] = str(cache_dir)
         return cache_dir
     return None
+
+
+def _refresh_numba_cache_for_version(cache_dir: Path) -> None:
+    marker = cache_dir / _NUMBA_CACHE_VERSION_FILE
+    try:
+        cached_version = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        cached_version = ""
+    if cached_version == __version__:
+        return
+
+    try:
+        children = list(cache_dir.iterdir())
+    except OSError:
+        children = []
+
+    for child in children:
+        if child == marker:
+            continue
+        try:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        except OSError:
+            continue
+
+    try:
+        marker.write_text(__version__, encoding="utf-8")
+    except OSError:
+        pass
 
 
 def user_channel_maps_path() -> Path:
