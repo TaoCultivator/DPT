@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from dpt_extractor.models.channel_mapping import ChannelMapping
+from dpt_extractor.models.channel_mapping import ChannelMapping, sort_channel_names
 
 # 电感电流（IGBT / MOSFET 通用）
 _IL_PATTERNS = (r"^IL$",)
@@ -174,6 +174,18 @@ def _pick_channel(
     return best_ch
 
 
+def _labeled_scope_channels(
+    labels: dict[str, str],
+    available: set[str],
+) -> list[tuple[str, str]]:
+    by_channel: dict[str, str] = {}
+    for ch, lab in labels.items():
+        key = ch.upper()
+        if key in available and _is_raw_scope_channel(key) and lab:
+            by_channel[key] = _norm_label(lab)
+    return [(ch, by_channel[ch]) for ch in sort_channel_names(by_channel)]
+
+
 def _is_lower_arm_current_norm(norm: str) -> bool:
     """是否为「下桥支路电流」类标签（非 IL、非被测管总电流）。"""
     if norm == "IL":
@@ -297,11 +309,7 @@ def infer_channel_mapping(
         return None
 
     avail = {ch.upper() for ch in (available or set(labels.keys()))}
-    labeled = [
-        (ch.upper(), _norm_label(lab))
-        for ch, lab in labels.items()
-        if ch.upper() in avail and _is_raw_scope_channel(ch) and lab
-    ]
+    labeled = _labeled_scope_channels(labels, avail)
     if not labeled:
         return None
 
@@ -358,11 +366,7 @@ def infer_short_circuit_mapping(
         return None
 
     avail = {ch.upper() for ch in (available or set(labels.keys()))}
-    labeled = [
-        (ch.upper(), _norm_label(lab))
-        for ch, lab in labels.items()
-        if ch.upper() in avail and _is_raw_scope_channel(ch) and lab
-    ]
+    labeled = _labeled_scope_channels(labels, avail)
     if not labeled:
         return None
 

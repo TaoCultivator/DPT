@@ -39,6 +39,34 @@ def infer_mapping_from_bundle(
     )
 
 
+def infer_mapping_from_waveform_trends(
+    bundle: WaveformBundle | None,
+    bridge: str,
+) -> ChannelMapping | None:
+    """Infer DPT mapping from waveform shape trends without trusting labels."""
+    if bundle is None:
+        return None
+    from dpt_extractor.io.waveform_mapping import (
+        infer_channel_mapping_from_waveform_trends,
+    )
+
+    return infer_channel_mapping_from_waveform_trends(bundle, bridge)
+
+
+def infer_best_mapping_from_bundle(
+    bundle: WaveformBundle | None,
+    bridge: str,
+) -> tuple[ChannelMapping | None, str]:
+    """Try waveform trends first, then TSS labels as a fallback."""
+    inferred = infer_mapping_from_waveform_trends(bundle, bridge)
+    if inferred is not None:
+        return inferred, "trend"
+    inferred = infer_mapping_from_bundle(bundle, bridge)
+    if inferred is not None:
+        return inferred, "label"
+    return None, ""
+
+
 def infer_short_circuit_mapping_from_bundle(
     bundle: WaveformBundle | None,
     bridge: str,
@@ -182,6 +210,56 @@ def validate_mapping(mapping: ChannelMapping, bundle: WaveformBundle | None) -> 
             check_col(key, col)
 
     return errors
+
+
+def active_mapping_keys(mapping: ChannelMapping) -> tuple[str, ...]:
+    """Logical keys that are currently backed by a direct source channel."""
+    keys = list(LOGICAL_SIGNAL_KEYS)
+    if mapping.ic_from_sum_irr_il and "ic" in keys:
+        keys.remove("ic")
+    if mapping.irr_from_ic_minus_il and "irr" in keys:
+        keys.remove("irr")
+    return tuple(keys)
+
+
+def resolve_mapping_conflicts(
+    mapping: ChannelMapping,
+    changed_key: str,
+    previous_channel: str = "",
+) -> ChannelMapping:
+    """Let the edited logical channel win, swapping the displaced role when possible."""
+    if changed_key not in LOGICAL_SIGNAL_KEYS:
+        return mapping
+    keys = active_mapping_keys(mapping)
+    if changed_key not in keys:
+        return mapping
+    current = str(getattr(mapping, changed_key) or "").upper()
+    if not current:
+        return mapping
+
+    conflicts = [
+        key
+        for key in keys
+        if key != changed_key and str(getattr(mapping, key) or "").upper() == current
+    ]
+    if not conflicts:
+        return mapping
+
+    data = mapping.to_dict()
+    previous = str(previous_channel or "")
+    previous_upper = previous.upper()
+    for conflict_key in conflicts:
+        replacement = ""
+        if previous and previous_upper != current:
+            used_elsewhere = any(
+                key not in {changed_key, conflict_key}
+                and str(getattr(mapping, key) or "").upper() == previous_upper
+                for key in keys
+            )
+            if not used_elsewhere:
+                replacement = previous
+        data[conflict_key] = replacement
+    return ChannelMapping.from_dict(data)
 
 
 class ChannelMappingStore:

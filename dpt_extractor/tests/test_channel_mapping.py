@@ -9,6 +9,7 @@ from dpt_extractor.models.channel_mapping import (
     apply_mapping,
     channels_for_mapping,
     default_mapping_for,
+    resolve_mapping_conflicts,
     sort_channel_names,
     validate_mapping,
 )
@@ -69,6 +70,22 @@ class TestChannelMapping(unittest.TestCase):
         )
         errs = validate_mapping(m, None)
         self.assertTrue(any("Irr" in e and "IL" in e for e in errs))
+
+    def test_resolve_mapping_conflict_swaps_displaced_role(self):
+        m = ChannelMapping(
+            vge="CH1",
+            vce="CH2",
+            ic="",
+            il="CH3",
+            irr="CH3",
+            v_diode="CH5",
+            vge_other="CH6",
+            ic_from_sum_irr_il=True,
+        )
+        resolved = resolve_mapping_conflicts(m, "il", "CH4")
+        self.assertEqual(resolved.il, "CH3")
+        self.assertEqual(resolved.irr, "CH4")
+        self.assertFalse(validate_mapping(resolved, None))
 
     @unittest.skipUnless(WH.exists(), "WH sample missing")
     def test_channels_from_tss_bundle(self):

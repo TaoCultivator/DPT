@@ -206,6 +206,48 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertNotIn("CH1", win.bundle.meta.channel_labels)
         win.close()
 
+    def test_label_mapping_button_applies_label_override(self):
+        import tempfile
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.channel_mapping import ChannelMappingStore
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        win = MainWindow()
+        with tempfile.TemporaryDirectory() as tmp:
+            win._channel_store = ChannelMappingStore(Path(tmp) / "maps.yaml")
+            win.bundle = WaveformBundle(
+                t=np.linspace(0.0, 1e-6, 16),
+                channels={f"CH{i}": np.zeros(16) for i in range(1, 7)},
+                meta=TekMetadata(
+                    channel_labels={
+                        "CH1": "L-Vge",
+                        "CH2": "L-Vce",
+                        "CH3": "IL",
+                        "CH4": "Ic",
+                        "CH5": "H-Vce",
+                        "CH6": "H-Vge",
+                    }
+                ),
+            )
+            win.profile = make_profile("U", "upper")
+
+            self.assertIn("按标签识别", [btn.text() for btn in win._context_menu_buttons])
+            win._on_apply_label_mapping_requested()
+
+            stored = win._channel_store.get("U", "upper")
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored.vge, "CH6")
+            self.assertEqual(stored.vce, "CH5")
+            self.assertEqual(stored.irr, "CH4")
+            self.assertEqual(stored.il, "CH3")
+            self.assertEqual(win.profile.vge, "CH6")
+
+        win.close()
+
     def test_main_window_toolbar_compacts_on_small_width(self):
         from dpt_extractor.gui.main_window import MainWindow
 
@@ -415,6 +457,40 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             self.assertEqual(dlg._combos["v_diode"].currentData(), "CH5")
             self.assertEqual(dlg._combos["vge_other"].currentData(), "CH6")
             self.assertTrue(dlg._ic_sum_cb.isChecked())
+            dlg.close()
+
+    def test_mapping_dialog_swaps_conflicting_channel_selection(self):
+        import tempfile
+        import numpy as np
+
+        from dpt_extractor.gui.channel_mapping_dialog import ChannelMappingDialog
+        from dpt_extractor.models.channel_mapping import (
+            ChannelMappingStore,
+            validate_mapping,
+        )
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 8
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, n),
+            channels={f"CH{i}": np.zeros(n) for i in range(1, 7)},
+            meta=TekMetadata(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChannelMappingStore(Path(tmp) / "maps.yaml")
+            dlg = ChannelMappingDialog(
+                phase="U",
+                bridge="upper",
+                bundle=bundle,
+                store=store,
+            )
+            idx = dlg._combos["il"].findData("CH3")
+            self.assertGreaterEqual(idx, 0)
+            dlg._combos["il"].setCurrentIndex(idx)
+
+            self.assertEqual(dlg._combos["il"].currentData(), "CH3")
+            self.assertEqual(dlg._combos["irr"].currentData(), "CH4")
+            self.assertFalse(validate_mapping(dlg._collect_mapping(), bundle))
             dlg.close()
 
     def test_added_math_channel_can_be_deleted(self):

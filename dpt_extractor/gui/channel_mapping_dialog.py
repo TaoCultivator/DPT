@@ -24,6 +24,7 @@ from dpt_extractor.models.channel_mapping import (
     channels_for_mapping,
     default_mapping_for,
     infer_mapping_from_bundle,
+    resolve_mapping_conflicts,
     validate_mapping,
 )
 from dpt_extractor.models.channel_mapping import ChannelMappingStore, apply_mapping
@@ -54,6 +55,8 @@ class ChannelMappingDialog(QDialog):
         self._irr_diff_cb: QCheckBox | None = None
         self._mapping_result: ChannelMapping | None = None
         self._applied = False
+        self._syncing_mapping_ui = False
+        self._last_combo_values: dict[str, str] = {}
 
         self._build_ui()
         self._load_initial_mapping()
@@ -105,6 +108,9 @@ class ChannelMappingDialog(QDialog):
             for ch in available:
                 combo.addItem(ch, ch)
             combo.setToolTip(tip)
+            combo.currentIndexChanged.connect(
+                lambda _idx, logical_key=key: self._on_combo_changed(logical_key)
+            )
             self._combos[key] = combo
             name_lbl = QLabel(label)
             name_lbl.setStyleSheet("color:#cdd6f4;font-weight:bold;")
@@ -169,6 +175,26 @@ class ChannelMappingDialog(QDialog):
         if checked and self._ic_sum_cb is not None and self._ic_sum_cb.isChecked():
             self._ic_sum_cb.setChecked(False)
 
+    def _current_combo_values(self) -> dict[str, str]:
+        return {
+            key: str(combo.currentData() or "")
+            for key, combo in self._combos.items()
+        }
+
+    def _on_combo_changed(self, key: str) -> None:
+        if self._syncing_mapping_ui:
+            return
+        mapping = self._collect_mapping()
+        adjusted = resolve_mapping_conflicts(
+            mapping,
+            key,
+            self._last_combo_values.get(key, ""),
+        )
+        if adjusted.to_dict() != mapping.to_dict():
+            self._apply_mapping_to_ui(adjusted)
+            return
+        self._last_combo_values = self._current_combo_values()
+
     def _set_combo(self, key: str, value: str) -> None:
         combo = self._combos[key]
         idx = combo.findData(value)
@@ -179,23 +205,29 @@ class ChannelMappingDialog(QDialog):
             combo.setCurrentIndex(combo.count() - 1)
 
     def _apply_mapping_to_ui(self, mapping: ChannelMapping) -> None:
-        d = mapping.to_dict()
-        if self._ic_sum_cb is not None:
-            self._ic_sum_cb.setChecked(bool(d.get("ic_from_sum_irr_il")))
-            self._combos["ic"].setEnabled(not d.get("ic_from_sum_irr_il"))
-        if self._irr_diff_cb is not None:
-            self._irr_diff_cb.setChecked(bool(d.get("irr_from_ic_minus_il")))
-            self._combos["irr"].setEnabled(not d.get("irr_from_ic_minus_il"))
-        for key in self._combos:
-            col = d.get(key)
-            if col is None:
-                continue
-            if key == "ic" and d.get("ic_from_sum_irr_il"):
-                continue
-            if key == "irr" and d.get("irr_from_ic_minus_il"):
-                continue
-            if isinstance(col, str) and col:
-                self._set_combo(key, col)
+        was_syncing = self._syncing_mapping_ui
+        self._syncing_mapping_ui = True
+        try:
+            d = mapping.to_dict()
+            if self._ic_sum_cb is not None:
+                self._ic_sum_cb.setChecked(bool(d.get("ic_from_sum_irr_il")))
+                self._combos["ic"].setEnabled(not d.get("ic_from_sum_irr_il"))
+            if self._irr_diff_cb is not None:
+                self._irr_diff_cb.setChecked(bool(d.get("irr_from_ic_minus_il")))
+                self._combos["irr"].setEnabled(not d.get("irr_from_ic_minus_il"))
+            for key in self._combos:
+                col = d.get(key)
+                if col is None:
+                    continue
+                if key == "ic" and d.get("ic_from_sum_irr_il"):
+                    continue
+                if key == "irr" and d.get("irr_from_ic_minus_il"):
+                    continue
+                if isinstance(col, str) and col:
+                    self._set_combo(key, col)
+        finally:
+            self._syncing_mapping_ui = was_syncing
+        self._last_combo_values = self._current_combo_values()
 
     def _load_initial_mapping(self) -> None:
         custom = self._store.get(self._phase, self._bridge)
@@ -216,7 +248,7 @@ class ChannelMappingDialog(QDialog):
         self._apply_mapping_to_ui(inferred)
 
     def _collect_mapping(self) -> ChannelMapping:
-        parts = {k: self._combos[k].currentData() for k in self._combos}
+        parts = {k: str(self._combos[k].currentData() or "") for k in self._combos}
         use_sum = self._ic_sum_cb.isChecked() if self._ic_sum_cb else False
         use_diff = self._irr_diff_cb.isChecked() if self._irr_diff_cb else False
         if use_sum:

@@ -65,7 +65,10 @@ from dpt_extractor.models.channel_mapping import (
     ChannelMapping,
     ChannelMappingStore,
     apply_mapping,
+    infer_best_mapping_from_bundle,
+    infer_mapping_from_bundle,
     infer_short_circuit_mapping_from_bundle,
+    resolve_mapping_conflicts,
     validate_mapping,
 )
 from dpt_extractor.io.waveform_loader import load_waveform
@@ -152,6 +155,7 @@ class _WaveformLoadOutcome:
     guessed: BridgeProfile
     profile: BridgeProfile
     inferred: ChannelMapping | None
+    inferred_source: str
     mapping_custom: bool
     result: ExtractResult | None
     short_circuit_not_ready: bool
@@ -184,15 +188,23 @@ def _compute_waveform_load_outcome(
         else base_profile
     )
     inferred = None
-    if (
-        custom_mapping is None
-        and parse_test_mode(cfg.test_mode.mode) == TestMode.SHORT_CIRCUIT
-    ):
-        inferred = infer_short_circuit_mapping_from_bundle(bundle, guessed.bridge)
-        if inferred is not None:
-            profile = apply_mapping(as_short_circuit_profile(base_profile), inferred)
+    inferred_source = ""
+    mode = parse_test_mode(cfg.test_mode.mode)
+    if custom_mapping is None:
+        if mode == TestMode.SHORT_CIRCUIT:
+            inferred = infer_short_circuit_mapping_from_bundle(bundle, guessed.bridge)
+            inferred_source = "label" if inferred is not None else ""
+            if inferred is not None:
+                profile = apply_mapping(as_short_circuit_profile(base_profile), inferred)
+            else:
+                profile = as_short_circuit_profile(profile)
         else:
-            profile = as_short_circuit_profile(profile)
+            inferred, inferred_source = infer_best_mapping_from_bundle(
+                bundle,
+                guessed.bridge,
+            )
+            if inferred is not None:
+                profile = apply_mapping(base_profile, inferred)
     else:
         profile = _profile_for_test_mode(profile, cfg)
 
@@ -217,6 +229,7 @@ def _compute_waveform_load_outcome(
         guessed=guessed,
         profile=profile,
         inferred=inferred,
+        inferred_source=inferred_source,
         mapping_custom=mapping_custom,
         result=result,
         short_circuit_not_ready=short_circuit_not_ready,
@@ -659,6 +672,7 @@ class MainWindow(QMainWindow):
             ("视图", "view", "右键菜单显示视图配置与显示模式"),
             ("纵轴", "y", "右键菜单显示纵轴功能"),
             ("截图", "capture", "复制当前窗口截图到剪贴板"),
+            ("按标签识别", "label_map", "强制根据当前 TSS Label 更新通道映射"),
             ("更多", "all", "右键菜单显示完整示波器功能"),
         ):
             btn = QPushButton(text)
@@ -667,6 +681,9 @@ class MainWindow(QMainWindow):
             if key == "capture":
                 btn.setCheckable(False)
                 btn.clicked.connect(lambda checked=False: self.wave_plot._copy_screenshot_to_clipboard())
+            elif key == "label_map":
+                btn.setCheckable(False)
+                btn.clicked.connect(self._on_apply_label_mapping_requested)
             else:
                 btn.setCheckable(True)
                 btn.clicked.connect(
@@ -953,19 +970,24 @@ class MainWindow(QMainWindow):
         phase = self.combo_phase.currentData()
         bridge = self.combo_bridge.currentData()
         profile, custom = resolve_profile(phase, bridge, self._channel_store)
-        if (
-            not custom
-            and self.bundle is not None
-            and parse_test_mode(self.cfg.test_mode.mode) == TestMode.SHORT_CIRCUIT
-        ):
-            inferred = infer_short_circuit_mapping_from_bundle(self.bundle, bridge)
-            if inferred is not None:
-                profile = apply_mapping(
-                    as_short_circuit_profile(make_profile(phase, bridge)),
-                    inferred,
-                )
+        mode = parse_test_mode(self.cfg.test_mode.mode)
+        if not custom and self.bundle is not None:
+            if mode == TestMode.SHORT_CIRCUIT:
+                inferred = infer_short_circuit_mapping_from_bundle(self.bundle, bridge)
+                if inferred is not None:
+                    profile = apply_mapping(
+                        as_short_circuit_profile(make_profile(phase, bridge)),
+                        inferred,
+                    )
+                else:
+                    profile = as_short_circuit_profile(profile)
             else:
-                profile = as_short_circuit_profile(profile)
+                inferred, _source = infer_best_mapping_from_bundle(
+                    self.bundle,
+                    bridge,
+                )
+                if inferred is not None:
+                    profile = apply_mapping(profile, inferred)
         else:
             profile = _profile_for_test_mode(profile, self.cfg)
         self._mapping_custom = custom
@@ -1003,6 +1025,40 @@ class MainWindow(QMainWindow):
         if self.bundle:
             self._recalculate(reset_manual=True)
 
+    def _on_apply_label_mapping_requested(self) -> None:
+        if self.bundle is None:
+            QMessageBox.information(
+                self,
+                "未加载 TSS",
+                "请先加载 TSS 波形文件，再按标签识别通道。",
+            )
+            return
+        phase = self.combo_phase.currentData()
+        bridge = self.combo_bridge.currentData()
+        mapping = infer_mapping_from_bundle(self.bundle, bridge)
+        if mapping is None:
+            QMessageBox.information(
+                self,
+                "无法识别",
+                "当前 TSS 无有效通道标签，或标签无法匹配当前上/下桥配置。",
+            )
+            return
+        errors = validate_mapping(mapping, self.bundle)
+        if errors:
+            QMessageBox.warning(
+                self,
+                "映射无效",
+                "按标签识别得到的映射不可用：\n\n"
+                + "\n".join(f"- {err}" for err in errors),
+            )
+            return
+        self._channel_store.set(phase, bridge, mapping)
+        self.profile = self._current_profile()
+        self._mapping_custom = True
+        self._update_map_status_label()
+        self._recalculate(reset_manual=True)
+        self.statusBar().showMessage("已按 TSS 标签识别并应用当前通道映射")
+
     def _on_waveform_channel_mapping_requested(self, source_key: str, logical_role: str) -> None:
         if self.bundle is None:
             return
@@ -1017,6 +1073,7 @@ class MainWindow(QMainWindow):
         if logical_role:
             if logical_role not in LOGICAL_SIGNAL_KEYS:
                 return
+            previous_channel = str(parts.get(logical_role) or "")
             parts[logical_role] = source_key
             if logical_role == "ic":
                 ic_sum = False
@@ -1036,6 +1093,12 @@ class MainWindow(QMainWindow):
             ic_from_sum_irr_il=ic_sum,
             irr_from_ic_minus_il=irr_diff,
         )
+        if logical_role:
+            mapping = resolve_mapping_conflicts(
+                mapping,
+                logical_role,
+                previous_channel,
+            )
         errors = validate_mapping(mapping, self.bundle)
         if errors:
             QMessageBox.warning(
@@ -1191,7 +1254,10 @@ class MainWindow(QMainWindow):
         if outcome.mapping_custom:
             msg += "（已应用自定义通道映射）"
         elif inferred is not None:
-            msg += "（已按 TSS 标签识别短路通道）"
+            if outcome.inferred_source == "trend":
+                msg += "（已按波形趋势识别通道）"
+            else:
+                msg += "（已按 TSS 标签识别通道）"
         if outcome.result is None:
             reason = outcome.extraction_error or "当前波形不满足该模式的自动计算条件"
             msg += f"（参数未计算：{reason}）"
