@@ -87,6 +87,8 @@ class TestGroundReference(unittest.TestCase):
             raw = plot._trace_raw[key]
             scale = plot._disp_scale[key]
             off = plot._disp_offset[key]
+            if key.startswith("MATH") and plot._unit_for_channel(key) == "J":
+                raw = plot._fit_raw_for_channel(key, raw)
             _, _, mid, _ = _raw_value_span(raw)
             mid_disp = mid / scale + off
             self.assertLess(abs(mid_disp), 0.35, msg=key)

@@ -12,7 +12,7 @@ from dpt_extractor.models.waveform import WaveformBundle
 
 
 def sort_channel_names(names: Iterable[str]) -> list[str]:
-    """CH1..CH6 then MATH1..MATHn, matching Tekscope column order."""
+    """CH1..CH8 then MATH1..MATHn, matching Tekscope column order."""
 
     def sort_key(name: str) -> tuple[int, int, str]:
         m = re.fullmatch(r"(CH|MATH)(\d+)", name)

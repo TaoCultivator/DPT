@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from html import escape
+from pathlib import Path
+import re
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -19,7 +23,6 @@ from PyQt6.QtWidgets import (
 
 from dpt_extractor.gui.slope_range_dialog import SlopeRangeDialog
 from dpt_extractor.gui.theme import (
-    SECTION_ENERGY,
     SECTION_OFF,
     SECTION_ON,
     SECTION_RR,
@@ -41,6 +44,35 @@ from dpt_extractor.models.slope_range import (
     preset_index_for_range,
     preset_to_range,
 )
+
+
+_TEMP_LABELS = {
+    "RT": "25℃",
+    "HT": "150℃",
+    "LT": "-40℃",
+}
+
+RESULT_PANEL_MARGIN = 4
+RESULT_PANEL_SPACING = 4
+RESULT_SUMMARY_HEIGHT = 76
+RESULT_HEADER_HEIGHT = 24
+RESULT_ROW_HEIGHT = 26
+RESULT_TABLE_FONT_PX = 12
+RESULT_PANEL_TARGET_WIDTH = 420
+RESULT_COLUMN_DEFAULTS = (38, 112, 50, 80, 112)
+RESULT_COLUMN_FILL_WEIGHTS = (0, 3, 0, 2, 2)
+RESULT_SCROLLBAR_RESERVE = 10
+ENERGY_NAMES = {"Eoff", "Eon", "Err"}
+ENERGY_TEXT_COLOR = "#ffd34d"
+SECTION_ACTIVE_BG = "#22b8cc"
+SECTION_ACTIVE_TEXT = "#061112"
+
+
+def _result_font(family: str, *, bold: bool = False) -> QFont:
+    font = QFont(family)
+    font.setPixelSize(RESULT_TABLE_FONT_PX)
+    font.setBold(bold)
+    return font
 
 
 def _fmt(v: float) -> str:
@@ -110,15 +142,103 @@ def _range_label_for_row(section: str, name: str, result: ExtractResult) -> str:
     return ""
 
 
+def _path_parts(path: str) -> list[str]:
+    return [p for p in re.split(r"[\\/]+", str(path)) if p]
+
+
+def _infer_temp_code(path: str) -> str:
+    for part in reversed(_path_parts(path)):
+        stem = Path(part).stem.upper()
+        for code in _TEMP_LABELS:
+            if re.search(rf"(?<![A-Z0-9]){code}(?![A-Z0-9])", stem):
+                return code
+        if re.search(r"(?<!\d)25(?:℃|C|DEG)?(?!\d)", stem):
+            return "RT"
+        if re.search(r"(?<!\d)150(?:℃|C|DEG)?(?!\d)", stem):
+            return "HT"
+        if re.search(r"(?<!\d)-?40(?:℃|C|DEG)?(?!\d)", stem):
+            return "LT"
+    return ""
+
+
+def _section_base_color(section: str) -> str:
+    if section == "关断过程":
+        return SECTION_OFF
+    if section == "开通":
+        return SECTION_ON
+    if section == "反向恢复":
+        return SECTION_RR
+    if section == "短路过程":
+        return SECTION_SHORT
+    return SECTION_OFF
+
+
+def _section_stack_label(section: str) -> str:
+    return "\n".join(section) if len(section) > 1 else section
+
+
+class _SectionTableItem(QTableWidgetItem):
+    def __init__(self, section: str, display_text: str | None = None) -> None:
+        super().__init__(display_text if display_text is not None else section)
+        self._section_text = section
+
+    def text(self) -> str:  # noqa: D102
+        return self._section_text
+
+
+def _summary_metric_html(label: str, value: str, unit: str, accent: str) -> str:
+    unit_html = f" <span style='color:#9aa9a8'>{escape(unit)}</span>" if unit else ""
+    value_color = ENERGY_TEXT_COLOR if label in ENERGY_NAMES else "#edf4ef"
+    return (
+        "<td style='padding:1px 2px'>"
+        "<div style='background-color:#0d1d1f;border:1px solid #1f4c52;"
+        "border-radius:4px;padding:2px 5px;white-space:nowrap'>"
+        f"<span style='color:{accent};font-weight:700'>{escape(label)}</span>"
+        "&nbsp;"
+        f"<span style='color:{value_color};font-family:\"Cascadia Mono\",Consolas,monospace;"
+        f"font-weight:700'>{escape(value)}</span>{unit_html}"
+        "</div></td>"
+    )
+
+
+def _summary_title(
+    result: ExtractResult,
+    temp_labels: dict[str, str] | None = None,
+) -> str:
+    labels = temp_labels or _TEMP_LABELS
+    parts = [result.profile_code or result.phase or "DPT"]
+    temp = _infer_temp_code(result.source_path)
+    if temp:
+        parts.extend((temp, labels.get(temp, _TEMP_LABELS[temp])))
+    if result.short_circuit_mode:
+        parts.append("短路")
+    elif result.single_pulse_mode:
+        parts.append("单脉冲")
+    else:
+        parts.append("双脉冲")
+    return " · ".join(escape(p) for p in parts if p)
+
+
 class ResultTable(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._temp_labels = dict(_TEMP_LABELS)
+        self.setObjectName("resultPanel")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(
+            RESULT_PANEL_MARGIN,
+            RESULT_PANEL_MARGIN,
+            RESULT_PANEL_MARGIN,
+            RESULT_PANEL_MARGIN,
+        )
+        layout.setSpacing(RESULT_PANEL_SPACING)
 
         self.summary = QLabel()
-        self.summary.setFixedHeight(58)
+        self.summary.setObjectName("resultSummary")
+        self.summary.setFixedHeight(RESULT_SUMMARY_HEIGHT)
+        self.summary.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
         self.summary.setWordWrap(False)
         self.summary.setTextFormat(Qt.TextFormat.RichText)
         self.summary.setSizePolicy(
@@ -127,15 +247,28 @@ class ResultTable(QWidget):
         layout.addWidget(self.summary)
 
         self.table = QTableWidget(0, 5)
+        self.table.setObjectName("resultDataTable")
+        table_font = _result_font("Microsoft YaHei UI")
+        self.table.setFont(table_font)
         self.table.setHorizontalHeaderLabels(
             ["分区", "参数", "单位", "范围取值", "数值"]
         )
         hdr = self.table.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr.setHighlightSections(False)
+        hdr.setFixedHeight(RESULT_HEADER_HEIGHT)
+        hdr.setMinimumSectionSize(24)
+        header_font = _result_font("Microsoft YaHei UI", bold=True)
+        hdr.setFont(header_font)
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(True)
+        self.table.setWordWrap(False)
+        self.table.setCornerButtonEnabled(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._set_column_widths(RESULT_COLUMN_DEFAULTS)
         layout.addWidget(self.table, stretch=1)
 
         self._slope_ranges = default_slope_ranges()
@@ -144,6 +277,8 @@ class ResultTable(QWidget):
         self._on_value_clicked: Callable[[str, str], None] | None = None
         self._row_keys: list[str | None] = []
         self._row_meta: list[tuple[str, str]] = []
+        self._section_ranges: dict[str, tuple[int, int]] = {}
+        self._active_metric: tuple[str, str] | None = None
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.table.cellClicked.connect(self._on_cell_clicked)
 
@@ -153,48 +288,96 @@ class ResultTable(QWidget):
         pane_policy.setHeightForWidth(False)
         self.setSizePolicy(pane_policy)
 
+    def set_temperature_labels(self, labels: dict[str, str]) -> None:
+        self._temp_labels = dict(_TEMP_LABELS)
+        for code, text in labels.items():
+            if code in self._temp_labels and text:
+                self._temp_labels[code] = str(text)
+
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(self.preferred_panel_width(), 680)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(340, 400)
+        return QSize(300, 360)
 
     def preferred_panel_width(self) -> int:
         """参数表侧栏紧凑宽度：列宽之和 + 边距，保证文字完整显示。"""
         n = self.table.columnCount()
         if n <= 0:
-            table_w = 396
+            table_w = 530
         else:
             table_w = sum(self.table.columnWidth(c) for c in range(n))
-        # layout margins(8*2) + 竖滚动条预留
-        return int(table_w + 2 * self.table.frameWidth() + 16 + 14)
+        # layout margins + 竖滚动条预留
+        content_w = int(
+            table_w
+            + 2 * self.table.frameWidth()
+            + RESULT_PANEL_MARGIN * 2
+            + RESULT_SCROLLBAR_RESERVE
+        )
+        return max(RESULT_PANEL_TARGET_WIDTH, content_w)
 
-    def _apply_compact_column_widths(self) -> None:
-        from PyQt6.QtGui import QFontMetrics
+    def _target_columns_width(self) -> int:
+        return max(
+            sum(RESULT_COLUMN_DEFAULTS),
+            RESULT_PANEL_TARGET_WIDTH
+            - RESULT_PANEL_MARGIN * 2
+            - 2 * self.table.frameWidth()
+            - RESULT_SCROLLBAR_RESERVE,
+        )
 
-        fm = QFontMetrics(self.table.font())
-        rng_w = 124
-        for r in range(self.table.rowCount()):
-            item = self.table.item(r, 3)
-            if item is not None:
-                rng_w = max(rng_w, fm.horizontalAdvance(item.text()) + 20)
-        param_w = 84
-        for r in range(self.table.rowCount()):
-            item = self.table.item(r, 1)
-            if item is not None:
-                param_w = max(param_w, fm.horizontalAdvance(item.text()) + 18)
-        char2 = fm.horizontalAdvance("00")
-        val_pad = 16 + char2
-        val_w = 72 + char2
-        for r in range(self.table.rowCount()):
-            item = self.table.item(r, 4)
-            if item is not None:
-                val_w = max(val_w, fm.horizontalAdvance(item.text()) + val_pad)
-        widths = (76, min(param_w, 142), 40, min(rng_w, 148), min(val_w, 88 + char2))
+    def _set_column_widths(self, widths: tuple[int, ...]) -> None:
         hdr = self.table.horizontalHeader()
         for col, w in enumerate(widths):
             self.table.setColumnWidth(col, w)
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+
+    def _apply_compact_column_widths(self) -> None:
+        from PyQt6.QtGui import QFontMetrics
+
+        rng_w = RESULT_COLUMN_DEFAULTS[3]
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 3)
+            if item is not None:
+                rng_w = max(
+                    rng_w,
+                    QFontMetrics(item.font()).horizontalAdvance(item.text()) + 2,
+                )
+        param_w = RESULT_COLUMN_DEFAULTS[1]
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 1)
+            if item is not None:
+                param_w = max(
+                    param_w,
+                    QFontMetrics(item.font()).horizontalAdvance(item.text()) + 2,
+                )
+        val_pad = 2
+        val_w = RESULT_COLUMN_DEFAULTS[4]
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 4)
+            if item is not None:
+                val_w = max(
+                    val_w,
+                    QFontMetrics(item.font()).horizontalAdvance(item.text()) + val_pad,
+                )
+        widths = [
+            RESULT_COLUMN_DEFAULTS[0],
+            min(param_w, 156),
+            RESULT_COLUMN_DEFAULTS[2],
+            min(rng_w, 138),
+            min(val_w, 150),
+        ]
+        extra = self._target_columns_width() - sum(widths)
+        if extra > 0:
+            total_weight = sum(RESULT_COLUMN_FILL_WEIGHTS)
+            used = 0
+            for idx, weight in enumerate(RESULT_COLUMN_FILL_WEIGHTS):
+                if weight <= 0:
+                    continue
+                add = extra * weight // total_weight
+                widths[idx] += add
+                used += add
+            widths[4] += extra - used
+        self._set_column_widths(tuple(widths))
 
     def set_range_handler(
         self, handler: Callable[[str, SlopeRange], None] | None,
@@ -221,19 +404,18 @@ class ResultTable(QWidget):
         if result.short_circuit_mode:
             sc = result.short_circuit
             vdc_disp = result.vdc_set if result.vdc_set is not None else result.vdc
-            html = f"""
-            <p style='margin:0;color:#cdd6f4;font-size:13px'>
-            <b style='color:#89b4fa'>短路</b>
-            {f" &nbsp; <span style='color:#cba6f7'>{result.profile_code}</span>" if result.profile_code else ""}
-            &nbsp; Udc = <b>{vdc_disp:.1f} V</b> &nbsp;|&nbsp;
-            Imax = <b>{sc.ic_max:.1f} A</b> &nbsp;|&nbsp;
-            Tsc = <b>{sc.tsc:.3f} us</b>
-            </p>
-            <p style='margin:6px 0 0 0;color:#a6adc8;font-size:12px'>
-            <b style='color:#a6e3a1'>Esc 本管</b> {_fmt(sc.esc_dut)} J &nbsp;
-            <b style='color:#89dceb'>Esc 对管</b> {_fmt(sc.esc_other)} J
-            </p>
-            """
+            html = (
+                "<div style='margin:0'>"
+                f"<div style='color:#d7e2dc;font-size:14px;font-weight:700'>{_summary_title(result, self._temp_labels)}</div>"
+                "<table style='margin-top:3px' cellspacing='0' cellpadding='0'><tr>"
+                + _summary_metric_html("Udc", f"{vdc_disp:.1f}", "V", "#4fdbe8")
+                + _summary_metric_html("Imax", f"{sc.ic_max:.1f}", "A", "#f2d06b")
+                + _summary_metric_html("Tsc", f"{sc.tsc:.3f}", "us", "#f4a261")
+                + "</tr><tr>"
+                + _summary_metric_html("Esc 本管", _fmt(sc.esc_dut), "J", "#8fd17f")
+                + _summary_metric_html("Esc 对管", _fmt(sc.esc_other), "J", "#7cc7e8")
+                + "</tr></table></div>"
+            )
             self.summary.setText(html)
             return
         off, on, rr = result.turn_off, result.turn_on, result.reverse_recovery
@@ -253,25 +435,27 @@ class ResultTable(QWidget):
             )
         eon_disp = "—" if result.single_pulse_mode else _fmt_energy(on.eon)
         err_disp = "—" if result.single_pulse_mode else _fmt_energy(rr.err)
-        html = f"""
-        <p style='margin:0;color:#cdd6f4;font-size:13px'>
-        <b style='color:#89b4fa'>工况</b>
-        {f" &nbsp; <span style='color:#cba6f7'>{result.profile_code}</span>" if result.profile_code else ""}
-        &nbsp; Vdc = <b>{vdc_disp:.1f} V</b> &nbsp;|&nbsp;
-        Idc = <b>{idc_disp:.1f} A</b>
-        {mode_note}
-        </p>
-        <p style='margin:6px 0 0 0;color:#a6adc8;font-size:12px'>
-        <b style='color:#fab387'>Eoff</b> {_fmt_energy(off.eoff)} mJ &nbsp;
-        <b style='color:#a6e3a1'>Eon</b> {eon_disp} mJ &nbsp;
-        <b style='color:#89dceb'>Err</b> {err_disp} mJ
-        {warn}
-        </p>
-        """
+        note = mode_note + warn
+        html = (
+            "<div style='margin:0'>"
+            f"<div style='color:#d7e2dc;font-size:14px;font-weight:700'>{_summary_title(result, self._temp_labels)}</div>"
+            "<table style='margin-top:3px' cellspacing='0' cellpadding='0'>"
+            "<tr>"
+            + _summary_metric_html("Vdc", f"{vdc_disp:.1f}", "V", "#4fdbe8")
+            + _summary_metric_html("Idc", f"{idc_disp:.1f}", "A", "#7cc7e8")
+            + "</tr><tr>"
+            + _summary_metric_html("Eoff", _fmt_energy(off.eoff), "mJ", ENERGY_TEXT_COLOR)
+            + _summary_metric_html("Eon", eon_disp, "mJ", ENERGY_TEXT_COLOR)
+            + _summary_metric_html("Err", err_disp, "mJ", ENERGY_TEXT_COLOR)
+            + "</tr></table>"
+            f"<div style='margin-top:3px;color:#aeb8b8;font-size:11px'>{note}</div>"
+            "</div>"
+        )
         self.summary.setText(html)
 
     def set_mode_placeholder(self, title: str, detail: str) -> None:
         """非双脉冲模式或功能未就绪时清空参数表并显示说明。"""
+        self.table.clearSpans()
         html = f"""
         <p style='margin:0;color:#89b4fa;font-size:13px'><b>{title}</b></p>
         <p style='margin:8px 0 0 0;color:#a6adc8;font-size:12px'>{detail}</p>
@@ -313,7 +497,6 @@ class ResultTable(QWidget):
             energy: set[str],
         ) -> None:
             for name, unit, val in items:
-                bg_use = SECTION_ENERGY if name in energy else bg
                 if section == "关断过程" and name == "串扰电压":
                     disp = f"{off.crosstalk_vmax:.2f}/{off.crosstalk_vmin:.2f}"
                 elif section == "开通" and name == "串扰电压":
@@ -321,7 +504,7 @@ class ResultTable(QWidget):
                 else:
                     disp = _fmt_energy(val) if name in energy else _fmt(val)
                 rng = _range_label_for_row(section, name, result) or "—"
-                rows.append((section, name, unit, rng, disp, bg_use))
+                rows.append((section, name, unit, rng, disp, bg))
 
         add(
             "关断过程",
@@ -378,51 +561,112 @@ class ResultTable(QWidget):
         self._populate_rows(rows)
 
     def _populate_rows(self, rows: list[tuple[str, str, str, str, str, str]]) -> None:
+        self.table.setUpdatesEnabled(False)
+        self.table.clearSpans()
         self.table.setRowCount(len(rows))
         self._row_keys = []
         self._row_meta = []
-        bold = QFont()
-        bold.setBold(True)
+        self._section_ranges = {}
+        param_font = _result_font("Microsoft YaHei UI", bold=True)
+        section_font = _result_font("Microsoft YaHei UI", bold=True)
+        value_font = _result_font("Cascadia Mono", bold=True)
+        utility_font = _result_font("Microsoft YaHei UI")
         for r, (section, name, unit, rng_disp, val, bg) in enumerate(rows):
             self._row_meta.append((section, name))
             color = QColor(bg)
+            text_color = QColor(
+                ENERGY_TEXT_COLOR if name in ENERGY_NAMES else TEXT_ON_SECTION
+            )
             row_key = SLOPE_ROW_KEYS.get((section, name))
             self._row_keys.append(row_key)
+            if section not in self._section_ranges:
+                self._section_ranges[section] = (r, 1)
+            else:
+                start, count = self._section_ranges[section]
+                self._section_ranges[section] = (start, count + 1)
 
-            for c, text in enumerate([section, name, unit]):
+            section_shadow_item = _SectionTableItem(section)
+            section_shadow_item.setBackground(QColor(_section_base_color(section)))
+            section_shadow_item.setForeground(QColor(TEXT_ON_SECTION))
+            section_shadow_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            section_shadow_item.setFont(section_font)
+            self.table.setItem(r, 0, section_shadow_item)
+
+            for c, text in ((1, name), (2, unit)):
                 item = QTableWidgetItem(text)
                 item.setBackground(color)
-                item.setForeground(QColor(TEXT_ON_SECTION))
+                item.setForeground(text_color)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 1:
-                    item.setFont(bold)
+                    item.setFont(param_font)
+                else:
+                    item.setFont(utility_font)
                 self.table.setItem(r, c, item)
 
             range_item = QTableWidgetItem(rng_disp)
             range_item.setBackground(color)
-            range_item.setForeground(QColor(TEXT_ON_SECTION))
+            range_item.setForeground(text_color)
             range_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            range_item.setFont(utility_font)
+            if row_key or (section == "关断过程" and name == "Eoff"):
+                range_item.setToolTip("双击修改范围取值")
             self.table.setItem(r, 3, range_item)
             val_item = QTableWidgetItem(val)
 
             val_item.setBackground(color)
-            val_item.setForeground(QColor(TEXT_ON_SECTION))
+            val_item.setForeground(text_color)
             val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            val_item.setFont(value_font)
             self.table.setItem(r, 4, val_item)
 
+        for section, (start, count) in self._section_ranges.items():
+            section_item = _SectionTableItem(section, _section_stack_label(section))
+            section_item.setBackground(QColor(_section_base_color(section)))
+            section_item.setForeground(QColor(TEXT_ON_SECTION))
+            section_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            section_item.setFont(section_font)
+            self.table.setItem(start, 0, section_item)
+            if count > 1:
+                self.table.setSpan(start, 0, count, 1)
+
+        self._refresh_section_highlight()
         self._apply_compact_column_widths()
         self.setMaximumWidth(self.preferred_panel_width())
         vh = self.table.verticalHeader()
         vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        vh.setDefaultSectionSize(26)
+        vh.setDefaultSectionSize(RESULT_ROW_HEIGHT)
+        self.table.setUpdatesEnabled(True)
+
+    def _refresh_section_highlight(self) -> None:
+        active_section = self._active_metric[0] if self._active_metric else None
+        for section, (start, count) in self._section_ranges.items():
+            active = section == active_section
+            bg = QColor(SECTION_ACTIVE_BG if active else _section_base_color(section))
+            fg = QColor(SECTION_ACTIVE_TEXT if active else TEXT_ON_SECTION)
+            for r in range(start, start + count):
+                item = self.table.item(r, 0)
+                if item is None:
+                    continue
+                item.setBackground(bg)
+                item.setForeground(fg)
+
+    def set_active_metric(self, section: str, name: str) -> None:
+        self._active_metric = (section, name)
+        for r, (sec, nm) in enumerate(self._row_meta):
+            if sec == section and nm == name:
+                self.table.setCurrentCell(r, 1)
+                self.table.selectRow(r)
+                break
+        self._refresh_section_highlight()
 
     def _on_cell_clicked(self, row: int, col: int) -> None:
         # 点击任意列都联动波形定位，避免仍停留在旧交互模式
         if row < 0 or row >= len(self._row_meta):
             return
+        section, name = self._row_meta[row]
+        self.set_active_metric(section, name)
         if self._on_value_clicked is None:
             return
-        section, name = self._row_meta[row]
         self._on_value_clicked(section, name)
 
     def set_metric_value(self, section: str, name: str, value: float) -> None:

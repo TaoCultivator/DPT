@@ -142,6 +142,195 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot.plot_waveforms(bundle, profile, None)
         return plot
 
+    def test_channel_box_mouse_gestures(self):
+        try:
+            from PyQt6.QtTest import QTest
+        except ImportError:
+            self.skipTest("QtTest is not available")
+        from PyQt6.QtCore import Qt
+
+        from dpt_extractor.gui.waveform_plot import ChannelBox
+
+        box = ChannelBox("CH2", "CH2", "#28bce8")
+        events = []
+        box.raiseClicked.connect(lambda key: events.append(("raise", key)))
+        box.highlightDoubleClicked.connect(
+            lambda key: events.append(("highlight", key))
+        )
+        box.verticalSettingsRequested.connect(
+            lambda key: events.append(("settings", key))
+        )
+        box.show()
+
+        QTest.mouseClick(box, Qt.MouseButton.LeftButton)
+        self.assertIn(("raise", "CH2"), events)
+        QTest.mouseDClick(box, Qt.MouseButton.LeftButton)
+        self.assertIn(("highlight", "CH2"), events)
+        QTest.mouseClick(box, Qt.MouseButton.RightButton)
+        self.assertIn(("settings", "CH2"), events)
+        box.close()
+
+    def test_pyqtgraph_auto_buttons_are_hidden(self):
+        plot = self._make_synthetic_plot()
+        self.assertTrue(plot.plot.getPlotItem().buttonsHidden)
+        self.assertTrue(plot._overview_plot.getPlotItem().buttonsHidden)
+
+    def test_time_axis_ticks_inline_unit_without_axis_title(self):
+        plot = self._make_synthetic_plot()
+        vb = plot.plot.getPlotItem().getViewBox()
+        vb.setXRange(0.0, 1.0, padding=0.0)
+        plot._update_x_ticks()
+
+        bottom_axis = plot.plot.getPlotItem().getAxis("bottom")
+        tick_text = [
+            text
+            for level in bottom_axis._tickLevels
+            for _, text in level
+        ]
+        self.assertFalse(bottom_axis.label.isVisible())
+        self.assertIn("0.1us", tick_text)
+        self.assertNotIn("0.1", tick_text)
+        self.assertLessEqual(bottom_axis.maximumHeight(), 1.0)
+        self.assertGreater(len(plot._x_tick_label_items), 0)
+        _xr, yr = vb.viewRange()
+        for item in plot._x_tick_label_items:
+            self.assertAlmostEqual(item.pos().y(), yr[0], places=9)
+
+        right_axis = plot.plot.getPlotItem().getAxis("right")
+        plot._update_y_ticks()
+        self.assertLessEqual(right_axis.maximumWidth(), 1.0)
+        self.assertGreater(len(plot._y_tick_label_items), 0)
+        xr, _yr = vb.viewRange()
+        for item in plot._y_tick_label_items:
+            self.assertAlmostEqual(item.pos().x(), xr[1], places=9)
+
+    def test_scope_graticule_uses_fixed_neutral_dots(self):
+        from dpt_extractor.gui.waveform_plot import (
+            GRATICULE_DOT_ALPHA,
+            GRATICULE_DOT_COLOR,
+            GRATICULE_DOT_SIZE_PX,
+            GRATICULE_SUBDIVISIONS_PER_DIV,
+            _graticule_dot_line_points,
+            _graticule_dot_values,
+        )
+
+        plot = self._make_synthetic_plot()
+        self.assertFalse(plot.plot.getPlotItem().getAxis("bottom").grid)
+        self.assertFalse(plot.plot.getPlotItem().getAxis("right").grid)
+        self.assertLessEqual(GRATICULE_DOT_SIZE_PX, 1.0)
+        self.assertLessEqual(GRATICULE_DOT_ALPHA, 150)
+        self.assertGreater(len(plot._graticule_dots.data), 0)
+        self.assertEqual(
+            plot._graticule_dots.opts["brush"].color().name(),
+            GRATICULE_DOT_COLOR,
+        )
+        self.assertEqual(
+            plot._graticule_dots.opts["brush"].color().alpha(),
+            GRATICULE_DOT_ALPHA,
+        )
+        self.assertEqual(plot._graticule_dots.opts["size"], GRATICULE_DOT_SIZE_PX)
+        self.assertEqual(GRATICULE_SUBDIVISIONS_PER_DIV, 5)
+        x_values = [
+            round(float(v), 10)
+            for v in _graticule_dot_values([6.0, 9.0], 6.0, 9.0)
+        ]
+        y_values = [
+            round(float(v), 10)
+            for v in _graticule_dot_values([-1.0, 1.0], -1.0, 1.0)
+        ]
+        self.assertEqual(x_values, [6.0, 6.6, 7.2, 7.8, 8.4, 9.0])
+        self.assertEqual(y_values, [-1.0, -0.6, -0.2, 0.2, 0.6, 1.0])
+        edge_values = [
+            round(float(v), 10)
+            for v in _graticule_dot_values([6.0, 9.0], 5.3, 9.7)
+        ]
+        self.assertEqual(edge_values, [5.4, 6.0, 6.6, 7.2, 7.8, 8.4, 9.0, 9.6])
+        line_x, line_y = _graticule_dot_line_points(
+            [6.0, 9.0],
+            [-1.0, 1.0],
+            6.0,
+            9.0,
+            -1.0,
+            1.0,
+        )
+        line_points = {
+            (round(float(x), 10), round(float(y), 10))
+            for x, y in zip(line_x, line_y)
+        }
+        self.assertIn((6.6, -1.0), line_points)
+        self.assertIn((6.0, -0.6), line_points)
+        self.assertNotIn((6.6, -0.6), line_points)
+        self.assertEqual(len(line_points), 20)
+
+        plot._on_legend_clicked("CH5")
+
+        self.assertGreater(len(plot._graticule_dots.data), 0)
+        self.assertEqual(
+            plot._graticule_dots.opts["brush"].color().name(),
+            GRATICULE_DOT_COLOR,
+        )
+        self.assertEqual(
+            plot._graticule_dots.opts["brush"].color().alpha(),
+            GRATICULE_DOT_ALPHA,
+        )
+        self.assertEqual(plot._graticule_dots.opts["size"], GRATICULE_DOT_SIZE_PX)
+
+    def test_overview_time_axis_uses_tss_scale_and_inline_units(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 200
+        t = np.linspace(0.0, 30e-6, n)
+        profile = make_profile("U", "upper")
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                profile.vge: np.linspace(-5.0, 15.0, n),
+                profile.vce: np.linspace(50.0, 900.0, n),
+                profile.ic: np.linspace(-100.0, 900.0, n),
+                profile.il: np.linspace(-50.0, 450.0, n),
+                profile.v_diode: np.linspace(0.0, 800.0, n),
+                profile.vge_other: np.linspace(-10.0, 10.0, n),
+            },
+            meta=TekMetadata(
+                source_path="/fake/scope-scale.tss",
+                horizontal_scale_per_div=3e-6,
+            ),
+        )
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+        plot._apply_x_us_per_div(0.5, center_us=12.0)
+
+        bottom_axis = plot._overview_plot.getPlotItem().getAxis("bottom")
+        tick_text = [
+            text
+            for level in bottom_axis._tickLevels
+            for _, text in level
+        ]
+        self.assertIn("3us", tick_text)
+        self.assertIn("6us", tick_text)
+        self.assertNotIn("3", tick_text)
+        self.assertNotIn("5us", tick_text)
+
+    def test_horizontal_scale_controls_align_to_gray_bar_left_center(self):
+        plot = self._make_synthetic_plot()
+        plot.resize(900, 500)
+        plot._scope_scale_bar.show()
+        plot.show()
+        self.app.processEvents()
+
+        scale_box = plot._x_scale_caption.parentWidget()
+        self.assertIsNotNone(scale_box)
+        pos = scale_box.mapTo(plot._scope_scale_bar, scale_box.rect().topLeft())
+        self.assertLessEqual(pos.x(), 1)
+        scale_center_y = pos.y() + scale_box.height() / 2
+        bar_center_y = plot._scope_scale_bar.height() / 2
+        self.assertLessEqual(abs(scale_center_y - bar_center_y), 1.0)
+        plot.close()
+
     def test_math_channels_display_and_formula_eval(self):
         import numpy as np
 
@@ -168,6 +357,79 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot._set_math_formula("MATH3", "INTG(CH2 * MATH2)")
         self.assertIn("MATH3", plot._channel_boxes)
         self.assertEqual(plot._unit_for_channel("MATH3"), "J")
+        plot._set_channel_scale("MATH3", 0.05)
+        self.assertAlmostEqual(plot._disp_scale["MATH3"], 0.05)
+        self.assertEqual(plot._vdiv_text("MATH3"), "50 mJ/div")
+
+        from PyQt6.QtCore import QPoint
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
+        panel = ChannelSettingsPanel(plot, "MATH3", QPoint(0, 0), parent=plot)
+        self.assertLess(panel._vdiv_spin.minimum(), 0.05)
+        self.assertAlmostEqual(panel._vdiv_spin.value(), 0.05)
+        panel._step_vdiv(-1)
+        self.assertAlmostEqual(plot._disp_scale["MATH3"], 0.02)
+        self.assertEqual(plot._vdiv_text("MATH3"), "20 mJ/div")
+        panel.close()
+
+        plot._set_channel_scale("MATH2", 0.5)
+        self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.5)
+        plot._set_math_formula("MATH4", "CH2")
+        self.assertEqual(plot._unit_for_channel("MATH4"), "V")
+        plot._set_channel_scale("MATH4", 0.5)
+        self.assertAlmostEqual(plot._disp_scale["MATH4"], 0.5)
+
+    def test_source_channel_colors_follow_scope_palette(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 16
+        t = np.linspace(0.0, 1e-6, n)
+        channels = {
+            f"CH{i}": np.linspace(float(i), float(i + 1), n)
+            for i in range(1, 9)
+        }
+        channels.update(
+            {
+                f"MATH{i}": np.linspace(float(i * 10), float(i * 10 + 1), n)
+                for i in range(1, 9)
+            }
+        )
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels=channels,
+                meta=TekMetadata(source_path="/fake/colors.tss"),
+            ),
+            make_profile("U", "upper"),
+            None,
+        )
+
+        expected = {
+            "CH1": "#FFF53B",
+            "CH2": "#20CFD3",
+            "CH3": "#EA4460",
+            "CH4": "#91CE32",
+            "CH5": "#FF9832",
+            "CH6": "#2626BF",
+            "CH7": "#E254A6",
+            "CH8": "#00E09B",
+            "MATH1": "#008000",
+            "MATH2": "#A62323",
+            "MATH3": "#FF0000",
+            "MATH4": "#789ED3",
+            "MATH5": "#936756",
+            "MATH6": "#6E2B85",
+            "MATH7": "#A62323",
+            "MATH8": "#96B03C",
+        }
+        self.assertEqual(list(plot._channel_boxes), list(expected))
+        for key, color in expected.items():
+            self.assertEqual(plot._trace_style[key][0].upper(), color)
 
     def test_channel_label_edit_updates_source_label(self):
         plot = self._make_synthetic_plot()
@@ -234,7 +496,10 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             )
             win.profile = make_profile("U", "upper")
 
-            self.assertIn("按标签识别", [btn.text() for btn in win._context_menu_buttons])
+            self.assertEqual(
+                [btn.text() for btn in win._context_menu_buttons],
+                ["光标", "缩放"],
+            )
             win._on_apply_label_mapping_requested()
 
             stored = win._channel_store.get("U", "upper")
@@ -252,6 +517,17 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         from dpt_extractor.gui.main_window import MainWindow
 
         win = MainWindow()
+
+        def assert_test_mode_children_contained():
+            group = win.test_mode_group
+            for child in (win.lbl_test_mode, win.combo_test_mode):
+                top_left = child.mapTo(group, child.rect().topLeft())
+                bottom_right = child.mapTo(group, child.rect().bottomRight())
+                self.assertGreaterEqual(top_left.x(), 0, child.objectName())
+                self.assertGreaterEqual(top_left.y(), 0, child.objectName())
+                self.assertLess(bottom_right.x(), group.width(), child.objectName())
+                self.assertLess(bottom_right.y(), group.height(), child.objectName())
+
         win._apply_toolbar_density(860)
         self.app.processEvents()
 
@@ -262,15 +538,200 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertTrue(win.lbl_map_status.isHidden())
         self.assertEqual(win._toolbar_rows[0].spacing(), 3)
         self.assertLessEqual(win.toolbar.minimumSizeHint().width(), 860)
-        self.assertLessEqual(win.combo_std.maximumWidth(), 122)
+        self.assertFalse(hasattr(win, "combo_std"))
+        self.assertFalse(hasattr(win, "spin_vdc"))
+        self.assertIn("#081719", win.combo_phase.view().styleSheet())
+        self.assertFalse(win.report_progress.isHidden())
+        self.assertEqual(win.report_progress.percent_text(), "0.000%")
+        assert_test_mode_children_contained()
 
         win._apply_toolbar_density(1600)
-        self.assertEqual(win.btn_open.text(), "📂  打开文件")
-        self.assertEqual(win.btn_recalc.text(), "↻  重新计算")
-        self.assertEqual(win.btn_export.text(), "💾  导出 Excel")
-        self.assertFalse(win._context_menu_label.isHidden())
+        self.assertEqual(win.btn_open.text(), "打开文件")
+        self.assertEqual(win.btn_recalc.text(), "重新计算")
+        self.assertEqual(win.btn_export.text(), "导出 Excel")
+        self.assertTrue(win._context_menu_label.isHidden())
         self.assertFalse(win.lbl_map_status.isHidden())
+        self.assertEqual(win.combo_phase.minimumWidth(), 78)
+        self.assertEqual(win.combo_bridge.minimumWidth(), 84)
+        self.assertEqual(win.combo_temp.minimumWidth(), 68)
+        self.assertEqual(win.spin_temp_value.minimumWidth(), 72)
+        assert_test_mode_children_contained()
         win.close()
+
+    def test_result_table_uses_compact_content_widths(self):
+        from PyQt6.QtGui import QFontMetrics
+
+        from dpt_extractor.gui.result_table import ResultTable
+        from dpt_extractor.models.results import (
+            ExtractResult,
+            ReverseRecoveryResult,
+            SegmentIndices,
+            TurnOffResult,
+            TurnOnResult,
+        )
+
+        result = ExtractResult(
+            phase="U",
+            profile_code="UH",
+            source_path="UH_RT.tss",
+            vdc=764.1,
+            segments=SegmentIndices(
+                turn_off=(0, 1),
+                turn_on=(2, 3),
+                reverse_recovery=(4, 5),
+            ),
+            turn_off=TurnOffResult(
+                ic_off_max=1051.25,
+                vce_off_max=1093.25,
+                dvdt=7.594,
+                didt=10.623,
+                dvdt_range="10%→90%",
+                didt_range="90%→10%",
+                crosstalk_vmax=-2.78,
+                crosstalk_vmin=-8.05,
+                eoff=88.884,
+                eoff_range="V↑~Ic平稳",
+            ),
+            turn_on=TurnOnResult(
+                ic_on_max=1154.22,
+                turn_on_current=1036.12,
+                dvdt_range="90%→10%",
+                didt_range="10%→90%",
+                crosstalk_vmax=-0.24,
+                crosstalk_vmin=-8.85,
+                eon=68.662,
+            ),
+            reverse_recovery=ReverseRecoveryResult(
+                vrr=985.03,
+                dvdt_max=12.971,
+                didt_irr=13.738,
+                err=1.116,
+            ),
+        )
+        table = ResultTable()
+        table.set_result(result)
+
+        widths = [table.table.columnWidth(c) for c in range(table.table.columnCount())]
+        self.assertEqual(table.table.font().pixelSize(), 12)
+        self.assertLessEqual(table.preferred_panel_width(), 465)
+        self.assertLessEqual(widths[1], 135)
+        self.assertLessEqual(widths[2], 50)
+        self.assertLessEqual(widths[3], 90)
+        self.assertLessEqual(widths[4], 135)
+
+        max_font_height = 0
+        for row in range(table.table.rowCount()):
+            for col in range(1, table.table.columnCount()):
+                item = table.table.item(row, col)
+                if item is None:
+                    continue
+                metrics = QFontMetrics(item.font())
+                max_font_height = max(max_font_height, metrics.height())
+                needed = metrics.horizontalAdvance(item.text()) + 2
+                self.assertLessEqual(needed, table.table.columnWidth(col), item.text())
+        self.assertLessEqual(
+            max_font_height + 4,
+            table.table.verticalHeader().defaultSectionSize(),
+        )
+        table.close()
+
+    def test_report_progress_bar_updates(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._begin_report_progress(5, "准备报告截图...")
+        self.assertFalse(win.report_progress.isHidden())
+        self.assertEqual(win.report_progress.maximum(), 5)
+        self.assertEqual(win.report_progress.value(), 0)
+        self.assertEqual(win.report_progress.percent_text(), "0.000%")
+        self.assertEqual(win.report_progress.detail_text(), "准备截图")
+
+        win._set_report_progress(3, 5, "截图 3/5")
+        self.assertEqual(win.report_progress.value(), 3)
+        self.assertEqual(win.report_progress.format(), "截图 3/5")
+        self.assertEqual(win.report_progress.percent_text(), "60.000%")
+        self.assertEqual(win.report_progress.detail_text(), "截图 3/5")
+
+        win._set_report_progress_busy("正在写入 Excel...")
+        self.assertTrue(win.report_progress.is_busy())
+        self.assertEqual(win.report_progress.detail_text(), "写入 Excel")
+        self.assertEqual(win.report_progress.eta_text(), "--")
+
+        win._finish_report_progress("写入完成 100%", ok=True)
+        self.assertEqual(win.report_progress.maximum(), 100)
+        self.assertEqual(win.report_progress.value(), 100)
+        self.assertEqual(win.report_progress.percent_text(), "100.000%")
+        self.assertEqual(win.report_progress.detail_text(), "完成")
+        win.close()
+
+    def test_report_write_progress_caps_until_finished(self):
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            REPORT_PROGRESS_TOTAL,
+            REPORT_PROGRESS_WRITE_DONE_CAP,
+            REPORT_PROGRESS_WRITE_START,
+        )
+
+        win = MainWindow()
+        win._report_request_id = 9
+        win._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告截图...")
+        win._set_report_progress(
+            REPORT_PROGRESS_WRITE_START,
+            REPORT_PROGRESS_TOTAL,
+            "正在写入 Excel...",
+        )
+
+        win._on_report_write_progress(9, 10, 10, "保存报告文件")
+        self.assertEqual(win.report_progress.value(), REPORT_PROGRESS_WRITE_DONE_CAP)
+        self.assertEqual(win.report_progress.percent_text(), "99.000%")
+        self.assertEqual(win.report_progress.detail_text(), "保存报告文件")
+
+        win._finish_report_progress("写入完成 100%", ok=True)
+        self.assertEqual(win.report_progress.value(), 100)
+        self.assertEqual(win.report_progress.percent_text(), "100.000%")
+        self.assertEqual(win.report_progress.detail_text(), "完成")
+        win.close()
+
+    def test_toolbar_temperature_values_are_editable_and_persisted(self):
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            TEMP_CONDITION_SETTINGS_PREFIX,
+        )
+
+        settings = QSettings("DPT", "DPTExtractor")
+        keys = [f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}" for code in ("RT", "HT", "LT")]
+        old_values = {key: settings.value(key, None) for key in keys}
+        for key in keys:
+            settings.remove(key)
+        try:
+            win = MainWindow()
+            self.assertEqual(win.combo_temp.currentData(), "RT")
+            self.assertAlmostEqual(win.spin_temp_value.value(), 25.0)
+
+            win.spin_temp_value.setValue(32.0)
+            self.assertAlmostEqual(
+                float(settings.value(f"{TEMP_CONDITION_SETTINGS_PREFIX}RT")),
+                32.0,
+            )
+            win._set_temperature_code("HT")
+            self.assertAlmostEqual(win.spin_temp_value.value(), 150.0)
+            win.spin_temp_value.setValue(155.0)
+            win.close()
+
+            win2 = MainWindow()
+            win2._set_temperature_code("RT")
+            self.assertAlmostEqual(win2.spin_temp_value.value(), 32.0)
+            win2._set_temperature_code("HT")
+            self.assertAlmostEqual(win2.spin_temp_value.value(), 155.0)
+            win2.close()
+        finally:
+            for key, value in old_values.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
 
     def test_main_window_shows_noncommercial_notice(self):
         from PyQt6.QtCore import QSettings
@@ -516,27 +977,34 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertNotIn("MATH2", plot._hidden_channels)
         self.assertEqual(plot._next_math_key(), "MATH2")
 
-    def test_channel_context_menu_uses_scope_style_actions(self):
+    def test_math_channel_settings_panel_has_delete_action(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QPushButton
+
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
         plot = self._make_synthetic_plot()
         plot._set_math_formula("MATH2", "CH3 + CH4")
 
-        def menu_texts(key):
-            return [
-                "|" if action.isSeparator() else action.text()
-                for action in plot._build_channel_box_menu(key).actions()
-            ]
+        panel = ChannelSettingsPanel(plot, "MATH2", QPoint(0, 0), parent=plot)
+        delete_btn = panel.findChild(QPushButton, "chDeleteBtn")
+        self.assertIsNotNone(delete_btn)
+        self.assertEqual(delete_btn.text(), "删除 Math 通道")
+        delete_btn.click()
+        self.assertNotIn("MATH2", plot._trace_items)
 
-        self.assertEqual(
-            menu_texts("MATH2"),
-            ["禁用 MATH2", "配置 MATH2...", "|", "标签...", "|", "删除 MATH2"],
-        )
-        self.assertEqual(
-            menu_texts("CH6"),
-            ["禁用 CH6", "配置 CH6...", "|", "标签..."],
-        )
+        ch_panel = ChannelSettingsPanel(plot, "CH1", QPoint(0, 0), parent=plot)
+        self.assertIsNone(ch_panel.findChild(QPushButton, "chDeleteBtn"))
+        ch_panel.close()
 
-        plot._toggle_channel_visibility("MATH2")
-        self.assertEqual(menu_texts("MATH2")[0], "启用 MATH2")
+    def test_channel_boxes_do_not_expose_context_menu(self):
+        plot = self._make_synthetic_plot()
+        plot._set_math_formula("MATH2", "CH3 + CH4")
+
+        self.assertFalse(hasattr(plot, "_build_channel_box_menu"))
+        self.assertFalse(hasattr(plot, "_show_channel_box_menu"))
+        self.assertFalse(hasattr(plot._channel_boxes["MATH2"], "contextMenuRequested"))
+        self.assertFalse(hasattr(plot._channel_boxes["CH6"], "contextMenuRequested"))
 
     def test_zoom_overview_region_tracks_and_pans_view(self):
         from PyQt6.QtWidgets import QSizePolicy
@@ -553,6 +1021,11 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             QSizePolicy.Policy.Expanding,
         )
         self.assertEqual(plot._scope_scale_bar.maximumHeight(), 20)
+        scale_margins = plot._scope_scale_bar.layout().contentsMargins()
+        self.assertEqual(scale_margins.left(), 0)
+        self.assertEqual(scale_margins.top(), 0)
+        self.assertEqual(scale_margins.bottom(), 0)
+        self.assertEqual(plot._x_scale_caption.height(), 16)
         self.assertEqual(plot._local_zoom_close_btn.height(), 16)
         self.assertIs(plot._zoom_toggle_btn.parentWidget(), plot._overview_plot)
         r0, r1 = plot._overview_region.getRegion()
@@ -997,28 +1470,252 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn("MATH1", plot._channel_boxes)
         self.assertEqual(plot._math_formulas, {"MATH1": "CH3+CH4"})
         self.assertNotIn("MATH1", plot._math_source_keys)
+        self.assertAlmostEqual(plot._manual_vdiv["MATH1"], 0.05)
         self.assertAlmostEqual(plot._disp_scale["MATH1"], 0.05)
         self.assertEqual(plot._unit_for_channel("MATH1"), "A")
         np.testing.assert_allclose(plot._trace_raw["MATH1"], original_math)
+
+        from PyQt6.QtCore import QPoint
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
+        panel = ChannelSettingsPanel(plot, "MATH1", QPoint(0, 0), parent=plot)
+        self.assertAlmostEqual(panel._vdiv_spin.value(), 0.05)
+        panel.close()
+
+    def test_computed_math_respects_tss_setup_vdiv_when_present(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        channels = {
+            "CH1": np.zeros(n),
+            "CH2": np.ones(n),
+            "CH3": np.ones(n),
+            "CH4": np.zeros(n),
+            "CH5": np.zeros(n),
+            "CH6": np.zeros(n),
+            "MATH2": np.linspace(0.0, 240.0, n),
+        }
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels=channels,
+                meta=TekMetadata(
+                    source_path="/fake/computed_math.tss",
+                    channel_vdiv={"MATH2": 0.05},
+                    channel_math_formulas={"MATH2": "INTG(CH2*MATH1)"},
+                    computed_math_channels={"MATH2"},
+                ),
+            ),
+            profile,
+            None,
+        )
+
+        self.assertAlmostEqual(plot._manual_vdiv["MATH2"], 0.05)
+        self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.05)
+
+    def test_math_without_tss_vdiv_auto_uses_math_fit_ladder(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        channels = {
+            "CH1": np.zeros(n),
+            "CH2": np.ones(n),
+            "CH3": np.ones(n),
+            "CH4": np.zeros(n),
+            "CH5": np.zeros(n),
+            "CH6": np.zeros(n),
+            "MATH2": np.linspace(0.0, 240.0, n),
+        }
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels=channels,
+                meta=TekMetadata(
+                    source_path="/fake/auto_math.tss",
+                    channel_math_formulas={"MATH2": "INTG(CH2*MATH1)"},
+                    computed_math_channels={"MATH2"},
+                ),
+            ),
+            profile,
+            None,
+        )
+
+        self.assertNotIn("MATH2", plot._manual_vdiv)
+        self.assertEqual(plot._disp_scale["MATH2"], 50.0)
+        _x, y = plot._trace_items["MATH2"].getData()
+        self.assertAlmostEqual(float(np.nanmin(y)), -2.4, places=6)
+        self.assertAlmostEqual(float(np.nanmax(y)), 2.4, places=6)
+
+    def test_loss_math_without_tss_vdiv_uses_switching_windows(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult, SegmentIndices
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        loss = np.full(n, 5.0)
+        loss[10:30] = np.linspace(0.0, 0.4, 20)
+        loss[70:90] = np.linspace(0.1, 0.3, 20)
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels={
+                    "CH1": np.zeros(n),
+                    "CH2": np.ones(n),
+                    "CH3": np.ones(n),
+                    "CH4": np.zeros(n),
+                    "CH5": np.zeros(n),
+                    "CH6": np.zeros(n),
+                    "MATH2": loss,
+                },
+                meta=TekMetadata(
+                    source_path="/fake/windowed_loss_math.tss",
+                    channel_math_formulas={"MATH2": "INTG(CH2*MATH1)"},
+                ),
+            ),
+            profile,
+            ExtractResult(
+                segments=SegmentIndices(
+                    turn_off=(10, 30),
+                    turn_on=(70, 90),
+                    reverse_recovery=(70, 90),
+                    pulse1_off=20,
+                    pulse2_on=80,
+                )
+            ),
+        )
+
+        self.assertNotIn("MATH2", plot._manual_vdiv)
+        self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.05)
+        self.assertEqual(plot._vdiv_text("MATH2"), "50 mJ/div")
+        fit = np.concatenate([loss[10:30], loss[70:90]])
+        fit_y = fit / plot._disp_scale["MATH2"] + plot._disp_offset["MATH2"]
+        self.assertGreaterEqual(float(np.nanmin(fit_y)), -4.05)
+        self.assertLessEqual(float(np.nanmax(fit_y)), 4.05)
+
+    def test_loss_math_with_tss_50mj_vdiv_uses_switching_windows_for_initial_offset(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import DISP_HALF_DIV, WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult, SegmentIndices
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        loss = np.linspace(0.0, 0.6, n)
+        loss[10:30] = np.linspace(0.065, 0.334, 20)
+        loss[70:90] = np.linspace(0.080, 0.300, 20)
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels={
+                    "CH1": np.zeros(n),
+                    "CH2": np.ones(n),
+                    "CH3": np.ones(n),
+                    "CH4": np.zeros(n),
+                    "CH5": np.zeros(n),
+                    "CH6": np.zeros(n),
+                    "MATH2": loss,
+                },
+                meta=TekMetadata(
+                    source_path="/fake/scope_50mj_loss_math.tss",
+                    channel_vdiv={"MATH2": 0.05},
+                    channel_math_formulas={"MATH2": "INTG(CH2*MATH1)"},
+                ),
+            ),
+            profile,
+            ExtractResult(
+                segments=SegmentIndices(
+                    turn_off=(10, 30),
+                    turn_on=(70, 90),
+                    reverse_recovery=(70, 90),
+                    pulse1_off=20,
+                    pulse2_on=80,
+                )
+            ),
+        )
+
+        self.assertAlmostEqual(plot._manual_vdiv["MATH2"], 0.05)
+        self.assertEqual(plot._vdiv_text("MATH2"), "50 mJ/div")
+        self.assertTrue(plot._trace_items["MATH2"].opts["clipToView"])
+
+        fit = np.concatenate([loss[10:30], loss[70:90]])
+        fit_y = fit / plot._disp_scale["MATH2"] + plot._disp_offset["MATH2"]
+        self.assertGreaterEqual(float(np.nanmin(fit_y)), -4.05)
+        self.assertLessEqual(float(np.nanmax(fit_y)), 4.05)
+
+        full_y = loss / plot._disp_scale["MATH2"] + plot._disp_offset["MATH2"]
+        self.assertGreater(float(np.nanmax(full_y)), DISP_HALF_DIV)
+        visible_low_mj = (-DISP_HALF_DIV - plot._disp_offset["MATH2"]) * 50.0
+        visible_high_mj = (DISP_HALF_DIV - plot._disp_offset["MATH2"]) * 50.0
+        self.assertGreaterEqual(visible_low_mj, -60.0)
+        self.assertLessEqual(visible_low_mj, -40.0)
+        self.assertGreaterEqual(visible_high_mj, 440.0)
+        self.assertLessEqual(visible_high_mj, 460.0)
 
     def test_selected_channel_updates_physical_y_axis(self):
         plot = self._make_synthetic_plot()
         self.assertEqual(plot._axis_channel(), "CH3")
         plot._on_legend_clicked("CH5")
+        self.assertEqual(plot._raised_key, "CH5")
+        self.assertIsNone(plot._highlighted_key)
         self.assertEqual(plot._axis_channel(), "CH5")
         self.assertEqual(plot._axis_last_signature[0], "CH5")
         self.assertEqual(plot._format_axis_value(1200.0, "V"), "1.2 kV")
+        self.assertIn("background:#151722", plot._channel_boxes["CH5"].styleSheet())
+        self.assertNotIn("background:#181b26", plot._channel_boxes["CH5"].styleSheet())
 
     def test_y_axis_ticks_anchor_to_channel_zero_and_vdiv(self):
         plot = self._make_synthetic_plot()
         plot._on_legend_clicked("CH6")
+        self.assertFalse(plot.plot.getPlotItem().getAxis("left").isVisible())
+        self.assertTrue(plot.plot.getPlotItem().getAxis("right").isVisible())
         tick_text = [
             text
-            for level in plot.plot.getPlotItem().getAxis("left")._tickLevels
+            for level in plot.plot.getPlotItem().getAxis("right")._tickLevels
             for _, text in level
         ]
-        for expected in ("0 V", "5 V", "10 V", "15 V", "20 V"):
+        for expected in ("0 V", "3 V", "6 V", "9 V", "12 V"):
             self.assertIn(expected, tick_text)
+
+    def test_dragging_math_zero_handle_selects_math_axis(self):
+        plot = self._make_synthetic_plot()
+        plot._set_math_formula("MATH2", "INTG(ABS(CH5)*ABS(CH4))")
+        plot._set_channel_scale("MATH2", 0.05)
+
+        plot._on_zero_handle_dragged("MATH2", -3.5)
+
+        self.assertEqual(plot._highlighted_key, "MATH2")
+        self.assertEqual(plot._axis_channel(), "MATH2")
+        tick_text = [
+            text
+            for level in plot.plot.getPlotItem().getAxis("right")._tickLevels
+            for _, text in level
+        ]
+        self.assertIn("50 mJ", tick_text)
+        self.assertIn("0 J", tick_text)
 
     def test_selection_zoom_applies_local_x_and_y_range(self):
         from PyQt6.QtCore import QPointF
@@ -1027,29 +1724,82 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         vb = plot.plot.getPlotItem().getViewBox()
         p0 = vb.mapViewToScene(QPointF(0.20, -2.0))
         p1 = vb.mapViewToScene(QPointF(0.70, 2.0))
-        plot._apply_selection_zoom(p0, p1)
+        self.assertTrue(plot._apply_selection_zoom(p0, p1))
         xr, yr = vb.viewRange()
         self.assertAlmostEqual(xr[0], 0.20, places=2)
         self.assertAlmostEqual(xr[1], 0.70, places=2)
         self.assertAlmostEqual(yr[0], -2.0, places=2)
         self.assertAlmostEqual(yr[1], 2.0, places=2)
 
-    def test_selection_zoom_requires_one_shot_button(self):
+    def test_selection_zoom_switch_toggles_until_closed(self):
         plot = self._make_synthetic_plot()
         self.assertFalse(plot._selection_zoom_enabled)
         self.assertFalse(plot._zoom_select_btn.isChecked())
 
-        plot._zoom_select_btn.setChecked(True)
+        captured: list[bool] = []
+        plot.selectionZoomChanged.connect(captured.append)
+
+        plot.set_selection_zoom_switch_enabled(True)
         self.assertTrue(plot._selection_zoom_enabled)
+        self.assertTrue(plot._zoom_select_btn.isChecked())
+        self.assertEqual(captured, [True])
+
         plot._finish_selection_zoom_mode()
         self.assertFalse(plot._selection_zoom_enabled)
         self.assertFalse(plot._zoom_select_btn.isChecked())
+        self.assertEqual(captured, [True, False])
 
         plot._arm_selection_zoom()
         self.assertTrue(plot._selection_zoom_enabled)
         self.assertTrue(plot._zoom_select_btn.isChecked())
-        plot._finish_selection_zoom_mode()
+        plot.set_selection_zoom_switch_enabled(False)
         self.assertFalse(plot._selection_zoom_enabled)
+        self.assertFalse(plot._zoom_select_btn.isChecked())
+
+    def test_selection_zoom_disarms_after_drag(self):
+        from PyQt6.QtCore import QPointF, Qt
+
+        class _DragEvent:
+            def __init__(
+                self,
+                scene_pos: QPointF,
+                *,
+                start: bool = False,
+                finish: bool = False,
+            ) -> None:
+                self._scene_pos = scene_pos
+                self._start = start
+                self._finish = finish
+                self.accepted = False
+
+            def button(self):
+                return Qt.MouseButton.LeftButton
+
+            def scenePos(self):
+                return self._scene_pos
+
+            def isStart(self):
+                return self._start
+
+            def isFinish(self):
+                return self._finish
+
+            def accept(self):
+                self.accepted = True
+
+        plot = self._make_synthetic_plot()
+        vb = plot.plot.getPlotItem().getViewBox()
+        p0 = vb.mapViewToScene(QPointF(0.20, -2.0))
+        p1 = vb.mapViewToScene(QPointF(0.70, 2.0))
+        captured: list[bool] = []
+        plot.selectionZoomChanged.connect(captured.append)
+
+        plot.set_selection_zoom_switch_enabled(True)
+        self.assertTrue(plot._on_selection_drag(_DragEvent(p0, start=True)))
+        self.assertTrue(plot._on_selection_drag(_DragEvent(p1, finish=True)))
+        self.assertFalse(plot._selection_zoom_enabled)
+        self.assertFalse(plot._zoom_select_btn.isChecked())
+        self.assertEqual(captured, [True, False])
 
     def test_drag_wrapper_keeps_original_viewbox_handler(self):
         plot = self._make_synthetic_plot()
@@ -1061,19 +1811,31 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn("method", closure_types)
         self.assertNotIn("function", closure_types)
 
-    def test_context_menu_group_selection(self):
+    def test_cursor_and_zoom_switch_api(self):
         plot = self._make_synthetic_plot()
-        self.assertEqual(plot.context_menu_group(), "all")
-        plot.set_context_menu_group("zoom")
-        self.assertEqual(plot.context_menu_group(), "zoom")
-        plot.set_context_menu_group("view")
-        self.assertEqual(plot.context_menu_group(), "view")
-        plot.set_context_menu_group("bad-value")
-        self.assertEqual(plot.context_menu_group(), "all")
+        cursor_changes: list[bool] = []
+        zoom_changes: list[bool] = []
+        plot.cursorVisibilityChanged.connect(cursor_changes.append)
+        plot.selectionZoomChanged.connect(zoom_changes.append)
 
-    def test_scope_context_menu_has_cursor_modes_and_clipboard_capture(self):
-        from PyQt6.QtWidgets import QApplication
+        self.assertTrue(plot.cursor_switch_enabled())
+        plot.set_cursor_switch_enabled(False)
+        self.assertFalse(plot.cursor_switch_enabled())
+        self.assertEqual(cursor_changes, [False])
+        plot._set_cursor_type("horizontal")
+        self.assertTrue(plot.cursor_switch_enabled())
+        plot.set_cursor_switch_enabled(False)
+        plot.set_cursor_switch_enabled(True)
+        self.assertEqual(plot._cursor_type, "horizontal")
 
+        self.assertFalse(plot.selection_zoom_switch_enabled())
+        plot.set_selection_zoom_switch_enabled(True)
+        self.assertTrue(plot.selection_zoom_switch_enabled())
+        plot.set_selection_zoom_switch_enabled(False)
+        self.assertFalse(plot.selection_zoom_switch_enabled())
+        self.assertEqual(zoom_changes, [True, False])
+
+    def test_scope_context_menu_is_cursor_menu_only(self):
         plot = self._make_synthetic_plot()
         self.assertTrue(plot._readout_scroll.isHidden())
         menu = plot._build_scope_context_menu(0.5, 0.0)
@@ -1081,43 +1843,33 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             "|" if action.isSeparator() else action.text()
             for action in menu.actions()
         ]
-        self.assertIn("光标", texts)
-        self.assertIn("复制截图到剪贴板", texts)
-
-        cursor_menu = next(
-            action.menu() for action in menu.actions() if action.text() == "光标"
-        )
-        cursor_texts = [action.text() for action in cursor_menu.actions()]
-        self.assertEqual(cursor_texts[0], "关闭光标")
-        self.assertIn("光标类型", cursor_texts)
-        self.assertIn("光标模式", cursor_texts)
+        self.assertIn("关闭光标", texts)
+        self.assertIn("光标类型", texts)
+        self.assertIn("光标模式", texts)
+        self.assertNotIn("光标", texts)
+        self.assertNotIn("缩放", texts)
+        self.assertNotIn("清除光标测量", texts)
+        self.assertNotIn("复制截图到剪贴板", texts)
+        self.assertNotIn("纵轴", texts)
+        self.assertNotIn("配置视图...", texts)
+        self.assertNotIn("显示模式", texts)
+        self.assertNotIn("默认设置", texts)
 
         type_menu = next(
-            action.menu() for action in cursor_menu.actions() if action.text() == "光标类型"
+            action.menu() for action in menu.actions() if action.text() == "光标类型"
         )
         self.assertEqual(
             [action.text() for action in type_menu.actions()],
             ["波形", "竖条", "横条", "竖条与横条"],
         )
-        cursor_menu.actions()[0].trigger()
+        menu.actions()[0].trigger()
         self.assertEqual(plot._cursor_type, "none")
         self.assertFalse(plot._cursor_a.isVisible())
         menu_after_close = plot._build_scope_context_menu(0.5, 0.0)
-        cursor_menu_after_close = next(
-            action.menu()
-            for action in menu_after_close.actions()
-            if action.text() == "光标"
-        )
-        self.assertEqual(cursor_menu_after_close.actions()[0].text(), "打开光标")
-        cursor_menu_after_close.actions()[0].trigger()
+        self.assertEqual(menu_after_close.actions()[0].text(), "打开光标")
+        menu_after_close.actions()[0].trigger()
         self.assertEqual(plot._cursor_type, "both")
         self.assertTrue(plot._cursor_a.isVisible())
-
-        plot.resize(900, 520)
-        plot.show()
-        QApplication.processEvents()
-        plot._copy_screenshot_to_clipboard()
-        self.assertFalse(QApplication.clipboard().pixmap().isNull())
         plot.close()
 
     def test_cursor_type_visibility_modes(self):
@@ -1166,12 +1918,43 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot._set_cursor_type("both")
         self.assertTrue(plot._cursor_a.isVisible())
         self.assertTrue(plot._h_cursor_a.isVisible())
-        self.assertTrue(plot._cursor_a_wave_marker.isVisible())
+        self.assertFalse(plot._cursor_a_wave_marker.isVisible())
 
         plot._set_cursor_type("none")
         self.assertFalse(plot._cursor_a.isVisible())
         self.assertFalse(plot._h_cursor_a.isVisible())
         self.assertFalse(plot._cursor_a_wave_marker.isVisible())
+
+    def test_cursor_readouts_match_scope_cursor_types(self):
+        plot = self._make_synthetic_plot()
+
+        plot._set_cursor_type("both")
+        both_a = plot._cursor_a_t_label.textItem.toPlainText()
+        both_delta = plot._cursor_ab_delta_label.textItem.toPlainText()
+        both_h_delta = plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+        self.assertIn("t:", both_a)
+        self.assertNotIn("\n", both_a)
+        self.assertIn("Δ t:", both_delta)
+        self.assertIn("1 / Δ t:", both_delta)
+        self.assertNotIn("Δ a:", both_delta)
+        self.assertIn("Δ a:", both_h_delta)
+        self.assertIn("Δ a/ Δ t:", both_h_delta)
+
+        plot._set_cursor_type("horizontal")
+        horizontal_delta = plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+        self.assertIn("Δ a:", horizontal_delta)
+        self.assertNotIn("/ Δ t", horizontal_delta)
+
+        plot._set_cursor_type("waveform")
+        wave_a = plot._cursor_a_t_label.textItem.toPlainText()
+        wave_delta = plot._cursor_ab_delta_label.textItem.toPlainText()
+        self.assertIn("t:", wave_a)
+        self.assertIn("\n", wave_a)
+        self.assertIn("a:", wave_a)
+        self.assertIn("Δ t:", wave_delta)
+        self.assertIn("Δ a:", wave_delta)
+        self.assertIn("Δ a/ Δ t:", wave_delta)
+        self.assertFalse(plot._h_cursor_a.isVisible())
 
     def test_waveform_cursor_markers_survive_replot(self):
         from dpt_extractor.gui.waveform_plot import WaveformPlot
@@ -1283,34 +2066,43 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         plot._on_legend_clicked(key)
         self.assertFalse(plot._ground_marker.isVisible())
 
-    def test_legend_click_highlight(self):
+    def test_legend_click_raises_and_double_click_toggles_highlight(self):
         plot, bundle, profile, _ = self._load_and_plot(WH)
         vb = plot.plot.getPlotItem().getViewBox()
         y_before = vb.viewRange()[1]
-        # 点击 CH1：仅置顶 + 高亮，纵轴量程不变
+        # 单击 CH1：仅置顶，不高亮、不压暗其它波形，纵轴量程不变
         plot._on_legend_clicked("CH1")
-        self.assertEqual(plot._highlighted_key, "CH1")
+        self.assertEqual(plot._raised_key, "CH1")
+        self.assertIsNone(plot._highlighted_key)
         self.assertEqual(plot._trace_items["CH1"].zValue(), 20)
-        # 其它波形被压到底层
         self.assertEqual(plot._trace_items["CH2"].zValue(), 0)
         y_after = vb.viewRange()[1]
         self.assertAlmostEqual(y_before[0], y_after[0], places=3)
         self.assertAlmostEqual(y_before[1], y_after[1], places=3)
-        # 再次点击恢复
-        plot._on_legend_clicked("CH1")
+
+        # 双击 CH1：高亮；再次双击取消高亮，但保留该通道置顶
+        plot._on_legend_double_clicked("CH1")
+        self.assertEqual(plot._raised_key, "CH1")
+        self.assertEqual(plot._highlighted_key, "CH1")
+        self.assertEqual(plot._trace_items["CH1"].zValue(), 20)
+        plot._on_legend_double_clicked("CH1")
         self.assertIsNone(plot._highlighted_key)
-        self.assertEqual(plot._trace_items["CH1"].zValue(), 0)
+        self.assertEqual(plot._trace_items["CH1"].zValue(), 20)
 
     def test_channel_visibility_toggle(self):
         plot, _, _, _ = self._load_and_plot(WH)
         key = "CH2"
         self.assertTrue(plot._trace_items[key].isVisible())
+        plot._on_legend_clicked(key)
+        self.assertEqual(plot._trace_items[key].zValue(), 20)
         plot._toggle_channel_visibility(key)
         self.assertIn(key, plot._hidden_channels)
         self.assertFalse(plot._trace_items[key].isVisible())
+        self.assertIsNone(plot._raised_key)
         plot._toggle_channel_visibility(key)
         self.assertNotIn(key, plot._hidden_channels)
         self.assertTrue(plot._trace_items[key].isVisible())
+        self.assertEqual(plot._trace_items[key].zValue(), 0)
 
     def test_auto_center_on_import(self):
         import numpy as np
@@ -1319,6 +2111,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         for key in plot._trace_items:
             raw = plot._trace_raw[key]
             scale = plot._disp_scale[key]
+            if key.startswith("MATH") and plot._unit_for_channel(key) == "J":
+                raw = plot._fit_raw_for_channel(key, raw)
             mid_raw = 0.5 * (float(np.nanmin(raw)) + float(np.nanmax(raw)))
             mid_disp = mid_raw / scale + plot._disp_offset[key]
             self.assertLess(abs(mid_disp), 0.35, msg=key)
@@ -1327,11 +2121,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         import numpy as np
 
         from dpt_extractor.gui.waveform_plot import (  # noqa: PLC0415
-            CURRENT_VDIV_DEFAULT,
             CURRENT_VDIV_MAX,
             DISP_HALF_DIV,
-            MATH_VDIV_LADDER,
-            VDIV_LADDER,
             VERT_VIEW_MARGIN,
             _auto_vdiv_for_channel,
             _pick_vdiv_ladder,
@@ -1344,26 +2135,33 @@ class TestWaveformPlotSmoke(unittest.TestCase):
 
         self.assertEqual(_wheel_delta_y(_SceneWheel()), 120)
         raw = np.array([0.0, 800.0])
-        self.assertEqual(_auto_vdiv_for_channel("vce", raw), 200.0)
-        self.assertEqual(_auto_vdiv_for_channel("vge", np.array([0.0, 15.0])), 5.0)
+        self.assertEqual(_auto_vdiv_for_channel("vce", raw), 100.0)
+        self.assertEqual(_auto_vdiv_for_channel("vge", np.array([0.0, 15.0])), 2.0)
         self.assertEqual(_pick_vdiv_ladder(37.0, "vge"), 50.0)
         self.assertEqual(_pick_vdiv_ladder(250.0, "ic"), 250.0)
         self.assertEqual(_pick_vdiv_ladder(280.0, "ic"), 300.0)
         small_ic = np.array([0.0, 400.0])
-        self.assertEqual(_auto_vdiv_for_channel("ic", small_ic), CURRENT_VDIV_DEFAULT)
+        self.assertEqual(_auto_vdiv_for_channel("ic", small_ic), 50.0)
+        self.assertEqual(_pick_vdiv_ladder(0.05, "MATH2"), 0.05)
+        self.assertEqual(_auto_vdiv_for_channel("MATH2", np.array([0.0, 240.0])), 50.0)
+        self.assertEqual(_auto_vdiv_for_channel("MATH3", np.array([-1.7, 2.3])), 0.5)
 
         plot, _, _, _ = self._load_and_plot(WH)
         max_half = DISP_HALF_DIV * (1.0 - VERT_VIEW_MARGIN) + 0.05
         for key, scale in plot._disp_scale.items():
-            ladder = MATH_VDIV_LADDER if key.startswith("MATH") else VDIV_LADDER
-            self.assertTrue(any(np.isclose(scale, float(v)) for v in ladder), msg=key)
+            ymin, ymax = plot._trace_yrange[key]
+            half_pp_div = (ymax - ymin) / (2.0 * scale)
+            if key in plot._manual_vdiv:
+                self.assertEqual(scale, plot._manual_vdiv[key])
+                continue
+            if key.startswith("MATH"):
+                self.assertGreaterEqual(scale, 1e-9)
+            else:
+                self.assertEqual(scale, float(int(scale)), msg=key)
             if key in ("ic", "irr"):
                 self.assertLessEqual(scale, CURRENT_VDIV_MAX)
                 self.assertGreaterEqual(scale, 1.0)
-            ymin, ymax = plot._trace_yrange[key]
-            half_pp_div = (ymax - ymin) / (2.0 * scale)
-            if not key.startswith("MATH"):
-                self.assertLessEqual(half_pp_div, max_half, key)
+            self.assertLessEqual(half_pp_div, max_half, key)
         plot._apply_x_us_per_div(0.2, center_us=18.0)
         before = plot._x_us_per_div
         plot._on_x_wheel(_SceneWheel())

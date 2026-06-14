@@ -4,7 +4,7 @@ from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Mapping
+from typing import Callable, Mapping
 
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
@@ -104,6 +104,7 @@ _SHORT_IMAGE_HEADERS: dict[tuple[str, str], str] = {
 }
 
 ImageMap = Mapping[tuple[str, str], str | Path]
+ReportProgressCallback = Callable[[int, int, str], None]
 
 REPORT_IMAGE_DISPLAY_SIZE_PX = (320, 240)
 DPT_WAVEFORM_BLOCK_ROWS = 51
@@ -1314,6 +1315,7 @@ def _write_dpt_images(
     anchor_row: int | None,
     images: ImageMap,
     result: ExtractResult,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> int:
     if anchor_row is None:
         _normalize_dpt_waveform_text(ws)
@@ -1365,6 +1367,7 @@ def _write_dpt_images(
         template_ranges=all_parameter_slots,
     )
     _normalize_dpt_waveform_text(ws)
+    image_total = len(overview_items) + len(regular_items)
     for image_path, target in overview_items:
         _insert_image(
             ws,
@@ -1374,6 +1377,8 @@ def _write_dpt_images(
             display_size=overview_display_size,
         )
         written += 1
+        if progress_callback is not None:
+            progress_callback(written, image_total, "插入报告图片")
     for image_path, target in regular_items:
         _insert_image(
             ws,
@@ -1383,6 +1388,8 @@ def _write_dpt_images(
             display_size=display_size,
         )
         written += 1
+        if progress_callback is not None:
+            progress_callback(written, image_total, "插入报告图片")
     return written
 
 
@@ -1500,6 +1507,7 @@ def _write_short_images(
     anchor_row: int | None,
     images: ImageMap,
     result: ExtractResult,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> int:
     if anchor_row is None:
         _normalize_short_picture_text(ws)
@@ -1527,6 +1535,7 @@ def _write_short_images(
         template_ranges=all_parameter_slots,
     )
     _normalize_short_picture_text(ws)
+    image_total = len(items)
     for image_path, target in items:
         _insert_image(
             ws,
@@ -1536,6 +1545,8 @@ def _write_short_images(
             display_size=display_size,
         )
         written += 1
+        if progress_callback is not None:
+            progress_callback(written, image_total, "插入报告图片")
     return written
 
 
@@ -1545,9 +1556,22 @@ def write_report_template(
     *,
     images: ImageMap | None = None,
     target_screen_width_px: int | None = None,
+    progress_callback: ReportProgressCallback | None = None,
 ) -> ReportWriteSummary:
     path = Path(report_path)
+    progress_total = max(6, 6 + len(images or {}))
+
+    def emit(step: int, label: str) -> None:
+        if progress_callback is not None:
+            progress_callback(
+                max(0, min(int(step), progress_total)),
+                progress_total,
+                label,
+            )
+
+    emit(0, "打开报告文件")
     wb = load_workbook(path)
+    emit(1, "读取报告模板")
     image_map: ImageMap = images or {}
     phase_code = _infer_phase_code(result.source_path, result)
     temp_code = _infer_temp_code(result.source_path)
@@ -1560,13 +1584,21 @@ def write_report_template(
         data_ws = wb[data_sheet]
         data_row = _short_target_row(data_ws, phase_code, temp_code)
         _write_short_data(data_ws, data_row, result)
+        emit(2, "写入报告数据")
         images_written = 0
         anchor_row = None
         if picture_sheet in wb.sheetnames:
             image_ws = wb[picture_sheet]
             anchor_row = _short_image_anchor_row(image_ws, phase_code, temp_code)
-            images_written = _write_short_images(image_ws, anchor_row, image_map, result)
+            images_written = _write_short_images(
+                image_ws,
+                anchor_row,
+                image_map,
+                result,
+                progress_callback=lambda done, _total, label: emit(2 + done, label),
+            )
         _set_report_open_zoom(wb, target_screen_width_px)
+        emit(progress_total - 1, "保存报告文件")
         wb.save(path)
         return ReportWriteSummary(
             report_path=path,
@@ -1592,6 +1624,7 @@ def write_report_template(
     )
     data_row = target.row
     _write_dpt_data(data_ws, data_row, result)
+    emit(2, "写入报告数据")
     vdc, idc = _match_setpoints(result)
     waveform_anchor_row = (
         _ensure_dpt_waveform_anchor(
@@ -1616,11 +1649,18 @@ def write_report_template(
             idc,
         )
     images_written = (
-        _write_dpt_images(waveform_ws, waveform_anchor_row, image_map, result)
+        _write_dpt_images(
+            waveform_ws,
+            waveform_anchor_row,
+            image_map,
+            result,
+            progress_callback=lambda done, _total, label: emit(2 + done, label),
+        )
         if waveform_ws is not None
         else 0
     )
     _set_report_open_zoom(wb, target_screen_width_px)
+    emit(progress_total - 1, "保存报告文件")
     wb.save(path)
     return ReportWriteSummary(
         report_path=path,

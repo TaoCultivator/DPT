@@ -6,9 +6,8 @@ import re
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QPen, QPolygonF
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QPen, QPolygonF
 from PyQt6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
@@ -17,7 +16,6 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGraphicsRectItem,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -332,12 +330,11 @@ class CursorSettingsDialog(QDialog):
 
 
 class ChannelBox(QFrame):
-    """示波器风格底部通道盒：左键选中、双击改垂直、右键菜单。"""
+    """示波器风格底部通道盒：单击置顶、双击高亮、右键改垂直。"""
 
-    highlightClicked = pyqtSignal(str)
+    raiseClicked = pyqtSignal(str)
+    highlightDoubleClicked = pyqtSignal(str)
     verticalSettingsRequested = pyqtSignal(str)
-    visibilityToggleRequested = pyqtSignal(str)
-    contextMenuRequested = pyqtSignal(str, QPoint)
 
     def __init__(self, key: str, name: str, color: str, parent=None):
         super().__init__(parent)
@@ -364,23 +361,19 @@ class ChannelBox(QFrame):
         lay.addWidget(self.vdiv_lbl)
 
     def mousePressEvent(self, ev) -> None:  # noqa: N802
-        if ev.button() == Qt.MouseButton.RightButton:
-            if hasattr(ev, "globalPosition"):
-                global_pos = ev.globalPosition().toPoint()
-            else:
-                global_pos = ev.globalPos()
-            self.contextMenuRequested.emit(self._key, global_pos)
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.raiseClicked.emit(self._key)
             ev.accept()
             return
-        if ev.button() == Qt.MouseButton.LeftButton:
-            self.highlightClicked.emit(self._key)
+        if ev.button() == Qt.MouseButton.RightButton:
+            self.verticalSettingsRequested.emit(self._key)
             ev.accept()
             return
         super().mousePressEvent(ev)
 
     def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.MouseButton.LeftButton:
-            self.verticalSettingsRequested.emit(self._key)
+            self.highlightDoubleClicked.emit(self._key)
             ev.accept()
             return
         super().mouseDoubleClickEvent(ev)
@@ -419,17 +412,6 @@ QMenu::separator {
     margin: 6px 0;
 }
 """
-
-_CHANNEL_BOX_TOOLTIP = """
-<div style="white-space:nowrap;">
-  <b>通道操作</b><br>
-  单击：选中并置顶高亮<br>
-  双击：打开垂直设置（显示、刻度、位置）<br>
-  右键：通道菜单（标签、配置、隐藏/显示）<br>
-  0 值箭头：拖动调整该通道垂直位置
-</div>
-"""
-
 
 class MathFormulaDialog(QDialog):
     """Small oscilloscope-style editor for a display math trace."""
@@ -548,8 +530,6 @@ class MathFormulaDialog(QDialog):
             self.accept()
 
 from dpt_extractor.gui.theme import (
-    WAVEFORM_EDGE_COLORS,
-    WAVEFORM_GRID_ALPHA,
     WAVEFORM_PLOT_BG,
     WAVEFORM_PLOT_FG,
     WAVEFORM_TRACE_STYLES,
@@ -564,13 +544,19 @@ from dpt_extractor.models.waveform import (
 
 MAX_PLOT_POINTS = 8000
 MIN_X_SPAN_US = 0.2  # 200 ns 最小放大窗口
-V_CURSOR_WIDTH = 3
-H_CURSOR_WIDTH = 2
+V_CURSOR_WIDTH = 1
+H_CURSOR_WIDTH = 1
 
-# 示波器光标：橙 A + 黄 B（与示波器 Tek 风格一致）
-CURSOR_PEN_A = "#FFAA00"
-CURSOR_PEN_B = "#FFE600"
-CURSOR_PEN_ZERO = "#A6E3A1"
+CURSOR_PEN_A = "#FFFFFF"
+CURSOR_PEN_B = "#FFFFFF"
+CURSOR_PEN_ZERO = "#FFFFFF"
+REFERENCE_LINE_COLOR = "#FFFFFF"
+CURSOR_READOUT_OVERLAY_Z = 10000
+CURSOR_NAME_OVERLAY_Z = CURSOR_READOUT_OVERLAY_Z + 10
+CURSOR_READOUT_BG_ALPHA = 175
+CURSOR_NAME_BG_ALPHA = 185
+CURSOR_NAME_FONT_SIZE_PX = 12
+CURSOR_LINE_LABEL_FONT_PT = 10
 
 # 每通道独立垂直刻度（示波器 V/div 风格）：显示坐标 = 原始值 / (单位每格)
 DISP_HALF_DIV = 5.0  # 纵向显示半高（格），总高 10 格（同示波器）
@@ -578,6 +564,12 @@ HORIZONTAL_DIV_COUNT = 10.0  # 横向整格数（与 _update_x_ticks 一致）
 X_NS_PER_DIV = 50  # 水平标度 ns/格 步进（滚轮与显示量化）
 PARAM_FOCUS_DEFAULT_US_PER_DIV = 0.2  # 点击参数局部放大默认 200 ns/div
 VERT_VIEW_MARGIN = 0.10  # 纵向上下各留 10% 空白
+PLOT_AXIS_LABEL_EDGE_INSET = 0.0
+PLOT_AXIS_LABEL_END_GUARD = 0.008
+GRATICULE_DOT_COLOR = "#b7b7b7"
+GRATICULE_DOT_ALPHA = 145
+GRATICULE_DOT_SIZE_PX = 1.0
+GRATICULE_SUBDIVISIONS_PER_DIV = 5
 VDIV_LADDER = (1, 2, 5, 10, 20, 50, 100, 150, 200, 250, 300)
 CURRENT_VDIV_DEFAULT = 200.0  # 电流通道默认刻度（A/格）
 CURRENT_VDIV_MAX = 300.0  # 电流通道可选上限（含 250、300）
@@ -613,15 +605,18 @@ CHANNEL_UNITS = {
     "vge_other": "V",
 }
 
+SOURCE_CHANNEL_PATTERN = r"(?:CH[1-8]|MATH\d+)"
+SOURCE_CHANNEL_RE = re.compile(rf"^{SOURCE_CHANNEL_PATTERN}$", re.I)
+
 MATH_TRACE_COLORS = (
     "#008000",
-    "#B22222",
-    "#FF1010",
-    "#98B33A",
-    "#F28A1D",
-    "#742D8E",
-    "#B22222",
-    "#98B33A",
+    "#A62323",
+    "#FF0000",
+    "#789ED3",
+    "#936756",
+    "#6E2B85",
+    "#A62323",
+    "#96B03C",
 )
 MATH_VDIV_LADDER = (
     1e-9,
@@ -666,10 +661,27 @@ def _is_math_trace_key(key: str) -> bool:
     return bool(re.fullmatch(r"MATH\d+", key.upper()))
 
 
+def _is_source_channel_key(key: str) -> bool:
+    return bool(SOURCE_CHANNEL_RE.fullmatch(str(key or "").upper()))
+
+
 def _math_color(key: str) -> str:
+    style = WAVEFORM_TRACE_STYLES.get(key.upper())
+    if style is not None:
+        return style[0]
     m = re.fullmatch(r"MATH(\d+)", key.upper())
     idx = int(m.group(1)) - 1 if m else 0
     return MATH_TRACE_COLORS[idx % len(MATH_TRACE_COLORS)]
+
+
+def _source_trace_style(key: str) -> tuple[str, float]:
+    key = key.upper()
+    style = WAVEFORM_TRACE_STYLES.get(key)
+    if style is not None:
+        return style
+    if _is_math_trace_key(key):
+        return _math_color(key), 1.5
+    return "#d0d0d0", 1.5
 
 
 def _source_channel_legend(key: str, labels: dict[str, str]) -> str:
@@ -747,30 +759,121 @@ def _format_time_per_div(step_us: float) -> str:
     return f"{ns} ns/div"
 
 
+def _format_x_tick_us(value_us: float) -> str:
+    value_us = float(value_us)
+    if abs(value_us) < 1e-12:
+        value_us = 0.0
+    return f"{value_us:g}us"
+
+
+def _x_axis_ticks(x0: float, x1: float, step_us: float) -> list[tuple[float, str]]:
+    import math
+
+    span = float(x1) - float(x0)
+    step_us = abs(float(step_us))
+    if span <= 0 or step_us <= 0:
+        return []
+    start = math.ceil(float(x0) / step_us - 1e-9) * step_us
+    ticks = []
+    v = start
+    cnt = 0
+    while v <= float(x1) + 1e-9 and cnt < 80:
+        ticks.append((v, _format_x_tick_us(v)))
+        v += step_us
+        cnt += 1
+    return ticks
+
+
+def _graticule_dot_values(
+    ticks: list[float], lower: float, upper: float
+) -> np.ndarray:
+    majors = sorted({float(v) for v in ticks})
+    if not majors:
+        return np.asarray([], dtype=np.float64)
+    if len(majors) == 1:
+        values = majors
+    else:
+        diffs = [
+            b - a
+            for a, b in zip(majors, majors[1:])
+            if b > a
+        ]
+        if diffs:
+            step = float(np.median(np.asarray(diffs, dtype=np.float64)))
+            while step > 0 and majors[0] > float(lower):
+                majors.insert(0, majors[0] - step)
+            while step > 0 and majors[-1] < float(upper):
+                majors.append(majors[-1] + step)
+        values = []
+        for a, b in zip(majors, majors[1:]):
+            if b <= a:
+                continue
+            step = (b - a) / GRATICULE_SUBDIVISIONS_PER_DIV
+            values.extend(a + step * i for i in range(GRATICULE_SUBDIVISIONS_PER_DIV))
+        values.append(majors[-1])
+    span = max(float(upper) - float(lower), 1e-12)
+    pad = span * 1e-6
+    return np.asarray(
+        [v for v in values if float(lower) - pad <= v <= float(upper) + pad],
+        dtype=np.float64,
+    )
+
+
+def _graticule_major_values(
+    ticks: list[float], lower: float, upper: float
+) -> np.ndarray:
+    span = max(float(upper) - float(lower), 1e-12)
+    pad = span * 1e-6
+    return np.asarray(
+        [
+            float(v)
+            for v in sorted({float(v) for v in ticks})
+            if float(lower) - pad <= float(v) <= float(upper) + pad
+        ],
+        dtype=np.float64,
+    )
+
+
+def _graticule_dot_line_points(
+    x_ticks: list[float],
+    y_ticks: list[float],
+    x0: float,
+    x1: float,
+    y0: float,
+    y1: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_minor = _graticule_dot_values(x_ticks, x0, x1)
+    y_minor = _graticule_dot_values(y_ticks, y0, y1)
+    x_major = _graticule_major_values(x_ticks, x0, x1)
+    y_major = _graticule_major_values(y_ticks, y0, y1)
+    if (
+        len(x_minor) == 0
+        or len(y_minor) == 0
+        or len(x_major) == 0
+        or len(y_major) == 0
+    ):
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+
+    # Scope graticules are dotted major lines, not a filled minor-dot lattice.
+    x = np.concatenate(
+        [
+            np.tile(x_minor, len(y_major)),
+            np.tile(x_major, len(y_minor)),
+        ]
+    )
+    y = np.concatenate(
+        [
+            np.repeat(y_major, len(x_minor)),
+            np.repeat(y_minor, len(x_major)),
+        ]
+    )
+    points = np.unique(np.column_stack([x, y]), axis=0)
+    return points[:, 0], points[:, 1]
+
+
 def _usable_y_divs() -> float:
     """纵向可用于波形的总格数（上下各留 VERT_VIEW_MARGIN）。"""
     return HORIZONTAL_DIV_COUNT * (1.0 - 2.0 * VERT_VIEW_MARGIN)
-
-
-def _vdiv_max_for_channel(key: str) -> float:
-    if CHANNEL_UNITS.get(key) == "A":
-        return CURRENT_VDIV_MAX  # 250、300 可选
-    return float(VDIV_LADDER[-1])
-
-
-def _pick_vdiv_ladder(required: float, key: str) -> float:
-    """取不小于 required 的最小整数档位；电流通道不超过 200A/格。"""
-    required = max(float(required), 1e-12)
-    cap = _vdiv_max_for_channel(key)
-    for v in VDIV_LADDER:
-        if float(v) > cap:
-            break
-        if float(v) >= required:
-            return float(v)
-    for v in reversed(VDIV_LADDER):
-        if float(v) <= cap:
-            return float(v)
-    return float(VDIV_LADDER[0])
 
 
 def _vdiv_max_for_channel(key: str) -> float:
@@ -813,20 +916,40 @@ def _y_fit_limit_div() -> float:
 
 
 def _auto_vdiv_for_channel(key: str, raw: np.ndarray) -> float:
-    """按波形半幅 + 上下 10% 边距自动选取整数 V/div（或 A/div）。
-
-    默认刻度（SCOPE_VDIV_DEFAULT）能放下时保持默认：Vge 5V/格，电压/电流 200。
-    仅当超出默认时才升档。
-    """
+    """TSS 没有垂直刻度时，按 10%~90% 波形区自动选取单位/格。"""
     if len(raw) == 0:
-        default = SCOPE_VDIV_DEFAULT.get(key, float(VDIV_LADDER[0]))
-        return _pick_vdiv_ladder(default, key)
+        return float(_vdiv_ladder_for_channel(key)[0])
     _, _, _, half_span = _raw_value_span(raw)
     required = (2.0 * half_span) / _usable_y_divs()
-    pref = SCOPE_VDIV_DEFAULT.get(key)
-    if pref is not None and required <= float(pref):
-        return float(pref)
-    return _pick_vdiv_ladder(required, key)
+    if _is_math_trace_key(key):
+        return _pick_vdiv_ladder(required, key)
+    import math
+
+    scale = float(max(1, int(math.ceil(max(required, 1e-12)))))
+    return min(scale, _vdiv_max_for_channel(key))
+
+
+def _loss_window_raw(
+    raw: np.ndarray,
+    segments: SegmentIndices | None,
+    *,
+    include_turn_on: bool = True,
+) -> np.ndarray:
+    if segments is None or len(raw) == 0:
+        return raw
+    windows = [segments.turn_off]
+    if include_turn_on:
+        windows.append(segments.turn_on)
+    chunks: list[np.ndarray] = []
+    n = len(raw)
+    for i0, i1 in windows:
+        lo = max(0, min(n, int(i0)))
+        hi = max(0, min(n, int(i1)))
+        if hi > lo:
+            chunks.append(np.asarray(raw[lo:hi], dtype=np.float64))
+    if not chunks:
+        return raw
+    return np.concatenate(chunks)
 
 
 def _wheel_delta_y(ev) -> int:
@@ -857,6 +980,18 @@ def _waveform_fits_at_center(raw: np.ndarray, scale: float) -> bool:
     half_up = (vmax - mid) / scale
     half_dn = (mid - vmin) / scale
     return half_up <= limit + 1e-9 and half_dn <= limit + 1e-9
+
+
+def _safe_initial_vdiv_for_channel(
+    key: str, raw: np.ndarray, scope_scale: float | None
+) -> float:
+    if (
+        scope_scale is not None
+        and np.isfinite(float(scope_scale))
+        and float(scope_scale) > 0
+    ):
+        return float(scope_scale)
+    return _auto_vdiv_for_channel(key, raw)
 
 
 def _auto_center_offset_div(raw: np.ndarray, scale: float) -> float:
@@ -941,14 +1076,19 @@ class WaveformPlot(QWidget):
 
     channelMappingRequested = pyqtSignal(str, str)
     channelLabelChanged = pyqtSignal(str, str)
+    cursorVisibilityChanged = pyqtSignal(bool)
+    selectionZoomChanged = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("WaveformPlotRoot")
-        self.setStyleSheet("QWidget#WaveformPlotRoot{background:#11121f;}")
+        self.setStyleSheet(
+            "QWidget#WaveformPlotRoot{background:#11121f;"
+            "border:0;}"
+        )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
 
         pg.setConfigOptions(antialias=False, background=WAVEFORM_PLOT_BG, foreground=WAVEFORM_PLOT_FG)
 
@@ -985,19 +1125,19 @@ class WaveformPlot(QWidget):
 
         scale_box = QWidget()
         scale_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        scale_box.setFixedHeight(18)
+        scale_box.setFixedHeight(16)
         scale_lay = QHBoxLayout(scale_box)
         scale_lay.setContentsMargins(0, 0, 0, 0)
         scale_lay.setSpacing(5)
         self._x_scale_caption = QLabel("水平标度")
         self._x_scale_caption.setObjectName("scopeScaleCaption")
-        self._x_scale_caption.setFixedHeight(18)
+        self._x_scale_caption.setFixedHeight(16)
         self._x_scale_caption.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self._x_scale_caption.setStyleSheet(
             "QLabel#scopeScaleCaption{color:#f2f2f2;font-size:10px;"
-            "font-weight:700;padding:0;margin:0;}"
+            "font-weight:700;padding:0 4px;margin:0;}"
         )
         self._x_scale_edit = QLineEdit()
         self._x_scale_edit.setObjectName("scopeScaleEdit")
@@ -1039,7 +1179,7 @@ class WaveformPlot(QWidget):
         self._x_zoom_out_btn.clicked.connect(lambda: self._step_x_scale(zoom_in=False))
         self._x_zoom_factor_label = QLabel("(1.00x 缩放)")
         self._x_zoom_factor_label.setObjectName("scopeScaleFactor")
-        self._x_zoom_factor_label.setFixedHeight(18)
+        self._x_zoom_factor_label.setFixedHeight(16)
         self._x_zoom_factor_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
@@ -1076,21 +1216,50 @@ class WaveformPlot(QWidget):
         self.plot = pg.PlotWidget()
         self.plot.setTitle(None)
         self.plot.setBackground(WAVEFORM_PLOT_BG)
-        self.plot.getPlotItem().getViewBox().setBackgroundColor(WAVEFORM_PLOT_BG)
-        self.plot.setLabel("bottom", "时间", units="µs", color=WAVEFORM_PLOT_FG)
-        self.plot.setLabel("left", "格 (div)", color=WAVEFORM_PLOT_FG)
-        self.plot.showGrid(x=True, y=True, alpha=WAVEFORM_GRID_ALPHA)
+        plot_item = self.plot.getPlotItem()
+        plot_item.hideButtons()
+        plot_item.setContentsMargins(0, 0, 0, 0)
+        plot_item.showAxis("right")
+        plot_item.hideAxis("left")
+        plot_item.getViewBox().setBackgroundColor(WAVEFORM_PLOT_BG)
+        self.plot.showGrid(x=False, y=False)
         axis_pen = pg.mkPen(WAVEFORM_PLOT_FG)
-        for axis_name in ("left", "bottom"):
-            ax = self.plot.getPlotItem().getAxis(axis_name)
+        for axis_name in ("right", "bottom"):
+            ax = plot_item.getAxis(axis_name)
             ax.setPen(axis_pen)
             ax.setTextPen(axis_pen)
-        # 纵轴固定整格刻度线（去掉细密小网格，只留示波器式整格水平线）
-        ax_left = self.plot.getPlotItem().getAxis("left")
-        ax_left.setTicks(
+            ax.showLabel(False)
+            ax.setStyle(
+                showValues=False,
+                tickLength=0,
+                tickTextOffset=0,
+                autoExpandTextSpace=False,
+                autoReduceTextSpace=False,
+            )
+        plot_item.getAxis("bottom").showLabel(False)
+        plot_item.getAxis("bottom").setHeight(1)
+        # 纵轴固定整格刻度线显示在波形区右侧（示波器式整格水平线）。
+        ax_right = plot_item.getAxis("right")
+        ax_right.setTicks(
             [[(i, str(i)) for i in range(-int(DISP_HALF_DIV), int(DISP_HALF_DIV) + 1)]]
         )
-        ax_left.setWidth(72)
+        ax_right.setWidth(1)
+        plot_item.getAxis("left").setGrid(False)
+        ax_right.setGrid(False)
+        self._x_tick_label_items: list[pg.TextItem] = []
+        self._y_tick_label_items: list[pg.TextItem] = []
+        self._graticule_x_ticks: list[float] = []
+        self._graticule_y_ticks: list[float] = []
+        graticule_dot_color = QColor(GRATICULE_DOT_COLOR)
+        graticule_dot_color.setAlpha(GRATICULE_DOT_ALPHA)
+        self._graticule_dots = pg.ScatterPlotItem(
+            size=GRATICULE_DOT_SIZE_PX,
+            pxMode=True,
+            pen=pg.mkPen(None),
+            brush=pg.mkBrush(graticule_dot_color),
+        )
+        self._graticule_dots.setZValue(-50)
+        self.plot.addItem(self._graticule_dots)
         # 图例不再画在波形内（改用顶部 _legend_label）
         self.plot.setMenuEnabled(False)
         self.plot.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1125,6 +1294,7 @@ class WaveformPlot(QWidget):
         self._overview_plot.setMenuEnabled(False)
         self._overview_plot.showGrid(x=True, y=False, alpha=0.22)
         overview_item = self._overview_plot.getPlotItem()
+        overview_item.hideButtons()
         overview_item.hideAxis("left")
         overview_item.getAxis("bottom").setPen(axis_pen)
         overview_item.getAxis("bottom").setTextPen(axis_pen)
@@ -1162,14 +1332,13 @@ class WaveformPlot(QWidget):
             "QFrame#scopeScaleBar{background:#777777;border:1px solid #5f5f5f;}"
         )
         scope_scale_lay = QHBoxLayout(self._scope_scale_bar)
-        scope_scale_lay.setContentsMargins(8, 1, 4, 1)
+        scope_scale_lay.setContentsMargins(0, 0, 4, 0)
         scope_scale_lay.setSpacing(6)
         scope_scale_lay.addWidget(scale_box, alignment=Qt.AlignmentFlag.AlignVCenter)
         scope_scale_lay.addStretch(1)
         self._local_zoom_close_btn = QPushButton("X")
         self._local_zoom_close_btn.setObjectName("scopeScaleCloseButton")
         self._local_zoom_close_btn.setFixedSize(30, 16)
-        self._local_zoom_close_btn.setToolTip("退出局部放大，回到全图")
         self._local_zoom_close_btn.setStyleSheet(
             "QPushButton#scopeScaleCloseButton{background:transparent;color:#e8e8e8;border:0;"
             "font-size:10px;font-weight:800;padding:0;margin:0;"
@@ -1181,9 +1350,15 @@ class WaveformPlot(QWidget):
             self._local_zoom_close_btn, alignment=Qt.AlignmentFlag.AlignVCenter
         )
         self._scope_scale_bar.hide()
-        layout.addWidget(self._overview_plot)
-        layout.addWidget(self._scope_scale_bar)
-        layout.addWidget(self.plot, stretch=1)
+        self._waveform_panel = QFrame()
+        self._waveform_panel.setObjectName("waveformPanel")
+        waveform_panel_layout = QVBoxLayout(self._waveform_panel)
+        waveform_panel_layout.setContentsMargins(4, 4, 4, 4)
+        waveform_panel_layout.setSpacing(4)
+        waveform_panel_layout.addWidget(self._overview_plot)
+        waveform_panel_layout.addWidget(self._scope_scale_bar)
+        waveform_panel_layout.addWidget(self.plot, stretch=1)
+        layout.addWidget(self._waveform_panel, stretch=1)
         self._zoom_toggle_btn = QPushButton("⌕", self._overview_plot)
         self._zoom_toggle_btn.setFixedSize(34, 34)
         self._zoom_toggle_btn.setToolTip("切换最近局部放大 / 全图预览")
@@ -1216,7 +1391,8 @@ class WaveformPlot(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._channel_scroll.setStyleSheet(
-            "QScrollArea { background-color: #10111a; border-top: 1px solid #303342; }"
+            "QScrollArea { background-color: #10111a;"
+            "border: 2px solid #46525a; border-radius: 4px; }"
         )
         self._channel_bar.setStyleSheet("background-color: #10111a;")
         self._channel_scroll.setWidget(self._channel_bar)
@@ -1235,10 +1411,13 @@ class WaveformPlot(QWidget):
         self._cursor_ha_v_label: pg.TextItem | None = None
         self._cursor_hb_v_label: pg.TextItem | None = None
         self._cursor_hb_ha_delta_label: pg.TextItem | None = None
+        self._cursor_ha_name_label: pg.TextItem | None = None
+        self._cursor_hb_name_label: pg.TextItem | None = None
         self._cursor_a_wave_marker: pg.ScatterPlotItem | None = None
         self._cursor_b_wave_marker: pg.ScatterPlotItem | None = None
         self._x_us_per_div: float = 0.0
         self._x_target_us_per_div: float = 0.0
+        self._scope_x_us_per_div: float | None = None
         self._x_scale_updating: bool = False
         # 用户手动调整过的水平标度（点击参数局部放大后记忆，µs/格）
         self._user_x_us_per_div: float | None = None
@@ -1256,6 +1435,7 @@ class WaveformPlot(QWidget):
         self._trace_legend: dict[str, str] = {}
         self._channel_labels: dict[str, str] = {}
         self._trace_units: dict[str, str] = {}
+        self._raised_key: str | None = None
         self._highlighted_key: str | None = None
         self._hidden_channels: set[str] = set()
 
@@ -1277,6 +1457,8 @@ class WaveformPlot(QWidget):
         self._formula_sources: dict[str, np.ndarray] = {}
         self._math_formulas: dict[str, str] = {}
         self._math_source_keys: set[str] = set()
+        self._loss_fit_segments: SegmentIndices | None = None
+        self._loss_fit_include_turn_on: bool = True
         self._base_logical_display_keys: dict[str, str] = {}
         self._logical_display_keys: dict[str, str] = {}
         self._display_channel_roles: dict[str, list[str]] = {}
@@ -1312,6 +1494,7 @@ class WaveformPlot(QWidget):
         # 光标联动模式：True=联动（原逻辑），False=独立（禁止自动吸附/联动）
         self._cursor_linked = True
         self._cursor_type = "both"
+        self._last_visible_cursor_type = "both"
         self._cursor_readout_overlay = True
         self._energy_edge_a = "rising"
         self._energy_edge_b = "falling"
@@ -1333,7 +1516,6 @@ class WaveformPlot(QWidget):
         self._selection_rect_item: QGraphicsRectItem | None = None
         self._selection_zoom_enabled = False
         self._axis_last_signature: tuple | None = None
-        self._context_menu_group = "all"
         self._display_mode = "overlay"
         self._recent_local_x_window: tuple[float, float] | None = None
 
@@ -1397,6 +1579,13 @@ class WaveformPlot(QWidget):
         for it in list(plot_item.items):
             if it not in keep:
                 plot_item.removeItem(it)
+        if hasattr(self, "_x_tick_label_items"):
+            self._x_tick_label_items.clear()
+            self._y_tick_label_items.clear()
+            self._graticule_x_ticks.clear()
+            self._graticule_y_ticks.clear()
+            self._graticule_dots.setData([], [])
+            self._axis_last_signature = None
 
     def clear(self) -> None:
         """完全清除：包括光标（仅在新文件加载等场景使用）。"""
@@ -1410,6 +1599,7 @@ class WaveformPlot(QWidget):
         self._clear_overview_traces()
         self._remove_cursor_plot_labels()
         self._remove_zero_handles()
+        self._clear_axis_tick_labels()
         self._interactive_vce_t_us = None
         self._interactive_vce = None
         self._interactive_irr_t_us = None
@@ -1418,6 +1608,7 @@ class WaveformPlot(QWidget):
         self._interactive_trr_i_fall_end = None
         self._interactive_ic_t_us = None
         self._interactive_ic = None
+        self._scope_x_us_per_div = None
         self._slope_channel = None
         self._interactive_on_change = None
         self._interactive_mode = "global"
@@ -1427,6 +1618,8 @@ class WaveformPlot(QWidget):
         self._interval_max_hline_enabled = False
         self._interval_peak_on_hb = False
         self._h_cursor_a_locked = False
+        self._raised_key = None
+        self._highlighted_key = None
 
     def _view_coords_at_context_pos(self, pos) -> tuple[float, float]:
         """右键位置 → 视图坐标 (时间 µs, 纵向显示格)。"""
@@ -1489,16 +1682,36 @@ class WaveformPlot(QWidget):
         return self._cursor_type in {"horizontal", "both"}
 
     def _cursor_waveform_visible(self) -> bool:
-        return self._cursor_type in {"waveform", "both"}
+        return self._cursor_type == "waveform" or (
+            self._cursor_type == "both" and self._interactive_mode == "energy_loss"
+        )
+
+    def cursor_switch_enabled(self) -> bool:
+        return self._cursor_type != "none"
+
+    def set_cursor_switch_enabled(self, enabled: bool) -> None:
+        if enabled:
+            self._set_cursor_type(self._last_visible_cursor_type or "both")
+        else:
+            self._set_cursor_type("none")
 
     def _set_cursor_type(self, cursor_type: str) -> None:
         if cursor_type not in {"none", "waveform", "vertical", "horizontal", "both"}:
             cursor_type = "both"
+        was_enabled = self.cursor_switch_enabled()
         self._cursor_type = cursor_type
+        if cursor_type != "none":
+            self._last_visible_cursor_type = cursor_type
         if cursor_type == "waveform":
             self._set_cursor_link_mode(linked=True)
+            self._update_readout()
+            if self.cursor_switch_enabled() != was_enabled:
+                self.cursorVisibilityChanged.emit(self.cursor_switch_enabled())
             return
+        self._update_readout()
         self._apply_cursor_visibility()
+        if self.cursor_switch_enabled() != was_enabled:
+            self.cursorVisibilityChanged.emit(self.cursor_switch_enabled())
 
     def _apply_cursor_visibility(self) -> None:
         show_v = self._cursor_vertical_visible()
@@ -1517,6 +1730,10 @@ class WaveformPlot(QWidget):
             item = getattr(self, attr)
             if item is not None:
                 item.setVisible(show_h and self._cursor_readout_overlay)
+        for attr in ("_cursor_ha_name_label", "_cursor_hb_name_label"):
+            item = getattr(self, attr)
+            if item is not None:
+                item.setVisible(show_h)
         self._update_waveform_cursor_markers()
 
     def _set_cursor_readout_overlay(self, enabled: bool) -> None:
@@ -1527,14 +1744,6 @@ class WaveformPlot(QWidget):
     def _show_cursor_settings_dialog(self) -> None:
         dlg = CursorSettingsDialog(self, parent=self)
         dlg.show()
-
-    def set_context_menu_group(self, group: str) -> None:
-        if group not in {"cursor", "zoom", "view", "y", "all"}:
-            group = "all"
-        self._context_menu_group = group
-
-    def context_menu_group(self) -> str:
-        return self._context_menu_group
 
     def _add_cursor_type_menu(self, menu: QMenu) -> QMenu:
         type_menu = menu.addMenu("光标类型")
@@ -1641,92 +1850,15 @@ class WaveformPlot(QWidget):
         menu.addAction(act_full)
         menu.addAction(act_reset)
 
-    def _populate_view_menu(self, menu: QMenu) -> None:
-        act_config = QAction("配置视图...", self)
-        act_config.triggered.connect(self._configure_active_view)
-        menu.addAction(act_config)
-        display_menu = menu.addMenu("显示模式")
-        group = QActionGroup(display_menu)
-        group.setExclusive(True)
-        for mode, text in (("stacked", "堆叠显示模式"), ("overlay", "叠加显示模式")):
-            act = QAction(text, display_menu)
-            act.setCheckable(True)
-            act.setChecked(self._display_mode == mode)
-            act.triggered.connect(
-                lambda _checked=False, display_mode=mode: self._set_display_mode(
-                    display_mode
-                )
-            )
-            group.addAction(act)
-            display_menu.addAction(act)
-        menu.addSeparator()
-        act_fit = QAction("回到上一视窗", self)
-        act_fit.triggered.connect(self._fit_last_window)
-        act_full = QAction("铺满全部波形", self)
-        act_full.triggered.connect(self._fit_full_range)
-        menu.addAction(act_fit)
-        menu.addAction(act_full)
-
-    def _populate_y_axis_menu(self, menu: QMenu) -> None:
-        act_auto_y = QAction("自动纵轴", self)
-        act_lock_y = QAction("锁定纵轴缩放(1.00x)", self)
-
-        act_auto_y.triggered.connect(self._apply_disp_yrange)
-        act_lock_y.triggered.connect(self._lock_y_mouse)
-
-        menu.addAction(act_auto_y)
-        menu.addAction(act_lock_y)
-
     def _build_scope_context_menu(self, t_us: float, y_div: float) -> QMenu:
         menu = QMenu(self)
         menu.setStyleSheet(_CHANNEL_CONTEXT_MENU_STYLE)
-        self._populate_view_menu(menu)
-        menu.addSeparator()
-        cursor_menu = menu.addMenu("光标")
-        self._populate_cursor_menu(cursor_menu, t_us, y_div)
-        self._add_cursor_move_actions(menu, t_us, y_div)
-        menu.addSeparator()
-        zoom_menu = menu.addMenu("缩放")
-        self._populate_zoom_menu(zoom_menu)
-        y_menu = menu.addMenu("纵轴")
-        self._populate_y_axis_menu(y_menu)
-        menu.addSeparator()
-        copy_action = QAction("复制截图到剪贴板", self)
-        copy_action.triggered.connect(self._copy_screenshot_to_clipboard)
-        menu.addAction(copy_action)
-        menu.addSeparator()
-        clear_action = QAction("清除光标测量", self)
-        clear_action.triggered.connect(self.disable_interactive_cursors)
-        default_action = QAction("默认设置", self)
-        default_action.triggered.connect(self._restore_scope_defaults)
-        menu.addAction(clear_action)
-        menu.addAction(default_action)
+        self._populate_cursor_menu(menu, t_us, y_div)
         return menu
 
     def _show_context_menu(self, pos) -> None:
         t_us, y_div = self._view_coords_at_context_pos(pos)
-        group = self._context_menu_group
-        if group == "all":
-            menu = self._build_scope_context_menu(t_us, y_div)
-            menu.exec(self.plot.mapToGlobal(pos))
-            return
-        menu = QMenu(self)
-        menu.setStyleSheet(_CHANNEL_CONTEXT_MENU_STYLE)
-        if group == "cursor":
-            self._populate_cursor_menu(menu, t_us, y_div)
-        elif group == "zoom":
-            self._populate_zoom_menu(menu)
-        elif group == "view":
-            self._populate_view_menu(menu)
-        elif group == "y":
-            self._populate_y_axis_menu(menu)
-        else:
-            self._populate_cursor_menu(menu, t_us, y_div)
-        menu.addSeparator()
-        copy_action = QAction("复制截图到剪贴板", self)
-        copy_action.triggered.connect(self._copy_screenshot_to_clipboard)
-        menu.addAction(copy_action)
-
+        menu = self._build_scope_context_menu(t_us, y_div)
         menu.exec(self.plot.mapToGlobal(pos))
 
     def _show_cursor_context_menu(self, _cursor_id: str, scene_pos: QPointF) -> None:
@@ -1736,72 +1868,6 @@ class WaveformPlot(QWidget):
         self._populate_cursor_menu(menu, float(view.x()), float(view.y()))
         menu.exec(self.plot.mapToGlobal(self.plot.mapFromScene(scene_pos)))
 
-    def _configure_active_view(self) -> None:
-        key = self._axis_channel() or self._display_key_for_channel(self._active_channel)
-        if key in self._trace_items:
-            self._show_channel_settings_panel(key)
-
-    def _set_display_mode(self, mode: str) -> None:
-        if mode not in {"overlay", "stacked"}:
-            mode = "overlay"
-        if not self._trace_items:
-            return
-        keys = list(self._trace_items)
-        if mode == "stacked":
-            n = max(1, len(keys))
-            targets = [0.0] if n == 1 else np.linspace(DISP_HALF_DIV * 0.82, -DISP_HALF_DIV * 0.82, n)
-            for key, target in zip(keys, targets):
-                raw = self._trace_raw.get(key)
-                scale = self._disp_scale.get(key, 1.0) or 1.0
-                if raw is None or len(raw) == 0:
-                    self._disp_offset[key] = float(target)
-                    continue
-                _vmin, _vmax, mid, _span = _raw_value_span(raw)
-                self._disp_offset[key] = float(target) - float(mid) / float(scale)
-        else:
-            for key in keys:
-                raw = self._trace_raw.get(key)
-                scale = self._disp_scale.get(key, 1.0) or 1.0
-                self._disp_offset[key] = _auto_center_offset_div(raw, scale) if raw is not None else 0.0
-        self._display_mode = mode
-        self._refresh_visible_traces(force=True)
-        self._refresh_overview_traces()
-        self._refresh_legend_styles()
-        self._update_zero_handle_positions()
-        self._update_y_ticks()
-        self._update_readout()
-
-    def _restore_scope_defaults(self) -> None:
-        self.disable_interactive_cursors()
-        self._set_cursor_type("both")
-        self._set_cursor_link_mode(linked=True)
-        self._set_display_mode("overlay")
-        self._fit_full_range()
-        self._apply_disp_yrange()
-
-    def _scope_screenshot_pixmap(self):
-        win = self.window()
-        if win is not None and win is not self:
-            return win.grab()
-        return self.grab()
-
-    def _show_status_message(self, message: str, timeout_ms: int = 3500) -> None:
-        win = self.window()
-        status_bar = getattr(win, "statusBar", None)
-        if callable(status_bar):
-            bar = status_bar()
-            if bar is not None:
-                bar.showMessage(message, timeout_ms)
-
-    def _copy_screenshot_to_clipboard(self) -> None:
-        clipboard = QApplication.clipboard()
-        clipboard.setPixmap(self._scope_screenshot_pixmap())
-        self._show_status_message("截图已复制到剪贴板，可直接粘贴")
-
-    def _lock_y_mouse(self) -> None:
-        vb = self.plot.getPlotItem().getViewBox()
-        vb.setMouseEnabled(x=True, y=False)
-
     def _apply_disp_yrange(self) -> None:
         """固定纵向显示为 ±DISP_HALF_DIV 格（每通道按自身 V/div 缩放）。"""
         vb = self.plot.getPlotItem().getViewBox()
@@ -1809,10 +1875,148 @@ class WaveformPlot(QWidget):
         vb.setMouseEnabled(x=True, y=False)
         self._update_y_ticks()
 
+    @staticmethod
+    def _axis_tick_html(text: str, color: str) -> str:
+        return (
+            "<span style='"
+            f"color:{color};"
+            "font-size:12px;"
+            "font-family:Consolas,\"Courier New\",monospace;"
+            "font-weight:700;"
+            "'>"
+            f"{text}"
+            "</span>"
+        )
+
+    def _clear_axis_tick_labels(self) -> None:
+        if not hasattr(self, "_x_tick_label_items"):
+            return
+        for item in [*self._x_tick_label_items, *self._y_tick_label_items]:
+            try:
+                self.plot.removeItem(item)
+            except Exception:
+                pass
+        self._x_tick_label_items.clear()
+        self._y_tick_label_items.clear()
+        if hasattr(self, "_graticule_dots"):
+            self._graticule_x_ticks.clear()
+            self._graticule_y_ticks.clear()
+            self._graticule_dots.setData([], [])
+
+    def _ensure_graticule_dots(self) -> None:
+        if not hasattr(self, "_graticule_dots"):
+            return
+        plot_items = self.plot.getPlotItem().items
+        if self._graticule_dots not in plot_items:
+            self.plot.addItem(self._graticule_dots)
+
+    def _sync_graticule_dots(self) -> None:
+        if not hasattr(self, "_graticule_dots"):
+            return
+        self._ensure_graticule_dots()
+        if not self._graticule_x_ticks or not self._graticule_y_ticks:
+            self._graticule_dots.setData([], [])
+            return
+        try:
+            (x0, x1), (y0, y1) = self.plot.getPlotItem().getViewBox().viewRange()
+        except Exception:
+            return
+        x_arr, y_arr = _graticule_dot_line_points(
+            self._graticule_x_ticks,
+            self._graticule_y_ticks,
+            float(x0),
+            float(x1),
+            float(y0),
+            float(y1),
+        )
+        if len(x_arr) == 0 or len(y_arr) == 0:
+            self._graticule_dots.setData([], [])
+            return
+        self._graticule_dots.setData(x=x_arr, y=y_arr)
+
+    def _sync_axis_tick_items(
+        self,
+        items: list[pg.TextItem],
+        count: int,
+        *,
+        anchor: tuple[float, float],
+    ) -> None:
+        while len(items) < count:
+            item = pg.TextItem(anchor=anchor)
+            item.setZValue(35)
+            self.plot.addItem(item)
+            items.append(item)
+        while len(items) > count:
+            item = items.pop()
+            try:
+                self.plot.removeItem(item)
+            except Exception:
+                pass
+
+    def _sync_x_tick_labels(self, ticks: list[tuple[float, str]]) -> None:
+        if not hasattr(self, "_x_tick_label_items"):
+            return
+        try:
+            (x0, x1), (y0, y1) = self.plot.getPlotItem().getViewBox().viewRange()
+        except Exception:
+            return
+        x_span = max(float(x1) - float(x0), 1e-12)
+        y_span = max(float(y1) - float(y0), 1e-12)
+        x_guard = PLOT_AXIS_LABEL_END_GUARD * x_span
+        y = float(y0) + PLOT_AXIS_LABEL_EDGE_INSET * y_span
+        visible = [
+            (max(float(x0) + x_guard, min(float(x1) - x_guard, float(x))), str(text))
+            for x, text in ticks
+            if float(x0) - x_guard <= float(x) <= float(x1) + x_guard
+        ]
+        self._sync_axis_tick_items(
+            self._x_tick_label_items,
+            len(visible),
+            anchor=(0.5, 1.0),
+        )
+        color = self._axis_tick_color()
+        for item, (x, text) in zip(self._x_tick_label_items, visible):
+            item.setHtml(self._axis_tick_html(text, color))
+            item.setPos(x, y)
+            item.show()
+
+    def _sync_y_tick_labels(self, ticks: list[tuple[float, str]], color: str) -> None:
+        if not hasattr(self, "_y_tick_label_items"):
+            return
+        try:
+            (x0, x1), (y0, y1) = self.plot.getPlotItem().getViewBox().viewRange()
+        except Exception:
+            return
+        x_span = max(float(x1) - float(x0), 1e-12)
+        y_span = max(float(y1) - float(y0), 1e-12)
+        x = float(x1) - PLOT_AXIS_LABEL_EDGE_INSET * x_span
+        y_guard = PLOT_AXIS_LABEL_END_GUARD * y_span
+        visible = [
+            (
+                max(float(y0) + y_guard, min(float(y1) - y_guard, float(y))),
+                str(text),
+            )
+            for y, text in ticks
+            if float(y0) - y_guard <= float(y) <= float(y1) + y_guard
+        ]
+        self._sync_axis_tick_items(
+            self._y_tick_label_items,
+            len(visible),
+            anchor=(1.0, 0.5),
+        )
+        for item, (y, text) in zip(self._y_tick_label_items, visible):
+            item.setHtml(self._axis_tick_html(text, color))
+            item.setPos(x, y)
+            item.show()
+
+    def _sync_x_tick_labels_from_axis(self) -> None:
+        axis = self.plot.getPlotItem().getAxis("bottom")
+        levels = getattr(axis, "_tickLevels", [])
+        ticks = list(levels[0]) if levels else []
+        self._sync_x_tick_labels(ticks)
+
     def _update_x_ticks(self) -> None:
         """时间轴只画 ~10 等分整刻度线（无细密小网格），随缩放自适应。"""
-        import math
-
         vb = self.plot.getPlotItem().getViewBox()
         try:
             x0, x1 = vb.viewRange()[0]
@@ -1825,16 +2029,38 @@ class WaveformPlot(QWidget):
             self._x_target_us_per_div = _quantize_x_us_per_div(_exact_x_us_per_div(span))
         self._x_us_per_div = self._x_target_us_per_div
         self._sync_x_scale_readout()
-        step = _nice_per_div(span, target_div=HORIZONTAL_DIV_COUNT)
-        start = math.ceil(x0 / step - 1e-9) * step
-        ticks = []
-        v = start
-        cnt = 0
-        while v <= x1 + 1e-9 and cnt < 60:
-            ticks.append((v, f"{v:g}"))
-            v += step
-            cnt += 1
+        step = self._x_tick_step_for_range(float(x0), float(x1))
+        ticks = _x_axis_ticks(float(x0), float(x1), step)
+        self._graticule_x_ticks = [float(x) for x, _text in ticks]
+        self._sync_graticule_dots()
         self.plot.getPlotItem().getAxis("bottom").setTicks([ticks])
+        self._sync_x_tick_labels(ticks)
+
+    def _is_full_x_view(self, x0: float, x1: float) -> bool:
+        if self._full_x_range is None:
+            return False
+        f0, f1 = self._full_x_range
+        full_span = max(float(f1) - float(f0), 1e-12)
+        tol = max(1e-6, full_span * 1e-5)
+        return abs(float(x0) - float(f0)) <= tol and abs(float(x1) - float(f1)) <= tol
+
+    def _x_tick_step_for_range(
+        self, x0: float, x1: float, *, prefer_scope: bool = False
+    ) -> float:
+        span = float(x1) - float(x0)
+        if span <= 0:
+            return 0.0
+        if (prefer_scope or self._is_full_x_view(x0, x1)) and self._scope_x_us_per_div:
+            return float(self._scope_x_us_per_div)
+        return _nice_per_div(span, target_div=HORIZONTAL_DIV_COUNT)
+
+    def _update_overview_x_ticks(self) -> None:
+        if self._full_x_range is None:
+            return
+        f0, f1 = self._full_x_range
+        step = self._x_tick_step_for_range(float(f0), float(f1), prefer_scope=True)
+        ticks = _x_axis_ticks(float(f0), float(f1), step)
+        self._overview_plot.getPlotItem().getAxis("bottom").setTicks([ticks])
 
     def _sync_x_scale_readout(self, scale_us: float | None = None) -> None:
         if scale_us is None:
@@ -1963,22 +2189,35 @@ class WaveformPlot(QWidget):
         self._apply_x_us_per_div(parsed)
         self._remember_user_x_scale(parsed)
 
+    def selection_zoom_switch_enabled(self) -> bool:
+        return self._selection_zoom_enabled
+
+    def set_selection_zoom_switch_enabled(self, enabled: bool) -> None:
+        self._set_selection_zoom_enabled(bool(enabled))
+
     def _set_selection_zoom_enabled(self, enabled: bool) -> None:
-        self._selection_zoom_enabled = bool(enabled)
+        enabled = bool(enabled)
+        changed = self._selection_zoom_enabled != enabled
+        self._selection_zoom_enabled = enabled
+        if self._zoom_select_btn.isChecked() != enabled:
+            self._zoom_select_btn.blockSignals(True)
+            try:
+                self._zoom_select_btn.setChecked(enabled)
+            finally:
+                self._zoom_select_btn.blockSignals(False)
         if self._selection_zoom_enabled:
             self.plot.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.plot.unsetCursor()
             self._clear_selection_rect()
+        if changed:
+            self.selectionZoomChanged.emit(self._selection_zoom_enabled)
 
     def _finish_selection_zoom_mode(self) -> None:
-        if self._zoom_select_btn.isChecked():
-            self._zoom_select_btn.setChecked(False)
-        else:
-            self._set_selection_zoom_enabled(False)
+        self._set_selection_zoom_enabled(False)
 
     def _arm_selection_zoom(self) -> None:
-        self._zoom_select_btn.setChecked(True)
+        self._set_selection_zoom_enabled(True)
 
     # ---- 每通道垂直刻度换算（显示坐标 = 原始值 / 刻度 + 位置偏移）----
     def _selection_button_is_left(self, ev) -> bool:
@@ -2007,7 +2246,7 @@ class WaveformPlot(QWidget):
             self._selection_rect_item = None
         self._selection_start_scene = None
 
-    def _apply_selection_zoom(self, p0: QPointF, p1: QPointF) -> None:
+    def _apply_selection_zoom(self, p0: QPointF, p1: QPointF) -> bool:
         vb = self.plot.getPlotItem().getViewBox()
         v0 = vb.mapSceneToView(p0)
         v1 = vb.mapSceneToView(p1)
@@ -2018,7 +2257,7 @@ class WaveformPlot(QWidget):
             x0 = max(f0, min(f1, x0))
             x1 = max(f0, min(f1, x1))
         if x1 - x0 < MIN_X_SPAN_US or y1 - y0 < 0.05:
-            return
+            return False
         vb.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0.0)
         self._last_x_window = (x0, x1)
         self._x_target_us_per_div = _quantize_x_us_per_div(
@@ -2028,6 +2267,7 @@ class WaveformPlot(QWidget):
         self._remember_user_x_scale(self._x_target_us_per_div)
         self._sync_x_scale_readout()
         self._update_y_ticks()
+        return True
 
     def _on_selection_drag(self, ev) -> bool:
         if (
@@ -2054,9 +2294,11 @@ class WaveformPlot(QWidget):
         if is_finish():
             start = QPointF(self._selection_start_scene)
             self._clear_selection_rect()
+            applied = False
             if rect.width() >= 8 and rect.height() >= 8:
-                self._apply_selection_zoom(start, cur)
-            self._finish_selection_zoom_mode()
+                applied = self._apply_selection_zoom(start, cur)
+            if applied:
+                self._finish_selection_zoom_mode()
             ev.accept()
             return True
 
@@ -2078,6 +2320,12 @@ class WaveformPlot(QWidget):
                 return key
         return None
 
+    def _axis_tick_color(self) -> str:
+        ch = self._axis_channel()
+        if ch is None:
+            return WAVEFORM_PLOT_FG
+        return self._trace_style.get(ch, (WAVEFORM_PLOT_FG, 1.0))[0]
+
     @staticmethod
     def _format_axis_value(value: float, unit: str) -> str:
         abs_v = abs(float(value))
@@ -2086,6 +2334,13 @@ class WaveformPlot(QWidget):
         if abs_v >= 1000.0 and unit in {"V", "A"}:
             prefix = "k"
             scale = 1000.0
+        elif unit == "J":
+            if 0.0 < abs_v < 1.0:
+                prefix = "m"
+                scale = 1e-3
+            elif abs_v >= 1000.0:
+                prefix = "k"
+                scale = 1000.0
         disp = float(value) / scale
         if abs(disp) < 1e-9:
             disp = 0.0
@@ -2101,6 +2356,7 @@ class WaveformPlot(QWidget):
     def _update_y_ticks(self) -> None:
         vb = self.plot.getPlotItem().getViewBox()
         try:
+            x0, x1 = vb.viewRange()[0]
             y0, y1 = vb.viewRange()[1]
         except Exception:
             return
@@ -2110,9 +2366,14 @@ class WaveformPlot(QWidget):
                 (i, str(i))
                 for i in range(-int(DISP_HALF_DIV), int(DISP_HALF_DIV) + 1)
             ]
-            signature = (None, round(y0, 9), round(y1, 9))
-            label = "div"
-            color = WAVEFORM_PLOT_FG
+            signature = (
+                None,
+                round(float(x0), 9),
+                round(float(x1), 9),
+                round(float(y0), 9),
+                round(float(y1), 9),
+            )
+            color = self._axis_tick_color()
         else:
             import math
 
@@ -2136,17 +2397,11 @@ class WaveformPlot(QWidget):
                 ticks.append((y, self._format_axis_value(raw_value, unit)))
                 n += 1
                 count += 1
-            color = self._trace_style.get(ch, (WAVEFORM_PLOT_FG, 1.0))[0]
-            legend = self._trace_legend.get(ch, ch)
-            vdiv = self._disp_scale.get(ch, 1.0)
-            vdiv_txt = (
-                f"{int(round(vdiv))}"
-                if abs(vdiv - round(vdiv)) < 1e-9
-                else f"{vdiv:g}"
-            )
-            label = f"{legend}  {vdiv_txt} {unit}/div"
+            color = self._axis_tick_color()
             signature = (
                 ch,
+                round(float(x0), 9),
+                round(float(x1), 9),
                 round(float(y0), 9),
                 round(float(y1), 9),
                 round(float(scale), 9),
@@ -2154,13 +2409,26 @@ class WaveformPlot(QWidget):
                 self._highlighted_key,
             )
         if signature == self._axis_last_signature:
+            self._graticule_y_ticks = [float(y) for y, _text in ticks]
+            self._sync_graticule_dots()
+            self._sync_y_tick_labels(ticks, color)
             return
         self._axis_last_signature = signature
-        ax = self.plot.getPlotItem().getAxis("left")
+        self._graticule_y_ticks = [float(y) for y, _text in ticks]
+        self._sync_graticule_dots()
+        ax = self.plot.getPlotItem().getAxis("right")
         ax.setTicks([ticks])
         ax.setPen(pg.mkPen(color))
         ax.setTextPen(pg.mkPen(color))
-        self.plot.setLabel("left", label, color=color)
+        ax.showLabel(False)
+        self._sync_y_tick_labels(ticks, color)
+        bottom_ax = self.plot.getPlotItem().getAxis("bottom")
+        bottom_ax.setPen(pg.mkPen(color))
+        bottom_ax.setTextPen(pg.mkPen(color))
+        overview_bottom_ax = self._overview_plot.getPlotItem().getAxis("bottom")
+        overview_bottom_ax.setPen(pg.mkPen(color))
+        overview_bottom_ax.setTextPen(pg.mkPen(color))
+        self._sync_x_tick_labels_from_axis()
 
     def _to_disp(self, channel: str, value: float) -> float:
         channel = self._display_key_for_channel(channel)
@@ -2255,6 +2523,7 @@ class WaveformPlot(QWidget):
                     yy,
                     pen=pg.mkPen(color, width=max(1.0, float(width) * 0.72)),
                 )
+                item.setClipToView(True)
                 item.setZValue(0)
                 self._overview_items[key] = item
             else:
@@ -2271,6 +2540,7 @@ class WaveformPlot(QWidget):
         )
         self._overview_plot.setXRange(f0, f1, padding=0.0)
         self._overview_plot.setYRange(-DISP_HALF_DIV, DISP_HALF_DIV, padding=0.0)
+        self._update_overview_x_ticks()
         self._sync_overview_region_to_main()
 
     def _is_local_x_window(self, x0: float, x1: float) -> bool:
@@ -2450,9 +2720,9 @@ class WaveformPlot(QWidget):
         text = expr.upper()
         if "INTG" in text or "INTEG" in text:
             return "J"
-        if re.search(r"\bCH[1-6]\b", text) and "*" in text:
+        if re.search(r"\bCH[1-8]\b", text) and "*" in text:
             return "W"
-        for name in re.findall(r"\b(?:CH[1-6]|MATH\d+)\b", text):
+        for name in re.findall(rf"\b{SOURCE_CHANNEL_PATTERN}\b", text):
             unit = self._trace_units.get(name) or CHANNEL_UNITS.get(name, "")
             if unit:
                 return unit
@@ -2533,7 +2803,7 @@ class WaveformPlot(QWidget):
     @staticmethod
     def _formula_tokens(expr: str) -> tuple[list[str], list[str]]:
         text = re.sub(r"\s+", "", expr.upper())
-        tokens = re.findall(r"(?:CH[1-6]|MATH\d+)", text)
+        tokens = re.findall(SOURCE_CHANNEL_PATTERN, text)
         ops = re.findall(r"[+\-*/]", text)
         return tokens, ops
 
@@ -2731,6 +3001,23 @@ class WaveformPlot(QWidget):
             raise ValueError("Formula result length does not match the waveform.")
         return arr
 
+    def _loss_fit_raw_for_channel(self, key: str, raw: np.ndarray) -> np.ndarray:
+        if self._unit_for_channel(key) != "J":
+            return raw
+        return _loss_window_raw(
+            raw,
+            self._loss_fit_segments,
+            include_turn_on=self._loss_fit_include_turn_on,
+        )
+
+    def _auto_scale_raw_for_channel(self, key: str, raw: np.ndarray) -> np.ndarray:
+        if _is_math_trace_key(key) and self._unit_for_channel(key) == "J":
+            return self._loss_fit_raw_for_channel(key, raw)
+        return raw
+
+    def _fit_raw_for_channel(self, key: str, raw: np.ndarray) -> np.ndarray:
+        return self._auto_scale_raw_for_channel(key, raw)
+
     def _add_trace_item(
         self, key: str, raw: np.ndarray, legend: str, color: str, width: float
     ) -> None:
@@ -2738,14 +3025,13 @@ class WaveformPlot(QWidget):
             return
         raw = np.asarray(raw, dtype=np.float64)
         self._trace_raw[key] = raw
+        fit_raw = self._fit_raw_for_channel(key, raw)
         if key in self._manual_vdiv:
             scale = float(self._manual_vdiv[key])
-            if not _is_math_trace_key(key) and not _waveform_fits_at_center(raw, scale):
-                scale = _auto_vdiv_for_channel(key, raw)
         else:
-            scale = _auto_vdiv_for_channel(key, raw)
+            scale = _auto_vdiv_for_channel(key, fit_raw)
         self._disp_scale[key] = scale
-        self._disp_offset[key] = _auto_center_offset_div(raw, scale)
+        self._disp_offset[key] = _auto_center_offset_div(fit_raw, scale)
         win = self._current_x_window_for_display()
         if win is None:
             win = (float(self._trace_t_us[0]), float(self._trace_t_us[-1]))
@@ -2755,6 +3041,7 @@ class WaveformPlot(QWidget):
             raw_disp / scale + self._disp_offset[key],
             pen=pg.mkPen(color, width=width),
         )
+        item.setClipToView(True)
         item.setZValue(0)
         self._trace_items[key] = item
         self._trace_style[key] = (color, width)
@@ -2776,13 +3063,19 @@ class WaveformPlot(QWidget):
         self._formula_sources[key] = raw
         self._trace_units[key] = self._formula_unit(expr)
         if key not in self._trace_items:
-            self._add_trace_item(key, raw, key, _math_color(key), 1.5)
+            color, width = _source_trace_style(key)
+            self._add_trace_item(key, raw, key, color, width)
             self._build_channel_bar()
             return
         self._trace_raw[key] = raw
         self._trace_yrange[key] = (float(np.nanmin(raw)), float(np.nanmax(raw))) if len(raw) else (0.0, 0.0)
-        self._disp_scale[key] = _auto_vdiv_for_channel(key, raw)
-        self._disp_offset[key] = _auto_center_offset_div(raw, self._disp_scale[key])
+        fit_raw = self._fit_raw_for_channel(key, raw)
+        if key in self._manual_vdiv:
+            scale = float(self._manual_vdiv[key])
+        else:
+            scale = _auto_vdiv_for_channel(key, fit_raw)
+        self._disp_scale[key] = scale
+        self._disp_offset[key] = _auto_center_offset_div(fit_raw, scale)
         self._refresh_visible_traces(force=True)
         self._refresh_overview_traces()
         self._refresh_legend_styles()
@@ -2829,8 +3122,16 @@ class WaveformPlot(QWidget):
             self._manual_vdiv.clear()
             for ch, scale in bundle.meta.channel_vdiv.items():
                 ch_key = ch.upper()
-                if re.fullmatch(r"(CH[1-6]|MATH\d+)", ch_key):
-                    self._manual_vdiv[ch_key] = float(scale)
+                try:
+                    scope_scale = float(scale)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    _is_source_channel_key(ch_key)
+                    and np.isfinite(scope_scale)
+                    and scope_scale > 0
+                ):
+                    self._manual_vdiv[ch_key] = scope_scale
         else:
             saved_offset = dict(self._disp_offset) if self._trace_items else {}
         self._soft_clear()
@@ -2868,7 +3169,7 @@ class WaveformPlot(QWidget):
         source_items = [
             (ch.upper(), np.asarray(raw, dtype=np.float64))
             for ch, raw in bundle.channels.items()
-            if re.fullmatch(r"(CH[1-6]|MATH\d+)", ch.upper())
+            if _is_source_channel_key(ch)
         ]
         source_items.sort(key=lambda item: _source_channel_sort_key(item[0]))
         t_us = np.asarray(t, dtype=np.float64) * 1e6
@@ -2882,12 +3183,24 @@ class WaveformPlot(QWidget):
         self._channel_labels = {
             ch.upper(): str(label).strip()
             for ch, label in bundle.meta.channel_labels.items()
-            if re.fullmatch(r"(CH[1-6]|MATH\d+)", ch.upper()) and str(label).strip()
+            if _is_source_channel_key(ch) and str(label).strip()
         }
         self._formula_sources.clear()
         self._formula_t_s = np.asarray(t, dtype=np.float64)
         self._trace_t_us = t_us
         self._trace_view_signature = None
+        self._loss_fit_segments = result.segments if result is not None else None
+        self._loss_fit_include_turn_on = not (
+            bool(result.single_pulse_mode) if result is not None else False
+        )
+        scope_scale = bundle.meta.horizontal_scale_per_div
+        self._scope_x_us_per_div = (
+            float(scope_scale) * 1e6
+            if scope_scale is not None
+            and np.isfinite(float(scope_scale))
+            and float(scope_scale) > 0
+            else None
+        )
         imported_math_formulas = {
             ch.upper(): self._normalize_formula(expr)
             for ch, expr in bundle.meta.channel_math_formulas.items()
@@ -2902,13 +3215,7 @@ class WaveformPlot(QWidget):
         )
         source_units = self._physical_channel_units(profile)
         for key, data in source_items:
-            if _is_math_trace_key(key):
-                color, width = _math_color(key), 1.5
-            else:
-                color, width = WAVEFORM_TRACE_STYLES.get(
-                    self._logical_role_for_source(key),
-                    (_math_color(key), 1.5),
-                )
+            color, width = _source_trace_style(key)
             legend = _source_channel_legend(key, self._channel_labels)
             raw = np.asarray(data, dtype=np.float64)
             self._trace_raw[key] = raw
@@ -2916,17 +3223,17 @@ class WaveformPlot(QWidget):
             self._trace_units[key] = (
                 self._formula_unit(expr) if expr else source_units.get(key, "")
             )
+            fit_raw = self._fit_raw_for_channel(key, raw)
             if key in self._manual_vdiv:
                 scale = float(self._manual_vdiv[key])
-                if not _is_math_trace_key(key) and not _waveform_fits_at_center(raw, scale):
-                    scale = _auto_vdiv_for_channel(key, raw)
             else:
-                scale = _auto_vdiv_for_channel(key, raw)
+                scope_scale = bundle.meta.channel_vdiv.get(key)
+                scale = _safe_initial_vdiv_for_channel(key, fit_raw, scope_scale)
             self._disp_scale[key] = scale
             if key in saved_offset:
                 offset = float(saved_offset[key])
             else:
-                offset = _auto_center_offset_div(raw, scale)
+                offset = _auto_center_offset_div(fit_raw, scale)
             self._disp_offset[key] = offset
             tx, raw_disp = _display_curve_data(t_us, raw, float(t_us[0]), float(t_us[-1]))
             item = self.plot.plot(
@@ -2934,6 +3241,7 @@ class WaveformPlot(QWidget):
                 raw_disp / scale + offset,
                 pen=pg.mkPen(color, width=width),
             )
+            item.setClipToView(True)
             item.setZValue(0)
             self._trace_items[key] = item
             self._trace_style[key] = (color, width)
@@ -2946,13 +3254,14 @@ class WaveformPlot(QWidget):
                     float(np.nanmax(data)),
                 )
         # 重建底部通道盒（含每通道 V/div）
+        self._raised_key = None
         self._highlighted_key = None
         for key in list(self._trace_items):
             self._trace_units.setdefault(key, CHANNEL_UNITS.get(key, ""))
 
         for ch, raw_full in bundle.channels.items():
             ch_key = ch.upper()
-            if not re.fullmatch(r"(CH[1-6]|MATH\d+)", ch_key):
+            if not _is_source_channel_key(ch_key):
                 continue
             self._formula_sources[ch_key] = np.asarray(raw_full, dtype=np.float64)
 
@@ -2983,24 +3292,24 @@ class WaveformPlot(QWidget):
                     else float(t[segs.turn_off[1]] * 1e6)
                 )
                 edge_marks_us = [
-                    (start_us, "短路开始", WAVEFORM_EDGE_COLORS["on"]),
-                    (end_us, "短路结束", WAVEFORM_EDGE_COLORS["off"]),
+                    (start_us, "短路开始"),
+                    (end_us, "短路结束"),
                 ]
             else:
                 edge_marks_us = [
-                    (float(t[segs.pulse1_off] * 1e6), "关断沿", WAVEFORM_EDGE_COLORS["off"])
+                    (float(t[segs.pulse1_off] * 1e6), "关断沿")
                 ]
             if not result.single_pulse_mode and not result.short_circuit_mode:
                 edge_marks_us.append(
-                    (float(t[segs.pulse2_on] * 1e6), "开通沿", WAVEFORM_EDGE_COLORS["on"])
+                    (float(t[segs.pulse2_on] * 1e6), "开通沿")
                 )
-            for pos_us, label, color in edge_marks_us:
+            for pos_us, label in edge_marks_us:
                 line = pg.InfiniteLine(
                     pos=pos_us,
                     angle=90,
-                    pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
+                    pen=pg.mkPen(REFERENCE_LINE_COLOR, width=1, style=Qt.PenStyle.DashLine),
                     label=label,
-                    labelOpts={"color": color, "position": 0.95},
+                    labelOpts={"color": REFERENCE_LINE_COLOR, "position": 0.95},
                 )
                 self.plot.addItem(line)
 
@@ -3062,11 +3371,9 @@ class WaveformPlot(QWidget):
             color, _ = self._trace_style[key]
             legend = self._trace_legend[key]
             box = ChannelBox(key, legend, color)
-            box.setToolTip(_CHANNEL_BOX_TOOLTIP)
-            box.highlightClicked.connect(self._on_legend_clicked)
+            box.raiseClicked.connect(self._on_legend_clicked)
+            box.highlightDoubleClicked.connect(self._on_legend_double_clicked)
             box.verticalSettingsRequested.connect(self._show_channel_settings_panel)
-            box.visibilityToggleRequested.connect(self._toggle_channel_visibility)
-            box.contextMenuRequested.connect(self._show_channel_box_menu)
             self._channel_boxes[key] = box
             self._channel_layout.addWidget(box)
         add_math = QPushButton("+ Math")
@@ -3178,86 +3485,9 @@ class WaveformPlot(QWidget):
                 "}"
             )
 
-    def _channel_menu_display_name(self, key: str) -> str:
-        key = key.upper()
-        legend = self._trace_legend.get(key, key).strip()
-        return legend or key
-
-    def _channel_menu_action_text(self, verb: str, key: str) -> str:
-        name = self._channel_menu_display_name(key)
-        return f"{verb} {name}"
-
-    def _build_channel_box_menu(self, key: str) -> QMenu:
-        key = key.upper()
-        menu = QMenu(self)
-        menu.setStyleSheet(_CHANNEL_CONTEXT_MENU_STYLE)
-
-        hidden = key in self._hidden_channels
-        visibility_text = self._channel_menu_action_text(
-            "启用" if hidden else "禁用", key
-        )
-        visibility_action = QAction(visibility_text, menu)
-        visibility_action.triggered.connect(
-            lambda _checked=False, ch=key: self._toggle_channel_visibility(ch)
-        )
-        menu.addAction(visibility_action)
-
-        configure_action = QAction(
-            f"{self._channel_menu_action_text('配置', key)}...", menu
-        )
-        if _is_math_trace_key(key):
-            configure_action.triggered.connect(
-                lambda _checked=False, ch=key: self._show_math_formula_editor(ch)
-            )
-        else:
-            configure_action.triggered.connect(
-                lambda _checked=False, ch=key: self._show_channel_settings_panel(ch)
-            )
-        menu.addAction(configure_action)
-
-        menu.addSeparator()
-        label_action = QAction("标签...", menu)
-        label_action.triggered.connect(
-            lambda _checked=False, ch=key: self._show_channel_label_editor(ch)
-        )
-        menu.addAction(label_action)
-
-        if _is_math_trace_key(key):
-            menu.addSeparator()
-            delete_action = QAction(
-                self._channel_menu_action_text("删除", key), menu
-            )
-            delete_action.setEnabled(self._can_delete_channel(key))
-            delete_action.triggered.connect(
-                lambda _checked=False, ch=key: self._delete_math_channel(ch)
-            )
-            menu.addAction(delete_action)
-        return menu
-
-    def _show_channel_box_menu(self, key: str, global_pos: QPoint) -> None:
-        if key not in self._trace_items:
-            return
-        menu = self._build_channel_box_menu(key)
-        menu.exec(global_pos)
-
     def _can_delete_channel(self, key: str) -> bool:
         key = key.upper()
         return _is_math_trace_key(key) and key in self._trace_items
-
-    def _show_channel_label_editor(self, key: str) -> None:
-        key = key.upper()
-        if key not in self._trace_items:
-            return
-        current = self._channel_labels.get(key, "")
-        text, ok = QInputDialog.getText(
-            self,
-            "标签",
-            f"{key} 标签：",
-            text=current,
-        )
-        if not ok:
-            return
-        self.set_channel_label(key, text.strip())
 
     def set_channel_label(self, key: str, label: str) -> None:
         key = key.upper()
@@ -3278,6 +3508,8 @@ class WaveformPlot(QWidget):
         key = key.upper()
         if key not in self._trace_items or not self._can_delete_channel(key):
             return
+        if self._raised_key == key:
+            self._raised_key = None
         if self._highlighted_key == key:
             self._clear_highlight()
 
@@ -3330,8 +3562,11 @@ class WaveformPlot(QWidget):
         else:
             self._hidden_channels.add(key)
             self._trace_items[key].setVisible(False)
+            if self._raised_key == key:
+                self._raised_key = None
             if self._highlighted_key == key:
                 self._clear_highlight()
+        self._apply_trace_selection_style()
         self._refresh_legend_styles()
         self._refresh_zero_handle_styles()
         self._refresh_overview_traces()
@@ -3344,7 +3579,10 @@ class WaveformPlot(QWidget):
         scale = self._disp_scale.get(key, 1.0)
         if raw is None:
             return
-        self._set_channel_offset(key, _auto_center_offset_div(raw, scale))
+        self._set_channel_offset(
+            key,
+            _auto_center_offset_div(self._fit_raw_for_channel(key, raw), scale),
+        )
 
     def _set_channel_offset(self, key: str, offset: float, **_kwargs) -> None:
         if key not in self._trace_items or self._trace_t_us is None:
@@ -3385,6 +3623,8 @@ class WaveformPlot(QWidget):
         self._update_zero_handle_positions()
 
     def _on_zero_handle_dragged(self, key: str, view_y: float) -> None:
+        if self._highlighted_key != key:
+            self._highlight_trace(key)
         self._set_channel_offset(key, view_y)
 
     def _zero_handle_scene_pos(self, vb: pg.ViewBox, y_div: float) -> QPointF:
@@ -3420,6 +3660,11 @@ class WaveformPlot(QWidget):
     def _on_legend_clicked(self, key: str) -> None:
         if key not in self._trace_items or key in self._hidden_channels:
             return
+        self._raise_trace(key)
+
+    def _on_legend_double_clicked(self, key: str) -> None:
+        if key not in self._trace_items or key in self._hidden_channels:
+            return
         if self._highlighted_key == key:
             self._clear_highlight()
         else:
@@ -3428,7 +3673,7 @@ class WaveformPlot(QWidget):
     # ------------------------------------------------------------------ 每通道 V/div ----
     def _vdiv_options(self, key: str) -> list[float]:
         cap = _vdiv_max_for_channel(key)
-        return [float(v) for v in VDIV_LADDER if float(v) <= cap]
+        return [float(v) for v in _vdiv_ladder_for_channel(key) if float(v) <= cap]
 
     def _position_menu_line(self, key: str) -> str:
         offset = self._disp_offset.get(key, 0.0)
@@ -3460,9 +3705,10 @@ class WaveformPlot(QWidget):
         raw = self._trace_raw.get(key)
         if raw is None:
             return
+        fit_raw = self._fit_raw_for_channel(key, raw)
         if value is None:
             self._manual_vdiv.pop(key, None)
-            scale = _auto_vdiv_for_channel(key, raw)
+            scale = _auto_vdiv_for_channel(key, fit_raw)
         else:
             scale = _pick_vdiv_ladder(float(value), key)
             self._manual_vdiv[key] = scale
@@ -3474,20 +3720,41 @@ class WaveformPlot(QWidget):
         c.setAlpha(alpha)
         return c
 
-    def _highlight_trace(self, key: str) -> None:
-        """仅高亮：选中波形置顶+加粗变亮，其余变暗。不改变纵轴量程。"""
-        self._highlighted_key = key
-        if self._interactive_mode not in self._BASE_TOP_SLOPE_MODES:
-            if self._interactive_mode != "turn_on_current":
-                self._active_channel = key
+    def _active_channel_can_follow_selection(self) -> bool:
+        if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
+            return False
+        return self._interactive_mode != "turn_on_current"
+
+    def _apply_trace_selection_style(self) -> None:
         for k, item in self._trace_items.items():
             color, width = self._trace_style[k]
-            if k == key:
+            if self._highlighted_key == k:
                 item.setPen(pg.mkPen(color, width=width + 1.8))
-                item.setZValue(20)
-            else:
+            elif self._highlighted_key is not None:
                 item.setPen(pg.mkPen(self._dim_color(color, 60), width=width))
-                item.setZValue(0)
+            else:
+                item.setPen(pg.mkPen(color, width=width))
+            item.setZValue(20 if self._raised_key == k else 0)
+
+    def _raise_trace(self, key: str) -> None:
+        """单击选中通道只置顶波形，不做加粗/变暗高亮。"""
+        self._raised_key = key
+        self._highlighted_key = None
+        if self._active_channel_can_follow_selection():
+            self._active_channel = key
+        self._apply_trace_selection_style()
+        self._refresh_legend_styles()
+        self._refresh_zero_handle_styles()
+        self._update_y_ticks()
+        self._update_readout()
+
+    def _highlight_trace(self, key: str) -> None:
+        """仅高亮：选中波形置顶+加粗变亮，其余变暗。不改变纵轴量程。"""
+        self._raised_key = key
+        self._highlighted_key = key
+        if self._active_channel_can_follow_selection():
+            self._active_channel = key
+        self._apply_trace_selection_style()
         self._refresh_legend_styles()
         self._refresh_zero_handle_styles()
         self._update_y_ticks()
@@ -3495,10 +3762,7 @@ class WaveformPlot(QWidget):
 
     def _clear_highlight(self) -> None:
         self._highlighted_key = None
-        for k, item in self._trace_items.items():
-            color, width = self._trace_style[k]
-            item.setPen(pg.mkPen(color, width=width))
-            item.setZValue(0)
+        self._apply_trace_selection_style()
         self._refresh_legend_styles()
         self._refresh_zero_handle_styles()
         self._update_y_ticks()
@@ -3535,6 +3799,11 @@ class WaveformPlot(QWidget):
                     "fill": (0, 0, 0, 160),
                 },
             )
+            label_item = getattr(line, "label", None)
+            if label_item is not None:
+                label_item.setFont(
+                    QFont("Segoe UI", CURSOR_LINE_LABEL_FONT_PT, QFont.Weight.Bold)
+                )
             line.setZValue(50)
             line.contextRequested.connect(self._show_cursor_context_menu)
             return line
@@ -3545,16 +3814,21 @@ class WaveformPlot(QWidget):
                 pos=pos,
                 angle=0,
                 movable=True,
-                pen=pg.mkPen(color, width=H_CURSOR_WIDTH, style=Qt.PenStyle.DashLine),
-                hoverPen=pg.mkPen("#FFFFFF", width=H_CURSOR_WIDTH + 1, style=Qt.PenStyle.DashLine),
+                pen=pg.mkPen(color, width=H_CURSOR_WIDTH),
+                hoverPen=pg.mkPen("#FFFFFF", width=H_CURSOR_WIDTH + 1),
                 label=label,
                 labelOpts={
                     "color": color,
-                    "position": 0.02,
+                    "position": 0.98,
                     "movable": False,
                     "fill": (0, 0, 0, 160),
                 },
             )
+            label_item = getattr(line, "label", None)
+            if label_item is not None:
+                label_item.setFont(
+                    QFont("Segoe UI", CURSOR_LINE_LABEL_FONT_PT, QFont.Weight.Bold)
+                )
             line.setZValue(50)
             line.contextRequested.connect(self._show_cursor_context_menu)
             return line
@@ -3587,7 +3861,7 @@ class WaveformPlot(QWidget):
             self._h_cursor_a.sigPositionChanged.connect(self._on_horizontal_cursor_moved)
         else:
             self._h_cursor_a.setPos(ha_y)
-            self._h_cursor_a.setPen(pg.mkPen(CURSOR_PEN_A, width=H_CURSOR_WIDTH, style=Qt.PenStyle.DashLine))
+            self._h_cursor_a.setPen(pg.mkPen(CURSOR_PEN_A, width=H_CURSOR_WIDTH))
             if not self._h_cursor_a_locked:
                 self._h_cursor_a.setMovable(True)
         if self._h_cursor_b is None:
@@ -3597,7 +3871,7 @@ class WaveformPlot(QWidget):
         else:
             self._h_cursor_b.setPos(hb_y)
             self._h_cursor_b.setMovable(True)
-            self._h_cursor_b.setPen(pg.mkPen(CURSOR_PEN_B, width=H_CURSOR_WIDTH, style=Qt.PenStyle.DashLine))
+            self._h_cursor_b.setPen(pg.mkPen(CURSOR_PEN_B, width=H_CURSOR_WIDTH))
 
         self._interactive_syncing = False
         self._update_readout()
@@ -3869,9 +4143,23 @@ class WaveformPlot(QWidget):
     @staticmethod
     def _cursor_plot_label_html(text: str, color: str) -> str:
         return (
-            "<div style='background-color:rgba(30,30,46,230);padding:4px 8px;"
+            "<div style='"
+            f"background-color:rgba(30,30,46,{CURSOR_READOUT_BG_ALPHA});"
+            "padding:4px 8px;"
             "border-radius:6px;"
             f"color:{color};font-size:11px;line-height:1.35;"
+            "font-family:Segoe UI,sans-serif'>"
+            f"{text}</div>"
+        )
+
+    @staticmethod
+    def _cursor_name_label_html(text: str, color: str) -> str:
+        return (
+            "<div style='"
+            f"background-color:rgba(10,10,14,{CURSOR_NAME_BG_ALPHA});"
+            "padding:2px 5px;border-radius:4px;"
+            f"color:{color};font-size:{CURSOR_NAME_FONT_SIZE_PX}px;"
+            "font-weight:700;line-height:1.2;"
             "font-family:Segoe UI,sans-serif'>"
             f"{text}</div>"
         )
@@ -3894,8 +4182,15 @@ class WaveformPlot(QWidget):
         span = max(x1 - x0, 1e-9)
         return x0 + 0.01 * span
 
+    def _plot_label_x_right_edge(self) -> float:
+        """横向光标名称框：贴右侧，避开左侧 Ha/Hb 数值读数。"""
+        vb = self.plot.getPlotItem().getViewBox()
+        x0, x1 = vb.viewRange()[0]
+        span = max(x1 - x0, 1e-9)
+        return x1 - 0.01 * span
+
     def _horizontal_cursor_plot_values(
-        self, ha_div: float, hb_div: float, dt_us: float
+        self, ha_div: float, hb_div: float, dt_us: float, *, include_rate: bool
     ) -> tuple[str, str, str | None]:
         """返回 Ha/Hb 单点 HTML 与 Δ/Δt 浮动框 HTML（示波器风格）。"""
 
@@ -3907,12 +4202,14 @@ class WaveformPlot(QWidget):
 
         def _delta_html(dv: float, unit: str) -> str:
             sym = self._scope_wave_letter(unit)
-            is_i = unit == "A"
-            return self._cursor_plot_label_html(
-                f"Δ {sym}: {self._scope_quantity_text(dv, unit)}<br/>"
-                f"Δ {sym}/ Δ t: {self._scope_rate_text(dv, dt_us, is_current=is_i)}",
-                "#CDD6F4",
-            )
+            text = f"Δ {sym}: {self._scope_quantity_text(dv, unit)}"
+            if include_rate:
+                is_i = unit == "A"
+                text += (
+                    "<br/>"
+                    f"Δ {sym}/ Δ t: {self._scope_rate_text(dv, dt_us, is_current=is_i)}"
+                )
+            return self._cursor_plot_label_html(text, "#CDD6F4")
 
         if self._interactive_mode == "energy_loss":
             ha_ch = getattr(self, "_energy_ha_channel", "vce")
@@ -3950,6 +4247,14 @@ class WaveformPlot(QWidget):
             "_cursor_ha_v_label",
             "_cursor_hb_v_label",
             "_cursor_hb_ha_delta_label",
+            "_cursor_ha_name_label",
+            "_cursor_hb_name_label",
+        ):
+            item = getattr(self, attr)
+            if item is not None:
+                self.plot.scene().removeItem(item)
+            setattr(self, attr, None)
+        for attr in (
             "_cursor_a_wave_marker",
             "_cursor_b_wave_marker",
         ):
@@ -3961,16 +4266,43 @@ class WaveformPlot(QWidget):
     def _ensure_v_cursor_plot_labels(self) -> None:
         if self._cursor_a_t_label is None:
             self._cursor_a_t_label = pg.TextItem(anchor=(0.5, 1.0))
-            self._cursor_a_t_label.setZValue(55)
-            self.plot.addItem(self._cursor_a_t_label)
+            self._cursor_a_t_label.setZValue(CURSOR_READOUT_OVERLAY_Z)
+            self.plot.scene().addItem(self._cursor_a_t_label)
         if self._cursor_b_t_label is None:
             self._cursor_b_t_label = pg.TextItem(anchor=(0.5, 1.0))
-            self._cursor_b_t_label.setZValue(55)
-            self.plot.addItem(self._cursor_b_t_label)
+            self._cursor_b_t_label.setZValue(CURSOR_READOUT_OVERLAY_Z)
+            self.plot.scene().addItem(self._cursor_b_t_label)
         if self._cursor_ab_delta_label is None:
             self._cursor_ab_delta_label = pg.TextItem(anchor=(0.5, 1.0))
-            self._cursor_ab_delta_label.setZValue(55)
-            self.plot.addItem(self._cursor_ab_delta_label)
+            self._cursor_ab_delta_label.setZValue(CURSOR_READOUT_OVERLAY_Z)
+            self.plot.scene().addItem(self._cursor_ab_delta_label)
+
+    def _cursor_readout_scene_pos(self, x: float, y: float) -> QPointF:
+        vb = self.plot.getPlotItem().getViewBox()
+        return vb.mapViewToScene(QPointF(float(x), float(y)))
+
+    def _separate_h_cursor_name_positions(
+        self, ha_pos: QPointF, hb_pos: QPointF
+    ) -> tuple[QPointF, QPointF]:
+        min_gap_px = 18.0
+        dy = float(hb_pos.y() - ha_pos.y())
+        if abs(dy) < min_gap_px:
+            center = 0.5 * (float(ha_pos.y()) + float(hb_pos.y()))
+            if dy >= 0:
+                ha_pos.setY(center - min_gap_px * 0.5)
+                hb_pos.setY(center + min_gap_px * 0.5)
+            else:
+                ha_pos.setY(center + min_gap_px * 0.5)
+                hb_pos.setY(center - min_gap_px * 0.5)
+        try:
+            rect = self.plot.getPlotItem().getViewBox().sceneBoundingRect()
+            top = float(rect.top()) + 8.0
+            bottom = float(rect.bottom()) - 8.0
+            ha_pos.setY(max(top, min(bottom, float(ha_pos.y()))))
+            hb_pos.setY(max(top, min(bottom, float(hb_pos.y()))))
+        except Exception:
+            pass
+        return ha_pos, hb_pos
 
     def _position_v_cursor_plot_labels(self, a_us: float, b_us: float) -> None:
         if (
@@ -3981,9 +4313,11 @@ class WaveformPlot(QWidget):
             return
         y_bot = self._plot_label_y_bottom()
         y_delta = self._plot_label_y_delta()
-        self._cursor_a_t_label.setPos(a_us, y_bot)
-        self._cursor_b_t_label.setPos(b_us, y_bot)
-        self._cursor_ab_delta_label.setPos(0.5 * (a_us + b_us), y_delta)
+        self._cursor_a_t_label.setPos(self._cursor_readout_scene_pos(a_us, y_bot))
+        self._cursor_b_t_label.setPos(self._cursor_readout_scene_pos(b_us, y_bot))
+        self._cursor_ab_delta_label.setPos(
+            self._cursor_readout_scene_pos(0.5 * (a_us + b_us), y_delta)
+        )
 
     def _update_v_cursor_plot_labels(self, a_us: float, b_us: float) -> None:
         """A/B 竖向或波形光标读数（示波器风格）。"""
@@ -4078,16 +4412,16 @@ class WaveformPlot(QWidget):
     def _ensure_h_cursor_plot_labels(self) -> None:
         if self._cursor_ha_v_label is None:
             self._cursor_ha_v_label = pg.TextItem(anchor=(0.0, 0.5))
-            self._cursor_ha_v_label.setZValue(55)
-            self.plot.addItem(self._cursor_ha_v_label)
+            self._cursor_ha_v_label.setZValue(CURSOR_READOUT_OVERLAY_Z)
+            self.plot.scene().addItem(self._cursor_ha_v_label)
         if self._cursor_hb_v_label is None:
             self._cursor_hb_v_label = pg.TextItem(anchor=(0.0, 0.5))
-            self._cursor_hb_v_label.setZValue(55)
-            self.plot.addItem(self._cursor_hb_v_label)
+            self._cursor_hb_v_label.setZValue(CURSOR_READOUT_OVERLAY_Z)
+            self.plot.scene().addItem(self._cursor_hb_v_label)
         if self._cursor_hb_ha_delta_label is None:
             self._cursor_hb_ha_delta_label = pg.TextItem(anchor=(0.0, 0.5))
-            self._cursor_hb_ha_delta_label.setZValue(55)
-            self.plot.addItem(self._cursor_hb_ha_delta_label)
+            self._cursor_hb_ha_delta_label.setZValue(CURSOR_READOUT_OVERLAY_Z)
+            self.plot.scene().addItem(self._cursor_hb_ha_delta_label)
 
     def _position_h_cursor_plot_labels(
         self, a_us: float, b_us: float, ha_div: float, hb_div: float
@@ -4100,20 +4434,28 @@ class WaveformPlot(QWidget):
             return
         x_left = self._plot_label_x_left_edge()
         y_mid = 0.5 * (ha_div + hb_div)
-        self._cursor_ha_v_label.setPos(x_left, ha_div)
-        self._cursor_hb_v_label.setPos(x_left, hb_div)
-        self._cursor_hb_ha_delta_label.setPos(x_left, y_mid)
+        self._cursor_ha_v_label.setPos(
+            self._cursor_readout_scene_pos(x_left, ha_div)
+        )
+        self._cursor_hb_v_label.setPos(
+            self._cursor_readout_scene_pos(x_left, hb_div)
+        )
+        self._cursor_hb_ha_delta_label.setPos(
+            self._cursor_readout_scene_pos(x_left, y_mid)
+        )
 
     def _update_h_cursor_plot_labels(
         self, a_us: float, b_us: float, ha_div: float, hb_div: float, dt_us: float
     ) -> None:
         """Ha/Hb 旁显示物理量、Δv 与 Δv/Δt（Δt 取自纵向 A/B）。"""
         show_h = self._cursor_horizontal_visible()
-        if not show_h or not self._cursor_readout_overlay:
+        if not show_h:
             for attr in (
                 "_cursor_ha_v_label",
                 "_cursor_hb_v_label",
                 "_cursor_hb_ha_delta_label",
+                "_cursor_ha_name_label",
+                "_cursor_hb_name_label",
             ):
                 item = getattr(self, attr)
                 if item is not None:
@@ -4124,14 +4466,30 @@ class WaveformPlot(QWidget):
                 "_cursor_ha_v_label",
                 "_cursor_hb_v_label",
                 "_cursor_hb_ha_delta_label",
+                "_cursor_ha_name_label",
+                "_cursor_hb_name_label",
             ):
                 item = getattr(self, attr)
                 if item is not None:
                     item.hide()
             return
         self._ensure_h_cursor_plot_labels()
+        if not self._cursor_readout_overlay:
+            for attr in (
+                "_cursor_ha_v_label",
+                "_cursor_hb_v_label",
+                "_cursor_hb_ha_delta_label",
+            ):
+                item = getattr(self, attr)
+                if item is not None:
+                    item.hide()
+            self._position_h_cursor_plot_labels(a_us, b_us, ha_div, hb_div)
+            return
         ha_html, hb_html, delta_html = self._horizontal_cursor_plot_values(
-            ha_div, hb_div, dt_us
+            ha_div,
+            hb_div,
+            dt_us,
+            include_rate=self._cursor_vertical_visible(),
         )
         self._cursor_ha_v_label.setHtml(ha_html)
         self._cursor_hb_v_label.setHtml(hb_html)
@@ -4154,6 +4512,7 @@ class WaveformPlot(QWidget):
         self._sync_overview_region_to_main()
         self._update_zero_handle_positions()
         self._update_y_ticks()
+        self._sync_x_tick_labels_from_axis()
         if self._cursor_a is None or self._cursor_b is None:
             return
         a = float(self._cursor_a.value())
@@ -4204,6 +4563,18 @@ class WaveformPlot(QWidget):
         super().resizeEvent(event)
         self._sync_readout_scroll_width()
         self._sync_channel_bar_width()
+        self._sync_x_tick_labels_from_axis()
+        if self._cursor_a is not None and self._cursor_b is not None:
+            a = float(self._cursor_a.value())
+            b = float(self._cursor_b.value())
+            self._position_v_cursor_plot_labels(a, b)
+            if self._h_cursor_a is not None and self._h_cursor_b is not None:
+                self._position_h_cursor_plot_labels(
+                    a,
+                    b,
+                    float(self._h_cursor_a.value()),
+                    float(self._h_cursor_b.value()),
+                )
         self._position_zoom_toggle_button()
 
     def _update_readout(self) -> None:
@@ -4481,14 +4852,14 @@ class WaveformPlot(QWidget):
                 angle=0,
                 movable=True,
                 pen=pg.mkPen(
-                    CURSOR_PEN_ZERO, width=H_CURSOR_WIDTH, style=Qt.PenStyle.DotLine
+                    REFERENCE_LINE_COLOR, width=1, style=Qt.PenStyle.DashLine
                 ),
                 hoverPen=pg.mkPen(
-                    "#FFFFFF", width=H_CURSOR_WIDTH + 1, style=Qt.PenStyle.DotLine
+                    "#FFFFFF", width=2, style=Qt.PenStyle.DashLine
                 ),
                 label="H0",
                 labelOpts={
-                    "color": CURSOR_PEN_ZERO,
+                    "color": REFERENCE_LINE_COLOR,
                     "position": 0.98,
                     "movable": False,
                     "fill": (0, 0, 0, 160),

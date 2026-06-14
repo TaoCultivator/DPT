@@ -26,8 +26,8 @@ from PyQt6.QtWidgets import (
 
 from dpt_extractor.gui.waveform_plot import (
     DISP_HALF_DIV,
-    VDIV_LADDER,
     _pick_vdiv_ladder,
+    _vdiv_ladder_for_channel,
     _vdiv_max_for_channel,
 )
 
@@ -186,6 +186,17 @@ QPushButton#chFormulaBtn {
     font-size: 13px;
 }
 QPushButton#chFormulaBtn:hover { background-color: #ffffff; }
+QPushButton#chDeleteBtn {
+    min-height: 34px;
+    padding: 4px 12px;
+    border: 1px solid #9f4b4b;
+    border-radius: 3px;
+    background-color: rgba(245, 225, 225, 245);
+    color: #6d1010;
+    font-size: 13px;
+    font-weight: bold;
+}
+QPushButton#chDeleteBtn:hover { background-color: #ffe6e6; }
 """
 
 _MAPPING_OPTIONS = (
@@ -202,7 +213,20 @@ _MAPPING_OPTIONS = (
 
 def _vdiv_options_for(key: str) -> list[float]:
     cap = _vdiv_max_for_channel(key)
-    return [float(v) for v in VDIV_LADDER if float(v) <= cap]
+    return [float(v) for v in _vdiv_ladder_for_channel(key) if float(v) <= cap]
+
+
+def _vdiv_decimals_for(key: str, current_scale: float) -> int:
+    values = [abs(float(current_scale))]
+    values.extend(abs(v) for v in _vdiv_options_for(key) if v > 0)
+    min_value = min((v for v in values if v > 0), default=1.0)
+    if min_value < 1e-6:
+        return 9
+    if min_value < 1e-3:
+        return 6
+    if min_value < 1.0 or abs(current_scale - round(current_scale)) > 1e-9:
+        return 3
+    return 0
 
 
 def _vdiv_neighbor(cur: float, key: str, up: bool) -> float:
@@ -320,12 +344,15 @@ class ChannelSettingsPanel(QDialog):
         vdiv_row = QHBoxLayout()
         vdiv_row.setContentsMargins(0, 0, 0, 0)
         vdiv_row.setSpacing(4)
+        current_scale = float(plot._disp_scale.get(key, 1.0))
         self._vdiv_spin = QDoubleSpinBox()
-        self._vdiv_spin.setDecimals(0)
-        self._vdiv_spin.setRange(1.0, _vdiv_max_for_channel(key))
+        self._vdiv_spin.setDecimals(_vdiv_decimals_for(key, current_scale))
+        vdiv_options = _vdiv_options_for(key)
+        min_vdiv = vdiv_options[0] if vdiv_options else min(1.0, current_scale)
+        self._vdiv_spin.setRange(min_vdiv, _vdiv_max_for_channel(key))
         self._vdiv_spin.setSuffix(f" {unit}/div")
         self._vdiv_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
-        self._vdiv_spin.setValue(plot._disp_scale.get(key, 1.0))
+        self._vdiv_spin.setValue(current_scale)
         self._vdiv_spin.valueChanged.connect(self._on_vdiv_changed)
         btn_up = QPushButton("▲")
         btn_dn = QPushButton("▼")
@@ -393,10 +420,22 @@ class ChannelSettingsPanel(QDialog):
         body_lay.addWidget(_cell("DPT 映射", mapping_w))
 
         if key.upper().startswith("MATH"):
+            math_row = QHBoxLayout()
+            math_row.setContentsMargins(0, 0, 0, 0)
+            math_row.setSpacing(8)
             formula_btn = QPushButton("编辑公式")
             formula_btn.setObjectName("chFormulaBtn")
             formula_btn.clicked.connect(self._on_formula_edit)
-            body_lay.addWidget(_cell("数学通道", formula_btn))
+            math_row.addWidget(formula_btn)
+            if plot._can_delete_channel(key):
+                delete_btn = QPushButton("删除 Math 通道")
+                delete_btn.setObjectName("chDeleteBtn")
+                delete_btn.clicked.connect(self._on_delete_math)
+                math_row.addWidget(delete_btn)
+            math_w = QWidget()
+            math_w.setObjectName("chPanelRow")
+            math_w.setLayout(math_row)
+            body_lay.addWidget(_cell("数学通道", math_w))
 
         # --- 快捷动作 ---
         links = QHBoxLayout()
@@ -482,6 +521,10 @@ class ChannelSettingsPanel(QDialog):
     def _on_formula_edit(self) -> None:
         self.close()
         self._plot._show_math_formula_editor(self._key)
+
+    def _on_delete_math(self) -> None:
+        self.close()
+        self._plot._delete_math_channel(self._key)
 
     def sync_from_plot(self) -> None:
         """外部改刻度/位置后刷新控件。"""

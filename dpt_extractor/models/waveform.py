@@ -23,6 +23,14 @@ class TekMetadata:
     channel_y_position: dict[str, float] = field(default_factory=dict)
     #: MATH channel -> formula restored from a Tektronix session setup file.
     channel_math_formulas: dict[str, str] = field(default_factory=dict)
+    #: MATH channels synthesized from setup formulas rather than loaded as .wfm members.
+    computed_math_channels: set[str] = field(default_factory=set)
+    #: Scope horizontal scale from the Tektronix session setup, seconds per division.
+    horizontal_scale_per_div: float | None = None
+    #: Scope horizontal position from the Tektronix session setup, percent.
+    horizontal_position_percent: float | None = None
+    #: Scope horizontal delay from the Tektronix session setup, seconds.
+    horizontal_delay: float | None = None
 
     @property
     def dt(self) -> float:
@@ -31,7 +39,7 @@ class TekMetadata:
 
 @dataclass
 class WaveformBundle:
-    """All channels keyed by waveform channel name (CH1..CH6, MATH1.., etc.)."""
+    """All channels keyed by waveform channel name (CH1..CH8, MATH1.., etc.)."""
 
     t: np.ndarray
     channels: dict[str, np.ndarray]

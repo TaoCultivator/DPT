@@ -42,6 +42,7 @@ class FakeAnalogWaveform:
 class TestTssHelpers(unittest.TestCase):
     def test_channel_from_member(self):
         self.assertEqual(_channel_from_member("CH1.wfm"), "CH1")
+        self.assertEqual(_channel_from_member("waveforms/CH8.wfm"), "CH8")
         self.assertEqual(_channel_from_member("waveforms/math2.wfm"), "MATH2")
         self.assertEqual(_channel_from_member("waveforms/M3.wfm"), "MATH3")
         self.assertIsNone(_channel_from_member("screenshot.png"))
@@ -142,6 +143,9 @@ class TestTssParser(unittest.TestCase):
             ":DISPLAY:GLOBAL:MATH3:STATE 1;"
             ":DISPLAY:WAVEVIEW1:MATH:MATH2:VERTICAL:SCALE 50.0000E-3;"
             ":DISPLAY:WAVEVIEW1:MATH:MATH2:VERTICAL:POSITION -3.8800;"
+            ":HORIZONTAL:SCALE 3.0000E-6;"
+            ":HORIZONTAL:POSITION 13.2000;"
+            ":HORIZONTAL:DELAY:TIME 0.0E+0;"
         )
         with tempfile.TemporaryDirectory() as tmp:
             tss_path = Path(tmp) / "UH_test.tss"
@@ -180,6 +184,49 @@ class TestTssParser(unittest.TestCase):
         self.assertEqual(bundle.meta.channel_labels["MATH2"], "Eon")
         self.assertAlmostEqual(bundle.meta.channel_vdiv["MATH2"], 0.05)
         self.assertAlmostEqual(bundle.meta.channel_y_position["MATH2"], -3.88)
+        self.assertEqual(bundle.meta.computed_math_channels, {"MATH1", "MATH2", "MATH3"})
+        self.assertAlmostEqual(bundle.meta.horizontal_scale_per_div or 0.0, 3e-6)
+        self.assertAlmostEqual(bundle.meta.horizontal_position_percent or 0.0, 13.2)
+        self.assertAlmostEqual(bundle.meta.horizontal_delay or 0.0, 0.0)
+
+    def test_original_math_wfm_is_not_marked_as_computed(self):
+        n = 5
+        values = {
+            "CH1": np.zeros(n),
+            "CH2": np.ones(n),
+            "MATH1": np.linspace(10.0, 50.0, n),
+        }
+        setup_text = (
+            ':MAINWINDOW:SOURCEORDER "1%3Bch1%3Bch2%3Bmath1";'
+            ':MATH:MATH1:DEFINE "Ch1%2BCh2";'
+            ":DISPLAY:GLOBAL:MATH1:STATE 1;"
+            ":DISPLAY:WAVEVIEW1:MATH:MATH1:VERTICAL:SCALE 50.0000E-3;"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tss_path = Path(tmp) / "UH_test.tss"
+            with zipfile.ZipFile(tss_path, "w") as zf:
+                for ch in values:
+                    zf.writestr(f"{ch.lower()}.wfm", b"placeholder")
+                zf.writestr("UH_test.set", self._make_setup_zip(setup_text))
+
+            def fake_read(path: str):
+                ch = Path(path).stem.upper()
+                wfm = self._make_wfm(n=n, label=ch)
+                wfm.source_name = ch
+                wfm.x_axis_spacing = 1.0
+                wfm.trigger_index = 0.0
+                wfm.y_axis_values = values[ch]
+                return wfm
+
+            with (
+                patch("dpt_extractor.io.tss_parser.read_file", side_effect=fake_read),
+                patch("dpt_extractor.io.tss_parser.read_wfm_vertical_scale_per_div", return_value=None),
+            ):
+                bundle = TssParser().parse(tss_path)
+
+        np.testing.assert_allclose(bundle.channels["MATH1"], values["MATH1"])
+        self.assertEqual(bundle.meta.computed_math_channels, set())
+        self.assertAlmostEqual(bundle.meta.channel_vdiv["MATH1"], 0.05)
 
     def test_invalid_tss_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

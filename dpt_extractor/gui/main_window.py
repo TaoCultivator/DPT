@@ -9,9 +9,8 @@ import time
 import numpy as np
 
 from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, Qt, QSettings, QTimer, pyqtSignal
-from PyQt6.QtGui import QPixmap, QResizeEvent
+from PyQt6.QtGui import QColor, QPalette, QPixmap, QResizeEvent
 from PyQt6.QtWidgets import (
-    QButtonGroup,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -22,12 +21,15 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QApplication,
     QSizePolicy,
-    QSpinBox,
     QSplitter,
     QStatusBar,
+    QStyle,
+    QStyleOptionComboBox,
+    QStylePainter,
     QVBoxLayout,
     QWidget,
 )
@@ -134,6 +136,341 @@ REPORT_PLOT_CAPTURE_SIZE = QSize(1280, 960)
 COMMERCIAL_AUTH_QQ = "3796823"
 NONCOMMERCIAL_NOTICE_TITLE = "非商业用途授权提示"
 NONCOMMERCIAL_NOTICE_SETTINGS_KEY = "license/noncommercial_notice_shown"
+REPORT_PROGRESS_TOTAL = 100000
+REPORT_PROGRESS_TEMPLATE_DONE = 5000
+REPORT_PROGRESS_CAPTURE_DONE = 85000
+REPORT_PROGRESS_WRITE_START = 85000
+REPORT_PROGRESS_WRITE_DONE_CAP = 99000
+TEMP_CONDITION_DEFAULTS = {
+    "RT": 25.0,
+    "HT": 150.0,
+    "LT": -40.0,
+}
+TEMP_CONDITION_SETTINGS_PREFIX = "conditions/temperature/"
+COMBO_POPUP_STYLESHEET = """
+QAbstractItemView {
+    background-color: #081719;
+    color: #edf6ee;
+    border: 1px solid #5a8b93;
+    selection-background-color: #28bce8;
+    selection-color: #061014;
+    outline: 0;
+}
+QAbstractItemView::item {
+    min-height: 26px;
+    padding: 5px 9px;
+    color: #edf6ee;
+}
+QAbstractItemView::item:selected {
+    background-color: #28bce8;
+    color: #061014;
+}
+QAbstractItemView::item:disabled {
+    color: #5d6a70;
+}
+"""
+
+
+def _format_temperature_number(value: float) -> str:
+    fv = float(value)
+    if abs(fv - round(fv)) < 0.05:
+        return str(int(round(fv)))
+    return f"{fv:.1f}".rstrip("0").rstrip(".")
+
+
+def _format_temperature_label(value: float) -> str:
+    return f"{_format_temperature_number(value)}℃"
+
+
+class TemperatureSpinBox(QDoubleSpinBox):
+    def textFromValue(self, value: float) -> str:  # noqa: N802
+        return _format_temperature_number(value)
+
+
+class CenteredComboBox(QComboBox):
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QStylePainter(self)
+        painter.setPen(self.palette().color(QPalette.ColorRole.Text))
+        opt = QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        text = opt.currentText
+        opt.currentText = ""
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
+        text_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox,
+            opt,
+            QStyle.SubControl.SC_ComboBoxEditField,
+            self,
+        )
+        painter.drawText(
+            text_rect,
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextSingleLine,
+            text,
+        )
+
+
+class PulseComboBox(CenteredComboBox):
+    valueChanged = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setRange(1, 10)
+        self.currentIndexChanged.connect(self._emit_value_changed)
+
+    def _emit_value_changed(self, _index: int = 0) -> None:
+        self.valueChanged.emit(self.value())
+
+    def setRange(self, minimum: int, maximum: int) -> None:  # noqa: N802
+        current = self.value() if self.count() else int(minimum)
+        was_blocked = self.blockSignals(True)
+        try:
+            self.clear()
+            for value in range(int(minimum), int(maximum) + 1):
+                self.addItem(f"第 {value} 波", value)
+            self.setValue(max(int(minimum), min(int(maximum), current)))
+        finally:
+            self.blockSignals(was_blocked)
+
+    def setMaximum(self, maximum: int) -> None:  # noqa: N802
+        self.setRange(1, int(maximum))
+
+    def setValue(self, value: int) -> None:  # noqa: N802
+        idx = self.findData(int(value))
+        if idx >= 0:
+            self.setCurrentIndex(idx)
+
+    def value(self) -> int:
+        data = self.currentData()
+        return int(data) if data is not None else 1
+
+
+class ReportProgressPanel(QFrame):
+    """Compact report progress readout with percent and ETA."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("reportProgressPanel")
+        self._minimum = 0
+        self._maximum = 100
+        self._value = 0
+        self._format = "待命"
+        self._started_at = time.perf_counter()
+        self._busy = False
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(200)
+        self._timer.timeout.connect(self._refresh_readout)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 0, 10, 0)
+        lay.setSpacing(8)
+
+        self._stage_label = QLabel("报告写入")
+        self._stage_label.setObjectName("reportProgressStage")
+        self._detail_label = QLabel("待命")
+        self._detail_label.setObjectName("reportProgressDetail")
+        self._detail_label.setMinimumWidth(62)
+        self._detail_label.setMaximumWidth(180)
+
+        sep_a = QLabel("|")
+        sep_a.setObjectName("reportProgressSeparator")
+        sep_b = QLabel("|")
+        sep_b.setObjectName("reportProgressSeparator")
+        sep_c = QLabel("|")
+        sep_c.setObjectName("reportProgressSeparator")
+
+        self._bar = QProgressBar()
+        self._bar.setObjectName("reportProgressTrack")
+        self._bar.setTextVisible(False)
+        self._bar.setRange(0, 100000)
+        self._bar.setValue(0)
+        self._bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+
+        self._percent_label = QLabel("0.000%")
+        self._percent_label.setObjectName("reportProgressPercent")
+        self._percent_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._percent_label.setMinimumWidth(74)
+        self._eta_label = QLabel("0 ms")
+        self._eta_label.setObjectName("reportProgressEta")
+        self._eta_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._eta_label.setMinimumWidth(50)
+
+        lay.addWidget(self._stage_label)
+        lay.addWidget(sep_a)
+        lay.addWidget(self._detail_label)
+        lay.addWidget(sep_b)
+        lay.addWidget(self._bar, stretch=1)
+        lay.addWidget(self._percent_label)
+        lay.addWidget(sep_c)
+        lay.addWidget(self._eta_label)
+        self.setToolTip("报告写入进度、当前阶段、百分比和预计剩余时间")
+        self.reset_idle()
+
+    def begin(self, total: int, label: str) -> None:
+        self._started_at = time.perf_counter()
+        self._busy = False
+        self.setRange(0, max(1, int(total)))
+        self.setValue(0)
+        self.setFormat(label)
+        self._timer.start()
+        self.show()
+        self._refresh_readout()
+
+    def update_progress(self, value: int, total: int, label: str) -> None:
+        self._busy = False
+        self.setRange(0, max(1, int(total)))
+        self.setValue(value)
+        self.setFormat(label)
+        self._timer.start()
+        self.show()
+        self._refresh_readout()
+
+    def set_busy(self, label: str) -> None:
+        self._busy = True
+        self.setFormat(label)
+        self._timer.start()
+        self.show()
+        self._refresh_readout()
+
+    def finish(self, label: str, *, ok: bool) -> None:
+        self._busy = False
+        self.setRange(0, 100)
+        self.setValue(100 if ok else 0)
+        self.setFormat(label)
+        self._refresh_readout()
+        self._timer.stop()
+        self.show()
+
+    def reset_idle(self) -> None:
+        self._busy = False
+        self.setRange(0, 100)
+        self.setValue(0)
+        self.setFormat("待命")
+        self._timer.stop()
+        self._eta_label.setText("0 ms")
+        self.show()
+
+    def setRange(self, minimum: int, maximum: int) -> None:  # noqa: N802
+        self._minimum = int(minimum)
+        self._maximum = max(int(maximum), self._minimum)
+        self._refresh_readout()
+
+    def setValue(self, value: int) -> None:  # noqa: N802
+        lo = self._minimum
+        hi = self._maximum
+        self._value = max(lo, min(int(value), hi))
+        self._refresh_readout()
+
+    def setFormat(self, label: str) -> None:  # noqa: N802
+        self._format = str(label or "")
+        self._detail_label.setText(self._detail_text(self._format))
+        self._detail_label.setToolTip(self._format)
+        self._refresh_readout()
+
+    def minimum(self) -> int:
+        return self._minimum
+
+    def maximum(self) -> int:
+        return self._maximum
+
+    def value(self) -> int:
+        return self._value
+
+    def format(self) -> str:
+        return self._format
+
+    def percent_text(self) -> str:
+        return self._percent_label.text()
+
+    def eta_text(self) -> str:
+        return self._eta_label.text()
+
+    def detail_text(self) -> str:
+        return self._detail_label.text()
+
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def _percent(self) -> float:
+        span = self._maximum - self._minimum
+        if span <= 0:
+            return 0.0
+        return 100.0 * (self._value - self._minimum) / span
+
+    def _refresh_readout(self) -> None:
+        percent = max(0.0, min(100.0, self._percent()))
+        self._bar.setRange(0, 100000)
+        self._bar.setValue(int(round(percent * 1000.0)))
+        self._percent_label.setText(f"{percent:0.3f}%")
+        if self._busy:
+            self._eta_label.setText("--")
+            return
+        self._eta_label.setText(self._format_duration_ms(self._eta_ms(percent)))
+
+    def _eta_ms(self, percent: float) -> float:
+        if percent <= 0.0 or percent >= 100.0:
+            return 0.0
+        elapsed_ms = max(0.0, (time.perf_counter() - self._started_at) * 1000.0)
+        return elapsed_ms * (100.0 - percent) / percent
+
+    @staticmethod
+    def _format_duration_ms(ms: float) -> str:
+        if ms < 1000.0:
+            return f"{int(round(ms))} ms"
+        if ms < 60000.0:
+            return f"{ms / 1000.0:.1f} s"
+        minutes = int(ms // 60000.0)
+        seconds = int(round((ms - minutes * 60000.0) / 1000.0))
+        return f"{minutes}m {seconds}s"
+
+    @staticmethod
+    def _detail_text(label: str) -> str:
+        text = str(label or "").strip()
+        text = re.sub(r"[.。…]+$", "", text)
+        replacements = (
+            ("准备报告截图", "准备截图"),
+            ("截图完成，准备写入 Excel", "准备写入 Excel"),
+            ("正在写入 Excel", "写入 Excel"),
+            ("写入完成 100%", "完成"),
+            ("写入失败", "失败"),
+        )
+        for source, target in replacements:
+            if text.startswith(source):
+                return target
+        return text or "待命"
+
+
+def _configure_combo_popup(combo: QComboBox) -> None:
+    view = combo.view()
+    view.setStyleSheet(COMBO_POPUP_STYLESHEET)
+    palette = view.palette()
+    palette.setColor(QPalette.ColorRole.Base, QColor("#081719"))
+    palette.setColor(QPalette.ColorRole.Text, QColor("#edf6ee"))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor("#28bce8"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#061014"))
+    view.setPalette(palette)
+
+
+def _infer_temp_code_from_path(path: str) -> str:
+    for part in reversed([p for p in re.split(r"[\\/]+", str(path)) if p]):
+        stem = Path(part).stem.upper()
+        for code in TEMP_CONDITION_DEFAULTS:
+            if re.search(rf"(?<![A-Z0-9]){code}(?![A-Z0-9])", stem):
+                return code
+        if re.search(r"(?<!\d)25(?:℃|C|DEG)?(?!\d)", stem):
+            return "RT"
+        if re.search(r"(?<!\d)150(?:℃|C|DEG)?(?!\d)", stem):
+            return "HT"
+        if re.search(r"(?<!\d)-?40(?:℃|C|DEG)?(?!\d)", stem):
+            return "LT"
+    return "RT"
 
 
 def commercial_authorization_message() -> str:
@@ -270,6 +607,7 @@ class _WaveformLoadTask(QRunnable):
 
 
 class _ReportWriteSignals(QObject):
+    progress = pyqtSignal(int, int, int, str)
     finished = pyqtSignal(int, object, float)
     failed = pyqtSignal(int, str)
 
@@ -301,6 +639,12 @@ class _ReportWriteTask(QRunnable):
                 self.report_path,
                 images=self.images,
                 target_screen_width_px=self.target_screen_width_px,
+                progress_callback=lambda value, total, label: self.signals.progress.emit(
+                    self.request_id,
+                    value,
+                    total,
+                    label,
+                ),
             )
         except PermissionError as exc:
             self.signals.failed.emit(
@@ -362,8 +706,10 @@ class MainWindow(QMainWindow):
         self._load_tasks: dict[int, _WaveformLoadTask] = {}
         self._report_request_id = 0
         self._report_tasks: dict[int, _ReportWriteTask] = {}
+        self._report_progress_active = False
         self._load_pool = QThreadPool.globalInstance()
         self._license_notice_dialog: QDialog | None = None
+        self._temperature_values = self._load_temperature_values()
 
         self._build_ui()
         self.result_table.set_range_handler(self._on_slope_range_changed)
@@ -387,53 +733,85 @@ class MainWindow(QMainWindow):
         self.toolbar = QFrame()
         self.toolbar.setObjectName("toolbar")
         tb_root = QVBoxLayout(self.toolbar)
-        tb_root.setContentsMargins(8, 6, 8, 6)
+        tb_root.setContentsMargins(6, 4, 6, 5)
         tb_root.setSpacing(4)
 
-        self.btn_open = QPushButton("📂  打开文件")
+        self.lbl_current_file = QLabel("未加载文件")
+        self.lbl_current_file.setObjectName("currentFileTitle")
+        self.lbl_current_file.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.lbl_current_file.setSizePolicy(
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.lbl_current_file.setToolTip("待处理数据原始文件名")
+        self.lbl_top_status = QLabel("请打开 Tektronix TSS 会话文件")
+        self.lbl_top_status.setObjectName("topStatusInfo")
+        self.lbl_top_status.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.lbl_top_status.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.report_progress = ReportProgressPanel()
+        self.report_progress.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+
+        self.btn_open = QPushButton("打开文件")
+        self.btn_open.setObjectName("primaryButton")
         self.btn_open.setToolTip("支持 Tektronix TSS 会话文件")
         self.btn_open.clicked.connect(self._open_waveform)
 
-        self.combo_phase = QComboBox()
+        self.combo_phase = CenteredComboBox()
         self.combo_phase.setMinimumContentsLength(4)
         for p in PHASES:
             self.combo_phase.addItem(f"{p}相", p)
+        _configure_combo_popup(self.combo_phase)
         self.combo_phase.currentIndexChanged.connect(self._on_phase_bridge_changed)
 
-        self.combo_bridge = QComboBox()
+        self.combo_bridge = CenteredComboBox()
         self.combo_bridge.setMinimumContentsLength(4)
         self.combo_bridge.addItem("上桥", "upper")
         self.combo_bridge.addItem("下桥", "lower")
+        _configure_combo_popup(self.combo_bridge)
         self.combo_bridge.currentIndexChanged.connect(self._on_phase_bridge_changed)
 
-        self.combo_std = QComboBox()
-        self.combo_std.addItems(["IEC60747-9", "Infineon (Eon Ic起点)", "Mitsubishi"])
-        self.combo_std.setToolTip("能量积分窗口判据（当前主实现为 IEC60747-9）")
-        self.combo_std.setMaximumWidth(168)
-        self.combo_std.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
-        )
+        self.combo_temp = CenteredComboBox()
+        self.combo_temp.setObjectName("tempSelector")
+        for code in TEMP_CONDITION_DEFAULTS:
+            self.combo_temp.addItem(code, code)
+        _configure_combo_popup(self.combo_temp)
+        self.combo_temp.setToolTip("工况温度标记，仅用于界面显示")
+        self.combo_temp.currentIndexChanged.connect(self._on_temperature_changed)
 
-        self.spin_vdc = QDoubleSpinBox()
-        self.spin_vdc.setRange(0, 5000)
-        self.spin_vdc.setDecimals(1)
-        self.spin_vdc.setSuffix(" V")
-        self.spin_vdc.setSpecialValueText("自动测量")
-        self.spin_vdc.setValue(0)
-        self.spin_vdc.setMaximumWidth(118)
-        self.spin_vdc.valueChanged.connect(self._on_vdc_changed)
+        self.spin_temp_value = TemperatureSpinBox()
+        self.spin_temp_value.setObjectName("tempValue")
+        self.spin_temp_value.setRange(-100.0, 250.0)
+        self.spin_temp_value.setDecimals(1)
+        self.spin_temp_value.setSingleStep(1.0)
+        self.spin_temp_value.setSuffix(" ℃")
+        self.spin_temp_value.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        self.spin_temp_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spin_temp_value.setToolTip("自定义当前温度数值，单位固定为 ℃")
+        self.spin_temp_value.setValue(self._temperature_values["RT"])
+        self.spin_temp_value.valueChanged.connect(self._on_temperature_value_changed)
 
-        self.btn_recalc = QPushButton("↻  重新计算")
+        self.btn_recalc = QPushButton("重新计算")
         self.btn_recalc.setToolTip("按当前设置重新计算全部参数")
         self.btn_recalc.clicked.connect(lambda: self._recalculate(reset_manual=True))
-        self.btn_export = QPushButton("💾  导出 Excel")
+        self.btn_export = QPushButton("导出 Excel")
         self.btn_export.setToolTip("导出当前结果到 Excel")
         self.btn_export.clicked.connect(self._export_excel)
-        self.btn_select_report_template = QPushButton("📄  加载模板")
+        self.btn_select_report_template = QPushButton("加载模板")
         self.btn_select_report_template.clicked.connect(self._select_report_template)
-        self.btn_select_report_output = QPushButton("📁  报告位置")
+        self.btn_select_report_output = QPushButton("报告位置")
         self.btn_select_report_output.clicked.connect(self._select_report_output_path)
-        self.btn_write_report = QPushButton("📝  写入报告")
+        self.btn_write_report = QPushButton("写入报告")
+        self.btn_write_report.setObjectName("accentButton")
         self.btn_write_report.setToolTip("将当前结果写入已设置的项目报告文件")
         self.btn_write_report.clicked.connect(self._write_report_template)
         self._update_report_template_tooltip()
@@ -445,31 +823,39 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        row1.addWidget(self.btn_open)
+        row_title = QHBoxLayout()
+        row_title.setSpacing(6)
+        row_title.addWidget(self.lbl_current_file)
+        row_title.addWidget(self.lbl_top_status, stretch=3)
+        row_title.addWidget(self.report_progress, stretch=2)
+
+        row_controls = QHBoxLayout()
+        row_controls.setSpacing(5)
+        row_controls.addWidget(self.btn_open)
         self.lbl_phase = QLabel("相别")
-        row1.addWidget(self.lbl_phase)
-        row1.addWidget(self.combo_phase)
+        row_controls.addWidget(self.lbl_phase)
+        row_controls.addWidget(self.combo_phase)
         self.lbl_bridge = QLabel("桥臂")
-        row1.addWidget(self.lbl_bridge)
-        row1.addWidget(self.combo_bridge)
-        self.lbl_std = QLabel("判据")
-        row1.addWidget(self.lbl_std)
-        row1.addWidget(self.combo_std)
-        self.lbl_vdc = QLabel("Vdc")
-        row1.addWidget(self.lbl_vdc)
-        row1.addWidget(self.spin_vdc)
-        row1.addWidget(self.btn_recalc)
-        row1.addWidget(self.btn_export)
-        row1.addWidget(self.btn_select_report_template)
-        row1.addWidget(self.btn_select_report_output)
-        row1.addWidget(self.btn_write_report)
-        row1.addWidget(self.lbl_map_status, stretch=1)
-        self.lbl_test_mode = QLabel("测试")
-        self.combo_test_mode = QComboBox()
+        row_controls.addWidget(self.lbl_bridge)
+        row_controls.addWidget(self.combo_bridge)
+        self.lbl_temp = QLabel("温度")
+        row_controls.addWidget(self.lbl_temp)
+        row_controls.addWidget(self.combo_temp)
+        row_controls.addWidget(self.spin_temp_value)
+        row_controls.addWidget(self.lbl_map_status, stretch=1)
+        row_controls.addWidget(self.btn_recalc)
+        row_controls.addWidget(self.btn_export)
+        row_controls.addWidget(self.btn_select_report_template)
+        row_controls.addWidget(self.btn_select_report_output)
+        row_controls.addWidget(self.btn_write_report)
+        self.lbl_test_mode = QLabel("测试模式")
+        self.lbl_test_mode.setObjectName("testModeTitle")
+        self.lbl_test_mode.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combo_test_mode = CenteredComboBox()
+        self.combo_test_mode.setObjectName("testModeSelector")
         for mode in (TestMode.DPT, TestMode.SHORT_CIRCUIT):
             self.combo_test_mode.addItem(MODE_UI_LABELS[mode], mode.value)
+        _configure_combo_popup(self.combo_test_mode)
         idx = self.combo_test_mode.findData(
             parse_test_mode(self.cfg.test_mode.mode).value
         )
@@ -486,21 +872,28 @@ class MainWindow(QMainWindow):
         pulse_sep.setFrameShape(QFrame.Shape.VLine)
         pulse_sep.setStyleSheet("color:#45475a;")
 
-        self.lbl_pulse_count = QLabel("— 波")
+        self.lbl_pulse_count = QLabel("共 -- 波")
+        self.lbl_pulse_count.setObjectName("pulseCount")
         self.lbl_pulse_count.setStyleSheet("color:#a6adc8;font-size:11px;")
 
         self.lbl_off_pulse = QLabel("关断")
-        self.spin_off_pulse = QSpinBox()
+        self.lbl_off_pulse.setObjectName("calcBadge")
+        self.spin_off_pulse = PulseComboBox()
+        self.spin_off_pulse.setObjectName("pulseSelector")
         self.spin_off_pulse.setRange(1, 10)
         self.spin_off_pulse.setValue(self.cfg.pulse_selection.off_pulse)
-        self.spin_off_pulse.setFixedWidth(40)
+        self.spin_off_pulse.setFixedWidth(92)
+        _configure_combo_popup(self.spin_off_pulse)
         self.spin_off_pulse.setToolTip("取第 N 个门极脉冲的关断沿")
 
         self.lbl_on_pulse = QLabel("开通")
-        self.spin_on_pulse = QSpinBox()
+        self.lbl_on_pulse.setObjectName("calcBadge")
+        self.spin_on_pulse = PulseComboBox()
+        self.spin_on_pulse.setObjectName("pulseSelector")
         self.spin_on_pulse.setRange(1, 10)
         self.spin_on_pulse.setValue(self.cfg.pulse_selection.on_pulse)
-        self.spin_on_pulse.setFixedWidth(40)
+        self.spin_on_pulse.setFixedWidth(92)
+        _configure_combo_popup(self.spin_on_pulse)
         self.spin_on_pulse.setToolTip(
             "取第 N 个门极脉冲的开通沿；可与关断同波（分析该脉冲的开通与关断）"
         )
@@ -508,8 +901,12 @@ class MainWindow(QMainWindow):
         self.spin_off_pulse.valueChanged.connect(self._on_pulse_spin_changed)
         self.spin_on_pulse.valueChanged.connect(self._on_pulse_spin_changed)
 
+        self.context_menu_selector = self._build_context_menu_selector()
+        self.param_calc_group = self._build_parameter_calc_group()
+        self.test_mode_group = self._build_test_mode_group()
+
         self._pulse_toolbar_widgets = (
-            pulse_sep,
+            self.param_calc_group,
             self.lbl_pulse_count,
             self.lbl_off_pulse,
             self.spin_off_pulse,
@@ -517,37 +914,56 @@ class MainWindow(QMainWindow):
             self.spin_on_pulse,
         )
 
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        row2.addWidget(pulse_sep)
-        row2.addWidget(self.lbl_pulse_count)
-        row2.addWidget(self.lbl_off_pulse)
-        row2.addWidget(self.spin_off_pulse)
-        row2.addWidget(self.lbl_on_pulse)
-        row2.addWidget(self.spin_on_pulse)
-        self.context_menu_selector = self._build_context_menu_selector()
-        row2.addWidget(self.context_menu_selector)
-        row2.addWidget(self.lbl_test_mode)
-        row2.addWidget(self.combo_test_mode)
-        row2.addStretch(1)
+        row_tools = QHBoxLayout()
+        row_tools.setSpacing(5)
+        row_tools_left = QHBoxLayout()
+        row_tools_left.setContentsMargins(0, 0, 0, 0)
+        row_tools_left.setSpacing(5)
+        row_tools_left.addWidget(self.context_menu_selector)
+        row_tools_left.addWidget(
+            self.param_calc_group,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        row_tools_left.addStretch(1)
 
-        self._toolbar_rows = (row1, row2)
+        row_tools_right = QHBoxLayout()
+        row_tools_right.setContentsMargins(0, 0, 0, 0)
+        row_tools_right.setSpacing(5)
+        row_tools_right.addStretch(1)
+        row_tools_right.addWidget(
+            self.test_mode_group,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        row_tools.addLayout(row_tools_left, stretch=0)
+        row_tools.addLayout(row_tools_right, stretch=1)
+
+        self._toolbar_rows = (row_title, row_controls, row_tools)
+        self._toolbar_tool_sections = (
+            row_tools_left,
+            row_tools_right,
+        )
         self._toolbar_density_bucket: str | None = None
         self._toolbar_text_mode: str | None = None
 
-        tb_root.addLayout(row1)
-        tb_root.addLayout(row2)
+        tb_root.addLayout(row_title)
+        tb_root.addLayout(row_controls)
+        tb_root.addLayout(row_tools)
 
         self.result_table = ResultTable()
+        self.result_table.set_temperature_labels(self._temperature_display_labels())
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setObjectName("mainSplitter")
         self.splitter.addWidget(self.wave_plot)
         self.splitter.addWidget(self.result_table)
         self.splitter.setStretchFactor(0, 5)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setCollapsible(0, False)
         self.splitter.setCollapsible(1, False)
-        self.splitter.setHandleWidth(5)
+        self.splitter.setHandleWidth(8)
         self._split_ratio = 0.74
         self._splitter_user_moved = False
         self.splitter.setSizes([1036, 364])
@@ -565,15 +981,41 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         layout.addWidget(self.toolbar)
         layout.addWidget(splitter, stretch=1)
         self.setCentralWidget(root)
-        self.setStatusBar(QStatusBar())
+        self._status_bar = QStatusBar()
+        self._status_bar.messageChanged.connect(self._on_status_message_changed)
+        self.setStatusBar(self._status_bar)
+        self._status_bar.hide()
         self.statusBar().showMessage("请打开 Tektronix TSS 会话文件")
         self._apply_toolbar_density(self.width() or 1400)
         self._apply_test_mode_ui()
+
+    def _on_status_message_changed(self, message: str) -> None:
+        if not hasattr(self, "lbl_top_status"):
+            return
+        text = self._top_status_display_text(message)
+        self.lbl_top_status.setText(text)
+        self.lbl_top_status.setToolTip(message or text)
+
+    def _top_status_display_text(self, message: str) -> str:
+        text = str(message or "").strip()
+        if not text:
+            return "就绪"
+        file_name = Path(self._current_path).name if self._current_path else ""
+        if file_name:
+            for prefix in (
+                f"已加载: {file_name}  |  ",
+                f"已加载: {file_name} | ",
+                f"正在后台加载: {file_name}",
+            ):
+                if text.startswith(prefix):
+                    stripped = text[len(prefix) :].strip()
+                    return stripped or text
+        return text
 
     def _license_settings(self) -> QSettings:
         return QSettings("DPT", "DPTExtractor")
@@ -586,6 +1028,31 @@ class MainWindow(QMainWindow):
 
     def _mark_license_notice_shown(self) -> None:
         self._license_settings().setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+
+    def _load_temperature_values(self) -> dict[str, float]:
+        settings = QSettings("DPT", "DPTExtractor")
+        values = dict(TEMP_CONDITION_DEFAULTS)
+        for code, default in TEMP_CONDITION_DEFAULTS.items():
+            raw = settings.value(f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}", default)
+            try:
+                values[code] = float(raw)
+            except (TypeError, ValueError):
+                values[code] = float(default)
+        return values
+
+    def _save_temperature_value(self, code: str, value: float) -> None:
+        if code not in TEMP_CONDITION_DEFAULTS:
+            return
+        QSettings("DPT", "DPTExtractor").setValue(
+            f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}",
+            float(value),
+        )
+
+    def _temperature_display_labels(self) -> dict[str, str]:
+        return {
+            code: _format_temperature_label(value)
+            for code, value in self._temperature_values.items()
+        }
 
     def _show_first_run_license_notice(self) -> None:
         app = QApplication.instance()
@@ -660,42 +1127,85 @@ class MainWindow(QMainWindow):
         label = QLabel("功能菜单")
         label.setObjectName("contextMenuSelectorLabel")
         self._context_menu_label = label
-        lay.addWidget(label)
+        label.setVisible(False)
 
-        group = QButtonGroup(box)
-        group.setExclusive(True)
-        self._context_menu_button_group = group
         self._context_menu_buttons: list[QPushButton] = []
-        for text, key, tip in (
-            ("光标", "cursor", "右键菜单显示光标类型、模式与配置"),
-            ("缩放", "zoom", "右键菜单显示框选局部放大、水平缩放与重置"),
-            ("视图", "view", "右键菜单显示视图配置与显示模式"),
-            ("纵轴", "y", "右键菜单显示纵轴功能"),
-            ("截图", "capture", "复制当前窗口截图到剪贴板"),
-            ("按标签识别", "label_map", "强制根据当前 TSS Label 更新通道映射"),
-            ("更多", "all", "右键菜单显示完整示波器功能"),
+        for text, key in (
+            ("光标", "cursor"),
+            ("缩放", "zoom"),
         ):
             btn = QPushButton(text)
             btn.setObjectName("contextMenuSelectorButton")
-            btn.setToolTip(tip)
-            if key == "capture":
-                btn.setCheckable(False)
-                btn.clicked.connect(lambda checked=False: self.wave_plot._copy_screenshot_to_clipboard())
-            elif key == "label_map":
-                btn.setCheckable(False)
-                btn.clicked.connect(self._on_apply_label_mapping_requested)
-            else:
-                btn.setCheckable(True)
+            btn.setCheckable(True)
+            if key == "cursor":
+                btn.setChecked(self.wave_plot.cursor_switch_enabled())
                 btn.clicked.connect(
-                    lambda checked=False, menu_key=key: self.wave_plot.set_context_menu_group(
-                        menu_key
+                    lambda checked=False: self.wave_plot.set_cursor_switch_enabled(
+                        checked
                     )
                 )
-                group.addButton(btn)
+                self.wave_plot.cursorVisibilityChanged.connect(
+                    lambda enabled, button=btn: self._set_toolbar_button_checked(
+                        button, enabled
+                    )
+                )
+            else:
+                btn.setChecked(self.wave_plot.selection_zoom_switch_enabled())
+                btn.clicked.connect(
+                    lambda checked=False: self.wave_plot.set_selection_zoom_switch_enabled(
+                        checked
+                    )
+                )
+                self.wave_plot.selectionZoomChanged.connect(
+                    lambda enabled, button=btn: self._set_toolbar_button_checked(
+                        button, enabled
+                    )
+                )
             lay.addWidget(btn)
             self._context_menu_buttons.append(btn)
-            if key == self.wave_plot.context_menu_group():
-                btn.setChecked(True)
+        return box
+
+    @staticmethod
+    def _set_toolbar_button_checked(button: QPushButton, checked: bool) -> None:
+        button.blockSignals(True)
+        try:
+            button.setChecked(bool(checked))
+        finally:
+            button.blockSignals(False)
+
+    def _build_parameter_calc_group(self) -> QWidget:
+        box = QFrame()
+        box.setObjectName("paramCalcGroup")
+        box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(4, 3, 4, 3)
+        lay.setSpacing(4)
+        lay.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        title = QLabel("参数计算")
+        title.setObjectName("paramCalcTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_param_calc_title = title
+        for widget in (
+            title,
+            self.lbl_pulse_count,
+            self.lbl_off_pulse,
+            self.spin_off_pulse,
+            self.lbl_on_pulse,
+            self.spin_on_pulse,
+        ):
+            lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
+        return box
+
+    def _build_test_mode_group(self) -> QWidget:
+        box = QFrame()
+        box.setObjectName("testModeGroup")
+        box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(4, 3, 4, 3)
+        lay.setSpacing(4)
+        lay.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        for widget in (self.lbl_test_mode, self.combo_test_mode):
+            lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
         return box
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
@@ -712,14 +1222,19 @@ class MainWindow(QMainWindow):
             font_px = 10
             label_px = 10
             min_h = 22
-            pad_v = 2
+            pad_v = 1
             pad_h = 6
             spacing = 3
-            combo_std_w = 122
-            spin_vdc_w = 92
             test_w = 96
             context_min_w = 38
             context_pad_h = 5
+            file_w = 260
+            phase_w = 64
+            bridge_w = 68
+            temp_w = 0
+            temp_value_w = 0
+            pulse_w = 70
+            show_temp = False
             show_context_label = False
             show_map_status = False
             text_mode = "tiny"
@@ -728,14 +1243,19 @@ class MainWindow(QMainWindow):
             font_px = 11
             label_px = 11
             min_h = 24
-            pad_v = 3
-            pad_h = 8
+            pad_v = 1
+            pad_h = 7
             spacing = 4
-            combo_std_w = 142
-            spin_vdc_w = 104
             test_w = 104
             context_min_w = 44
             context_pad_h = 7
+            file_w = 360
+            phase_w = 68
+            bridge_w = 72
+            temp_w = 0
+            temp_value_w = 0
+            pulse_w = 82
+            show_temp = False
             show_context_label = False
             show_map_status = False
             text_mode = "compact"
@@ -743,15 +1263,20 @@ class MainWindow(QMainWindow):
             bucket = "medium"
             font_px = 12
             label_px = 12
-            min_h = 26
-            pad_v = 4
-            pad_h = 10
-            spacing = 5
-            combo_std_w = 156
-            spin_vdc_w = 112
+            min_h = 25
+            pad_v = 1
+            pad_h = 9
+            spacing = 4
             test_w = 108
             context_min_w = 48
             context_pad_h = 8
+            file_w = 520
+            phase_w = 72
+            bridge_w = 78
+            temp_w = 64
+            temp_value_w = 70
+            pulse_w = 92
+            show_temp = True
             show_context_label = True
             show_map_status = True
             text_mode = "medium"
@@ -759,18 +1284,36 @@ class MainWindow(QMainWindow):
             bucket = "full"
             font_px = 13
             label_px = 12
-            min_h = 28
-            pad_v = 5
-            pad_h = 14
-            spacing = 6
-            combo_std_w = 168
-            spin_vdc_w = 118
+            min_h = 26
+            pad_v = 1
+            pad_h = 11
+            spacing = 5
             test_w = 112
             context_min_w = 52
             context_pad_h = 10
+            file_w = 760
+            phase_w = 78
+            bridge_w = 84
+            temp_w = 68
+            temp_value_w = 72
+            pulse_w = 96
+            show_temp = True
             show_context_label = True
             show_map_status = True
             text_mode = "full"
+
+        control_h = min_h + 8
+        param_control_h = max(22, min_h + 2)
+        param_group_h = param_control_h + 8
+        title_h = max(24, control_h - 4)
+        group_h = control_h + 4
+        test_mode_title_w = (
+            64 if text_mode == "tiny" else 70 if text_mode == "compact" else 76
+        )
+        test_mode_group_w = test_mode_title_w + test_w + 12
+        param_badge_min_w = 42 if text_mode in {"tiny", "compact"} else 46
+        param_pulse_w = max(62, pulse_w - 18)
+        param_pulse_min_h = max(18, param_control_h - 2)
 
         if self._toolbar_text_mode != text_mode:
             if text_mode == "tiny":
@@ -795,65 +1338,358 @@ class MainWindow(QMainWindow):
                 self.btn_select_report_output.setText("报告位置")
                 self.btn_write_report.setText("写入报告")
             else:
-                self.btn_open.setText("📂  打开文件")
-                self.btn_recalc.setText("↻  重新计算")
-                self.btn_export.setText("💾  导出 Excel")
-                self.btn_select_report_template.setText("📄  加载模板")
-                self.btn_select_report_output.setText("📁  报告位置")
-                self.btn_write_report.setText("📝  写入报告")
+                self.btn_open.setText("打开文件")
+                self.btn_recalc.setText("重新计算")
+                self.btn_export.setText("导出 Excel")
+                self.btn_select_report_template.setText("加载模板")
+                self.btn_select_report_output.setText("报告位置")
+                self.btn_write_report.setText("写入报告")
+            short_menu = text_mode in {"tiny", "compact"}
+            menu_labels = (
+                ("光", "缩")
+                if short_menu
+                else ("光标", "缩放")
+            )
+            for btn, label in zip(self._context_menu_buttons, menu_labels):
+                btn.setText(label)
             self._toolbar_text_mode = text_mode
 
         if self._toolbar_density_bucket == bucket:
             return
         self._toolbar_density_bucket = bucket
 
-        for row in self._toolbar_rows:
+        for row in self._toolbar_rows + self._toolbar_tool_sections:
             row.setSpacing(spacing)
-        self.combo_std.setMaximumWidth(combo_std_w)
-        self.spin_vdc.setMaximumWidth(spin_vdc_w)
-        self.combo_test_mode.setMaximumWidth(test_w)
+            row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.lbl_current_file.setMaximumWidth(file_w)
+        self.lbl_current_file.setMinimumWidth(min(file_w, 220))
+        self.lbl_current_file.setFixedHeight(title_h)
+        self.lbl_top_status.setMinimumWidth(120)
+        self.lbl_top_status.setFixedHeight(title_h)
+        self.report_progress.setMinimumWidth(250 if window_width < 1180 else 360)
+        self.report_progress.setMaximumWidth(520 if window_width < 1500 else 760)
+        self.report_progress.setFixedHeight(title_h)
+        self.combo_phase.setFixedWidth(phase_w)
+        self.combo_bridge.setFixedWidth(bridge_w)
+        self.spin_off_pulse.setFixedWidth(param_pulse_w)
+        self.spin_on_pulse.setFixedWidth(param_pulse_w)
+        for w in (
+            self.btn_open,
+            self.btn_recalc,
+            self.btn_export,
+            self.btn_select_report_template,
+            self.btn_select_report_output,
+            self.btn_write_report,
+            self.combo_phase,
+            self.combo_bridge,
+            self.spin_temp_value,
+        ):
+            w.setFixedHeight(control_h)
+        for label in (
+            self.lbl_phase,
+            self.lbl_bridge,
+            self.lbl_temp,
+            self.lbl_test_mode,
+            self.lbl_pulse_count,
+            self.lbl_off_pulse,
+            self.lbl_on_pulse,
+        ):
+            label.setMinimumHeight(control_h)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.context_menu_selector.setFixedHeight(group_h)
+        self.param_calc_group.setFixedHeight(param_group_h)
+        for widget in (
+            self.lbl_param_calc_title,
+            self.lbl_pulse_count,
+            self.lbl_off_pulse,
+            self.lbl_on_pulse,
+            self.spin_off_pulse,
+            self.spin_on_pulse,
+        ):
+            widget.setFixedHeight(param_control_h)
+            widget.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+        self.test_mode_group.setFixedSize(test_mode_group_w, param_group_h)
+        self.lbl_test_mode.setFixedWidth(test_mode_title_w)
+        self.combo_test_mode.setFixedWidth(test_w)
+        for widget in (self.lbl_test_mode, self.combo_test_mode):
+            widget.setFixedHeight(param_control_h)
+            widget.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+        self.lbl_param_calc_title.setVisible(text_mode != "tiny")
+        self.lbl_temp.setVisible(show_temp)
+        self.combo_temp.setVisible(show_temp)
+        self.spin_temp_value.setVisible(show_temp)
+        if show_temp:
+            self.combo_temp.setFixedWidth(temp_w)
+            self.combo_temp.setFixedHeight(control_h)
+            self.spin_temp_value.setFixedWidth(temp_value_w)
         self.lbl_map_status.setVisible(show_map_status)
-        self._context_menu_label.setVisible(show_context_label)
+        self._context_menu_label.setVisible(False)
 
         self.toolbar.setStyleSheet(
             f"""
+            QFrame#toolbar {{
+                background-color: #071113;
+                border: 2px solid #28464c;
+                border-radius: 8px;
+            }}
             QFrame#toolbar QLabel {{
+                background: transparent;
                 font-size: {label_px}px;
             }}
+            QFrame#toolbar QLabel#appTitle {{
+                color: #f2f7f1;
+                background: transparent;
+                font-size: {font_px + 4}px;
+                font-weight: 800;
+                padding: 2px 8px;
+            }}
+            QFrame#toolbar QLabel#currentFileTitle {{
+                color: #edf6ee;
+                background: #0b1719;
+                border: 1px solid #33545b;
+                border-radius: 6px;
+                font-family: "Cascadia Mono", Consolas, monospace;
+                font-size: {font_px + 3}px;
+                font-weight: 800;
+                padding: 3px 10px;
+            }}
+            QFrame#toolbar QLabel#topStatusInfo {{
+                color: #aebcc3;
+                background: #10151d;
+                border: 1px solid #2d3b4b;
+                border-radius: 6px;
+                font-family: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+                font-size: {label_px}px;
+                padding: 3px 10px;
+            }}
             QFrame#toolbar QPushButton {{
+                background-color: #243036;
+                color: #e4ecea;
+                border: 1px solid #385057;
+                border-radius: 6px;
                 font-size: {font_px}px;
-                padding: {pad_v}px {pad_h}px;
+                padding: 0 {pad_h}px;
                 min-height: {min_h}px;
+                text-align: center;
+            }}
+            QFrame#toolbar QPushButton:hover {{
+                background-color: #2e4148;
+                border-color: #4c727a;
+            }}
+            QFrame#toolbar QPushButton#primaryButton {{
+                background-color: #24c3d9;
+                border-color: #5ee6f4;
+                color: #061014;
+                font-weight: 800;
+            }}
+            QFrame#toolbar QPushButton#accentButton {{
+                background-color: #f4b64b;
+                border-color: #f6d36b;
+                color: #12100a;
+                font-weight: 800;
             }}
             QFrame#toolbar QComboBox,
-            QFrame#toolbar QDoubleSpinBox,
-            QFrame#toolbar QSpinBox {{
-                background-color: #313244;
-                color: #cdd6f4;
-                border: 1px solid #45475a;
-                border-radius: 4px;
+            QFrame#toolbar QSpinBox,
+            QFrame#toolbar QDoubleSpinBox {{
+                background-color: #102225;
+                color: #e5efec;
+                border: 1px solid #3d5960;
+                border-radius: 6px;
                 font-size: {font_px}px;
-                padding: {max(2, pad_v)}px {max(5, pad_h - 2)}px;
+                padding: 0 {max(5, pad_h - 2)}px;
                 min-height: {min_h}px;
             }}
-            QFrame#toolbar QSpinBox {{
-                min-width: {34 if bucket == "tiny" else 38}px;
+            QFrame#toolbar QComboBox QAbstractItemView {{
+                background-color: #081719;
+                color: #edf6ee;
+                selection-background-color: #28bce8;
+                selection-color: #061014;
+                border: 1px solid #5a8b93;
+                outline: 0;
+            }}
+            QFrame#toolbar QComboBox QAbstractItemView::item {{
+                color: #edf6ee;
+                min-height: 26px;
+                padding: 5px 9px;
+            }}
+            QFrame#toolbar QComboBox#tempSelector {{
+                border-color: #315b5f;
+                font-weight: 700;
+            }}
+            QFrame#toolbar QDoubleSpinBox#tempValue {{
+                background-color: #172018;
+                color: #f2d45c;
+                border: 1px solid #6b5b23;
+                border-radius: 6px;
+                font-size: {font_px}px;
+                font-weight: 800;
+                padding: 0 {max(5, pad_h - 4)}px;
+                min-height: {min_h}px;
+            }}
+            QFrame#toolbar QFrame#paramCalcGroup {{
+                background:#0c1515;
+                border:1px solid #5d5128;
+                border-radius:10px;
+            }}
+            QFrame#toolbar QFrame#testModeGroup {{
+                background:#0c1515;
+                border:1px solid #5d5128;
+                border-radius:10px;
+            }}
+            QFrame#toolbar QLabel#paramCalcTitle {{
+                background:#143338;
+                color:#48d5e6;
+                border:1px solid #2c6870;
+                border-radius:7px;
+                font-weight:800;
+                font-size:{label_px}px;
+                padding:0 {max(6, pad_h - 2)}px;
+            }}
+            QFrame#toolbar QLabel#testModeTitle {{
+                background:#143338;
+                color:#d8e4e1;
+                border:1px solid #2c6870;
+                border-radius:7px;
+                font-weight:800;
+                font-size:{label_px}px;
+                padding:0 {max(6, pad_h - 2)}px;
+            }}
+            QFrame#toolbar QLabel#pulseCount {{
+                color:#9ca9a6;
+                font-size:{label_px}px;
+                padding:0 1px;
+            }}
+            QFrame#toolbar QLabel#calcBadge {{
+                background:#f0c54d;
+                color:#16140b;
+                border:1px solid #f7d56a;
+                border-radius:7px;
+                font-weight:800;
+                font-size:{label_px}px;
+                padding:0 {max(6, pad_h - 2)}px;
+                min-width:{param_badge_min_w}px;
+            }}
+            QFrame#toolbar QFrame#paramCalcGroup QComboBox#pulseSelector {{
+                background:#071113;
+                color:#e9f2ef;
+                border:1px solid #6a6140;
+                border-radius:8px;
+                font-size:{font_px}px;
+                padding:0 {max(5, pad_h - 3)}px;
+                min-height:{param_pulse_min_h}px;
+                max-height:{param_control_h}px;
+            }}
+            QFrame#toolbar QFrame#testModeGroup QComboBox#testModeSelector {{
+                background:#071113;
+                color:#e9f2ef;
+                border:1px solid #6a6140;
+                border-radius:8px;
+                font-size:{font_px}px;
+                padding:0 {max(5, pad_h - 3)}px;
+                min-height:{param_pulse_min_h}px;
+                max-height:{param_control_h}px;
+            }}
+            QFrame#toolbar QFrame#reportProgressPanel {{
+                background-color:#061314;
+                border:1px solid #214a50;
+                border-radius:8px;
+            }}
+            QFrame#toolbar QLabel#reportProgressStage {{
+                color:#dff8f0;
+                font-size:{label_px}px;
+                font-weight:800;
+            }}
+            QFrame#toolbar QLabel#reportProgressDetail {{
+                color:#89989d;
+                font-size:{label_px}px;
+                font-weight:700;
+            }}
+            QFrame#toolbar QLabel#reportProgressSeparator {{
+                color:#284249;
+                font-size:{label_px}px;
+                font-weight:700;
+            }}
+            QFrame#toolbar QLabel#reportProgressPercent {{
+                color:#bff9ef;
+                font-family:"Cascadia Mono", Consolas, monospace;
+                font-size:{label_px}px;
+                font-weight:900;
+            }}
+            QFrame#toolbar QLabel#reportProgressEta {{
+                color:#a8b7b8;
+                font-family:"Cascadia Mono", Consolas, monospace;
+                font-size:{max(10, label_px - 1)}px;
+                font-weight:800;
+            }}
+            QFrame#toolbar QProgressBar#reportProgressTrack {{
+                background-color:#020a0b;
+                border:1px solid #10272b;
+                border-radius:3px;
+                min-height:4px;
+                max-height:4px;
+            }}
+            QFrame#toolbar QProgressBar#reportProgressTrack::chunk {{
+                background-color:#35d8d0;
+                border-radius:2px;
             }}
             """
         )
         self.context_menu_selector.setStyleSheet(
-            "QFrame#contextMenuSelector{background:#2a2a2a;"
-            "border:1px solid #585858;border-radius:5px;}"
+            "QFrame#contextMenuSelector{background:#0b1719;"
+            "border:1px solid #2b464b;border-radius:8px;}"
             f"QLabel#contextMenuSelectorLabel{{color:#aeb6d8;font-size:{label_px}px;"
             "padding-left:6px;padding-right:2px;}"
-            "QPushButton#contextMenuSelectorButton{background:#3d3d3d;"
-            "color:#f0f0f0;border:1px solid #6a6a6a;border-radius:5px;"
-            f"padding:{max(2, pad_v)}px {context_pad_h}px;"
+            "QPushButton#contextMenuSelectorButton{background:#142428;"
+            "color:#d8e4e1;border:1px solid #344d53;border-radius:7px;"
+            f"padding:0 {context_pad_h}px;"
             f"min-height:{min_h}px;min-width:{context_min_w}px;}}"
-            "QPushButton#contextMenuSelectorButton:hover{background:#505050;}"
+            "QPushButton#contextMenuSelectorButton:hover{background:#1f363c;}"
             "QPushButton#contextMenuSelectorButton:checked{background:#28bce8;"
-            "color:#061014;border-color:#8fd3ff;}"
+            "color:#061014;border-color:#63dff2;font-weight:800;}"
         )
+
+    def _set_temperature_code(self, code: str) -> None:
+        code = code if code in TEMP_CONDITION_DEFAULTS else "RT"
+        idx = self.combo_temp.findData(code)
+        self.combo_temp.blockSignals(True)
+        self.spin_temp_value.blockSignals(True)
+        try:
+            if idx >= 0:
+                self.combo_temp.setCurrentIndex(idx)
+            self.spin_temp_value.setValue(self._temperature_values[code])
+        finally:
+            self.combo_temp.blockSignals(False)
+            self.spin_temp_value.blockSignals(False)
+        self.result_table.set_temperature_labels(self._temperature_display_labels())
+
+    def _on_temperature_changed(self, _index: int = 0) -> None:
+        code = str(self.combo_temp.currentData() or "RT")
+        code = code if code in TEMP_CONDITION_DEFAULTS else "RT"
+        self.spin_temp_value.blockSignals(True)
+        try:
+            self.spin_temp_value.setValue(self._temperature_values[code])
+        finally:
+            self.spin_temp_value.blockSignals(False)
+        self.result_table.set_temperature_labels(self._temperature_display_labels())
+        if self.result is not None:
+            self.result_table.set_result(self.result)
+
+    def _on_temperature_value_changed(self, value: float) -> None:
+        code = str(self.combo_temp.currentData() or "RT")
+        if code not in TEMP_CONDITION_DEFAULTS:
+            return
+        self._temperature_values[code] = float(value)
+        self._save_temperature_value(code, float(value))
+        self.result_table.set_temperature_labels(self._temperature_display_labels())
+        if self.result is not None:
+            self.result_table.set_result(self.result)
+
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
         sizes = self.splitter.sizes()
         total = sum(sizes)
@@ -886,9 +1722,6 @@ class MainWindow(QMainWindow):
         self.result_table.setMaximumWidth(compact_right)
         self.splitter.setSizes([left, right])
 
-    def _on_vdc_changed(self, val: float) -> None:
-        self.cfg.vdc_override = None if val <= 0 else val
-
     def _set_pulse_spin_values(self, off_pulse: int, on_pulse: int) -> None:
         self.spin_off_pulse.blockSignals(True)
         self.spin_on_pulse.blockSignals(True)
@@ -913,9 +1746,9 @@ class MainWindow(QMainWindow):
             self.lbl_on_pulse.setEnabled(not single)
             if detected_count > 0:
                 suffix = "（单脉冲·仅关断）" if single else ""
-                self.lbl_pulse_count.setText(f"{detected_count} 波{suffix}")
+                self.lbl_pulse_count.setText(f"共 {detected_count} 波{suffix}")
             else:
-                self.lbl_pulse_count.setText("— 波")
+                self.lbl_pulse_count.setText("共 -- 波")
         finally:
             self.spin_off_pulse.blockSignals(False)
             self.spin_on_pulse.blockSignals(False)
@@ -1175,6 +2008,8 @@ class MainWindow(QMainWindow):
         self.btn_select_report_output.setEnabled(not busy)
         self.btn_write_report.setEnabled(not busy)
         if busy:
+            self.lbl_current_file.setText(f"正在加载 {Path(path).name}")
+            self.lbl_current_file.setToolTip(path)
             self.statusBar().showMessage(f"正在后台加载: {Path(path).name}")
 
     def _set_report_busy(self, busy: bool) -> None:
@@ -1186,6 +2021,25 @@ class MainWindow(QMainWindow):
         self.btn_write_report.setEnabled(not busy)
         if busy:
             self.statusBar().showMessage("正在后台写入报告...")
+
+    def _begin_report_progress(self, total: int, label: str) -> None:
+        total = max(1, int(total))
+        self._report_progress_active = True
+        self.report_progress.begin(total, label)
+        QApplication.processEvents()
+
+    def _set_report_progress(self, value: int, total: int, label: str) -> None:
+        total = max(1, int(total))
+        self.report_progress.update_progress(value, total, label)
+        QApplication.processEvents()
+
+    def _set_report_progress_busy(self, label: str) -> None:
+        self.report_progress.set_busy(label)
+        QApplication.processEvents()
+
+    def _finish_report_progress(self, label: str, *, ok: bool) -> None:
+        self.report_progress.finish(label, ok=ok)
+        self._report_progress_active = False
 
     def _start_background_load(self, path: str) -> None:
         self._load_request_id += 1
@@ -1280,10 +2134,10 @@ class MainWindow(QMainWindow):
         self._mapping_custom = outcome.mapping_custom
         self._update_map_status_label()
 
-        self.spin_vdc.blockSignals(True)
-        self.spin_vdc.setValue(0)
-        self.spin_vdc.blockSignals(False)
         self.cfg.vdc_override = None
+        self.lbl_current_file.setText(Path(path).name)
+        self.lbl_current_file.setToolTip(path)
+        self._set_temperature_code(_infer_temp_code_from_path(path))
         self._slope_ranges = default_slope_ranges()
         self.result_table.set_slope_ranges(self._slope_ranges)
         self._clear_manual_adjustments()
@@ -1373,6 +2227,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_value_clicked(self, section: str, name: str) -> None:
+        self.result_table.set_active_metric(section, name)
         if self.result is not None and self.result.short_circuit_mode:
             if (
                 section == "短路过程"
@@ -4571,6 +5426,16 @@ class MainWindow(QMainWindow):
         if self.result is None:
             return {}
         params = self._report_image_params()
+        if not self._report_progress_active:
+            self._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告截图...")
+        capture_start = max(0, min(self.report_progress.value(), REPORT_PROGRESS_TEMPLATE_DONE))
+        capture_span = max(1, REPORT_PROGRESS_CAPTURE_DONE - capture_start)
+        capture_total = max(1, len(params) + 1)
+        self._set_report_progress(
+            capture_start,
+            REPORT_PROGRESS_TOTAL,
+            "准备报告截图...",
+        )
         images: dict[tuple[str, str], Path] = {}
         vb = self.wave_plot.plot.getPlotItem().getViewBox()
         old_x, old_y = vb.viewRange()
@@ -4591,12 +5456,25 @@ class MainWindow(QMainWindow):
                 path = directory / self._safe_report_image_name(section, name, index)
                 self._save_report_plot_capture(path, capture_size)
                 images[(section, name)] = path
+                progress_value = capture_start + int(
+                    round(capture_span * index / capture_total)
+                )
+                self._set_report_progress(
+                    min(progress_value, REPORT_PROGRESS_CAPTURE_DONE),
+                    REPORT_PROGRESS_TOTAL,
+                    f"截图 {index}/{len(params)} · {name}",
+                )
         finally:
             vb.setRange(
                 xRange=(float(old_x[0]), float(old_x[1])),
                 yRange=(float(old_y[0]), float(old_y[1])),
                 padding=0.0,
             )
+        self._set_report_progress(
+            REPORT_PROGRESS_CAPTURE_DONE,
+            REPORT_PROGRESS_TOTAL,
+            "截图完成，准备写入 Excel...",
+        )
         return images
 
     def _short_desat_image_available(self) -> bool:
@@ -4667,8 +5545,20 @@ class MainWindow(QMainWindow):
             return False
 
         try:
+            self._begin_report_progress(REPORT_PROGRESS_TOTAL, "复制模板...")
+            self._set_report_progress(
+                REPORT_PROGRESS_TEMPLATE_DONE // 2,
+                REPORT_PROGRESS_TOTAL,
+                "复制模板...",
+            )
             self._report_output_path = copy_report_template(src, target)
+            self._set_report_progress(
+                REPORT_PROGRESS_TEMPLATE_DONE,
+                REPORT_PROGRESS_TOTAL,
+                "模板复制完成",
+            )
         except PermissionError as exc:
+            self._finish_report_progress("写入失败", ok=False)
             QMessageBox.critical(
                 self,
                 "生成报告失败",
@@ -4677,6 +5567,7 @@ class MainWindow(QMainWindow):
             )
             return False
         except Exception as exc:
+            self._finish_report_progress("写入失败", ok=False)
             QMessageBox.critical(self, "生成报告失败", str(exc))
             return False
 
@@ -4695,11 +5586,22 @@ class MainWindow(QMainWindow):
             return
         if not self._ensure_report_output_file():
             return
+        tempdir = None
+        self._set_report_busy(True)
         try:
+            if not self._report_progress_active:
+                self._begin_report_progress(
+                    REPORT_PROGRESS_TOTAL,
+                    "准备报告截图...",
+                )
             tempdir = tempfile.TemporaryDirectory()
             images = self._capture_report_images(Path(tempdir.name))
             self._start_report_write_task(tempdir, images)
         except PermissionError as e:
+            if tempdir is not None:
+                tempdir.cleanup()
+            self._set_report_busy(False)
+            self._finish_report_progress("写入失败", ok=False)
             QMessageBox.critical(
                 self,
                 "写入报告失败",
@@ -4709,6 +5611,10 @@ class MainWindow(QMainWindow):
                 f"错误:\n{e}",
             )
         except Exception as e:
+            if tempdir is not None:
+                tempdir.cleanup()
+            self._set_report_busy(False)
+            self._finish_report_progress("写入失败", ok=False)
             QMessageBox.critical(self, "写入报告失败", str(e))
 
     def _start_report_write_task(
@@ -4729,11 +5635,36 @@ class MainWindow(QMainWindow):
             tempdir,
             self._report_target_screen_width_px(),
         )
+        task.signals.progress.connect(self._on_report_write_progress)
         task.signals.finished.connect(self._on_report_write_finished)
         task.signals.failed.connect(self._on_report_write_failed)
         self._report_tasks[request_id] = task
         self._set_report_busy(True)
+        self._set_report_progress(
+            REPORT_PROGRESS_WRITE_START,
+            REPORT_PROGRESS_TOTAL,
+            "正在写入 Excel...",
+        )
         self._load_pool.start(task)
+
+    def _on_report_write_progress(
+        self,
+        request_id: int,
+        value: int,
+        total: int,
+        label: str,
+    ) -> None:
+        if request_id != self._report_request_id:
+            return
+        total = max(1, int(total))
+        ratio = max(0.0, min(float(value) / total, 1.0))
+        span = REPORT_PROGRESS_WRITE_DONE_CAP - REPORT_PROGRESS_WRITE_START
+        progress_value = REPORT_PROGRESS_WRITE_START + int(round(span * ratio))
+        self._set_report_progress(
+            min(progress_value, REPORT_PROGRESS_WRITE_DONE_CAP),
+            REPORT_PROGRESS_TOTAL,
+            label,
+        )
 
     def _on_report_write_finished(
         self,
@@ -4745,6 +5676,7 @@ class MainWindow(QMainWindow):
         if request_id != self._report_request_id:
             return
         self._set_report_busy(False)
+        self._finish_report_progress("写入完成 100%", ok=True)
         if self._report_output_path is not None:
             set_report_output_path(self._report_output_path)
             set_last_export_path(self._report_output_path)
@@ -4768,6 +5700,7 @@ class MainWindow(QMainWindow):
         if request_id != self._report_request_id:
             return
         self._set_report_busy(False)
+        self._finish_report_progress("写入失败", ok=False)
         QMessageBox.critical(self, "写入报告失败", message)
 
     def _export_excel(self) -> None:

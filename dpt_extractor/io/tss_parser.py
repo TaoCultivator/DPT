@@ -13,8 +13,8 @@ import numpy as np
 
 from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
 
-_CHANNEL_RE = re.compile(r"^(CH[1-6]|MATH\d+|M\d+)$", re.I)
-_WFM_NAME_RE = re.compile(r"(CH[1-6]|MATH\d+|M\d+)", re.I)
+_CHANNEL_RE = re.compile(r"^(CH[1-8]|MATH\d+|M\d+)$", re.I)
+_WFM_NAME_RE = re.compile(r"(CH[1-8]|MATH\d+|M\d+)", re.I)
 _MATH_KEY_RE = re.compile(r"MATH(\d+)", re.I)
 
 
@@ -96,6 +96,9 @@ class _MathSetup:
     y_position: dict[str, float] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
+    horizontal_scale_per_div: float | None = None
+    horizontal_position_percent: float | None = None
+    horizontal_delay: float | None = None
 
 
 def _strip_setup_value(value: str) -> str:
@@ -166,7 +169,34 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
             ]
             continue
 
-        label_match = re.fullmatch(r":(?:(MATH):(MATH\d+)|(CH[1-6])):LABEL:NAME", key_u)
+        if key_u == ":HORIZONTAL:SCALE":
+            try:
+                scale = float(value)
+                if scale > 0 and np.isfinite(scale):
+                    setup.horizontal_scale_per_div = scale
+            except ValueError:
+                pass
+            continue
+
+        if key_u == ":HORIZONTAL:POSITION":
+            try:
+                position = float(value)
+                if np.isfinite(position):
+                    setup.horizontal_position_percent = position
+            except ValueError:
+                pass
+            continue
+
+        if key_u == ":HORIZONTAL:DELAY:TIME":
+            try:
+                delay = float(value)
+                if np.isfinite(delay):
+                    setup.horizontal_delay = delay
+            except ValueError:
+                pass
+            continue
+
+        label_match = re.fullmatch(r":(?:(MATH):(MATH\d+)|(CH[1-8])):LABEL:NAME", key_u)
         if label_match:
             label_key = _normalize_channel(label_match.group(2) or label_match.group(3) or "")
             if label_key and value:
@@ -385,6 +415,7 @@ class TssParser:
         y_position: dict[str, float] = {}
         meta = TekMetadata()
         t_ref: np.ndarray | None = None
+        computed_math_channels: set[str] = set()
 
         with zipfile.ZipFile(path, "r") as zf:
             math_setup = _parse_tss_math_setup(zf)
@@ -460,6 +491,7 @@ class TssParser:
                     channels[math_key] = _FormulaEvaluator(t_ref, channels).evaluate(
                         math_setup.formulas[math_key]
                     )
+                    computed_math_channels.add(math_key)
                 except (SyntaxError, ValueError, ZeroDivisionError, FloatingPointError):
                     continue
             for math_key in sorted(math_setup.formulas, key=_math_sort_key):
@@ -469,6 +501,7 @@ class TssParser:
                     channels[math_key] = _FormulaEvaluator(t_ref, channels).evaluate(
                         math_setup.formulas[math_key]
                     )
+                    computed_math_channels.add(math_key)
                 except (SyntaxError, ValueError, ZeroDivisionError, FloatingPointError):
                     continue
 
@@ -482,5 +515,9 @@ class TssParser:
         meta.channel_math_formulas = {
             key: expr for key, expr in math_setup.formulas.items() if key in channels
         }
+        meta.computed_math_channels = computed_math_channels
+        meta.horizontal_scale_per_div = math_setup.horizontal_scale_per_div
+        meta.horizontal_position_percent = math_setup.horizontal_position_percent
+        meta.horizontal_delay = math_setup.horizontal_delay
         meta.record_length = n
         return WaveformBundle(t=t_ref, channels=channels, meta=meta)
