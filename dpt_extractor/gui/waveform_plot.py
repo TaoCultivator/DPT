@@ -3625,13 +3625,60 @@ class WaveformPlot(QWidget):
     def _on_zero_handle_dragged(self, key: str, view_y: float) -> None:
         if self._highlighted_key != key:
             self._highlight_trace(key)
-        self._set_channel_offset(key, view_y)
+        self._set_channel_offset(key, self._zero_handle_offset_for_view_y(key, view_y))
 
     def _zero_handle_scene_pos(self, vb: pg.ViewBox, y_div: float) -> QPointF:
         """图元原点在箭尾平边，与 Y 轴（波形区左界）对齐，箭身向右展开。"""
         xr, _yr = vb.viewRange()
         axis_scene = vb.mapViewToScene(QPointF(float(xr[0]), y_div))
         return QPointF(axis_scene.x(), axis_scene.y())
+
+    def _loss_math_left_edge_raw_value(self, key: str) -> float | None:
+        if not (_is_math_trace_key(key) and self._unit_for_channel(key) == "J"):
+            return None
+        raw = self._trace_raw.get(key)
+        t_us = self._trace_t_us
+        if raw is None or t_us is None:
+            return None
+        n = min(len(raw), len(t_us))
+        if n <= 0:
+            return None
+        t_arr = np.asarray(t_us[:n], dtype=np.float64)
+        raw_arr = np.asarray(raw[:n], dtype=np.float64)
+        finite = np.isfinite(t_arr) & np.isfinite(raw_arr)
+        if not np.any(finite):
+            return None
+        t_arr = t_arr[finite]
+        raw_arr = raw_arr[finite]
+        if len(t_arr) == 1:
+            return float(raw_arr[0])
+        win = self._current_x_window_for_display()
+        x0 = float(win[0]) if win is not None else float(t_arr[0])
+        if not np.isfinite(x0):
+            x0 = float(t_arr[0])
+        if t_arr[0] > t_arr[-1]:
+            t_arr = t_arr[::-1]
+            raw_arr = raw_arr[::-1]
+        x0 = max(float(t_arr[0]), min(float(t_arr[-1]), x0))
+        return float(np.interp(x0, t_arr, raw_arr))
+
+    def _zero_handle_anchor_raw_value(self, key: str) -> float:
+        # 损耗积分波形的 0J 可能远离可视曲线；左侧 MATH 标识按窗口左缘曲线锚定。
+        loss_left = self._loss_math_left_edge_raw_value(key)
+        if loss_left is not None:
+            return loss_left
+        return 0.0
+
+    def _zero_handle_display_y(self, key: str) -> float:
+        raw_value = self._zero_handle_anchor_raw_value(key)
+        scale = self._disp_scale.get(key, 1.0)
+        offset = self._disp_offset.get(key, 0.0)
+        return (raw_value / scale if scale else raw_value) + offset
+
+    def _zero_handle_offset_for_view_y(self, key: str, view_y: float) -> float:
+        raw_value = self._zero_handle_anchor_raw_value(key)
+        scale = self._disp_scale.get(key, 1.0)
+        return float(view_y) - (raw_value / scale if scale else raw_value)
 
     def _update_zero_handle_positions(self) -> None:
         if not self._zero_handles:
@@ -3642,8 +3689,7 @@ class WaveformPlot(QWidget):
             handle.setVisible(not hidden)
             if hidden:
                 continue
-            # 显式按该通道原始 0V/0A 换算，确保标记始终指向通道归零值。
-            y = float(self._to_disp(key, 0.0))
+            y = float(self._zero_handle_display_y(key))
             pos = self._zero_handle_scene_pos(vb, y)
             handle.setPos(pos.x(), pos.y())
             legend = self._trace_legend.get(key, key)

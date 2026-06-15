@@ -1675,6 +1675,69 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertGreaterEqual(visible_high_mj, 440.0)
         self.assertLessEqual(visible_high_mj, 460.0)
 
+    def test_loss_math_zero_handles_align_to_visible_left_edge(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult, SegmentIndices
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        loss2 = np.linspace(0.018, 0.082, n)
+        loss3 = np.linspace(0.004, 0.018, n)
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels={
+                    "CH1": np.zeros(n),
+                    "CH2": np.ones(n),
+                    "CH3": np.ones(n),
+                    "CH4": np.zeros(n),
+                    "CH5": np.zeros(n),
+                    "CH6": np.zeros(n),
+                    "MATH2": loss2,
+                    "MATH3": loss3,
+                },
+                meta=TekMetadata(
+                    source_path="/fake/dual_loss_math.tss",
+                    channel_vdiv={"MATH2": 0.01, "MATH3": 0.002},
+                    channel_math_formulas={
+                        "MATH2": "INTG(CH2*MATH1)",
+                        "MATH3": "INTG(CH5*MATH1)",
+                    },
+                ),
+            ),
+            profile,
+            ExtractResult(
+                segments=SegmentIndices(
+                    turn_off=(10, 30),
+                    turn_on=(70, 90),
+                    reverse_recovery=(70, 90),
+                    pulse1_off=20,
+                    pulse2_on=80,
+                )
+            ),
+        )
+
+        vb = plot.plot.getPlotItem().getViewBox()
+        vb.setXRange(0.25, 0.75, padding=0.0)
+        plot._update_zero_handle_positions()
+        left_us = float(vb.viewRange()[0][0])
+
+        for key, raw in (("MATH2", loss2), ("MATH3", loss3)):
+            expected_raw = float(np.interp(left_us, plot._trace_t_us, raw))
+            expected_y = (
+                expected_raw / plot._disp_scale[key] + plot._disp_offset[key]
+            )
+            self.assertAlmostEqual(plot._zero_handle_display_y(key), expected_y, places=6)
+            handle_y = float(vb.mapSceneToView(plot._zero_handles[key].scenePos()).y())
+            self.assertAlmostEqual(handle_y, expected_y, places=6)
+            self.assertNotAlmostEqual(expected_y, plot._to_disp(key, 0.0), places=3)
+
     def test_selected_channel_updates_physical_y_axis(self):
         plot = self._make_synthetic_plot()
         self.assertEqual(plot._axis_channel(), "CH3")
