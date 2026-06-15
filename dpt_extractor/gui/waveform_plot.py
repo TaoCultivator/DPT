@@ -3633,18 +3633,9 @@ class WaveformPlot(QWidget):
         axis_scene = vb.mapViewToScene(QPointF(float(xr[0]), y_div))
         return QPointF(axis_scene.x(), axis_scene.y())
 
-    def _loss_math_left_edge_raw_value(self, key: str) -> float | None:
-        if not (_is_math_trace_key(key) and self._unit_for_channel(key) == "J"):
-            return None
-        raw = self._trace_raw.get(key)
-        t_us = self._trace_t_us
-        if raw is None or t_us is None:
-            return None
-        n = min(len(raw), len(t_us))
-        if n <= 0:
-            return None
-        t_arr = np.asarray(t_us[:n], dtype=np.float64)
-        raw_arr = np.asarray(raw[:n], dtype=np.float64)
+    def _loss_math_visible_left_raw_value(
+        self, raw_arr: np.ndarray, t_arr: np.ndarray
+    ) -> float | None:
         finite = np.isfinite(t_arr) & np.isfinite(raw_arr)
         if not np.any(finite):
             return None
@@ -3662,11 +3653,49 @@ class WaveformPlot(QWidget):
         x0 = max(float(t_arr[0]), min(float(t_arr[-1]), x0))
         return float(np.interp(x0, t_arr, raw_arr))
 
+    def _loss_math_window_anchor_raw_value(
+        self, raw_arr: np.ndarray
+    ) -> float | None:
+        segments = self._loss_fit_segments
+        if segments is None or len(raw_arr) == 0:
+            return None
+        windows = [segments.turn_off]
+        if self._loss_fit_include_turn_on:
+            windows.append(segments.turn_on)
+        n = len(raw_arr)
+        for i0, i1 in windows:
+            lo = max(0, min(n, int(i0)))
+            hi = max(0, min(n, int(i1)))
+            if hi <= lo:
+                continue
+            window = raw_arr[lo:hi]
+            valid = np.flatnonzero(np.isfinite(window))
+            if len(valid):
+                return float(window[int(valid[0])])
+        return None
+
+    def _loss_math_anchor_raw_value(self, key: str) -> float | None:
+        if not (_is_math_trace_key(key) and self._unit_for_channel(key) == "J"):
+            return None
+        raw = self._trace_raw.get(key)
+        t_us = self._trace_t_us
+        if raw is None or t_us is None:
+            return None
+        n = min(len(raw), len(t_us))
+        if n <= 0:
+            return None
+        t_arr = np.asarray(t_us[:n], dtype=np.float64)
+        raw_arr = np.asarray(raw[:n], dtype=np.float64)
+        anchor = self._loss_math_window_anchor_raw_value(raw_arr)
+        if anchor is not None:
+            return anchor
+        return self._loss_math_visible_left_raw_value(raw_arr, t_arr)
+
     def _zero_handle_anchor_raw_value(self, key: str) -> float:
-        # 损耗积分波形的 0J 可能远离可视曲线；左侧 MATH 标识按窗口左缘曲线锚定。
-        loss_left = self._loss_math_left_edge_raw_value(key)
-        if loss_left is not None:
-            return loss_left
+        # 损耗积分波形的 0J 可能远离开关窗口；左侧 MATH 标识按损耗窗口锚定。
+        loss_anchor = self._loss_math_anchor_raw_value(key)
+        if loss_anchor is not None:
+            return loss_anchor
         return 0.0
 
     def _zero_handle_display_y(self, key: str) -> float:

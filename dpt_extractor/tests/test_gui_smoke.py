@@ -1675,7 +1675,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertGreaterEqual(visible_high_mj, 440.0)
         self.assertLessEqual(visible_high_mj, 460.0)
 
-    def test_loss_math_zero_handles_align_to_visible_left_edge(self):
+    def test_loss_math_zero_handles_align_to_switching_window_start(self):
         import numpy as np
 
         from dpt_extractor.gui.waveform_plot import WaveformPlot
@@ -1723,13 +1723,11 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             ),
         )
 
-        vb = plot.plot.getPlotItem().getViewBox()
-        vb.setXRange(0.25, 0.75, padding=0.0)
         plot._update_zero_handle_positions()
-        left_us = float(vb.viewRange()[0][0])
+        vb = plot.plot.getPlotItem().getViewBox()
 
         for key, raw in (("MATH2", loss2), ("MATH3", loss3)):
-            expected_raw = float(np.interp(left_us, plot._trace_t_us, raw))
+            expected_raw = float(raw[10])
             expected_y = (
                 expected_raw / plot._disp_scale[key] + plot._disp_offset[key]
             )
