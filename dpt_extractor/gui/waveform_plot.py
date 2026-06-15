@@ -6,7 +6,15 @@ import re
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QPen, QPolygonF
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QBrush,
+    QColor,
+    QFont,
+    QPen,
+    QPolygonF,
+)
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -51,6 +59,8 @@ class ChannelZeroHandle(pg.GraphicsObject):
 
     _PX_LEN = 34
     _PX_H = 15
+    _TEXT_RATIO = 0.68
+    _FONT_PT = 7
 
     def __init__(self, key: str, label: str, color: str, view_box: pg.ViewBox):
         super().__init__()
@@ -61,24 +71,36 @@ class ChannelZeroHandle(pg.GraphicsObject):
         self._px_len = self._PX_LEN
         self._px_h = self._PX_H
         self._highlighted = False
+        self._dimmed = False
         self._hovered = False
+        self._pressed = False
         self._press_scene: QPointF | None = None
         self._dragging = False
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         self.setAcceptHoverEvents(True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self.setZValue(100)
-        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def set_highlighted(self, on: bool) -> None:
         if self._highlighted != on:
             self._highlighted = on
             self.update()
 
+    def set_dimmed(self, on: bool) -> None:
+        if self._dimmed != on:
+            self._dimmed = on
+            self.update()
+
+    def _set_pressed(self, on: bool) -> None:
+        if self._pressed != on:
+            self._pressed = on
+            self.update()
+
     @staticmethod
     def _right_arrow_polygon_px(px_len: float, px_h: float) -> QPolygonF:
         """像素坐标：左侧为通道标签，右侧尖端精确指向该通道 0 值。"""
-        body_w = px_len * 0.68
+        body_w = px_len * ChannelZeroHandle._TEXT_RATIO
         hh = px_h * 0.5
         tip = px_len
         return QPolygonF(
@@ -91,6 +113,34 @@ class ChannelZeroHandle(pg.GraphicsObject):
             ]
         )
 
+    @staticmethod
+    def _label_font(base: QFont | None = None) -> QFont:
+        font = QFont(base) if base is not None else QFont()
+        font.setBold(True)
+        font.setPointSize(ChannelZeroHandle._FONT_PT)
+        return font
+
+    def _label_text_rect(self) -> QRectF:
+        return QRectF(
+            2.0,
+            -self._px_h / 2.0,
+            self._px_len * self._TEXT_RATIO - 3.0,
+            self._px_h,
+        )
+
+    def _current_fill_color(self) -> QColor:
+        fill = QColor(self._color)
+        if self._highlighted:
+            fill = fill.lighter(124)
+        elif self._dimmed:
+            fill = fill.darker(185)
+            fill.setAlpha(135)
+        elif self._hovered:
+            fill = fill.lighter(105)
+        if self._pressed:
+            fill = fill.darker(190)
+        return fill
+
     def boundingRect(self):  # noqa: N802
         return QRectF(
             -2,
@@ -100,24 +150,19 @@ class ChannelZeroHandle(pg.GraphicsObject):
         )
 
     def paint(self, painter, opt, widget=None) -> None:  # noqa: N802
-        fill = self._color
-        if self._highlighted:
-            fill = fill.lighter(120)
-        elif self._hovered:
-            fill = fill.lighter(105)
+        fill = self._current_fill_color()
         outline = QColor("#101010")
-        outline.setAlpha(210)
+        outline.setAlpha(130 if self._dimmed and not self._highlighted else 210)
         painter.setPen(QPen(outline, 1.0))
         painter.setBrush(fill)
         painter.drawPolygon(self._right_arrow_polygon_px(self._px_len, self._px_h))
-        font = painter.font()
-        font.setBold(True)
-        font.setPointSize(7)
-        painter.setFont(font)
+        painter.setFont(self._label_font(painter.font()))
         text_color = QColor("#111111") if fill.lightness() > 145 else QColor("#ffffff")
+        if self._dimmed and not self._highlighted:
+            text_color.setAlpha(180)
         painter.setPen(text_color)
         painter.drawText(
-            QRectF(1.0, -self._px_h / 2.0, self._px_len * 0.68 - 1.0, self._px_h),
+            self._label_text_rect(),
             Qt.AlignmentFlag.AlignCenter,
             self._label,
         )
@@ -136,6 +181,7 @@ class ChannelZeroHandle(pg.GraphicsObject):
         if ev.button() == Qt.MouseButton.LeftButton:
             self._press_scene = ev.scenePos()
             self._dragging = False
+            self._set_pressed(True)
             ev.accept()
             return
         super().mousePressEvent(ev)
@@ -159,6 +205,7 @@ class ChannelZeroHandle(pg.GraphicsObject):
                 self.clicked.emit(self._key)
             self._press_scene = None
             self._dragging = False
+            self._set_pressed(False)
             ev.accept()
             return
         super().mouseReleaseEvent(ev)
@@ -1457,6 +1504,7 @@ class WaveformPlot(QWidget):
         self._formula_sources: dict[str, np.ndarray] = {}
         self._math_formulas: dict[str, str] = {}
         self._math_source_keys: set[str] = set()
+        self._computed_math_channels: set[str] = set()
         self._loss_fit_segments: SegmentIndices | None = None
         self._loss_fit_include_turn_on: bool = True
         self._base_logical_display_keys: dict[str, str] = {}
@@ -3010,8 +3058,18 @@ class WaveformPlot(QWidget):
             include_turn_on=self._loss_fit_include_turn_on,
         )
 
+    def _is_computed_loss_math_channel(self, key: str) -> bool:
+        key = key.upper()
+        return (
+            _is_math_trace_key(key)
+            and key in self._computed_math_channels
+            and self._unit_for_channel(key) == "J"
+        )
+
     def _auto_scale_raw_for_channel(self, key: str, raw: np.ndarray) -> np.ndarray:
         if _is_math_trace_key(key) and self._unit_for_channel(key) == "J":
+            if self._is_computed_loss_math_channel(key):
+                return raw
             return self._loss_fit_raw_for_channel(key, raw)
         return raw
 
@@ -3113,6 +3171,13 @@ class WaveformPlot(QWidget):
     ) -> None:
         source = bundle.meta.source_path
         is_new_source = source != self._loaded_source_path
+        computed_math_channels = {
+            str(ch or "").upper() for ch in bundle.meta.computed_math_channels
+        }
+        imported_math_formulas = {
+            ch.upper(): self._normalize_formula(expr)
+            for ch, expr in bundle.meta.channel_math_formulas.items()
+        }
         if is_new_source:
             self._loaded_source_path = source
             self.reset_interaction_state()
@@ -3122,6 +3187,14 @@ class WaveformPlot(QWidget):
             self._manual_vdiv.clear()
             for ch, scale in bundle.meta.channel_vdiv.items():
                 ch_key = ch.upper()
+                expr = imported_math_formulas.get(ch_key, "")
+                computed_loss_math = (
+                    ch_key in computed_math_channels
+                    and _is_math_trace_key(ch_key)
+                    and ("INTG" in expr.upper() or "INTEG" in expr.upper())
+                )
+                if computed_loss_math:
+                    continue
                 try:
                     scope_scale = float(scale)
                 except (TypeError, ValueError):
@@ -3189,6 +3262,7 @@ class WaveformPlot(QWidget):
         self._formula_t_s = np.asarray(t, dtype=np.float64)
         self._trace_t_us = t_us
         self._trace_view_signature = None
+        self._computed_math_channels = set(computed_math_channels)
         self._loss_fit_segments = result.segments if result is not None else None
         self._loss_fit_include_turn_on = not (
             bool(result.single_pulse_mode) if result is not None else False
@@ -3201,10 +3275,6 @@ class WaveformPlot(QWidget):
             and float(scope_scale) > 0
             else None
         )
-        imported_math_formulas = {
-            ch.upper(): self._normalize_formula(expr)
-            for ch, expr in bundle.meta.channel_math_formulas.items()
-        }
         self._logical_display_keys = self._logical_display_key_map(profile)
         self._base_logical_display_keys = dict(self._logical_display_keys)
         self._prefer_math_display_keys_for_derived_currents(
@@ -3227,7 +3297,11 @@ class WaveformPlot(QWidget):
             if key in self._manual_vdiv:
                 scale = float(self._manual_vdiv[key])
             else:
-                scope_scale = bundle.meta.channel_vdiv.get(key)
+                scope_scale = (
+                    None
+                    if self._is_computed_loss_math_channel(key)
+                    else bundle.meta.channel_vdiv.get(key)
+                )
                 scale = _safe_initial_vdiv_for_channel(key, fit_raw, scope_scale)
             self._disp_scale[key] = scale
             if key in saved_offset:
@@ -3398,6 +3472,15 @@ class WaveformPlot(QWidget):
         text = legend.strip().lstrip("-━— ").strip()
         return text[:10] if text else key
 
+    @staticmethod
+    def _zero_handle_display_label(key: str) -> str:
+        key = key.upper()
+        if m := re.fullmatch(r"CH(\d+)", key):
+            return f"C{m.group(1)}"
+        if m := re.fullmatch(r"MATH(\d+)", key):
+            return f"M{m.group(1)}"
+        return key[:3]
+
     def _zero_handle_tooltip(self, key: str, legend: str) -> str:
         text = self._zero_handle_label(key, legend)
         unit = self._unit_for_channel(key)
@@ -3528,6 +3611,7 @@ class WaveformPlot(QWidget):
         self._formula_sources.pop(key, None)
         self._math_formulas.pop(key, None)
         self._math_source_keys.discard(key)
+        self._computed_math_channels.discard(key)
         self._disp_scale.pop(key, None)
         self._disp_offset.pop(key, None)
         self._manual_vdiv.pop(key, None)
@@ -3612,7 +3696,7 @@ class WaveformPlot(QWidget):
         for key in self._trace_items:
             color, _ = self._trace_style[key]
             legend = self._trace_legend[key]
-            label = key.upper()
+            label = self._zero_handle_display_label(key)
             handle = ChannelZeroHandle(key, label, color, vb)
             handle.setToolTip(self._zero_handle_tooltip(key, legend))
             handle.clicked.connect(self._on_legend_clicked)
@@ -3625,7 +3709,7 @@ class WaveformPlot(QWidget):
     def _on_zero_handle_dragged(self, key: str, view_y: float) -> None:
         if self._highlighted_key != key:
             self._highlight_trace(key)
-        self._set_channel_offset(key, self._zero_handle_offset_for_view_y(key, view_y))
+        self._set_channel_offset(key, view_y)
 
     def _zero_handle_scene_pos(self, vb: pg.ViewBox, y_div: float) -> QPointF:
         """图元原点在箭尾平边，与 Y 轴（波形区左界）对齐，箭身向右展开。"""
@@ -3633,81 +3717,8 @@ class WaveformPlot(QWidget):
         axis_scene = vb.mapViewToScene(QPointF(float(xr[0]), y_div))
         return QPointF(axis_scene.x(), axis_scene.y())
 
-    def _loss_math_visible_left_raw_value(
-        self, raw_arr: np.ndarray, t_arr: np.ndarray
-    ) -> float | None:
-        finite = np.isfinite(t_arr) & np.isfinite(raw_arr)
-        if not np.any(finite):
-            return None
-        t_arr = t_arr[finite]
-        raw_arr = raw_arr[finite]
-        if len(t_arr) == 1:
-            return float(raw_arr[0])
-        win = self._current_x_window_for_display()
-        x0 = float(win[0]) if win is not None else float(t_arr[0])
-        if not np.isfinite(x0):
-            x0 = float(t_arr[0])
-        if t_arr[0] > t_arr[-1]:
-            t_arr = t_arr[::-1]
-            raw_arr = raw_arr[::-1]
-        x0 = max(float(t_arr[0]), min(float(t_arr[-1]), x0))
-        return float(np.interp(x0, t_arr, raw_arr))
-
-    def _loss_math_window_anchor_raw_value(
-        self, raw_arr: np.ndarray
-    ) -> float | None:
-        segments = self._loss_fit_segments
-        if segments is None or len(raw_arr) == 0:
-            return None
-        windows = [segments.turn_off]
-        if self._loss_fit_include_turn_on:
-            windows.append(segments.turn_on)
-        n = len(raw_arr)
-        for i0, i1 in windows:
-            lo = max(0, min(n, int(i0)))
-            hi = max(0, min(n, int(i1)))
-            if hi <= lo:
-                continue
-            window = raw_arr[lo:hi]
-            valid = np.flatnonzero(np.isfinite(window))
-            if len(valid):
-                return float(window[int(valid[0])])
-        return None
-
-    def _loss_math_anchor_raw_value(self, key: str) -> float | None:
-        if not (_is_math_trace_key(key) and self._unit_for_channel(key) == "J"):
-            return None
-        raw = self._trace_raw.get(key)
-        t_us = self._trace_t_us
-        if raw is None or t_us is None:
-            return None
-        n = min(len(raw), len(t_us))
-        if n <= 0:
-            return None
-        t_arr = np.asarray(t_us[:n], dtype=np.float64)
-        raw_arr = np.asarray(raw[:n], dtype=np.float64)
-        anchor = self._loss_math_window_anchor_raw_value(raw_arr)
-        if anchor is not None:
-            return anchor
-        return self._loss_math_visible_left_raw_value(raw_arr, t_arr)
-
-    def _zero_handle_anchor_raw_value(self, key: str) -> float:
-        # 损耗积分波形的 0J 可能远离开关窗口；左侧 MATH 标识按损耗窗口锚定。
-        loss_anchor = self._loss_math_anchor_raw_value(key)
-        if loss_anchor is not None:
-            return loss_anchor
-        return 0.0
-
     def _zero_handle_display_y(self, key: str) -> float:
-        raw_value = self._zero_handle_anchor_raw_value(key)
-        scale = self._disp_scale.get(key, 1.0)
-        offset = self._disp_offset.get(key, 0.0)
-        return (raw_value / scale if scale else raw_value) + offset
-
-    def _zero_handle_offset_for_view_y(self, key: str, view_y: float) -> float:
-        raw_value = self._zero_handle_anchor_raw_value(key)
-        scale = self._disp_scale.get(key, 1.0)
-        return float(view_y) - (raw_value / scale if scale else raw_value)
+        return float(self._to_disp(key, 0.0))
 
     def _update_zero_handle_positions(self) -> None:
         if not self._zero_handles:
@@ -3729,8 +3740,15 @@ class WaveformPlot(QWidget):
             highlighted = (
                 key not in self._hidden_channels and key == self._highlighted_key
             )
+            raised = key not in self._hidden_channels and key == self._raised_key
+            dimmed = (
+                key not in self._hidden_channels
+                and self._highlighted_key is not None
+                and not highlighted
+            )
             handle.set_highlighted(highlighted)
-            handle.setZValue(120 if highlighted else 100)
+            handle.set_dimmed(dimmed)
+            handle.setZValue(120 if (highlighted or raised) else 100)
 
     def _on_legend_clicked(self, key: str) -> None:
         if key not in self._trace_items or key in self._hidden_channels:

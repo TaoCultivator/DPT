@@ -170,6 +170,29 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn(("settings", "CH2"), events)
         box.close()
 
+    def test_zero_handle_shows_math_label_and_uses_press_feedback(self):
+        from PyQt6.QtCore import Qt
+
+        from dpt_extractor.gui.waveform_plot import ChannelZeroHandle
+
+        plot = self._make_synthetic_plot()
+        handle = plot._zero_handles["MATH1"]
+
+        self.assertEqual(plot._zero_handle_display_label("CH1"), "C1")
+        self.assertEqual(handle._label, "M1")
+        self.assertEqual(handle._px_len, ChannelZeroHandle._PX_LEN)
+        self.assertEqual(handle._px_h, ChannelZeroHandle._PX_H)
+        self.assertEqual(handle.cursor().shape(), Qt.CursorShape.ArrowCursor)
+
+        base = handle._current_fill_color()
+        handle._set_pressed(True)
+        pressed = handle._current_fill_color()
+        self.assertLess(pressed.lightness(), base.lightness())
+        handle._set_pressed(False)
+        restored = handle._current_fill_color()
+        self.assertEqual(restored.name(), base.name())
+        self.assertEqual(restored.alpha(), base.alpha())
+
     def test_pyqtgraph_auto_buttons_are_hidden(self):
         plot = self._make_synthetic_plot()
         self.assertTrue(plot.plot.getPlotItem().buttonsHidden)
@@ -1482,7 +1505,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertAlmostEqual(panel._vdiv_spin.value(), 0.05)
         panel.close()
 
-    def test_computed_math_respects_tss_setup_vdiv_when_present(self):
+    def test_computed_non_loss_math_respects_tss_setup_vdiv_when_present(self):
         import numpy as np
 
         from dpt_extractor.gui.waveform_plot import WaveformPlot
@@ -1509,7 +1532,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 meta=TekMetadata(
                     source_path="/fake/computed_math.tss",
                     channel_vdiv={"MATH2": 0.05},
-                    channel_math_formulas={"MATH2": "INTG(CH2*MATH1)"},
+                    channel_math_formulas={"MATH2": "CH2+CH3"},
                     computed_math_channels={"MATH2"},
                 ),
             ),
@@ -1519,6 +1542,57 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         self.assertAlmostEqual(plot._manual_vdiv["MATH2"], 0.05)
         self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.05)
+
+    def test_computed_loss_math_ignores_stale_tss_vdiv_and_fits_full_waveform(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import DISP_HALF_DIV, WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult, SegmentIndices
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        loss = np.linspace(-0.001, 0.136, n)
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels={
+                    "CH1": np.zeros(n),
+                    "CH2": np.ones(n),
+                    "CH3": np.ones(n),
+                    "CH4": np.zeros(n),
+                    "CH5": np.zeros(n),
+                    "CH6": np.zeros(n),
+                    "MATH2": loss,
+                },
+                meta=TekMetadata(
+                    source_path="/fake/computed_loss_stale_vdiv.tss",
+                    channel_vdiv={"MATH2": 0.01},
+                    channel_math_formulas={"MATH2": "INTG(CH2*MATH1)"},
+                    computed_math_channels={"MATH2"},
+                ),
+            ),
+            profile,
+            ExtractResult(
+                segments=SegmentIndices(
+                    turn_off=(10, 30),
+                    turn_on=(70, 90),
+                    reverse_recovery=(70, 90),
+                    pulse1_off=20,
+                    pulse2_on=80,
+                )
+            ),
+        )
+
+        self.assertNotIn("MATH2", plot._manual_vdiv)
+        self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.02)
+        full_y = loss / plot._disp_scale["MATH2"] + plot._disp_offset["MATH2"]
+        self.assertGreaterEqual(float(np.nanmin(full_y)), -DISP_HALF_DIV)
+        self.assertLessEqual(float(np.nanmax(full_y)), DISP_HALF_DIV)
+        self.assertLessEqual(float(np.nanmax(np.abs(full_y))), 4.05)
 
     def test_math_without_tss_vdiv_auto_uses_math_fit_ladder(self):
         import numpy as np
@@ -1675,7 +1749,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertGreaterEqual(visible_high_mj, 440.0)
         self.assertLessEqual(visible_high_mj, 460.0)
 
-    def test_loss_math_zero_handles_align_to_switching_window_start(self):
+    def test_loss_math_zero_handles_keep_zero_reference(self):
         import numpy as np
 
         from dpt_extractor.gui.waveform_plot import WaveformPlot
@@ -1726,15 +1800,11 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot._update_zero_handle_positions()
         vb = plot.plot.getPlotItem().getViewBox()
 
-        for key, raw in (("MATH2", loss2), ("MATH3", loss3)):
-            expected_raw = float(raw[10])
-            expected_y = (
-                expected_raw / plot._disp_scale[key] + plot._disp_offset[key]
-            )
+        for key in ("MATH2", "MATH3"):
+            expected_y = plot._to_disp(key, 0.0)
             self.assertAlmostEqual(plot._zero_handle_display_y(key), expected_y, places=6)
             handle_y = float(vb.mapSceneToView(plot._zero_handles[key].scenePos()).y())
             self.assertAlmostEqual(handle_y, expected_y, places=6)
-            self.assertNotAlmostEqual(expected_y, plot._to_disp(key, 0.0), places=3)
 
     def test_selected_channel_updates_physical_y_axis(self):
         plot = self._make_synthetic_plot()
@@ -2137,6 +2207,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertIsNone(plot._highlighted_key)
         self.assertEqual(plot._trace_items["CH1"].zValue(), 20)
         self.assertEqual(plot._trace_items["CH2"].zValue(), 0)
+        self.assertEqual(plot._zero_handles["CH1"].zValue(), 120)
+        self.assertEqual(plot._zero_handles["CH2"].zValue(), 100)
         y_after = vb.viewRange()[1]
         self.assertAlmostEqual(y_before[0], y_after[0], places=3)
         self.assertAlmostEqual(y_before[1], y_after[1], places=3)
@@ -2146,9 +2218,19 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertEqual(plot._raised_key, "CH1")
         self.assertEqual(plot._highlighted_key, "CH1")
         self.assertEqual(plot._trace_items["CH1"].zValue(), 20)
+        selected_pen = plot._trace_items["CH1"].opts["pen"]
+        dimmed_pen = plot._trace_items["CH2"].opts["pen"]
+        self.assertEqual(selected_pen.color().alpha(), 255)
+        self.assertLess(dimmed_pen.color().alpha(), selected_pen.color().alpha())
+        self.assertTrue(plot._zero_handles["CH1"]._highlighted)
+        self.assertFalse(plot._zero_handles["CH1"]._dimmed)
+        self.assertTrue(plot._zero_handles["CH2"]._dimmed)
         plot._on_legend_double_clicked("CH1")
         self.assertIsNone(plot._highlighted_key)
         self.assertEqual(plot._trace_items["CH1"].zValue(), 20)
+        self.assertEqual(plot._zero_handles["CH1"].zValue(), 120)
+        self.assertFalse(any(h._highlighted for h in plot._zero_handles.values()))
+        self.assertFalse(any(h._dimmed for h in plot._zero_handles.values()))
 
     def test_channel_visibility_toggle(self):
         plot, _, _, _ = self._load_and_plot(WH)
