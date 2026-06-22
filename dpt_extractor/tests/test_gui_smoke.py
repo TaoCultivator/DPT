@@ -177,6 +177,41 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn(("settings", "CH2"), events)
         box.close()
 
+    def test_channel_bar_uses_arrow_buttons_instead_of_scrollbar(self):
+        from PyQt6.QtCore import Qt
+
+        plot = self._make_synthetic_plot()
+        plot.resize(520, 520)
+        plot.show()
+        self.app.processEvents()
+        plot._sync_channel_bar_width()
+        self.app.processEvents()
+
+        bar = plot._channel_scroll.horizontalScrollBar()
+        self.assertEqual(
+            plot._channel_scroll.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        self.assertTrue(plot._channel_nav_left_btn.isVisible())
+        self.assertTrue(plot._channel_nav_right_btn.isVisible())
+        self.assertFalse(plot._channel_nav_left_btn.isEnabled())
+        self.assertTrue(plot._channel_nav_right_btn.isEnabled())
+
+        start = bar.value()
+        plot._channel_nav_right_btn.click()
+        self.app.processEvents()
+        self.assertGreater(bar.value(), start)
+        self.assertTrue(plot._channel_nav_left_btn.isEnabled())
+
+        plot.resize(1600, 520)
+        self.app.processEvents()
+        plot._sync_channel_bar_width()
+        self.app.processEvents()
+        self.assertFalse(plot._channel_nav_left_btn.isVisible())
+        self.assertFalse(plot._channel_nav_right_btn.isVisible())
+        self.assertEqual(bar.value(), bar.minimum())
+        plot.close()
+
     def test_zero_handle_shows_math_label_and_uses_press_feedback(self):
         from PyQt6.QtCore import Qt
 

@@ -1500,7 +1500,37 @@ class WaveformPlot(QWidget):
         self._zoom_toggle_btn.clicked.connect(self._toggle_zoom_preview)
         self._zoom_toggle_btn.hide()
 
-        # ---- 底部通道盒（横向滚动，窄屏不挤出）----
+        # ---- 底部通道盒（隐藏滚动条，左右箭头平移）----
+        self._channel_strip = QFrame()
+        self._channel_strip.setObjectName("channelStrip")
+        self._channel_strip.setFixedHeight(68)
+        self._channel_strip.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        channel_strip_layout = QHBoxLayout(self._channel_strip)
+        channel_strip_layout.setContentsMargins(2, 2, 2, 2)
+        channel_strip_layout.setSpacing(0)
+
+        self._channel_nav_left_btn = QPushButton("‹")
+        self._channel_nav_right_btn = QPushButton("›")
+        for btn in (self._channel_nav_left_btn, self._channel_nav_right_btn):
+            btn.setFixedSize(28, 60)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setVisible(False)
+            btn.setStyleSheet(
+                "QPushButton{background:#171924;color:#cdd6f4;"
+                "border:1px solid #46525a;border-radius:3px;"
+                "font-size:30px;font-weight:700;padding:0;}"
+                "QPushButton:hover{background:#273044;color:#ffffff;}"
+                "QPushButton:disabled{color:#5e6678;background:#11131c;}"
+            )
+        self._channel_nav_left_btn.clicked.connect(
+            lambda: self._scroll_channel_bar(-1)
+        )
+        self._channel_nav_right_btn.clicked.connect(
+            lambda: self._scroll_channel_bar(1)
+        )
+
         self._channel_bar = QWidget()
         self._channel_layout = QHBoxLayout(self._channel_bar)
         self._channel_layout.setContentsMargins(6, 5, 6, 5)
@@ -1509,7 +1539,7 @@ class WaveformPlot(QWidget):
         self._channel_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._channel_scroll.setWidgetResizable(False)
         self._channel_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self._channel_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -1520,13 +1550,26 @@ class WaveformPlot(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._channel_scroll.setStyleSheet(
-            "QScrollArea { background-color: #10111a;"
+            "QScrollArea { background-color: #10111a; border: none; }"
+        )
+        self._channel_strip.setStyleSheet(
+            "QFrame#channelStrip { background-color: #10111a;"
             "border: 2px solid #46525a; border-radius: 4px; }"
         )
         self._channel_bar.setStyleSheet("background-color: #10111a;")
         self._channel_scroll.setWidget(self._channel_bar)
-        layout.addWidget(self._channel_scroll)
+        channel_strip_layout.addWidget(self._channel_nav_left_btn)
+        channel_strip_layout.addWidget(self._channel_scroll, stretch=1)
+        channel_strip_layout.addWidget(self._channel_nav_right_btn)
+        self._channel_scroll.horizontalScrollBar().rangeChanged.connect(
+            lambda _min, _max: self._sync_channel_nav_buttons()
+        )
+        self._channel_scroll.horizontalScrollBar().valueChanged.connect(
+            lambda _value: self._sync_channel_nav_buttons()
+        )
+        layout.addWidget(self._channel_strip)
         self._channel_boxes: dict[str, ChannelBox] = {}
+        self._channel_content_width = 0
 
         # 持久光标
         self._cursor_a: pg.InfiniteLine | None = None
@@ -5303,7 +5346,47 @@ class WaveformPlot(QWidget):
         )
         view_w = max(120, self._channel_scroll.viewport().width())
         bar_h = max(62, self._channel_bar.sizeHint().height())
+        self._channel_content_width = content_w
         self._channel_bar.setFixedSize(max(content_w, view_w), bar_h)
+        self._sync_channel_nav_buttons()
+
+    def _channel_nav_overflow(self) -> bool:
+        if not hasattr(self, "_channel_strip"):
+            return False
+        content_w = int(getattr(self, "_channel_content_width", 0))
+        if content_w <= 0:
+            content_w = int(self._channel_bar.sizeHint().width() + 12)
+        available_w = max(120, int(self._channel_strip.width()) - 4)
+        return content_w > available_w
+
+    def _sync_channel_nav_buttons(self) -> None:
+        if not hasattr(self, "_channel_nav_left_btn"):
+            return
+        overflow = self._channel_nav_overflow()
+        was_left_visible = self._channel_nav_left_btn.isVisible()
+        was_right_visible = self._channel_nav_right_btn.isVisible()
+        self._channel_nav_left_btn.setVisible(overflow)
+        self._channel_nav_right_btn.setVisible(overflow)
+        bar = self._channel_scroll.horizontalScrollBar()
+        if not overflow:
+            if bar.value() != bar.minimum():
+                bar.setValue(bar.minimum())
+            self._channel_nav_left_btn.setEnabled(False)
+            self._channel_nav_right_btn.setEnabled(False)
+        else:
+            self._channel_nav_left_btn.setEnabled(bar.value() > bar.minimum())
+            self._channel_nav_right_btn.setEnabled(bar.value() < bar.maximum())
+        if (
+            was_left_visible != self._channel_nav_left_btn.isVisible()
+            or was_right_visible != self._channel_nav_right_btn.isVisible()
+        ):
+            QTimer.singleShot(0, self._sync_channel_bar_width)
+
+    def _scroll_channel_bar(self, direction: int) -> None:
+        bar = self._channel_scroll.horizontalScrollBar()
+        step = max(120, int(self._channel_scroll.viewport().width() * 0.6))
+        bar.setValue(bar.value() + int(direction) * step)
+        self._sync_channel_nav_buttons()
 
     def _set_readout_text(self, txt: str) -> None:
         self._readout_label.setText(txt)
