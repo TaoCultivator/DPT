@@ -2795,8 +2795,12 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         both_a = plot._cursor_a_t_label.textItem.toPlainText()
         both_delta = plot._cursor_ab_delta_label.textItem.toPlainText()
         both_h_delta = plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+        both_ha = plot._cursor_ha_v_label.textItem.toPlainText()
+        both_hb = plot._cursor_hb_v_label.textItem.toPlainText()
         self.assertIn("t:", both_a)
         self.assertNotIn("\n", both_a)
+        self.assertIn("Ha:", both_ha)
+        self.assertIn("Hb:", both_hb)
         self.assertIn("Δ t:", both_delta)
         self.assertIn("1 / Δ t:", both_delta)
         self.assertNotIn("Δ a:", both_delta)
@@ -2824,6 +2828,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         from dpt_extractor.gui.waveform_plot import (
             CURSOR_READOUT_BOTTOM_TICK_GUARD_PX,
+            CURSOR_READOUT_CURSOR_GAP_PX,
             CURSOR_READOUT_EDGE_INSET_PX,
         )
 
@@ -2834,6 +2839,10 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         assert plot._h_cursor_a is not None
         assert plot._h_cursor_b is not None
+        assert plot._cursor_a is not None
+        assert plot._cursor_b is not None
+        plot._cursor_a.setPos(0.50)
+        plot._cursor_b.setPos(0.51)
         plot._h_cursor_a.setPos(0.0)
         plot._h_cursor_b.setPos(-1.5)
         plot._set_cursor_type("both")
@@ -2853,6 +2862,21 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertAlmostEqual(
             float(plot._cursor_b_t_label.scenePos().y()), bottom_y, delta=1.0
         )
+        a_line_x = plot._cursor_readout_scene_x(float(plot._cursor_a.value()))
+        b_line_x = plot._cursor_readout_scene_x(float(plot._cursor_b.value()))
+        self.assertLess(a_line_x, b_line_x)
+        self.assertAlmostEqual(float(plot._cursor_a_t_label.anchor.x()), 1.0)
+        self.assertAlmostEqual(float(plot._cursor_b_t_label.anchor.x()), 0.0)
+        self.assertAlmostEqual(
+            float(plot._cursor_a_t_label.scenePos().x()),
+            a_line_x - CURSOR_READOUT_CURSOR_GAP_PX,
+            delta=1.0,
+        )
+        self.assertAlmostEqual(
+            float(plot._cursor_b_t_label.scenePos().x()),
+            b_line_x + CURSOR_READOUT_CURSOR_GAP_PX,
+            delta=1.0,
+        )
         self.assertAlmostEqual(
             float(plot._cursor_ha_v_label.scenePos().y()), top_y, delta=1.0
         )
@@ -2862,6 +2886,26 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             20.0,
         )
 
+        plot._cursor_a.setPos(0.80)
+        plot._cursor_b.setPos(0.20)
+        plot._update_readout()
+        self.app.processEvents()
+        a_line_x = plot._cursor_readout_scene_x(float(plot._cursor_a.value()))
+        b_line_x = plot._cursor_readout_scene_x(float(plot._cursor_b.value()))
+        self.assertGreater(a_line_x, b_line_x)
+        self.assertAlmostEqual(float(plot._cursor_a_t_label.anchor.x()), 0.0)
+        self.assertAlmostEqual(float(plot._cursor_b_t_label.anchor.x()), 1.0)
+        self.assertAlmostEqual(
+            float(plot._cursor_a_t_label.scenePos().x()),
+            a_line_x + CURSOR_READOUT_CURSOR_GAP_PX,
+            delta=1.0,
+        )
+        self.assertAlmostEqual(
+            float(plot._cursor_b_t_label.scenePos().x()),
+            b_line_x - CURSOR_READOUT_CURSOR_GAP_PX,
+            delta=1.0,
+        )
+
         plot._set_cursor_type("horizontal")
         self.app.processEvents()
         self.assertAlmostEqual(
@@ -2869,6 +2913,86 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             bottom_y,
             delta=1.0,
         )
+        plot.close()
+
+    def test_waveform_cursor_readout_avoids_intersection_marker(self):
+        from PyQt6.QtCore import QPointF, QRectF
+
+        from dpt_extractor.gui.waveform_plot import CURSOR_READOUT_MARKER_GUARD_PX
+
+        plot = self._make_synthetic_plot()
+        plot.resize(900, 520)
+        plot.show()
+        self.app.processEvents()
+
+        assert plot._cursor_a is not None
+        assert plot._cursor_b is not None
+        plot._set_cursor_type("waveform")
+        plot._cursor_a.setPos(0.50)
+        plot._cursor_b.setPos(0.51)
+        plot._update_readout()
+        self.app.processEvents()
+
+        assert plot._cursor_a_wave_marker is not None
+        assert plot._cursor_a_t_label is not None
+        a_us = float(plot._cursor_a.value())
+        b_us = float(plot._cursor_b.value())
+        a_line_x = plot._cursor_readout_scene_x(a_us)
+        label_rect = plot._cursor_text_scene_rect(plot._cursor_a_t_label)
+        marker_scene = QPointF(a_line_x, float(label_rect.center().y()))
+        marker_view = plot.plot.getPlotItem().getViewBox().mapSceneToView(marker_scene)
+
+        plot._cursor_a_wave_marker.setData([a_us], [float(marker_view.y())])
+        plot._cursor_a_wave_marker.show()
+        plot._position_v_cursor_plot_labels(a_us, b_us)
+
+        guard = QRectF(
+            float(marker_scene.x()) - CURSOR_READOUT_MARKER_GUARD_PX,
+            float(marker_scene.y()) - CURSOR_READOUT_MARKER_GUARD_PX,
+            CURSOR_READOUT_MARKER_GUARD_PX * 2.0,
+            CURSOR_READOUT_MARKER_GUARD_PX * 2.0,
+        )
+        moved_rect = plot._cursor_text_scene_rect(plot._cursor_a_t_label)
+        self.assertFalse(moved_rect.intersects(guard))
+        self.assertGreaterEqual(
+            float(plot._cursor_a_t_label.scenePos().y()),
+            float(guard.bottom()),
+        )
+        plot.close()
+
+    def test_cursor_readout_labels_avoid_each_other(self):
+        from dpt_extractor.gui.waveform_plot import CURSOR_READOUT_LABEL_GUARD_PX
+
+        plot = self._make_synthetic_plot()
+        plot.resize(900, 520)
+        plot.show()
+        self.app.processEvents()
+
+        plot._set_cursor_type("vertical")
+        assert plot._cursor_a_t_label is not None
+        assert plot._cursor_b_t_label is not None
+        plot._cursor_b_t_label.setPos(plot._cursor_a_t_label.scenePos())
+        before_a = plot._padded_scene_rect(
+            plot._cursor_text_scene_rect(plot._cursor_a_t_label),
+            CURSOR_READOUT_LABEL_GUARD_PX,
+        )
+        before_b = plot._padded_scene_rect(
+            plot._cursor_text_scene_rect(plot._cursor_b_t_label),
+            CURSOR_READOUT_LABEL_GUARD_PX,
+        )
+        self.assertTrue(before_a.intersects(before_b))
+
+        plot._avoid_cursor_label_overlaps()
+
+        after_a = plot._padded_scene_rect(
+            plot._cursor_text_scene_rect(plot._cursor_a_t_label),
+            CURSOR_READOUT_LABEL_GUARD_PX,
+        )
+        after_b = plot._padded_scene_rect(
+            plot._cursor_text_scene_rect(plot._cursor_b_t_label),
+            CURSOR_READOUT_LABEL_GUARD_PX,
+        )
+        self.assertFalse(after_a.intersects(after_b))
         plot.close()
 
     def test_waveform_cursor_markers_survive_replot(self):

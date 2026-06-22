@@ -641,6 +641,9 @@ CURSOR_READOUT_EDGE_INSET_PX = 8.0
 CURSOR_READOUT_BOTTOM_TICK_GUARD_PX = 28.0
 CURSOR_READOUT_STACK_GAP_PX = 5.0
 CURSOR_READOUT_MIN_ROW_PX = 22.0
+CURSOR_READOUT_CURSOR_GAP_PX = 4.0
+CURSOR_READOUT_MARKER_GUARD_PX = 14.0
+CURSOR_READOUT_LABEL_GUARD_PX = 4.0
 
 # 每通道独立垂直刻度（示波器 V/div 风格）：显示坐标 = 原始值 / (单位每格)
 DISP_HALF_DIV = 5.0  # 纵向显示半高（格），总高 10 格（同示波器）
@@ -4711,6 +4714,116 @@ class WaveformPlot(QWidget):
             h = 0.0
         return max(CURSOR_READOUT_MIN_ROW_PX, h)
 
+    def _cursor_marker_scene_point(self, end: str) -> QPointF | None:
+        marker = (
+            self._cursor_a_wave_marker
+            if end == "a"
+            else self._cursor_b_wave_marker
+            if end == "b"
+            else None
+        )
+        if marker is None or not marker.isVisible():
+            return None
+        try:
+            xs, ys = marker.getData()
+            x_arr = np.asarray(xs, dtype=float).ravel()
+            y_arr = np.asarray(ys, dtype=float).ravel()
+            if x_arr.size == 0 or y_arr.size == 0:
+                return None
+            x = float(x_arr[0])
+            y = float(y_arr[0])
+        except Exception:
+            return None
+        if not (np.isfinite(x) and np.isfinite(y)):
+            return None
+        vb = self.plot.getPlotItem().getViewBox()
+        return vb.mapViewToScene(QPointF(x, y))
+
+    @staticmethod
+    def _cursor_text_scene_rect(item: pg.TextItem) -> QRectF:
+        return item.mapRectToScene(item.boundingRect())
+
+    @staticmethod
+    def _padded_scene_rect(rect: QRectF, padding: float) -> QRectF:
+        return QRectF(
+            float(rect.left()) - padding,
+            float(rect.top()) - padding,
+            float(rect.width()) + padding * 2.0,
+            float(rect.height()) + padding * 2.0,
+        )
+
+    def _visible_cursor_readout_items(self) -> list[pg.TextItem]:
+        items: list[pg.TextItem] = []
+        for attr in (
+            "_cursor_ha_v_label",
+            "_cursor_hb_v_label",
+            "_cursor_hb_ha_delta_label",
+            "_cursor_ab_delta_label",
+            "_cursor_a_t_label",
+            "_cursor_b_t_label",
+        ):
+            item = getattr(self, attr, None)
+            if item is not None and item.isVisible():
+                items.append(item)
+        return items
+
+    def _move_cursor_label_to_scene_top(
+        self, item: pg.TextItem, top_y: float
+    ) -> None:
+        current = self._cursor_text_scene_rect(item)
+        item.setPos(
+            QPointF(
+                float(item.scenePos().x()),
+                float(item.scenePos().y()) + top_y - float(current.top()),
+            )
+        )
+
+    def _avoid_cursor_label_overlaps(self) -> None:
+        scene_rect = self._cursor_readout_scene_rect()
+        top_limit = float(scene_rect.top()) + CURSOR_READOUT_EDGE_INSET_PX
+        bottom_limit = float(scene_rect.bottom()) - CURSOR_READOUT_EDGE_INSET_PX
+        placed: list[QRectF] = []
+        for end in ("a", "b"):
+            point = self._cursor_marker_scene_point(end)
+            if point is not None:
+                placed.append(
+                    QRectF(
+                        float(point.x()) - CURSOR_READOUT_MARKER_GUARD_PX,
+                        float(point.y()) - CURSOR_READOUT_MARKER_GUARD_PX,
+                        CURSOR_READOUT_MARKER_GUARD_PX * 2.0,
+                        CURSOR_READOUT_MARKER_GUARD_PX * 2.0,
+                    )
+                )
+        for item in self._visible_cursor_readout_items():
+            for _ in range(6):
+                current = self._padded_scene_rect(
+                    self._cursor_text_scene_rect(item),
+                    CURSOR_READOUT_LABEL_GUARD_PX,
+                )
+                blocker = next(
+                    (rect for rect in placed if current.intersects(rect)),
+                    None,
+                )
+                if blocker is None:
+                    break
+                raw_current = self._cursor_text_scene_rect(item)
+                target_top = float(blocker.bottom()) + CURSOR_READOUT_STACK_GAP_PX
+                if target_top + float(raw_current.height()) > bottom_limit:
+                    target_top = (
+                        float(blocker.top())
+                        - CURSOR_READOUT_STACK_GAP_PX
+                        - float(raw_current.height())
+                    )
+                max_top = bottom_limit - float(raw_current.height())
+                target_top = max(top_limit, min(max_top, target_top))
+                self._move_cursor_label_to_scene_top(item, target_top)
+            placed.append(
+                self._padded_scene_rect(
+                    self._cursor_text_scene_rect(item),
+                    CURSOR_READOUT_LABEL_GUARD_PX,
+                )
+            )
+
     def _plot_label_x_left_edge(self) -> float:
         """横向光标读数框：贴在当前视图最左侧，避免压在波形中间。"""
         vb = self.plot.getPlotItem().getViewBox()
@@ -4734,10 +4847,9 @@ class WaveformPlot(QWidget):
     ) -> tuple[str, str, str | None]:
         """返回 Ha/Hb 单点 HTML 与 Δ/Δt 浮动框 HTML（示波器风格）。"""
 
-        def _level_html(val: float, unit: str, color: str) -> str:
-            sym = self._scope_wave_letter(unit)
+        def _level_html(name: str, val: float, unit: str, color: str) -> str:
             return self._cursor_plot_label_html(
-                f"{sym}: {self._scope_quantity_text(val, unit)}", color
+                f"{name}: {self._scope_quantity_text(val, unit)}", color
             )
 
         def _delta_html(dv: float, unit: str) -> str:
@@ -4762,8 +4874,8 @@ class WaveformPlot(QWidget):
                 hb_val = abs(hb_val)
             u_ha = self._unit_for_channel(ha_ch)
             u_hb = self._unit_for_channel(hb_ch)
-            ha_html = _level_html(ha_val, u_ha, CURSOR_PEN_A)
-            hb_html = _level_html(hb_val, u_hb, CURSOR_PEN_B)
+            ha_html = _level_html("Ha", ha_val, u_ha, CURSOR_PEN_A)
+            hb_html = _level_html("Hb", hb_val, u_hb, CURSOR_PEN_B)
             if ha_ch != hb_ch or u_ha != u_hb:
                 return ha_html, hb_html, None
             return ha_html, hb_html, _delta_html(hb_val - ha_val, u_ha)
@@ -4775,8 +4887,8 @@ class WaveformPlot(QWidget):
         if ch == "irr":
             ha_val = abs(ha_val)
             hb_val = abs(hb_val)
-        ha_html = _level_html(ha_val, unit, CURSOR_PEN_A)
-        hb_html = _level_html(hb_val, unit, CURSOR_PEN_B)
+        ha_html = _level_html("Ha", ha_val, unit, CURSOR_PEN_A)
+        hb_html = _level_html("Hb", hb_val, unit, CURSOR_PEN_B)
         return ha_html, hb_html, _delta_html(hb_val - ha_val, unit)
 
     def _remove_cursor_plot_labels(self) -> None:
@@ -4849,17 +4961,60 @@ class WaveformPlot(QWidget):
             return
         y_bottom = self._cursor_readout_bottom_scene_y()
         y_top = self._cursor_readout_top_scene_y()
-        self._cursor_a_t_label.setAnchor((0.5, 1.0))
-        self._cursor_b_t_label.setAnchor((0.5, 1.0))
+        a_x = self._cursor_readout_scene_x(a_us)
+        b_x = self._cursor_readout_scene_x(b_us)
+        if a_x <= b_x:
+            self._cursor_a_t_label.setAnchor((1.0, 1.0))
+            self._cursor_b_t_label.setAnchor((0.0, 1.0))
+            a_label_x = a_x - CURSOR_READOUT_CURSOR_GAP_PX
+            b_label_x = b_x + CURSOR_READOUT_CURSOR_GAP_PX
+        else:
+            self._cursor_a_t_label.setAnchor((0.0, 1.0))
+            self._cursor_b_t_label.setAnchor((1.0, 1.0))
+            a_label_x = a_x + CURSOR_READOUT_CURSOR_GAP_PX
+            b_label_x = b_x - CURSOR_READOUT_CURSOR_GAP_PX
         self._cursor_ab_delta_label.setAnchor((0.5, 0.0))
-        self._cursor_a_t_label.setPos(
-            QPointF(self._cursor_readout_scene_x(a_us), y_bottom)
-        )
-        self._cursor_b_t_label.setPos(
-            QPointF(self._cursor_readout_scene_x(b_us), y_bottom)
-        )
+        self._cursor_a_t_label.setPos(QPointF(a_label_x, y_bottom))
+        self._cursor_b_t_label.setPos(QPointF(b_label_x, y_bottom))
         self._cursor_ab_delta_label.setPos(
             QPointF(self._cursor_readout_scene_x(0.5 * (a_us + b_us)), y_top)
+        )
+        self._avoid_v_cursor_marker_overlap(
+            self._cursor_a_t_label,
+            "a",
+            a_label_x,
+            anchor_x=float(self._cursor_a_t_label.anchor.x()),
+        )
+        self._avoid_v_cursor_marker_overlap(
+            self._cursor_b_t_label,
+            "b",
+            b_label_x,
+            anchor_x=float(self._cursor_b_t_label.anchor.x()),
+        )
+
+    def _avoid_v_cursor_marker_overlap(
+        self, item: pg.TextItem, end: str, label_x: float, *, anchor_x: float
+    ) -> None:
+        point = self._cursor_marker_scene_point(end)
+        if point is None:
+            return
+        guard = QRectF(
+            float(point.x()) - CURSOR_READOUT_MARKER_GUARD_PX,
+            float(point.y()) - CURSOR_READOUT_MARKER_GUARD_PX,
+            CURSOR_READOUT_MARKER_GUARD_PX * 2.0,
+            CURSOR_READOUT_MARKER_GUARD_PX * 2.0,
+        )
+        if not self._cursor_text_scene_rect(item).intersects(guard):
+            return
+        item.setAnchor((anchor_x, 0.0))
+        item.setPos(
+            QPointF(label_x, float(guard.bottom()) + CURSOR_READOUT_STACK_GAP_PX)
+        )
+        if not self._cursor_text_scene_rect(item).intersects(guard):
+            return
+        item.setAnchor((anchor_x, 1.0))
+        item.setPos(
+            QPointF(label_x, float(guard.top()) - CURSOR_READOUT_STACK_GAP_PX)
         )
 
     def _update_v_cursor_plot_labels(self, a_us: float, b_us: float) -> None:
@@ -4903,11 +5058,11 @@ class WaveformPlot(QWidget):
                 self._cursor_ab_delta_label.setHtml(
                     self._cursor_plot_label_html(delta_text, "#CDD6F4")
                 )
+                self._update_waveform_cursor_markers()
                 self._position_v_cursor_plot_labels(a_us, b_us)
                 self._cursor_a_t_label.show()
                 self._cursor_b_t_label.show()
                 self._cursor_ab_delta_label.show()
-                self._update_waveform_cursor_markers()
                 return
         ch = self._cursor_source_channel()
         unit = self._unit_for_channel(ch) if ch is not None else ""
@@ -4946,11 +5101,11 @@ class WaveformPlot(QWidget):
         )
         delta_html = self._cursor_plot_label_html(delta_text, "#CDD6F4")
         self._cursor_ab_delta_label.setHtml(delta_html)
+        self._update_waveform_cursor_markers()
         self._position_v_cursor_plot_labels(a_us, b_us)
         self._cursor_a_t_label.show()
         self._cursor_b_t_label.show()
         self._cursor_ab_delta_label.show()
-        self._update_waveform_cursor_markers()
 
     def _ensure_h_cursor_plot_labels(self) -> None:
         if self._cursor_ha_v_label is None:
@@ -5121,6 +5276,7 @@ class WaveformPlot(QWidget):
                 float(self._h_cursor_a.value()),
                 float(self._h_cursor_b.value()),
             )
+        self._avoid_cursor_label_overlaps()
         self._apply_cursor_visibility()
 
     # ------------------------------------------------------------------ 读数刷新 ----
@@ -5216,6 +5372,7 @@ class WaveformPlot(QWidget):
                     float(self._h_cursor_a.value()),
                     float(self._h_cursor_b.value()),
                 )
+            self._avoid_cursor_label_overlaps()
         self._position_zoom_toggle_button()
         self._queue_plot_geometry_sync(force_traces=True)
         self._refresh_cursor_auxiliary_guides()
@@ -5236,6 +5393,7 @@ class WaveformPlot(QWidget):
         self._update_y_ticks()
         self._update_v_cursor_plot_labels(a, b)
         self._update_h_cursor_plot_labels(a, b, ha_div, hb_div, dt_us)
+        self._avoid_cursor_label_overlaps()
         self._refresh_cursor_auxiliary_guides()
         if abs(dt_us) > 1e-9:
             freq_khz = 1e3 / abs(dt_us)
