@@ -146,6 +146,17 @@ class TestTssParser(unittest.TestCase):
             ":HORIZONTAL:SCALE 3.0000E-6;"
             ":HORIZONTAL:POSITION 13.2000;"
             ":HORIZONTAL:DELAY:TIME 0.0E+0;"
+            ":MEASUREMENT:MEAS1:STATE 1;"
+            ":MEASUREMENT:MEAS1:SOURCE CH1;"
+            ":MEASUREMENT:MEAS1:TYPE MAXIMUM;"
+            ":MEASUREMENT:MEAS1:RANGE SCREEN;"
+            ":MEASUREMENT:MEAS2:STATE 1;"
+            ":MEASUREMENT:MEAS2:SOURCE CH3;"
+            ":MEASUREMENT:MEAS2:TYPE ACRMS;"
+            ":MEASUREMENT:MEAS2:GATING CURSOR;"
+            ":MEASUREMENT:MEAS3:STATE 0;"
+            ":MEASUREMENT:MEAS3:SOURCE CH2;"
+            ":MEASUREMENT:MEAS3:TYPE MINIMUM;"
         )
         with tempfile.TemporaryDirectory() as tmp:
             tss_path = Path(tmp) / "UH_test.tss"
@@ -188,6 +199,10 @@ class TestTssParser(unittest.TestCase):
         self.assertAlmostEqual(bundle.meta.horizontal_scale_per_div or 0.0, 3e-6)
         self.assertAlmostEqual(bundle.meta.horizontal_position_percent or 0.0, 13.2)
         self.assertAlmostEqual(bundle.meta.horizontal_delay or 0.0, 0.0)
+        self.assertEqual(
+            bundle.meta.offset_measurements,
+            [("CH1", "maximum", "screen"), ("CH3", "ac_rms", "cursor")],
+        )
 
     def test_original_math_wfm_is_not_marked_as_computed(self):
         n = 5

@@ -251,15 +251,15 @@ class TestShortCircuitTemplateLayout(unittest.TestCase):
         self.assertIsNone(ws.cell(HEADER_UNIT_ROW, COL_PHASE).value)
         self.assertIsNone(ws.cell(HEADER_UNIT_ROW, COL_TYPE).value)
         expected_temp_labels = {
-            5: "RT",
-            7: "HT",
-            9: "LT",
-            11: "RT",
-            13: "HT",
-            15: "LT",
-            17: "RT",
-            19: "HT",
-            21: "LT",
+            5: "25℃",
+            7: "150℃",
+            9: "-40℃",
+            11: "25℃",
+            13: "150℃",
+            15: "-40℃",
+            17: "25℃",
+            19: "150℃",
+            21: "-40℃",
         }
         for row in range(DATA_START_ROW, DATA_START_ROW + len(TEMPLATE_ROWS)):
             if row in expected_temp_labels:
@@ -323,7 +323,7 @@ class TestShortCircuitTemplateLayout(unittest.TestCase):
             and ws.cell(row, COL_ICMAX).value is not None
         ]
         self.assertEqual(rows, [12])
-        self.assertEqual(ws.cell(11, COL_TEMP).value, "RT")
+        self.assertEqual(ws.cell(11, COL_TEMP).value, "25℃")
         self.assertIsNone(ws.cell(rows[0], COL_TEMP).value)
         self.assertEqual(ws.cell(rows[0], COL_VDC).value, 750)
 
@@ -373,7 +373,7 @@ class TestShortCircuitExcel(unittest.TestCase):
         row = rows[0]
         self.assertGreater(float(ws.cell(row, COL_ICMAX).value), 3000.0)
         self.assertGreater(float(ws.cell(row, COL_TSC).value), 1.0)
-        self.assertEqual(ws.cell(row, COL_TEMP).value, "LT")
+        self.assertEqual(ws.cell(row, COL_TEMP).value, "-40℃")
         self.assertIsNone(ws.cell(row, COL_TYPE).value)
         self.assertEqual(ws.cell(row, COL_VDC).value, 480)
 
@@ -428,6 +428,9 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
         hb_line = win.wave_plot._from_disp("ic", float(win.wave_plot._h_cursor_b.value()))
         self.assertAlmostEqual(float(ha_line), float(ha), places=3)
         self.assertAlmostEqual(float(hb_line), float(hb), places=3)
+        self.assertIsNotNone(win.wave_plot._cursor_aux_hline)
+        assert win.wave_plot._cursor_aux_hline is not None
+        self.assertFalse(win.wave_plot._cursor_aux_hline.isVisible())
         self.assertAlmostEqual(win.result.short_circuit.tsc, t_b_us - t_a_us, places=6)
 
         win._enable_generic_parameter_interaction("短路过程", "短路时间Tsc")

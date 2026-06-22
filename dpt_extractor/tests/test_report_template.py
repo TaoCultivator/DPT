@@ -109,11 +109,88 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(summary.data_row, 5)
             self.assertEqual(summary.waveform_anchor_row, 1)
             self.assertEqual(saved["U相_双脉冲数据"].cell(5, COL_OFF["delta_vce"]).value, 123.456)
-            self.assertEqual(saved_wave.cell(1, 1).value, "UH_RT")
+            self.assertEqual(saved_wave.cell(1, 1).value, "UH_25℃")
             self.assertEqual(saved_wave.cell(18, 1).value, "750V_805A")
             self.assertEqual(saved_wave.cell(35, 1).value, "总概览图")
             self.assertLess(saved_wave.column_dimensions["J"].width, 13)
             self.assertEqual(len(saved_wave._images), 1)
+
+    def test_dpt_template_uses_current_temperature_label(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "RT"
+            wave = wb.create_sheet("U相_双脉冲波形")
+            wave.merge_cells(start_row=1, start_column=1, end_row=17, end_column=8)
+            wave.cell(1, 1, "UH_RT")
+            wave.merge_cells(start_row=18, start_column=1, end_row=34, end_column=8)
+            wave.cell(18, 1, "750V_1050A")
+            wave.merge_cells(start_row=35, start_column=1, end_row=51, end_column=8)
+            wave.cell(35, 1, "总概览图")
+            wb.save(report)
+
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
+                    profile_code="UH",
+                ),
+                report,
+                temperature_labels={"RT": "26.5℃", "HT": "175℃", "LT": "-55℃"},
+            )
+
+            saved = load_workbook(report)
+            self.assertEqual(saved["U相_双脉冲数据"].cell(5, 2).value, "26.5℃")
+            self.assertEqual(saved["U相_双脉冲波形"].cell(1, 1).value, "UH_26.5℃")
+
+    def test_dpt_write_normalizes_short_picture_temperature_labels(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            wave = wb.create_sheet("U相_双脉冲波形")
+            wave.merge_cells(start_row=1, start_column=1, end_row=17, end_column=8)
+            wave.cell(1, 1, "UH_RT")
+            wave.merge_cells(start_row=18, start_column=1, end_row=34, end_column=8)
+            wave.cell(18, 1, "750V_1050A")
+            wave.merge_cells(start_row=35, start_column=1, end_row=51, end_column=8)
+            wave.cell(35, 1, "总概览图")
+            short_pic = wb.create_sheet("短路测试图片")
+            short_pic.merge_cells("A2:E5")
+            short_pic["A2"] = "UH_RT"
+            short_pic.merge_cells("A23:E26")
+            short_pic["A23"] = "UH_HT"
+            short_pic.merge_cells("A44:E47")
+            short_pic["A44"] = "UH_LT"
+            wb.save(report)
+
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
+                    profile_code="UH",
+                ),
+                report,
+            )
+
+            saved_short = load_workbook(report)["短路测试图片"]
+            self.assertEqual(saved_short["A2"].value, "UH_25℃")
+            self.assertEqual(saved_short["A23"].value, "UH_150℃")
+            self.assertEqual(saved_short["A44"].value, "UH_-40℃")
 
     def test_dpt_template_rewrites_same_condition_in_first_waveform_block(self):
         from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_VOLTAGE
@@ -157,7 +234,7 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(summary.data_row, 5)
             self.assertEqual(summary.waveform_anchor_row, 1)
             self.assertEqual(saved["U相_双脉冲数据"].cell(5, COL_OFF["delta_vce"]).value, 1048)
-            self.assertEqual(saved["U相_双脉冲波形"].cell(1, 1).value, "UH_RT")
+            self.assertEqual(saved["U相_双脉冲波形"].cell(1, 1).value, "UH_25℃")
             self.assertEqual(saved["U相_双脉冲波形"].cell(18, 1).value, "750V_1048A")
 
     def test_dpt_template_clears_stale_duplicate_waveform_block(self):
@@ -218,7 +295,7 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved_wave = load_workbook(report)["U相_双脉冲波形"]
             self.assertEqual(summary.data_row, 6)
             self.assertEqual(summary.waveform_anchor_row, 54)
-            self.assertEqual(saved_wave.cell(54, 1).value, "UH_RT")
+            self.assertEqual(saved_wave.cell(54, 1).value, "UH_25℃")
             self.assertEqual(saved_wave.cell(71, 1).value, "750V_806A")
             self.assertIsNone(saved_wave.cell(107, 1).value)
             self.assertIsNone(saved_wave.cell(124, 1).value)
@@ -410,12 +487,12 @@ class TestReportTemplateWriter(unittest.TestCase):
 
             saved_wave = load_workbook(report)["U相_双脉冲波形"]
             self.assertEqual(anchors, [1, 54, 107, 160, 213])
-            self.assertEqual(saved_wave.cell(107, 1).value, "UH_RT")
+            self.assertEqual(saved_wave.cell(107, 1).value, "UH_25℃")
             self.assertEqual(saved_wave.cell(124, 1).value, "600V_403A")
-            self.assertEqual(saved_wave.cell(160, 1).value, "UL_RT")
+            self.assertEqual(saved_wave.cell(160, 1).value, "UL_25℃")
             self.assertEqual(saved_wave.cell(177, 1).value, "750V_1048A")
             self.assertEqual(saved_wave.cell(194, 1).value, "总概览图")
-            self.assertEqual(saved_wave.cell(213, 1).value, "UL_RT")
+            self.assertEqual(saved_wave.cell(213, 1).value, "UL_25℃")
             self.assertEqual(saved_wave.cell(230, 1).value, "750V_806A")
             self.assertIsNone(saved_wave.cell(266, 1).value)
             self.assertIsNone(saved_wave.cell(283, 1).value)
@@ -520,9 +597,9 @@ class TestReportTemplateWriter(unittest.TestCase):
                 saved.cell(8, COL_OFF["delta_vce"]).alignment.horizontal,
             )
             saved_wave = load_workbook(report)["U相_双脉冲波形"]
-            self.assertEqual(saved_wave.cell(213, 1).value, "UH_RT")
+            self.assertEqual(saved_wave.cell(213, 1).value, "UH_25℃")
             self.assertEqual(saved_wave.cell(230, 1).value, "750V_200A")
-            self.assertEqual(saved_wave.cell(266, 1).value, "UL_RT")
+            self.assertEqual(saved_wave.cell(266, 1).value, "UL_25℃")
 
     def test_dpt_template_appends_waveform_block_with_two_separator_rows(self):
         from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_VOLTAGE
@@ -565,7 +642,7 @@ class TestReportTemplateWriter(unittest.TestCase):
 
             saved_wave = load_workbook(report)["U相_双脉冲波形"]
             self.assertEqual(summary.waveform_anchor_row, 213)
-            self.assertEqual(saved_wave.cell(213, 1).value, "UH_RT")
+            self.assertEqual(saved_wave.cell(213, 1).value, "UH_25℃")
             self.assertEqual(saved_wave.cell(230, 1).value, "750V_200A")
             self.assertEqual(saved_wave.cell(247, 1).value, "总概览图")
             self.assertIsNone(saved_wave.cell(211, 1).value)
@@ -1156,13 +1233,46 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(rows_and_anchors, [(6, 12), (5, 1)])
             self.assertEqual(saved["短路测试"].cell(5, 5).value, 1111)
             self.assertEqual(saved["短路测试"].cell(6, 5).value, 2222)
-            self.assertEqual(saved["短路测试图片"].cell(1, 1).value, "UH_RT")
-            self.assertEqual(saved["短路测试图片"].cell(12, 1).value, "UL_RT")
+            self.assertEqual(saved["短路测试图片"].cell(1, 1).value, "UH_25℃")
+            self.assertEqual(saved["短路测试图片"].cell(12, 1).value, "UL_25℃")
             self.assertEqual(saved["短路测试图片"].cell(6, 1).value, "750V")
             self.assertEqual(saved["短路测试图片"].cell(6, 2).value, "1111A")
             self.assertEqual(saved["短路测试图片"].cell(17, 1).value, "750V")
             self.assertEqual(saved["短路测试图片"].cell(17, 2).value, "2222A")
             self.assertEqual(len(saved["短路测试图片"]._images), 2)
+
+    def test_short_template_uses_current_temperature_label(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "short_report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "短路测试"
+            ws.merge_cells("A5:A6")
+            ws["A5"] = "RT"
+            ws["B5"] = "UH"
+            ws["B6"] = "UL"
+            pic = wb.create_sheet("短路测试图片")
+            pic.merge_cells("A1:E4")
+            pic["A1"] = "UH_RT"
+            wb.save(report)
+
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_000.tss"),
+                    profile_code="UH",
+                    short_circuit_mode=True,
+                    short_circuit=ShortCircuitResult(ic_max=1234.0),
+                ),
+                report,
+                temperature_labels={"RT": "26.5℃", "HT": "175℃", "LT": "-55℃"},
+            )
+
+            saved = load_workbook(report)
+            self.assertEqual(saved["短路测试"].cell(5, 1).value, "26.5℃")
+            self.assertEqual(saved["短路测试图片"].cell(1, 1).value, "UH_26.5℃")
 
     def test_short_template_writes_row_and_global_image_slot(self):
         from dpt_extractor.export.report_template import write_report_template

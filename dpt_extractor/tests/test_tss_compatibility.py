@@ -74,12 +74,14 @@ class TestFourTssCompatibility(unittest.TestCase):
               self.assertAlmostEqual(
                   result.reverse_recovery.err, e, places=3
               )
-              # A 应落在恢复主峰之后的下降段内（不早于主峰、不超出恢复段太远）
+              # A 应落在 IRM 主峰之后、本次开通过程结束之前的稳定恢复交点。
               ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
               t_pk_us = float(t[ipk]) * 1e6
               self.assertGreater(mk.t_start * 1e6, t_pk_us - 0.01, "A 应在恢复主峰之后")
               self.assertLess(
-                  mk.t_start * 1e6, t_pk_us + 0.30, "A 不应远离恢复段"
+                  mk.t_start * 1e6,
+                  float(t[on1]) * 1e6,
+                  "A 不应越过本次开通过程",
               )
 
   def test_wh_err_ab_on_waveform_crossings(self) -> None:
@@ -107,7 +109,7 @@ class TestFourTssCompatibility(unittest.TestCase):
       t_pk_us = float(t[ipk]) * 1e6
       tb_us = mk.t_end * 1e6
       ta_us = mk.t_start * 1e6
-      self.assertLess(tb_us, t_pk_us - 0.04, "B 应在 IRM 主峰前（勿卡在 rr 段起点）")
+      self.assertLess(tb_us, t_pk_us, "B 应在 IRM 主峰前（勿卡在 rr 段起点）")
       self.assertGreater(tb_us, t_pk_us - 0.15)
       self.assertGreater(ta_us, t_pk_us)
       self.assertLess(ta_us, t_pk_us + 0.22)

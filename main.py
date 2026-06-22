@@ -9,6 +9,20 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+
+def _restart_with_local_venv() -> None:
+    """Run the app with the project virtual environment when available."""
+    if sys.prefix == sys.base_prefix:
+        venv_python = _ROOT / ".venv" / "Scripts" / "python.exe"
+        if venv_python.exists() and Path(sys.executable).resolve() != venv_python.resolve():
+            import os
+
+            os.execv(str(venv_python), [str(venv_python), *sys.argv])
+
+
+if __name__ == "__main__":
+    _restart_with_local_venv()
+
 from dpt_extractor.utils.text_encoding import configure_utf8_text_io
 from dpt_extractor.utils.app_paths import configure_numba_cache_dir
 

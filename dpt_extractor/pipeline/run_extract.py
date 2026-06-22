@@ -18,4 +18,6 @@ def run_extraction(
     mode = parse_test_mode(cfg.test_mode.mode)
     if mode == TestMode.SHORT_CIRCUIT:
         return extract_short_circuit(bundle, profile, cfg)
+    if mode == TestMode.OFFSET_MEASUREMENT:
+        raise ValueError("偏移测量模式不执行参数提取")
     return extract_all(bundle, profile, cfg)

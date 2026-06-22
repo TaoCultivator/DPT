@@ -25,7 +25,7 @@ class TestGroundReference(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
-    def _plot(self, sample_path: Path):
+    def _plot(self, sample_path: Path, *, with_bundle: bool = False):
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.gui.waveform_plot import WaveformPlot
         from dpt_extractor.io.waveform_loader import load_waveform
@@ -43,6 +43,8 @@ class TestGroundReference(unittest.TestCase):
         result = extract_all(bundle, profile, cfg)
         plot = WaveformPlot()
         plot.plot_waveforms(bundle, profile, result)
+        if with_bundle:
+            return plot, bundle
         return plot
 
     def test_physical_zero_maps_to_ground_offset(self):
@@ -78,12 +80,20 @@ class TestGroundReference(unittest.TestCase):
             self.assertEqual(len(x), len(y), msg=key)
             self.assertGreater(len(y), 0, msg=key)
 
-    def test_center_grid_is_waveform_mid_not_physical_zero(self):
+    def test_scope_ypos_or_center_grid_keeps_ground_reference(self):
         import numpy as np
-        from dpt_extractor.gui.waveform_plot import _raw_value_span
+        from dpt_extractor.gui.waveform_plot import DISP_HALF_DIV, _raw_value_span
 
-        plot = self._plot(SAMPLES[2])
+        plot, bundle = self._plot(SAMPLES[2], with_bundle=True)
         for key in plot._trace_items:
+            if key in bundle.meta.channel_y_position:
+                expected = max(
+                    -DISP_HALF_DIV,
+                    min(DISP_HALF_DIV, float(bundle.meta.channel_y_position[key])),
+                )
+                self.assertAlmostEqual(plot._disp_offset[key], expected, places=6)
+                self.assertAlmostEqual(plot._to_disp(key, 0.0), expected, places=6)
+                continue
             raw = plot._trace_raw[key]
             scale = plot._disp_scale[key]
             off = plot._disp_offset[key]

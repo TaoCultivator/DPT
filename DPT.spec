@@ -27,7 +27,7 @@ user_map = ROOT / "dpt_extractor" / "config" / "channel_maps_user.yaml"
 if user_map.is_file():
     datas.append((str(user_map), "dpt_extractor/config"))
 
-hiddenimports = collect_submodules("tm_data_types") + [
+hiddenimports = collect_submodules("tm_data_types") + collect_submodules("PIL") + [
     "dpt_extractor",
     "dpt_extractor.gui",
     "dpt_extractor.gui.main_window",

@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, Qt, QSettings, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette, QPixmap, QResizeEvent
+from PyQt6.QtGui import QCloseEvent, QPalette, QPixmap, QResizeEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -55,7 +55,11 @@ from dpt_extractor.gui.recent_paths import (
     set_report_template_source_path,
 )
 from dpt_extractor.gui.result_table import ResultTable
-from dpt_extractor.gui.theme import DARK_STYLESHEET, SUMMARY_STYLE
+from dpt_extractor.gui.theme import (
+    DARK_STYLESHEET,
+    SUMMARY_STYLE,
+    apply_combo_popup_style,
+)
 from dpt_extractor.gui.waveform_plot import WaveformPlot
 from dpt_extractor.utils.app_paths import (
     commercial_notice_poster_path,
@@ -100,6 +104,16 @@ from dpt_extractor.metrics.iec_windows import (
     err_window_scope_example,
     integrate_err_recovery,
     integrate_vi_window,
+)
+from dpt_extractor.metrics.offset_measurement import (
+    OFFSET_MEASUREMENT_BY_KEY,
+    OFFSET_RANGE_LABELS,
+    auto_offset_measurement_unit,
+    calculate_offset_measurement,
+    convert_offset_measurement_value,
+    normalize_offset_range_key,
+    offset_measurement_marker,
+    offset_measurement_unit,
 )
 from dpt_extractor.metrics.slopes import (
     DidtCrossingResult,
@@ -147,30 +161,6 @@ TEMP_CONDITION_DEFAULTS = {
     "LT": -40.0,
 }
 TEMP_CONDITION_SETTINGS_PREFIX = "conditions/temperature/"
-COMBO_POPUP_STYLESHEET = """
-QAbstractItemView {
-    background-color: #081719;
-    color: #edf6ee;
-    border: 1px solid #5a8b93;
-    selection-background-color: #28bce8;
-    selection-color: #061014;
-    outline: 0;
-}
-QAbstractItemView::item {
-    min-height: 26px;
-    padding: 5px 9px;
-    color: #edf6ee;
-}
-QAbstractItemView::item:selected {
-    background-color: #28bce8;
-    color: #061014;
-}
-QAbstractItemView::item:disabled {
-    color: #5d6a70;
-}
-"""
-
-
 def _format_temperature_number(value: float) -> str:
     fv = float(value)
     if abs(fv - round(fv)) < 0.05:
@@ -448,14 +438,7 @@ class ReportProgressPanel(QFrame):
 
 
 def _configure_combo_popup(combo: QComboBox) -> None:
-    view = combo.view()
-    view.setStyleSheet(COMBO_POPUP_STYLESHEET)
-    palette = view.palette()
-    palette.setColor(QPalette.ColorRole.Base, QColor("#081719"))
-    palette.setColor(QPalette.ColorRole.Text, QColor("#edf6ee"))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor("#28bce8"))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#061014"))
-    view.setPalette(palette)
+    apply_combo_popup_style(combo)
 
 
 def _infer_temp_code_from_path(path: str) -> str:
@@ -548,8 +531,12 @@ def _compute_waveform_load_outcome(
     extract_t0 = time.perf_counter()
     extraction_error = ""
     try:
-        result = run_extraction(bundle, profile, cfg)
-        short_circuit_not_ready = False
+        if mode == TestMode.OFFSET_MEASUREMENT:
+            result = None
+            short_circuit_not_ready = False
+        else:
+            result = run_extraction(bundle, profile, cfg)
+            short_circuit_not_ready = False
     except ShortCircuitExtractNotReady as exc:
         result = None
         short_circuit_not_ready = True
@@ -621,6 +608,7 @@ class _ReportWriteTask(QRunnable):
         images: dict[tuple[str, str], Path],
         tempdir: tempfile.TemporaryDirectory,
         target_screen_width_px: int | None,
+        temperature_labels: dict[str, str],
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -629,6 +617,7 @@ class _ReportWriteTask(QRunnable):
         self.images = images
         self.tempdir = tempdir
         self.target_screen_width_px = target_screen_width_px
+        self.temperature_labels = dict(temperature_labels)
         self.signals = _ReportWriteSignals()
 
     def run(self) -> None:
@@ -639,6 +628,7 @@ class _ReportWriteTask(QRunnable):
                 self.report_path,
                 images=self.images,
                 target_screen_width_px=self.target_screen_width_px,
+                temperature_labels=self.temperature_labels,
                 progress_callback=lambda value, total, label: self.signals.progress.emit(
                     self.request_id,
                     value,
@@ -701,6 +691,11 @@ class MainWindow(QMainWindow):
         self._manual_didt: dict[tuple[str, str], tuple[float, float, float, float]] = {}
         # Trr：Ha、Hb、A/B (µs)、尖峰索引（与 Irr 区间模式分离）
         self._manual_trr_measure: tuple[float, float, float, float, int | None] | None = None
+        self._offset_measurements: list[tuple[str, str, str]] = []
+        self._offset_cursor_window_us: tuple[float, float] | None = None
+        self._offset_cursor_waveform_source: str = ""
+        self._pre_offset_cursor_type: str | None = None
+        self._pre_offset_cursor_linked: bool | None = None
         self._active_slope_param: tuple[str, str] | None = None
         self._load_request_id = 0
         self._load_tasks: dict[int, _WaveformLoadTask] = {}
@@ -709,23 +704,37 @@ class MainWindow(QMainWindow):
         self._report_progress_active = False
         self._load_pool = QThreadPool.globalInstance()
         self._license_notice_dialog: QDialog | None = None
+        self._license_notice_timer = QTimer(self)
+        self._license_notice_timer.setSingleShot(True)
+        self._license_notice_timer.timeout.connect(self._show_first_run_license_notice)
         self._temperature_values = self._load_temperature_values()
 
         self._build_ui()
         self.result_table.set_range_handler(self._on_slope_range_changed)
         self.result_table.set_eoff_pre_handler(self._on_eoff_pre_changed)
         self.result_table.set_value_click_handler(self._on_value_clicked)
+        self.result_table.set_offset_measurement_add_handler(
+            self._on_offset_measurement_add_requested
+        )
+        self.result_table.set_offset_measurement_delete_handler(
+            self._on_offset_measurement_delete_requested,
+            self._on_offset_measurement_delete_all_requested,
+        )
+        self.result_table.set_offset_measurement_update_handler(
+            self._on_offset_measurement_update_requested
+        )
         self.result_table.set_slope_ranges(self._slope_ranges)
         # 持久 A/B 光标：global 模式拖动时显示测量读数；横向 Ha/Hb 同步
         self.wave_plot.set_global_cursor_handler(self._on_global_cursors_moved)
         self.wave_plot.set_horizontal_cursor_handler(self._on_horizontal_cursors_moved)
+        self.wave_plot.set_view_range_handler(self._on_waveform_view_range_changed)
         self.wave_plot.channelMappingRequested.connect(
             self._on_waveform_channel_mapping_requested
         )
         self.wave_plot.channelLabelChanged.connect(
             self._on_waveform_channel_label_changed
         )
-        QTimer.singleShot(0, self._show_first_run_license_notice)
+        self._license_notice_timer.start(0)
 
     def _build_ui(self) -> None:
         self.wave_plot = WaveformPlot()
@@ -853,7 +862,11 @@ class MainWindow(QMainWindow):
         self.lbl_test_mode.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.combo_test_mode = CenteredComboBox()
         self.combo_test_mode.setObjectName("testModeSelector")
-        for mode in (TestMode.DPT, TestMode.SHORT_CIRCUIT):
+        for mode in (
+            TestMode.DPT,
+            TestMode.SHORT_CIRCUIT,
+            TestMode.OFFSET_MEASUREMENT,
+        ):
             self.combo_test_mode.addItem(MODE_UI_LABELS[mode], mode.value)
         _configure_combo_popup(self.combo_test_mode)
         idx = self.combo_test_mode.findData(
@@ -863,9 +876,7 @@ class MainWindow(QMainWindow):
             self.combo_test_mode.setCurrentIndex(idx)
         self.combo_test_mode.setMinimumContentsLength(8)
         self.combo_test_mode.setMaximumWidth(112)
-        self.combo_test_mode.setToolTip(
-            "双脉冲与短路测试使用独立计算流程"
-        )
+        self.combo_test_mode.setToolTip("双脉冲、短路与偏移测量使用独立流程")
         self.combo_test_mode.currentIndexChanged.connect(self._on_test_mode_changed)
 
         pulse_sep = QFrame()
@@ -1212,6 +1223,14 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._apply_toolbar_density(event.size().width())
         self._sync_splitter_sizes()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if self._license_notice_timer.isActive():
+            self._license_notice_timer.stop()
+        if self._license_notice_dialog is not None:
+            self._license_notice_dialog.close()
+            self._license_notice_dialog = None
+        super().closeEvent(event)
 
     def _apply_toolbar_density(self, window_width: int) -> None:
         """Keep the top controls legible without letting them overrun small screens."""
@@ -1763,19 +1782,84 @@ class MainWindow(QMainWindow):
             self._recalculate(reset_manual=True)
 
     def _apply_test_mode_ui(self) -> None:
-        is_dpt = parse_test_mode(self.cfg.test_mode.mode) == TestMode.DPT
+        mode = parse_test_mode(self.cfg.test_mode.mode)
+        is_dpt = mode == TestMode.DPT
+        is_offset = mode == TestMode.OFFSET_MEASUREMENT
+        if not is_offset:
+            self._restore_pre_offset_cursor_mode()
         for w in self._pulse_toolbar_widgets:
             w.setEnabled(is_dpt)
             w.setVisible(is_dpt)
-        if not is_dpt:
+        if is_offset:
+            self.btn_export.setToolTip("偏移测量模式不生成参数 Excel")
+            self.btn_export.setEnabled(False)
+            self.btn_select_report_template.setEnabled(False)
+            self.btn_select_report_output.setEnabled(False)
+            self.btn_write_report.setEnabled(False)
+        elif not is_dpt:
             self.btn_export.setToolTip("导出短路测试 Excel")
+            self.btn_export.setEnabled(True)
+            self.btn_select_report_template.setEnabled(True)
+            self.btn_select_report_output.setEnabled(True)
+            self.btn_write_report.setEnabled(True)
         else:
             self.btn_export.setToolTip("导出当前结果到 Excel")
+            self.btn_export.setEnabled(True)
+            self.btn_select_report_template.setEnabled(True)
+            self.btn_select_report_output.setEnabled(True)
+            self.btn_write_report.setEnabled(True)
 
     def _on_pulse_spin_changed(self, _value: int) -> None:
         if parse_test_mode(self.cfg.test_mode.mode) != TestMode.DPT:
             return
         self._on_pulse_selection_changed()
+
+    def _apply_offset_cursor_mode_defaults(self) -> None:
+        if self._pre_offset_cursor_type is None:
+            self._pre_offset_cursor_type = self.wave_plot.cursor_type()
+            self._pre_offset_cursor_linked = self.wave_plot.cursor_linked()
+        self.wave_plot.set_cursor_type("waveform")
+
+    def _restore_pre_offset_cursor_mode(self) -> None:
+        if self._pre_offset_cursor_type is None:
+            return
+        cursor_type = self._pre_offset_cursor_type
+        cursor_linked = self._pre_offset_cursor_linked
+        self._pre_offset_cursor_type = None
+        self._pre_offset_cursor_linked = None
+        self.wave_plot.set_cursor_type(cursor_type)
+        if cursor_linked is not None:
+            self.wave_plot.set_cursor_linked(cursor_linked)
+
+    def _save_offset_cursor_window(self, t_a_us: float, t_b_us: float) -> None:
+        if self.bundle is None:
+            return
+        a_us, b_us = sorted((float(t_a_us), float(t_b_us)))
+        self._offset_cursor_window_us = (a_us, b_us)
+        self._offset_cursor_waveform_source = self.bundle.meta.source_path
+
+    def _offset_cursor_window_for_current_waveform(
+        self,
+    ) -> tuple[float, float] | None:
+        if (
+            self.bundle is None
+            or self._offset_cursor_window_us is None
+            or self._offset_cursor_waveform_source != self.bundle.meta.source_path
+        ):
+            return None
+        return self._offset_cursor_window_us
+
+    def _sync_offset_cursor_window_from_plot(self) -> None:
+        cursors = self.wave_plot.cursors_t_us()
+        if cursors is not None:
+            self._save_offset_cursor_window(cursors[0], cursors[1])
+
+    def _restore_offset_cursor_window_to_plot(self) -> None:
+        window = self._offset_cursor_window_for_current_waveform()
+        if window is None:
+            self._sync_offset_cursor_window_from_plot()
+            return
+        self.wave_plot.set_global_cursor_window(window[0], window[1])
 
     def _on_global_cursors_moved(self, t_a_us: float, t_b_us: float) -> None:
         """Global 模式 A/B 拖动：按物理光标位置更新 statusBar（A/B 与波形上一致）。"""
@@ -1790,6 +1874,9 @@ class MainWindow(QMainWindow):
             f"光标测量: A={t_a_us:.3f} µs  B={t_b_us:.3f} µs  "
             f"Δt={dt_us:+.3f} µs  |Δt|={abs(dt_us):.3f} µs  1/|Δt|={freq_disp}"
         )
+        if parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT:
+            self._save_offset_cursor_window(t_a_us, t_b_us)
+            self._refresh_offset_measurement_table(update_auxiliary=True)
 
     def _on_horizontal_cursors_moved(self, ha: float, hb: float) -> None:
         if self._active_slope_param is not None:
@@ -1798,6 +1885,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"横光标: Ha={ha:+.3f}  Hb={hb:+.3f}  Δy={dy:+.3f}"
         )
+
+    def _on_waveform_view_range_changed(self) -> None:
+        if parse_test_mode(self.cfg.test_mode.mode) != TestMode.OFFSET_MEASUREMENT:
+            return
+        if any(range_key == "screen" for _source, _metric, range_key in self._offset_measurements):
+            self._refresh_offset_measurement_table(update_auxiliary=True)
 
     def _current_profile(self) -> BridgeProfile:
         phase = self.combo_phase.currentData()
@@ -1963,6 +2056,8 @@ class MainWindow(QMainWindow):
         else:
             self.bundle.meta.channel_labels.pop(source_key, None)
             self.statusBar().showMessage(f"{source_key} 标签已清空")
+        if parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT:
+            self._refresh_offset_measurement_table()
 
     def _set_profile_combos(self, profile: BridgeProfile) -> None:
         pi = self.combo_phase.findData(profile.phase)
@@ -2011,6 +2106,8 @@ class MainWindow(QMainWindow):
             self.lbl_current_file.setText(f"正在加载 {Path(path).name}")
             self.lbl_current_file.setToolTip(path)
             self.statusBar().showMessage(f"正在后台加载: {Path(path).name}")
+        else:
+            self._apply_test_mode_ui()
 
     def _set_report_busy(self, busy: bool) -> None:
         self.btn_open.setEnabled(not busy)
@@ -2100,7 +2197,11 @@ class MainWindow(QMainWindow):
         outcome: _WaveformLoadOutcome,
         inferred: ChannelMapping | None,
     ) -> str:
-        extract_label = "提取" if outcome.result is not None else "参数尝试"
+        mode = parse_test_mode(self.cfg.test_mode.mode)
+        if mode == TestMode.OFFSET_MEASUREMENT:
+            extract_label = "偏移测量准备"
+        else:
+            extract_label = "提取" if outcome.result is not None else "参数尝试"
         msg = (
             f"已加载: {Path(outcome.path).name}  |  "
             f"读取 {outcome.load_ms:.0f} ms  {extract_label} {outcome.extract_ms:.0f} ms"
@@ -2112,9 +2213,11 @@ class MainWindow(QMainWindow):
                 msg += "（已按波形趋势识别通道）"
             else:
                 msg += "（已按 TSS 标签识别通道）"
-        if outcome.result is None:
+        if outcome.result is None and mode != TestMode.OFFSET_MEASUREMENT:
             reason = outcome.extraction_error or "当前波形不满足该模式的自动计算条件"
             msg += f"（参数未计算：{reason}）"
+        elif mode == TestMode.OFFSET_MEASUREMENT:
+            msg += "（偏移测量模式：未运行参数计算）"
         if outcome.bundle.meta.channel_vdiv:
             msg += f"（已应用 TSS 垂直刻度 {len(outcome.bundle.meta.channel_vdiv)} 通道）"
         return msg
@@ -2122,6 +2225,329 @@ class MainWindow(QMainWindow):
     def _extraction_placeholder_detail(self, error: str) -> str:
         reason = error.strip() or "当前波形不满足该模式的自动计算条件。"
         return f"当前波形已加载，参数未计算。原因：{reason}"
+
+    @staticmethod
+    def _offset_source_label(key: str, label: str | None = None) -> str:
+        raw = str(key or "")
+        display = str(label or "").strip()
+        if not display:
+            m = re.fullmatch(r"CH(\d+)", raw.upper())
+            if m:
+                display = f"Ch {m.group(1)}"
+            else:
+                m = re.fullmatch(r"MATH(\d+)", raw.upper())
+                display = f"Math {m.group(1)}" if m else raw
+        if display.upper().replace(" ", "") == raw.upper():
+            return display
+        return f"{display} ({raw})"
+
+    @staticmethod
+    def _offset_source_display_name(key: str) -> str:
+        raw = str(key or "").upper()
+        m = re.fullmatch(r"CH(\d+)", raw)
+        if m:
+            return f"Ch {m.group(1)}"
+        m = re.fullmatch(r"MATH(\d+)", raw)
+        if m:
+            return f"Math {m.group(1)}"
+        return raw or "波形"
+
+    def _offset_source_options(self) -> list[tuple[str, str]]:
+        if self.bundle is None:
+            return []
+        out: list[tuple[str, str]] = []
+        for key in self.bundle.channels:
+            label = self.bundle.meta.channel_labels.get(key, "")
+            out.append((key, self._offset_source_label(key, label)))
+        return out
+
+    def _default_offset_measurements_for_bundle(self) -> list[tuple[str, str, str]]:
+        if self.bundle is None:
+            return []
+        available = set(self.bundle.channels)
+        out: list[tuple[str, str, str]] = []
+        for source_key, metric_key, range_key in self.bundle.meta.offset_measurements:
+            source = str(source_key).upper()
+            metric = str(metric_key)
+            if source not in available or metric not in OFFSET_MEASUREMENT_BY_KEY:
+                continue
+            item = (source, metric, normalize_offset_range_key(range_key))
+            if item not in out:
+                out.append(item)
+        return out
+
+    def _offset_source_unit(self, source_key: str) -> str:
+        try:
+            return self.wave_plot._unit_for_channel(source_key)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _offset_value_text(value: float) -> str:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        if not np.isfinite(v):
+            return "—"
+        if abs(v) >= 100:
+            return f"{v:.2f}"
+        if abs(v) >= 1:
+            return f"{v:.3f}"
+        if abs(v) >= 0.01 or v == 0:
+            return f"{v:.4f}"
+        return f"{v:.4e}"
+
+    def _offset_range_label(self, range_key: str) -> str:
+        return OFFSET_RANGE_LABELS.get(str(range_key), "全波形")
+
+    def _offset_default_unit(self, spec: tuple[str, str, str]) -> str:
+        source_key, metric_key, _range_key = spec
+        return offset_measurement_unit(
+            metric_key,
+            self._offset_source_unit(source_key),
+        )
+
+    def _offset_range_window_s(self, range_key: str) -> tuple[float, float] | None:
+        if self.bundle is None or self.bundle.t.size == 0:
+            return None
+        key = normalize_offset_range_key(range_key)
+        if key == "cursor":
+            cursors = self._offset_cursor_window_for_current_waveform()
+            if cursors is None:
+                cursors = self.wave_plot.cursors_t_us()
+                if (
+                    cursors is not None
+                    and parse_test_mode(self.cfg.test_mode.mode)
+                    == TestMode.OFFSET_MEASUREMENT
+                ):
+                    self._save_offset_cursor_window(cursors[0], cursors[1])
+            if cursors is not None:
+                a_us, b_us = cursors
+                return float(a_us) * 1e-6, float(b_us) * 1e-6
+        elif key == "screen":
+            screen = self.wave_plot.current_x_range_us()
+            if screen is not None:
+                a_us, b_us = screen
+                return float(a_us) * 1e-6, float(b_us) * 1e-6
+        return float(self.bundle.t[0]), float(self.bundle.t[-1])
+
+    def _offset_series_for_range(
+        self,
+        source_key: str,
+        range_key: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self.bundle is None or source_key not in self.bundle.channels:
+            return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+        t = np.asarray(self.bundle.t, dtype=np.float64)
+        y = np.asarray(self.bundle.channels[source_key], dtype=np.float64)
+        window = self._offset_range_window_s(range_key)
+        if window is None:
+            return t, y
+        lo, hi = sorted((float(window[0]), float(window[1])))
+        mask = (t >= lo) & (t <= hi)
+        if not np.any(mask):
+            return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+        return t[mask], y[mask]
+
+    def _offset_measurement_rows(
+        self,
+    ) -> tuple[
+        list[tuple[str, str, str, str, str, str]],
+        list[tuple[str, str, str]],
+    ]:
+        if self.bundle is None:
+            return [], []
+        available = set(self.bundle.channels)
+        rows: list[tuple[str, str, str, str, str, str]] = []
+        row_specs: list[tuple[str, str, str]] = []
+        for source_key, metric_key, range_key in self._offset_measurements:
+            if source_key not in available or metric_key not in OFFSET_MEASUREMENT_BY_KEY:
+                continue
+            range_key = normalize_offset_range_key(range_key)
+            row_spec = (source_key, metric_key, range_key)
+            t_range, raw = self._offset_series_for_range(source_key, range_key)
+            value = calculate_offset_measurement(t_range, raw, metric_key)
+            spec = OFFSET_MEASUREMENT_BY_KEY[metric_key]
+            name = spec.label.replace("\n", " ")
+            base_unit = self._offset_default_unit(row_spec)
+            unit = auto_offset_measurement_unit(value, base_unit)
+            display_value = convert_offset_measurement_value(
+                value,
+                base_unit,
+                unit,
+            )
+            rows.append(
+                (
+                    self._offset_source_display_name(source_key),
+                    name,
+                    unit,
+                    self._offset_range_label(range_key),
+                    self._offset_value_text(display_value),
+                    self.wave_plot.trace_color(source_key),
+                )
+            )
+            row_specs.append(row_spec)
+        return rows, row_specs
+
+    def _refresh_offset_measurement_table(self, *, update_auxiliary: bool = False) -> None:
+        sources = self._offset_source_options()
+        rows, row_specs = self._offset_measurement_rows()
+        self.result_table.set_offset_sources(sources)
+        self.result_table.show_offset_measurements(
+            rows,
+            source_count=len(sources),
+            row_specs=row_specs,
+        )
+        self.result_table.setMaximumWidth(self.result_table.preferred_panel_width())
+        if rows and self.result_table.table.currentRow() < 0:
+            self.result_table.table.setCurrentCell(0, 1)
+            self.result_table.table.selectRow(0)
+        if not self._splitter_user_moved:
+            self._sync_splitter_sizes()
+        if update_auxiliary:
+            self._refresh_offset_auxiliary_from_active()
+
+    def _refresh_offset_auxiliary_from_active(self) -> None:
+        if self.bundle is None:
+            self.wave_plot.clear_cursor_auxiliary_guides()
+            return
+        spec = self.result_table.current_offset_measurement_spec()
+        if spec is None:
+            self.wave_plot.clear_cursor_auxiliary_guides()
+            return
+        source_key, metric_key, range_key = spec
+        window = self._offset_range_window_s(range_key)
+        t_range, raw = self._offset_series_for_range(source_key, range_key)
+        marker = offset_measurement_marker(t_range, raw, metric_key)
+        if marker is None:
+            self.wave_plot.clear_cursor_auxiliary_guides()
+            return
+        t_s, value = marker
+        x_range_us = None
+        if window is not None:
+            lo_s, hi_s = sorted((float(window[0]), float(window[1])))
+            if hi_s > lo_s:
+                x_range_us = (lo_s * 1e6, hi_s * 1e6)
+        self.wave_plot.set_cursor_auxiliary_point(
+            source_key,
+            float(t_s) * 1e6,
+            value,
+            show_vertical_guide=True,
+            x_range_us=x_range_us,
+        )
+
+    def _enter_offset_measurement_mode(
+        self,
+        outcome: _WaveformLoadOutcome | None = None,
+    ) -> None:
+        self.result = None
+        self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
+        self.wave_plot.enable_global_cursor_interaction()
+        self._apply_offset_cursor_mode_defaults()
+        self._restore_offset_cursor_window_to_plot()
+        self._refresh_offset_measurement_table(update_auxiliary=True)
+        if outcome is not None:
+            self.statusBar().showMessage(
+                self._loaded_status_message(outcome, outcome.inferred)
+            )
+        else:
+            self.statusBar().showMessage("偏移测量：波形已加载，可自定义添加测量项")
+
+    def _on_offset_measurement_add_requested(
+        self, source_key: str, metric_key: str, range_key: str = "screen"
+    ) -> None:
+        if self.bundle is None:
+            return
+        source_key = str(source_key).upper()
+        if source_key not in self.bundle.channels:
+            return
+        if metric_key not in OFFSET_MEASUREMENT_BY_KEY:
+            return
+        range_key = normalize_offset_range_key(range_key)
+        pair = (source_key, metric_key, range_key)
+        if pair not in self._offset_measurements:
+            self._offset_measurements.append(pair)
+        self._refresh_offset_measurement_table(update_auxiliary=True)
+        label = self._offset_source_label(
+            source_key,
+            self.bundle.meta.channel_labels.get(source_key, ""),
+        )
+        metric = OFFSET_MEASUREMENT_BY_KEY[metric_key].label.replace("\n", " ")
+        self.statusBar().showMessage(
+            f"已添加偏移测量: {label} · {metric} · {self._offset_range_label(range_key)}"
+        )
+
+    def _on_offset_measurement_update_requested(
+        self,
+        row: int,
+        field: str,
+        value: str,
+    ) -> None:
+        if self.bundle is None:
+            return
+        if row < 0 or row >= len(self._offset_measurements):
+            return
+
+        old_spec = self._offset_measurements[row]
+        source_key, metric_key, range_key = old_spec
+        field = str(field)
+        value = str(value)
+
+        if field == "source":
+            new_source = value.upper()
+            if new_source not in self.bundle.channels:
+                return
+            source_key = new_source
+        elif field == "metric":
+            if value not in OFFSET_MEASUREMENT_BY_KEY:
+                return
+            metric_key = value
+        elif field == "range":
+            range_key = normalize_offset_range_key(value)
+        else:
+            return
+
+        new_spec = (source_key, metric_key, range_key)
+        self._offset_measurements[row] = new_spec
+        self._refresh_offset_measurement_table(update_auxiliary=True)
+        self.statusBar().showMessage(
+            f"已更新偏移测量: "
+            f"{self._offset_source_display_name(source_key)} · "
+            f"{OFFSET_MEASUREMENT_BY_KEY[metric_key].label.replace(chr(10), ' ')} · "
+            f"{self._offset_range_label(range_key)}"
+        )
+
+    def _on_offset_measurement_delete_requested(
+        self, source_key: str, metric_key: str, range_key: str
+    ) -> None:
+        source_key = str(source_key).upper()
+        range_key = normalize_offset_range_key(range_key)
+        target = (source_key, metric_key, range_key)
+        for idx, item in enumerate(self._offset_measurements):
+            normalized = (
+                str(item[0]).upper(),
+                item[1],
+                normalize_offset_range_key(item[2]),
+            )
+            if normalized == target:
+                del self._offset_measurements[idx]
+                self._refresh_offset_measurement_table(update_auxiliary=True)
+                metric = OFFSET_MEASUREMENT_BY_KEY.get(metric_key)
+                metric_label = metric.label.replace("\n", " ") if metric else metric_key
+                self.statusBar().showMessage(
+                    f"已删除偏移测量: "
+                    f"{self._offset_source_display_name(source_key)} · "
+                    f"{metric_label} · {self._offset_range_label(range_key)}"
+                )
+                return
+
+    def _on_offset_measurement_delete_all_requested(self) -> None:
+        if not self._offset_measurements:
+            return
+        self._offset_measurements = []
+        self._refresh_offset_measurement_table(update_auxiliary=True)
+        self.statusBar().showMessage("已删除全部偏移测量")
 
     def _apply_loaded_waveform(self, outcome: _WaveformLoadOutcome) -> None:
         path = outcome.path
@@ -2141,7 +2567,12 @@ class MainWindow(QMainWindow):
         self._slope_ranges = default_slope_ranges()
         self.result_table.set_slope_ranges(self._slope_ranges)
         self._clear_manual_adjustments()
+        self._offset_measurements = self._default_offset_measurements_for_bundle()
         set_last_open_path(path)
+
+        if parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT:
+            self._enter_offset_measurement_mode(outcome)
+            return
 
         if outcome.result is None:
             self.result = None
@@ -2227,7 +2658,26 @@ class MainWindow(QMainWindow):
         )
 
     def _on_value_clicked(self, section: str, name: str) -> None:
-        self.result_table.set_active_metric(section, name)
+        is_offset = parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT
+        if not is_offset:
+            self.result_table.set_active_metric(section, name)
+        if is_offset:
+            self._refresh_offset_auxiliary_from_active()
+            spec = self.result_table.current_offset_measurement_spec()
+            if spec is not None:
+                _source, _metric, range_key = spec
+                self.statusBar().showMessage(
+                    f"偏移测量: {section} · {name} · {self._offset_range_label(range_key)}"
+                )
+            else:
+                self.statusBar().showMessage(f"偏移测量: {name}")
+            return
+        if self._metric_unavailable(section, name):
+            self.wave_plot.disable_interactive_cursors()
+            self.statusBar().showMessage(
+                f"{section}-{name}: 缺少关联通道，参数不可用"
+            )
+            return
         if self.result is not None and self.result.short_circuit_mode:
             if (
                 section == "短路过程"
@@ -2279,6 +2729,12 @@ class MainWindow(QMainWindow):
             self._enable_crosstalk_interaction(section)
             return
         self._enable_generic_parameter_interaction(section, name)
+
+    def _metric_unavailable(self, section: str, name: str) -> bool:
+        return (
+            self.result is not None
+            and self.result.is_metric_unavailable(section, name)
+        )
 
     def _dvdt_channel(self, section: str) -> str:
         return "v_diode" if section == "反向恢复" else "vce"
@@ -3336,7 +3792,7 @@ class MainWindow(QMainWindow):
             t, irr, v_diode, rr0, rr1, dt, i_search_end=on1
         )
         search_t0 = float(t[rr0] * 1e6)
-        search_t1 = float(t[rr1] * 1e6)
+        search_t1 = float(t[on1] * 1e6)
         edge_a, edge_b = "falling", "rising"
         ha_channel, hb_channel, a_channel, b_channel = "irr", "v_diode", "irr", "v_diode"
         from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
@@ -3662,8 +4118,7 @@ class MainWindow(QMainWindow):
         if self.bundle is None or self.result is None or self.result.segments is None:
             return
         from dpt_extractor.metrics.irr_measure import (
-            irr_parameter_peak_index,
-            measure_irr_trr,
+            default_irr_trr_measure,
         )
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 
@@ -3678,7 +4133,8 @@ class MainWindow(QMainWindow):
         saved = self._saved_trr_measure_state()
         if saved is None:
             self._auto_align_irr_channel_baseline(irr, i0, i1)
-            peak_idx = irr_parameter_peak_index(
+            m = default_irr_trr_measure(
+                t,
                 irr,
                 i0,
                 i1,
@@ -3686,31 +4142,6 @@ class MainWindow(QMainWindow):
                 on0,
                 on1,
             )
-            peak_idx = max(i0, min(int(peak_idx), min(on1, len(t) - 1)))
-            measure_i1 = max(i1, peak_idx)
-            # Ha=软恢复尾段参考（主峰后 300–600ns）；硬恢复回退算法默认尖峰前平台
-            ha_override = None
-            pk_us = float(t[peak_idx]) * 1e6
-            ha_override = self._window_mid(irr, pk_us + 0.3, pk_us + 0.6)
-            m = measure_irr_trr(
-                t,
-                irr,
-                i0,
-                measure_i1,
-                ha=ha_override,
-                peak_idx=peak_idx,
-                i_fall_end=on1,
-            )
-            if m is None and ha_override is not None:
-                # 软恢复(Ha≈0)时该参考线交点可能取不到，回退默认 Ha
-                m = measure_irr_trr(
-                    t,
-                    irr,
-                    i0,
-                    measure_i1,
-                    peak_idx=peak_idx,
-                    i_fall_end=on1,
-                )
             if m is None:
                 self._enable_generic_parameter_interaction("反向恢复", "Trr")
                 return
@@ -4143,6 +4574,8 @@ class MainWindow(QMainWindow):
     ) -> float | str | None:
         if self.bundle is None or self.result is None:
             return None
+        if self._metric_unavailable(section, name):
+            return None
         t = self.bundle.t
         dt = self.bundle.dt
         from dpt_extractor.models.waveform import (
@@ -4153,8 +4586,16 @@ class MainWindow(QMainWindow):
         vce = self.bundle.get(self.profile.vce)
         ic = bundle_total_current(self.bundle, self.profile)
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
-        v_diode = self.bundle.get(self.profile.v_diode)
-        vge_other = self.bundle.get(self.profile.vge_other)
+        v_diode = (
+            self.bundle.channels.get(self.profile.v_diode)
+            if self.profile.v_diode
+            else None
+        )
+        vge_other = (
+            self.bundle.channels.get(self.profile.vge_other)
+            if self.profile.vge_other
+            else None
+        )
         dur_ns = max(0.0, (t[i1] - t[i0]) * 1e9)
 
         if section == "短路过程":
@@ -4205,6 +4646,8 @@ class MainWindow(QMainWindow):
                 self.result_table.set_metric_value(section, name, val)
                 return val
             if name == "应力Vpeak_对管":
+                if v_diode is None:
+                    return None
                 val = float(np.max(v_diode[i0 : i1 + 1]))
                 sc.vpeak_other = val
                 self.result_table.set_metric_value(section, name, val)
@@ -4257,6 +4700,8 @@ class MainWindow(QMainWindow):
                 self._sync_off_time_relations(changed="tf")
                 return dur_ns
             if name == "串扰电压":
+                if vge_other is None:
+                    return None
                 vmax, vmin = crosstalk_extrema(vge_other, i0, i1 + 1, dt)
                 self.result.turn_off.crosstalk_vmax = float(vmax)
                 self.result.turn_off.crosstalk_vmin = float(vmin)
@@ -4314,6 +4759,8 @@ class MainWindow(QMainWindow):
                 self._sync_on_time_relations(changed="tr")
                 return dur_ns
             if name == "串扰电压":
+                if vge_other is None:
+                    return None
                 vmax, vmin = crosstalk_extrema(vge_other, i0, i1 + 1, dt)
                 self.result.turn_on.crosstalk_vmax = float(vmax)
                 self.result.turn_on.crosstalk_vmin = float(vmin)
@@ -4328,10 +4775,14 @@ class MainWindow(QMainWindow):
                 self.result.reverse_recovery.trr = dur_ns
                 return dur_ns
             if name == "Vrr":
+                if v_diode is None:
+                    return None
                 v = float(np.max(v_diode[i0 : i1 + 1]))
                 self.result.reverse_recovery.vrr = v
                 return v
             if name == "dv/dt":
+                if v_diode is None:
+                    return None
                 v = float(dvdt_max(t, v_diode, i0, i1 + 1, dt, self.cfg))
                 self.result.reverse_recovery.dvdt_max = v
                 return v
@@ -4345,6 +4796,8 @@ class MainWindow(QMainWindow):
     def _stored_param_value(self, section: str, name: str) -> float | str | None:
         """首次进入交互时沿用 extract 结果，避免点击参数即重算。"""
         if self.result is None:
+            return None
+        if self._metric_unavailable(section, name):
             return None
         off = self.result.turn_off
         on = self.result.turn_on
@@ -4425,6 +4878,8 @@ class MainWindow(QMainWindow):
     ) -> float | None:
         if self.bundle is None:
             return None
+        if self._metric_unavailable(section, name):
+            return None
         from dpt_extractor.models.waveform import (
             bundle_reverse_recovery_current,
             bundle_total_current,
@@ -4433,7 +4888,11 @@ class MainWindow(QMainWindow):
         vce = self.bundle.get(self.profile.vce)
         ic = bundle_total_current(self.bundle, self.profile)
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
-        v_diode = self.bundle.get(self.profile.v_diode)
+        v_diode = (
+            self.bundle.channels.get(self.profile.v_diode)
+            if self.profile.v_diode
+            else None
+        )
 
         if section == "短路过程":
             if name in {
@@ -4449,6 +4908,8 @@ class MainWindow(QMainWindow):
             if name == "应力Vpeak_本管":
                 return float(np.max(vce[i0 : i1 + 1]))
             if name == "应力Vpeak_对管":
+                if v_diode is None:
+                    return None
                 return float(np.max(v_diode[i0 : i1 + 1]))
             if name == "Desat动作时间":
                 desat_channel = self._short_circuit_desat_channel()
@@ -4475,6 +4936,8 @@ class MainWindow(QMainWindow):
             if name == "Irr":
                 return self._irr_peak_interactive(irr, i0, i1)
             if name == "Vrr":
+                if v_diode is None:
+                    return None
                 return float(np.max(v_diode[i0 : i1 + 1]))
         return None
 
@@ -4522,62 +4985,6 @@ class MainWindow(QMainWindow):
         if peak_neg >= 0.1 * amp:
             return i0 + neg_i
         return i0 + pos_i
-
-    def _irr_settled_midline(self, irr: np.ndarray, i0: int, i1: int) -> float:
-        """Irr 尖峰前无震荡平台（Ha 默认，与 Trr 卡尺一致）。"""
-        from dpt_extractor.metrics.irr_measure import (
-            _default_ha,
-            _find_recovery_peak_index,
-        )
-
-        seg = np.asarray(irr[i0 : i1 + 1], dtype=np.float64)
-        if len(seg) == 0:
-            return 0.0
-        ipk = _find_recovery_peak_index(seg, self.bundle.dt)
-        return float(_default_ha(seg, ipk))
-
-    def _irr_default_crossings(
-        self, irr: np.ndarray, t: np.ndarray, i0: int, i1: int
-    ) -> tuple[float, float, float] | None:
-        """返回 (Ha中线A值, A交点µs, B交点µs)。"""
-        seg = np.asarray(irr[i0 : i1 + 1], dtype=np.float64)
-        tt = np.asarray(t[i0 : i1 + 1], dtype=np.float64)
-        if len(seg) < 8 or len(tt) != len(seg):
-            return None
-        mid = self._irr_settled_midline(irr, i0, i1)
-        ipk = int(np.argmax(seg))
-        if ipk <= 1 or ipk >= len(seg) - 2:
-            return None
-
-        ja = None
-        for j in range(0, ipk):
-            if seg[j] <= mid and seg[j + 1] >= mid:
-                ja = j
-        if ja is None:
-            return None
-        jb = None
-        for j in range(ipk, len(seg) - 1):
-            if seg[j] >= mid and seg[j + 1] <= mid:
-                jb = j
-                break
-        if jb is None:
-            return None
-
-        def _interp_t(j: int) -> float:
-            y1, y2 = seg[j], seg[j + 1]
-            t1, t2 = tt[j], tt[j + 1]
-            dy = y2 - y1
-            if abs(dy) < 1e-12:
-                return float(t1)
-            f = (mid - y1) / dy
-            f = max(0.0, min(1.0, f))
-            return float(t1 + f * (t2 - t1))
-
-        ta_us = _interp_t(ja) * 1e6
-        tb_us = _interp_t(jb) * 1e6
-        if tb_us <= ta_us:
-            return None
-        return float(mid), float(ta_us), float(tb_us)
 
     def _sync_ls_off(self) -> None:
         """Ls_off = 关断 ΔVce / (关断 di/dt)，单位 nH（ΔVce[V] / di/dt[A/ns]）。"""
@@ -4762,69 +5169,22 @@ class MainWindow(QMainWindow):
 
     def _default_trr_interval_us(self) -> tuple[float, float] | None:
         """
-        Trr 默认 A/B：
-        A=反向主谷后首次上穿中线；B=正向峰值后首次下穿中线。
+        Trr 默认 A/B 使用同一套核心 marker，避免默认光标与表格值分叉。
         """
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+        from dpt_extractor.metrics.irr_measure import default_irr_trr_measure
 
         t = self.bundle.t
-        dt = self.bundle.dt
         segs = self.result.segments
+        rr0, rr1 = segs.reverse_recovery
         on0, on1 = segs.turn_on
-        if on1 <= on0 + 6:
+        irr = bundle_reverse_recovery_current(self.bundle, self.profile)
+        marker = default_irr_trr_measure(t, irr, rr0, rr1, segs.pulse2_on, on0, on1)
+        if marker is None:
             return None
-
-        ts = t[on0:on1]
-        irr = bundle_reverse_recovery_current(self.bundle, self.profile)[on0:on1]
-        if len(ts) < 8 or len(irr) < 8:
-            return None
-
-        # 轻平滑，降低单点尖噪影响
-        win = max(5, int(round(40e-9 / max(dt, 1e-15))))
-        if win % 2 == 0:
-            win += 1
-        win = min(win, max(5, len(irr) // 3 * 2 + 1))
-        if win >= 5:
-            ker = np.ones(win, dtype=np.float64) / float(win)
-            ys = np.convolve(irr.astype(np.float64), ker, mode="same")
-        else:
-            ys = irr.astype(np.float64)
-
-        # 以窗口前段中位数作中线，适配轻微零漂
-        k = max(8, len(ys) // 6)
-        mid = float(np.median(ys[:k]))
-
-        i_neg = int(np.argmin(ys))
-        i_pos = int(np.argmax(ys))
-        if i_pos <= i_neg + 2:
-            return None
-
-        def _cross_up(arr: np.ndarray, start: int, level: float) -> int | None:
-            for j in range(start, len(arr) - 1):
-                if arr[j] <= level and arr[j + 1] >= level:
-                    return j
-            return None
-
-        def _cross_down(arr: np.ndarray, start: int, level: float) -> int | None:
-            for j in range(start, len(arr) - 1):
-                if arr[j] >= level and arr[j + 1] <= level:
-                    return j
-            return None
-
-        j_a = _cross_up(ys, i_neg, mid)
-        if j_a is None:
-            return None
-        j_b = _cross_down(ys, max(i_pos, j_a + 1), mid)
-        if j_b is None:
-            return None
-
-        ta = float(ts[j_a] * 1e6)
-        tb = float(ts[j_b] * 1e6)
-        if tb <= ta:
-            return None
-        return ta, tb
+        return float(marker.ta_s * 1e6), float(marker.tb_s * 1e6)
 
     def _turn_on_ic_max_window_indices(self) -> tuple[int, int] | None:
         """Window used by extract._turn_on_ic_max_in_base_window."""
@@ -5122,6 +5482,8 @@ class MainWindow(QMainWindow):
     def _parameter_interval_us(self, section: str, name: str) -> tuple[float, float] | None:
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
+        if self._metric_unavailable(section, name):
+            return None
         t = self.bundle.t
         segs = self.result.segments
 
@@ -5246,6 +5608,11 @@ class MainWindow(QMainWindow):
             return
         try:
             self.cfg.slope_ranges = dict(self._slope_ranges)
+            if parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT:
+                if reset_manual:
+                    self._clear_manual_adjustments()
+                self._enter_offset_measurement_mode()
+                return
             active_param = self._active_slope_param
             if reset_manual:
                 self._clear_manual_adjustments()
@@ -5492,8 +5859,11 @@ class MainWindow(QMainWindow):
         return tuple(
             param
             for param in SHORT_REPORT_IMAGE_PARAMS
-            if param != ("短路过程", "Desat动作时间")
-            or self._short_desat_image_available()
+            if not self.result.is_metric_unavailable(*param)
+            and (
+                param != ("短路过程", "Desat动作时间")
+                or self._short_desat_image_available()
+            )
         )
 
     def _current_report_template_source(self) -> Path | None:
@@ -5634,6 +6004,7 @@ class MainWindow(QMainWindow):
             images,
             tempdir,
             self._report_target_screen_width_px(),
+            self._temperature_display_labels(),
         )
         task.signals.progress.connect(self._on_report_write_progress)
         task.signals.finished.connect(self._on_report_write_finished)

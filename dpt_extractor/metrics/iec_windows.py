@@ -4,8 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from dpt_extractor.config.loader import AppConfig
-from dpt_extractor.utils.signal import crossing_index, smooth, threshold_value
+from dpt_extractor.utils.signal import crossing_index
 from dpt_extractor.utils.timing_adapt import scope_turn_off_bases, scope_turn_on_bases
 
 
@@ -38,56 +37,6 @@ class EnergyLossMarkers:
         return IntegrationWindow(
             self.i_start, self.i_end, self.t_start, self.t_end
         )
-
-
-def _icm(ic: np.ndarray, i0: int, i1: int) -> float:
-    return float(np.percentile(np.abs(ic[i0:i1]), 95))
-
-
-def _vge_levels(vge: np.ndarray, i0: int, i1: int) -> tuple[float, float]:
-    seg = vge[i0:i1]
-    return float(np.percentile(seg, 5)), float(np.percentile(seg, 95))
-
-
-def eoff_window_iec(
-    t: np.ndarray,
-    vge: np.ndarray,
-    ic: np.ndarray,
-    vce: np.ndarray,
-    i0: int,
-    i1: int,
-    off_idx: int,
-    dt: float,
-    cfg: AppConfig,
-    vdc: float | None = None,
-) -> IntegrationWindow:
-    """IEC60747-9 Eoff: t1=90% Vge↓, t2=2% Icm↓."""
-    th = cfg.thresholds
-    w0 = max(i0, off_idx - int(80e-9 / dt))
-    w1 = min(i1, off_idx + int(500e-9 / dt))
-
-    v_lo, v_hi = _vge_levels(vge, w0, w1)
-    vge_s = smooth(vge[w0:w1], dt, cfg.smoothing.detect_window_ns)
-    ic_s = smooth(np.abs(ic[w0:w1]), dt, cfg.smoothing.detect_window_ns)
-
-    v_90 = threshold_value(v_lo, v_hi, th.high_pct)
-    i_2 = 0.02 * _icm(ic, w0, w1)
-
-    i_start_local = crossing_index(vge_s, v_90, "falling", 0)
-    if i_start_local is None:
-        i_start_local = max(0, off_idx - w0)
-
-    i_end_local = crossing_index(ic_s, i_2, "falling", i_start_local)
-    if i_end_local is None:
-        i_end_local = crossing_index(ic_s, i_2, "falling", i_start_local, last=True)
-    if i_end_local is None:
-        i_end_local = min(len(vge_s) - 1, i_start_local + int(350e-9 / dt))
-    if i_end_local <= i_start_local + 5:
-        i_end_local = min(len(vge_s) - 1, off_idx - w0 + int(300e-9 / dt))
-
-    i_start = w0 + i_start_local
-    i_end = w0 + i_end_local
-    return IntegrationWindow(i_start, i_end, float(t[i_start]), float(t[i_end]))
 
 
 def _plateau_mean_vce_before_off(
@@ -190,50 +139,19 @@ def _eon_ic_rise_start_index(
     dt: float,
     i_top: float,
 ) -> int:
-    """开通 A：|Ic| 上升沿与 Ha 的第一个有效交点（跳过开通前小幅抖动穿越）。"""
-    hold = max(3, int(25e-9 / dt))
-    margin = 10.0
-    for k in range(max(0, anchor), len(i_seg) - hold - 1):
-        if i_seg[k] < ha_ic and i_seg[k + 1] >= ha_ic:
-            if float(np.mean(i_seg[k + 1 : k + 1 + hold])) >= ha_ic + margin:
-                return k
-    i_start = crossing_index(i_seg, ha_ic, "rising", anchor)
-    if i_start is None:
-        di = max(float(i_top) - ha_ic, 1.0)
-        i_start = crossing_index(
-            i_seg, ha_ic + max(0.03 * di, 15.0), "rising", anchor
-        )
-    return int(i_start) if i_start is not None else max(0, anchor)
-
-
-def _eoff_last_on_state_index(v_seg: np.ndarray, ha_v: float, v_top: float, end: int) -> int:
-    """关断前最后一个低 Vce 平台样本（主抬升前），用于跳过早期噪声穿越。"""
-    on_ceiling = ha_v + max(22.0, 0.04 * max(float(v_top) - ha_v, 1.0))
-    last_on = 0
-    for k in range(0, max(1, end + 1)):
-        if v_seg[k] <= on_ceiling:
-            last_on = k
-    return int(last_on)
-
-
-def _eoff_vce_ha_crossing_time(
-    t_seg: np.ndarray,
-    v_seg: np.ndarray,
-    ha_v: float,
-    i_lo: int,
-    i_hi: int,
-) -> float:
-    """沿 [i_lo, i_hi] 线性插值 Vce 与 Ha 的交点时刻。"""
-    i_lo = max(0, int(i_lo))
-    i_hi = min(len(v_seg) - 1, int(i_hi))
-    if i_hi <= i_lo:
-        return float(t_seg[i_lo])
-    v0 = float(v_seg[i_lo])
-    v1 = float(v_seg[i_hi])
-    if abs(v1 - v0) < 1e-30:
-        return float(t_seg[i_lo])
-    frac = float(np.clip((ha_v - v0) / (v1 - v0), 0.0, 1.0))
-    return float(t_seg[i_lo] + frac * (t_seg[i_hi] - t_seg[i_lo]))
+    """开通 A：Ic 主上升沿第一次穿 Ha。"""
+    t_seg = np.arange(len(i_seg), dtype=np.float64) * float(dt)
+    ix, _ = _main_edge_level_crossing(
+        t_seg,
+        i_seg,
+        ha_ic,
+        i_top,
+        "rising",
+        anchor,
+        dt,
+        min_trigger=15.0,
+    )
+    return int(ix)
 
 
 def _crossing_pair_index(
@@ -265,6 +183,349 @@ def _crossing_pair_index(
     return None
 
 
+def _crossing_pair_indices(
+    y: np.ndarray,
+    level: float,
+    start: int = 0,
+    end: int | None = None,
+    direction: str | None = None,
+) -> list[int]:
+    """Return all sample-pair indices containing a level crossing."""
+    if end is None:
+        end = len(y) - 1
+    start = max(0, int(start))
+    end = min(len(y) - 1, int(end))
+    if end <= start:
+        return []
+    yy = np.asarray(y, dtype=np.float64)
+    lvl = float(level)
+    out: list[int] = []
+    for k in range(start, end):
+        y0, y1 = float(yy[k]), float(yy[k + 1])
+        if direction == "falling":
+            ok = y0 >= lvl and y1 <= lvl and y0 > y1
+        elif direction == "rising":
+            ok = y0 <= lvl and y1 >= lvl and y1 > y0
+        elif direction is None or direction == "any":
+            d0, d1 = y0 - lvl, y1 - lvl
+            ok = (d0 == 0.0 and d1 != 0.0) or (d0 * d1 <= 0.0 and d0 != d1)
+        else:
+            raise ValueError(direction)
+        if ok:
+            out.append(k)
+    return out
+
+
+def _ns_to_t_units(t_seg: np.ndarray, dt: float, ns: float) -> float:
+    diffs = np.diff(np.asarray(t_seg, dtype=np.float64))
+    positive = diffs[diffs > 0.0]
+    sample_dt = float(np.median(positive)) if len(positive) else float(dt)
+    return float(ns) * 1e-3 if sample_dt > 1e-7 else float(ns) * 1e-9
+
+
+def _level_crossing_time(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    ix: int,
+    level: float,
+) -> float:
+    """Linear interpolation time for a true waveform/level intersection."""
+    if len(t_seg) == 0:
+        return 0.0
+    ix = max(0, min(int(ix), len(t_seg) - 2))
+    y0, y1 = float(y_seg[ix]), float(y_seg[ix + 1])
+    if y1 == y0:
+        return float(t_seg[ix])
+    frac = float(np.clip((float(level) - y0) / (y1 - y0), 0.0, 1.0))
+    return float(t_seg[ix] + frac * (t_seg[ix + 1] - t_seg[ix]))
+
+
+def _settled_level_crossing_after_main_edge(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    level: float,
+    first_ix: int,
+    first_t: float,
+    dt: float,
+    edge_top: float,
+    *,
+    direction: str,
+    end: int | None = None,
+    settle_profile: str = "generic",
+) -> tuple[int, float]:
+    """Eoff/Eon right cursor after the selected main falling edge settles.
+
+    This is not the Err/IRM-peak rule. Eoff calls it with Ic after the turn-off
+    current falling edge; Eon calls it with Vce after the turn-on voltage falling
+    edge. The first main-edge crossing only proves the selected waveform touched
+    the local platform; the cursor then includes meaningful local damping and
+    lands on the real waveform/platform intersection. Long low-level tail noise
+    stays out.
+    """
+    if len(t_seg) < 2:
+        return 0, float(t_seg[0]) if len(t_seg) else 0.0
+    yy = np.asarray(y_seg, dtype=np.float64)
+    tt = np.asarray(t_seg, dtype=np.float64)
+    lvl = float(level)
+    first_ix = max(0, min(int(first_ix), len(yy) - 2))
+    end_ix = len(yy) - 2 if end is None else max(first_ix + 1, min(int(end), len(yy) - 2))
+    if end_ix <= first_ix + 2:
+        return first_ix, float(first_t)
+
+    span = max(
+        abs(float(edge_top) - lvl),
+        float(np.nanpercentile(np.abs(yy[first_ix : end_ix + 2] - lvl), 95)),
+        1.0,
+    )
+    dev = np.abs(yy[first_ix : end_ix + 2] - lvl)
+    if len(dev) < 8:
+        return first_ix, float(first_t)
+
+    tail_len = max(8, len(dev) // 5)
+    tail = dev[-tail_len:]
+    tail_med = float(np.nanmedian(tail)) if len(tail) else 0.0
+    tail_mad = (
+        float(np.nanmedian(np.abs(tail - tail_med)))
+        if len(tail)
+        else 0.0
+    )
+    tail_floor = tail_med + 3.0 * 1.4826 * tail_mad
+    crosses = _crossing_pair_indices(
+        yy,
+        lvl,
+        first_ix,
+        end_ix,
+        direction=None,
+    )
+    if not crosses:
+        return first_ix, float(first_t)
+
+    # Choose the first real platform crossing after the locally visible ringing
+    # has become small enough. This is intentionally a "first pass" rule; do not
+    # chase a later, smaller tail window after the process has already settled.
+    pre_n = max(2, int(round(40e-9 / max(float(dt), 1e-15))))
+    post_n = max(4, int(round(160e-9 / max(float(dt), 1e-15))))
+    smooth_n = max(3, int(round(8e-9 / max(float(dt), 1e-15))))
+    smooth_y = yy
+    if smooth_n > 1 and len(yy) >= smooth_n:
+        kernel = np.ones(smooth_n, dtype=np.float64) / float(smooth_n)
+        smooth_y = np.convolve(yy, kernel, mode="same")
+    current_pp_tol: float | None = None
+    if settle_profile == "voltage_fall":
+        if span >= 700.0:
+            visible_cap = max(7.0, min(22.0, 0.024 * span))
+        else:
+            visible_cap = max(7.0, min(12.0, 2.2 * tail_floor))
+        p75_tol = max(1.0, 0.0132 * span, min(0.024 * span, 0.90 * visible_cap))
+        p85_tol = max(1.0, 0.0140 * span, min(0.030 * span, visible_cap))
+        p95_tol = max(2.0, min(0.060 * span, 1.35 * visible_cap))
+    elif settle_profile == "current_fall":
+        visible_cap = max(10.0, min(18.0, 0.080 * span))
+        p75_tol = max(1.0, min(0.080 * span, 0.55 * visible_cap))
+        p85_tol = max(1.0, min(0.100 * span, 0.60 * visible_cap))
+        p95_tol = max(2.0, min(0.130 * span, 0.80 * visible_cap))
+        if 180.0 <= span <= 500.0:
+            current_pp_tol = max(12.0, min(15.0, 0.055 * span))
+    else:
+        visible_cap = max(5.0, min(20.0, max(2.2 * tail_floor, 0.025 * span)))
+        p75_tol = max(1.0, min(0.026 * span, 0.95 * visible_cap))
+        p85_tol = max(1.0, min(0.032 * span, visible_cap))
+        p95_tol = max(2.0, min(0.065 * span, 1.45 * visible_cap))
+    p50_tol = max(1.0, 0.020 * span, 0.45 * visible_cap)
+    min_delay_s = 0.0
+    if settle_profile == "current_fall":
+        min_delay_s = 190e-9 if tail_floor < 1.0 else 140e-9
+    elif settle_profile == "voltage_fall":
+        min_delay_s = 0.0 if span >= 700.0 else 45e-9
+
+    chosen: int | None = None
+    for ix in crosses:
+        candidate_t = _level_crossing_time(tt, yy, int(ix), lvl)
+        if candidate_t < float(first_t) + min_delay_s:
+            continue
+        lo = max(0, int(ix) - pre_n)
+        hi = min(end_ix + 2, int(ix) + post_n)
+        local_dev = np.abs(yy[lo:hi] - lvl)
+        if len(local_dev) < 8:
+            continue
+        p50, p75, p85, p95 = (
+            float(np.nanpercentile(local_dev, pct))
+            for pct in (50, 75, 85, 95)
+        )
+        if current_pp_tol is not None:
+            pp_hi = min(end_ix + 2, int(ix) + post_n)
+            pp_seg = smooth_y[int(ix) : pp_hi]
+            local_pp = (
+                float(np.nanmax(pp_seg) - np.nanmin(pp_seg))
+                if len(pp_seg) >= 4
+                else float("inf")
+            )
+            if local_pp > current_pp_tol:
+                continue
+        if (
+            p50 <= p50_tol
+            and p75 <= p75_tol
+            and p85 <= p85_tol
+            and p95 <= p95_tol
+        ):
+            chosen = int(ix)
+            break
+    if chosen is None:
+        chosen = int(crosses[-1])
+    chosen_t = _level_crossing_time(tt, yy, chosen, lvl)
+    if chosen_t < float(first_t):
+        return first_ix, float(first_t)
+    return chosen, float(chosen_t)
+
+
+def _main_edge_level_crossing(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    level: float,
+    edge_top: float,
+    direction: str,
+    anchor: int,
+    dt: float,
+    *,
+    fit_pre_ns: float = 180.0,
+    fit_post_ns: float = 80.0,
+    trigger_frac: float = 0.50,
+    fit_low_frac: float = 0.10,
+    fit_high_frac: float = 0.35,
+    min_trigger: float = 30.0,
+    prefer_raw_crossing: bool = True,
+    raw_window_ns: float = 80.0,
+) -> tuple[int, float]:
+    """主上升/下降沿进入平台电平的交点。
+
+    先用远离平台噪声的主沿有效电平定位主沿，再在主沿 10%~35% 区间拟合，
+    回推到平台电平。这样平台附近的小振铃/噪声穿越不会抢走 A/B 光标。
+    """
+    if len(t_seg) < 2:
+        return 0, float(t_seg[0]) if len(t_seg) else 0.0
+    yy = np.asarray(y_seg, dtype=np.float64)
+    tt = np.asarray(t_seg, dtype=np.float64)
+    lvl = float(level)
+    span = max(abs(float(edge_top) - lvl), 1.0)
+    anchor = max(0, min(int(anchor), len(yy) - 2))
+    trigger_step = max(float(min_trigger), float(trigger_frac) * span)
+    trigger_step = min(trigger_step, 0.85 * span)
+    trigger = lvl + trigger_step
+    low = lvl + float(fit_low_frac) * span
+    high = lvl + float(fit_high_frac) * span
+    if low > high:
+        low, high = high, low
+
+    k_trigger: int | None = None
+    if direction == "rising":
+        for k in range(anchor, len(yy)):
+            if float(yy[k]) >= trigger:
+                k_trigger = k
+                break
+    elif direction == "falling":
+        for k in range(anchor, len(yy)):
+            if float(yy[k]) <= trigger:
+                k_trigger = k
+                break
+    else:
+        raise ValueError(direction)
+
+    if k_trigger is None:
+        ix = _crossing_pair_index(yy, lvl, direction, anchor)
+        if ix is not None:
+            return int(ix), _eoff_crossing_time_us(tt, yy, int(ix), lvl, direction)
+        return anchor, float(tt[anchor])
+
+    fit_pre = _ns_to_t_units(tt, dt, fit_pre_ns)
+    fit_post = _ns_to_t_units(tt, dt, fit_post_ns)
+    fit_lo_t = float(tt[k_trigger]) - fit_pre
+    fit_hi_t = float(tt[k_trigger]) + fit_post
+    fit_lo = max(anchor, int(np.searchsorted(tt, fit_lo_t, side="left")))
+    fit_hi = min(len(yy) - 1, int(np.searchsorted(tt, fit_hi_t, side="right")))
+    if fit_hi <= fit_lo + 2:
+        fit_lo = max(anchor, k_trigger - 8)
+        fit_hi = min(len(yy) - 1, k_trigger + 8)
+
+    if prefer_raw_crossing:
+        raw_window = _ns_to_t_units(tt, dt, raw_window_ns)
+        if direction == "rising":
+            raw_lo = max(anchor, int(np.searchsorted(tt, float(tt[k_trigger]) - raw_window, side="left")))
+            raw_hi = min(k_trigger, len(yy) - 2)
+            raw_ix = None
+            for kk in range(raw_lo, raw_hi + 1):
+                y0, y1 = float(yy[kk]), float(yy[kk + 1])
+                if y0 <= lvl < y1 and y1 > y0:
+                    raw_ix = kk
+            if raw_ix is not None:
+                return int(raw_ix), _eoff_crossing_time_us(
+                    tt, yy, int(raw_ix), lvl, direction
+                )
+        else:
+            raw_lo = max(anchor, k_trigger)
+            raw_hi = min(
+                len(yy) - 2,
+                int(np.searchsorted(tt, float(tt[k_trigger]) + raw_window, side="right")),
+            )
+            for kk in range(raw_lo, raw_hi + 1):
+                y0, y1 = float(yy[kk]), float(yy[kk + 1])
+                if y0 > lvl >= y1 and y0 > y1:
+                    return int(kk), _eoff_crossing_time_us(
+                        tt, yy, int(kk), lvl, direction
+                    )
+
+    band = np.flatnonzero((yy[fit_lo : fit_hi + 1] >= low) & (yy[fit_lo : fit_hi + 1] <= high))
+    if len(band) < 4:
+        broad_low = lvl + 0.05 * span
+        broad_high = lvl + 0.50 * span
+        if broad_low > broad_high:
+            broad_low, broad_high = broad_high, broad_low
+        band = np.flatnonzero(
+            (yy[fit_lo : fit_hi + 1] >= broad_low)
+            & (yy[fit_lo : fit_hi + 1] <= broad_high)
+        )
+
+    if len(band) >= 4:
+        abs_band = fit_lo + band
+        gaps = np.flatnonzero(np.diff(abs_band) > 3)
+        starts = np.concatenate(([0], gaps + 1))
+        ends = np.concatenate((gaps + 1, [len(abs_band)]))
+        runs = [abs_band[s:e] for s, e in zip(starts, ends) if e - s >= 4]
+        if runs:
+            if direction == "rising":
+                before = [run for run in runs if int(run[-1]) <= k_trigger]
+                idx = before[-1] if before else min(
+                    runs, key=lambda run: abs(int(run[-1]) - k_trigger)
+                )
+            else:
+                after = [run for run in runs if int(run[0]) >= k_trigger]
+                idx = after[0] if after else min(
+                    runs, key=lambda run: abs(int(run[0]) - k_trigger)
+                )
+        else:
+            idx = abs_band
+        slope, intercept = np.polyfit(tt[idx], yy[idx], 1)
+        if (direction == "rising" and slope > 0.0) or (
+            direction == "falling" and slope < 0.0
+        ):
+            t_fit = (lvl - float(intercept)) / float(slope)
+            if direction == "rising":
+                t_fit = max(float(tt[fit_lo]), min(float(t_fit), float(tt[k_trigger])))
+            else:
+                t_fit = max(float(tt[k_trigger]), min(float(t_fit), float(tt[fit_hi])))
+            ix = int(np.searchsorted(tt, t_fit, side="right")) - 1
+            ix = max(0, min(ix, len(tt) - 2))
+            return ix, float(t_fit)
+
+    if direction == "rising":
+        search_lo, search_hi = fit_lo, min(k_trigger, len(yy) - 2)
+    else:
+        search_lo, search_hi = max(anchor, k_trigger), min(fit_hi, len(yy) - 2)
+    ix = _crossing_pair_index(yy, lvl, direction, search_lo, search_hi)
+    if ix is not None:
+        return int(ix), _eoff_crossing_time_us(tt, yy, int(ix), lvl, direction)
+    return k_trigger, float(tt[k_trigger])
+
+
 def _eoff_vce_ha_crossing_at_main_rise(
     t_seg: np.ndarray,
     v_seg: np.ndarray,
@@ -273,104 +534,21 @@ def _eoff_vce_ha_crossing_at_main_rise(
     v_top: float,
     search_span_ns: float = 350.0,
     pre_rise_span_ns: float = 160.0,
-    prefer_last_base_cross: bool = True,
 ) -> tuple[int, float]:
-    """关断 A：主 Vce 抬升沿与 Ha 的上升穿越时刻。"""
-    if len(t_seg) < 2:
-        return 0, float(t_seg[0]) if len(t_seg) else 0.0
-
-    t_lo = float(t_seg[0])
-    # 搜索整个关断窗内 Vce<=on_hi 的最大 dV/dt 点（主抬升脚）。
-    # 不能用 t_lo+固定 350ns 截断：下桥窗起点距实际抬升 >350ns 时，
-    # 主抬升会被排除、best_k 落到导通态噪声上（A 偏早上百 ns）。
-    # 抬升后 Vce 高位 (>on_hi) 已被下面的 continue 跳过，故全窗搜索安全。
+    """关断 A：Vce 主上升沿第一次穿 Ha 的时刻。"""
     _ = search_span_ns
-    t_hi = float(t_seg[-1])
-    on_hi = ha_v + max(30.0, 0.04 * max(float(v_top) - ha_v, 1.0))
-
-    # 主抬升定位：先找首个越过 50% (ha_v→v_top) 的样本（仅真实关断抬升能到达，
-    # 导通态噪声尖峰幅度远不及），再向左回找 Ha 上升穿越。若平台在 Ha 附近抖动，
-    # 使用到达主抬升前的最后一次上穿，这才是 Vce 主上升沿与 Ha 的第一个交点。
-    # 旧法取回看窗里的第一个上穿，会把 A 放到导通平台噪声点上。
-    mid = ha_v + 0.5 * max(float(v_top) - ha_v, 1.0)
-    k_high: int | None = None
-    for k in range(len(v_seg)):
-        if float(t_seg[k]) > t_hi:
-            break
-        if float(v_seg[k]) >= mid:
-            k_high = k
-            break
-    if k_high is not None:
-        diffs = np.diff(t_seg)
-        positive_diffs = diffs[diffs > 0.0]
-        sample_dt = float(np.median(positive_diffs)) if len(positive_diffs) else float(dt)
-        # t_seg 在 pipeline 中是秒，在 GUI 交互中是微秒；按采样间隔推断单位。
-        # Low-current turn-off traces can leave the true Vce base for a ~30 V
-        # foot before the 50% rise point.  Keep the default lookback narrow for
-        # high-current noise immunity; callers may widen it for low-current DPT.
-        pre_rise_span = (
-            float(pre_rise_span_ns) * 1e-3
-            if sample_dt > 1e-7
-            else float(pre_rise_span_ns) * 1e-9
-        )
-        t_near = float(t_seg[k_high]) - pre_rise_span
-        last_cross: tuple[int, float] | None = None
-        for kk in range(0, max(0, k_high)):
-            if float(t_seg[kk]) < t_near:
-                continue
-            y0, y1 = float(v_seg[kk]), float(v_seg[kk + 1])
-            if y0 < ha_v <= y1 and y1 > y0:
-                frac = float(np.clip((ha_v - y0) / (y1 - y0), 0.0, 1.0))
-                t_cross = float(t_seg[kk] + frac * (t_seg[kk + 1] - t_seg[kk]))
-                if not prefer_last_base_cross:
-                    return int(kk), t_cross
-                last_cross = (int(kk), t_cross)
-        if last_cross is not None:
-            return last_cross
-
-        # 若局部窗口未找到 Ha 交点，回退到脚点附近插值。
-        foot = k_high
-        while foot > 0 and float(v_seg[foot - 1]) > on_hi:
-            foot -= 1
-        best_k = max(0, foot - 1)
-    else:
-        # 回退：窗内 Vce<=on_hi 的最大 dV/dt（保留旧行为）
-        best_k = 0
-        best_slope = -1.0
-        for k in range(1, len(t_seg) - 1):
-            if float(t_seg[k]) > t_hi:
-                break
-            if float(v_seg[k]) > on_hi:
-                continue
-            dt_k = float(t_seg[k + 1] - t_seg[k])
-            if dt_k <= 0.0:
-                continue
-            slope = (float(v_seg[k + 1]) - float(v_seg[k])) / dt_k
-            if slope > best_slope:
-                best_slope = slope
-                best_k = k
-
-    # 仅在最大斜率点附近找 Ha 穿越（避免 lookback 随 dt 放大到数百点误取早期噪声）
-    look = max(4, min(24, int(3e-9 / max(float(dt), 1e-12))))
-    best_kk: int | None = None
-    best_dist = len(v_seg)
-    for kk in range(max(0, best_k - look), min(len(v_seg) - 1, best_k + look)):
-        y0, y1 = float(v_seg[kk]), float(v_seg[kk + 1])
-        if y0 < ha_v <= y1 and y1 > y0:
-            dist = abs(kk - best_k)
-            if dist < best_dist:
-                best_dist = dist
-                best_kk = kk
-    if best_kk is not None:
-        y0, y1 = float(v_seg[best_kk]), float(v_seg[best_kk + 1])
-        frac = float(np.clip((ha_v - y0) / (y1 - y0), 0.0, 1.0))
-        t_cross = float(t_seg[best_kk] + frac * (t_seg[best_kk + 1] - t_seg[best_kk]))
-        return int(best_kk), t_cross
-
-    j_hi = min(len(t_seg) - 1, best_k + look)
-    j_lo = max(0, best_k - look)
-    t_cross = _eoff_vce_ha_crossing_time(t_seg, v_seg, ha_v, j_lo, j_hi)
-    return int(j_lo), t_cross
+    return _main_edge_level_crossing(
+        t_seg,
+        v_seg,
+        ha_v,
+        v_top,
+        "rising",
+        0,
+        dt,
+        fit_pre_ns=pre_rise_span_ns,
+        min_trigger=30.0,
+        raw_window_ns=pre_rise_span_ns,
+    )
 
 
 def _eoff_vce_rise_start_index(
@@ -381,7 +559,6 @@ def _eoff_vce_rise_start_index(
     v_top: float,
     t_seg: np.ndarray | None = None,
     pre_rise_span_ns: float = 160.0,
-    prefer_last_base_cross: bool = True,
 ) -> int:
     """关断 A 样本索引（与 _eoff_vce_ha_crossing_at_main_rise 一致）。"""
     _ = anchor
@@ -394,7 +571,6 @@ def _eoff_vce_rise_start_index(
         dt,
         v_top,
         pre_rise_span_ns=pre_rise_span_ns,
-        prefer_last_base_cross=prefer_last_base_cross,
     )
     return int(ix)
 
@@ -418,6 +594,74 @@ def _eoff_crossing_time_us(
     return float(t_seg[ix] + frac * (t_seg[ix + 1] - t_seg[ix]))
 
 
+def _eon_ic_rise_crossing_at_main_rise(
+    t_seg: np.ndarray,
+    i_seg: np.ndarray,
+    ha_ic: float,
+    anchor: int,
+    dt: float,
+    i_top: float,
+) -> tuple[int, float]:
+    """开通 A：Ic 主上升沿第一次穿 Ha。"""
+    return _main_edge_level_crossing(
+        t_seg,
+        i_seg,
+        ha_ic,
+        i_top,
+        "rising",
+        anchor,
+        dt,
+        min_trigger=15.0,
+        raw_window_ns=200.0,
+    )
+
+
+def _eoff_ic_fall_crossing_at_main_fall(
+    t_seg: np.ndarray,
+    i_seg: np.ndarray,
+    hb: float,
+    anchor: int,
+    dt: float,
+    i_top: float,
+) -> tuple[int, float]:
+    """关断 B：Ic 主下降沿与 Hb 的第一个真实交点。"""
+    return _main_edge_level_crossing(
+        t_seg,
+        i_seg,
+        hb,
+        i_top,
+        "falling",
+        anchor,
+        dt,
+        min_trigger=15.0,
+        fit_post_ns=300.0,
+        raw_window_ns=400.0,
+    )
+
+
+def _eon_vce_hb_fall_crossing_at_main_fall(
+    t_seg: np.ndarray,
+    v_seg: np.ndarray,
+    hb: float,
+    anchor: int,
+    dt: float,
+    v_top: float,
+) -> tuple[int, float]:
+    """开通 B：Vce 主下降沿与 Hb 的第一个真实交点。"""
+    return _main_edge_level_crossing(
+        t_seg,
+        v_seg,
+        hb,
+        v_top,
+        "falling",
+        anchor,
+        dt,
+        min_trigger=5.0,
+        fit_post_ns=300.0,
+        raw_window_ns=400.0,
+    )
+
+
 def _eoff_ic_fall_start_index(
     i_seg: np.ndarray,
     hb: float,
@@ -425,20 +669,12 @@ def _eoff_ic_fall_start_index(
     dt: float,
     i_top: float,
 ) -> int:
-    """关断 B：|Ic| 主下降沿与 Hb 的第一个有效交点（仅抑制紧邻回穿）。"""
-    hold = max(3, int(25e-9 / dt))
-    bounce_tol = max(5.0, 0.08 * max(float(i_top) - hb, 1.0))
-    for k in range(max(0, anchor), len(i_seg) - hold - 1):
-        if i_seg[k] > hb and i_seg[k + 1] <= hb:
-            if float(np.mean(i_seg[k + 1 : k + 1 + hold])) <= hb + bounce_tol:
-                return k
-    i_end = _crossing_pair_index(i_seg, hb, "falling", anchor)
-    if i_end is None:
-        di = max(float(i_top) - hb, 1.0)
-        i_end = _crossing_pair_index(
-            i_seg, hb + max(0.03 * di, 30.0), "falling", anchor
-        )
-    return int(i_end) if i_end is not None else max(anchor, 0)
+    """关断 B 样本索引（与主下降沿首交点口径一致）。"""
+    t_seg = np.arange(len(i_seg), dtype=np.float64) * float(dt)
+    ix, _ = _eoff_ic_fall_crossing_at_main_fall(
+        t_seg, i_seg, hb, anchor, dt, i_top
+    )
+    return int(ix)
 
 
 def _eon_vce_hb_fall_start_index(
@@ -448,27 +684,12 @@ def _eon_vce_hb_fall_start_index(
     dt: float,
     v_top: float,
 ) -> int:
-    """开通 B：Vce 主下降沿与 Hb 的第一个有效下降穿越（抑制拖尾振铃假交点）。"""
-    hold = max(3, int(25e-9 / dt))
-    bounce_tol = max(3.0, 0.015 * max(float(v_top) - float(hb), 1.0))
-    sw_hi = max(float(hb) + 12.0, 0.06 * max(float(v_top), 1.0))
-    for k in range(max(0, anchor), len(v_seg) - hold - 1):
-        if float(np.max(v_seg[max(anchor, k - 8) : k + 1])) < sw_hi:
-            continue
-        y0, y1 = float(v_seg[k]), float(v_seg[k + 1])
-        if y0 > float(hb) and y1 <= float(hb):
-            if float(np.mean(v_seg[k + 1 : k + 1 + hold])) <= float(hb) + bounce_tol:
-                return k
-    i_end = _crossing_pair_index(v_seg, float(hb), "falling", anchor)
-    if i_end is None:
-        dv = max(float(v_top) - float(hb), 1.0)
-        i_end = _crossing_pair_index(
-            v_seg,
-            float(hb) + max(0.02 * dv, 5.0),
-            "falling",
-            anchor,
-        )
-    return int(i_end) if i_end is not None else max(anchor, 0)
+    """开通 B 样本索引（与主下降沿首交点口径一致）。"""
+    t_seg = np.arange(len(v_seg), dtype=np.float64) * float(dt)
+    ix, _ = _eon_vce_hb_fall_crossing_at_main_fall(
+        t_seg, v_seg, hb, anchor, dt, v_top
+    )
+    return int(ix)
 
 
 def _plateau_mean_ic_before_on(
@@ -516,7 +737,7 @@ def eoff_energy_markers(
 ) -> EnergyLossMarkers:
     """
     关断损耗卡尺：Ha=Vce 抬升前平台均值；Hb=Ic 回落后平台均值；
-    A=Vce 与 Ha 上升穿越；B=|Ic| 与 Hb 下降穿越。
+    A=Vce 与 Ha 上升穿越；B=Ic 主下降沿与 Hb 的第一个真实交点。
     """
     _v_base, i_top, i_base, v_top, w0, w1 = scope_turn_off_bases(
         vce, ic, off_idx, i0, i1, dt, pre_ns, pulse1_on=pulse1_on
@@ -549,19 +770,13 @@ def eoff_energy_markers(
         dt,
         float(v_top),
         pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
-        prefer_last_base_cross=True,
     )
 
     fall_anchor = max(i_start_local + 1, int(np.searchsorted(t_sw, t_start, side="left")))
-    i_end_local = _eoff_ic_fall_start_index(
-        i_seg, hb_a, fall_anchor, dt, float(i_top)
+    i_end_local, t_end = _eoff_ic_fall_crossing_at_main_fall(
+        t_sw, i_seg, hb_a, fall_anchor, dt, float(i_top)
     )
-    if i_end_local is None:
-        i_end_local = min(len(i_seg) - 1, i_start_local + int(450e-9 / dt))
-    if i_end_local <= i_start_local + 5:
-        i_end_local = min(len(i_seg) - 1, i_start_local + int(350e-9 / dt))
 
-    t_end = _eoff_crossing_time_us(t_sw, i_seg, i_end_local, hb_a, "falling")
     i_start = int(np.searchsorted(t, t_start, side="left"))
     i_end = int(np.searchsorted(t, t_end, side="left"))
     i_start = max(sw0, min(i_start, len(t) - 2))
@@ -593,47 +808,6 @@ def eoff_window_scope_example(
     ).as_integration_window()
 
 
-def eon_window_iec(
-    t: np.ndarray,
-    vge: np.ndarray,
-    ic: np.ndarray,
-    vce: np.ndarray,
-    vdc: float,
-    i0: int,
-    i1: int,
-    on_idx: int,
-    dt: float,
-    cfg: AppConfig,
-) -> IntegrationWindow:
-    """IEC60747-9 Eon: t1=10% Vge↑, t2=2% Vce↓ (last Vce fall to on-state)."""
-    th = cfg.thresholds
-    w0 = max(i0, on_idx - int(80e-9 / dt))
-    w1 = min(i1, on_idx + int(700e-9 / dt))
-
-    v_lo, v_hi = _vge_levels(vge, w0, w1)
-    vge_s = smooth(vge[w0:w1], dt, cfg.smoothing.detect_window_ns)
-    vce_s = smooth(vce[w0:w1], dt, cfg.smoothing.detect_window_ns)
-
-    v_10 = threshold_value(v_lo, v_hi, th.low_pct)
-    vce_hi = float(np.max(vce[w0:w1]))
-    vce_2 = vdc + 0.02 * max(vce_hi - vdc, 1.0)
-
-    anchor = max(0, on_idx - w0)
-    i_start_local = crossing_index(vge_s, v_10, "rising", anchor)
-    if i_start_local is None:
-        i_start_local = anchor
-
-    i_end_local = crossing_index(vce_s, vce_2, "falling", i_start_local, last=True)
-    if i_end_local is None:
-        i_end_local = min(len(vge_s) - 1, i_start_local + int(500e-9 / dt))
-    if i_end_local <= i_start_local + 5:
-        i_end_local = min(len(vge_s) - 1, on_idx - w0 + int(450e-9 / dt))
-
-    i_start = w0 + i_start_local
-    i_end = w0 + i_end_local
-    return IntegrationWindow(i_start, i_end, float(t[i_start]), float(t[i_end]))
-
-
 def eon_energy_markers(
     t: np.ndarray,
     ic: np.ndarray,
@@ -646,7 +820,7 @@ def eon_energy_markers(
 ) -> EnergyLossMarkers:
     """
     开通损耗卡尺：Ha=Ic 抬升前低平台；Hb=Vce 回落后平稳均值；
-    A=|Ic| 上升沿与 Ha 的第一个交点；B=Vce 下降沿与 Hb 的第一个交点。
+    A=Ic 上升沿与 Ha 的交点；B=Vce 主下降沿与 Hb 的第一个真实交点。
     """
     on_ref = int(on_idx)
     if on_ref < int(i0) or on_ref > int(i1):
@@ -673,25 +847,25 @@ def eon_energy_markers(
     local_on = on_ref - sw0
 
     anchor = max(0, local_on - int(15e-9 / dt))
-    i_start_local = _eon_ic_rise_start_index(i_seg, ha_ic, anchor, dt, float(i_top))
+    i_start_local, t_start = _eon_ic_rise_crossing_at_main_rise(
+        t_sw, i_seg, ha_ic, anchor, dt, float(i_top)
+    )
     if i_start_local >= len(i_seg) - 2:
         i_start_local = max(0, min(len(i_seg) - 2, local_on))
+        t_start = float(t_sw[i_start_local])
 
-    i_end_local = _eon_vce_hb_fall_start_index(
-        v_seg, hb_v, i_start_local, dt, float(v_top)
+    i_end_local, t_end = _eon_vce_hb_fall_crossing_at_main_fall(
+        t_sw, v_seg, hb_v, i_start_local, dt, float(v_top)
     )
-    if i_end_local <= i_start_local + 5:
-        i_end_local = min(len(v_seg) - 1, i_start_local + int(350e-9 / dt))
 
-    t_end = _eoff_crossing_time_us(t_sw, v_seg, i_end_local, hb_v, "falling")
-    i_start = int(np.searchsorted(t, float(t_sw[i_start_local]), side="left"))
+    i_start = int(np.searchsorted(t, float(t_start), side="left"))
     i_end = int(np.searchsorted(t, t_end, side="left"))
     i_start = max(sw0, min(i_start, len(t) - 2))
     i_end = max(i_start + 1, min(i_end, len(t) - 1))
     return EnergyLossMarkers(
         float(ha_ic),
         float(hb_v),
-        float(t_sw[i_start_local]),
+        float(t_start),
         float(t_end),
         i_start,
         i_end,
@@ -713,49 +887,6 @@ def eon_window_scope_example(
     return eon_energy_markers(
         t, ic, vce, i0, i1, on_idx, dt, pulse1_off=pulse1_off
     ).as_integration_window()
-
-
-def err_window_iec(
-    t: np.ndarray,
-    irr: np.ndarray,
-    v_diode: np.ndarray,
-    i0: int,
-    i1: int,
-    dt: float,
-    cfg: AppConfig,
-) -> IntegrationWindow:
-    """IEC60747-9 Err: t1=10% Vd↑, t2=2% Irr↓ after peak."""
-    th = cfg.thresholds
-    irr_s = smooth(irr[i0:i1], dt, cfg.smoothing.detect_window_ns)
-    vd_s = smooth(v_diode[i0:i1], dt, cfg.smoothing.detect_window_ns)
-
-    irr_abs = np.abs(irr_s)
-    irm = float(np.max(irr_abs)) if len(irr_abs) else 0.0
-    if irm < 1.0:
-        return IntegrationWindow(i0, i1, float(t[i0]), float(t[i1]))
-
-    vdm = float(np.percentile(vd_s, 10))
-    vmax = float(np.max(vd_s))
-    v_10 = vdm + th.low_pct * max(vmax - vdm, 1.0)
-    i_2 = 0.02 * irm
-
-    peak_local = int(np.argmax(irr_abs))
-    i_start_local = crossing_index(vd_s, v_10, "rising", 0, end=max(peak_local + 1, 10))
-    if i_start_local is None:
-        i_start_local = max(0, peak_local - int(80e-9 / dt))
-
-    i_end_local = crossing_index(irr_abs, i_2, "falling", peak_local, last=True)
-    if i_end_local is None:
-        i_end_local = min(len(irr_s) - 1, peak_local + int(250e-9 / dt))
-    if i_end_local <= i_start_local + 5:
-        i_end_local = min(len(irr_s) - 1, i_start_local + int(200e-9 / dt))
-
-    return IntegrationWindow(
-        i0 + i_start_local,
-        i0 + i_end_local,
-        float(t[i0 + i_start_local]),
-        float(t[i0 + i_end_local]),
-    )
 
 
 def err_window_scope_example(
@@ -844,45 +975,104 @@ def err_recovery_peak_index(seg_i: np.ndarray, dt: float) -> int:
     return int(np.argmax(q))
 
 
-def _err_recovery_peak_index(seg_abs: np.ndarray, dt: float) -> int:
-    """反向恢复主尖峰：跳过窗头已处于高电流的样点。"""
-    n = len(seg_abs)
-    if n < 8:
-        return int(np.argmax(seg_abs))
-    w = min(max(8, n // 4), int(100e-9 / max(dt, 1e-15)))
-    j0 = int(np.argmin(seg_abs[:w])) if w >= 3 else 0
-    return j0 + int(np.argmax(seg_abs[j0:]))
+@dataclass(frozen=True)
+class _ErrRecoveryBase:
+    level: float
+    start_idx: int
+    end_idx: int
+    amp: float
+    strict: bool = False
 
 
-def _err_ha_post_peak_plateau(
-    t: np.ndarray,
-    irr_abs: np.ndarray,
-    ipk: int,
+def _err_recovery_settled_base(
+    irr: np.ndarray,
+    ipk_global: int,
     dt: float,
     search_end: int,
-) -> float:
-    """尖峰后震荡结束尾段 |Irr| 平台：峰后约 370ns 起取 600ns 窗 (max+min)/2。
+) -> _ErrRecoveryBase:
+    """Err Ha：主大振荡结束后，本次恢复过程内的 Irr base 有效值。
 
-    须在 reverse_recovery 段之外继续搜索（典型工况峰后 ~19µs 才进入平稳尾段）。
+    仅用于反向恢复电流 Irr：从 IRM 尖峰后向右扫描滚动局部极差；第一个达到
+    低幅稳定标准的位置就是 A/Ha 的结束评估区，后面的长尾噪声、LC 振铃和
+    平台抖动不再参与。Eoff/Eon 不得引用这个尖峰规则，它们分别按 Ic/Vce
+    主下降沿与各自 Hb 横线判定。这个 helper 取代旧的峰后固定 400~800ns 尾窗。
     """
-    peak = float(irr_abs[ipk])
-    wlen = max(5, int(600e-9 / max(dt, 1e-15)))
-    settle = max(3, int(370e-9 / max(dt, 1e-15)))
-    lo = ipk + settle
-    hi = min(len(irr_abs) - wlen, int(search_end) - wlen + 1)
-    if lo > hi:
-        lo = max(ipk + 3, min(lo, len(irr_abs) - wlen - 1))
-        hi = lo
+    y = np.asarray(irr, dtype=np.float64)
+    n = len(y)
+    if n == 0:
+        return _ErrRecoveryBase(0.0, 0, 0, 0.0)
+    k0 = max(0, min(int(ipk_global), n - 1))
+    k_end = max(k0 + 1, min(int(search_end), n - 1))
+    available = k_end - k0
+    if available < 12:
+        level = float(y[k0])
+        return _ErrRecoveryBase(level, k0, k_end, 0.0)
 
-    def _mid_range(block: np.ndarray) -> float:
-        return 0.5 * (float(np.max(block)) + float(np.min(block)))
+    base_len = max(16, int(60e-9 / max(dt, 1e-15)))
+    if available <= base_len + 4:
+        base_len = max(8, available - 2)
+    step = max(1, int(5e-9 / max(dt, 1e-15)))
+    scan_lo = k0 + max(4, int(80e-9 / max(dt, 1e-15)))
+    scan_hi = k_end - base_len
+    if scan_hi < scan_lo:
+        scan_lo = max(k0 + 1, k_end - base_len)
+        scan_hi = scan_lo
 
-    sub = irr_abs[lo : lo + wlen]
-    if len(sub) >= 3:
-        return _mid_range(sub)
+    def _stats(start: int) -> tuple[float, float]:
+        block = y[start : start + base_len]
+        if len(block) < 3:
+            return 0.0, float(block[0]) if len(block) else float(y[k0])
+        mn = float(np.min(block))
+        mx = float(np.max(block))
+        return 0.5 * (mx - mn), 0.5 * (mx + mn)
 
-    tail = irr_abs[max(ipk, len(irr_abs) - wlen) :]
-    return _mid_range(tail) if len(tail) else peak * 0.25
+    peak_abs = max(abs(float(y[k0])), 1.0)
+    lookahead = max(6, int(120e-9 / max(step * dt, 1e-15)))
+    best: tuple[int, float, float] | None = None
+
+    def _scan_with_ceiling(ceiling: float, *, strict: bool) -> _ErrRecoveryBase | None:
+        nonlocal best
+        cur = scan_lo
+        while cur <= scan_hi:
+            amp, mid = _stats(cur)
+            if best is None or amp < best[1]:
+                best = (cur, amp, mid)
+            if amp <= ceiling:
+                future_amps = [amp]
+                fut = cur + step
+                for _ in range(lookahead - 1):
+                    if fut > scan_hi:
+                        break
+                    fut_amp, _fut_mid = _stats(fut)
+                    future_amps.append(fut_amp)
+                    fut += step
+                future_max = max(future_amps)
+                no_main_rebound = future_max <= max(1.45 * amp, amp + 12.0)
+                if no_main_rebound:
+                    end_idx = min(n - 1, cur + base_len - 1)
+                    return _ErrRecoveryBase(
+                        float(mid), int(cur), end_idx, float(amp), strict=strict
+                    )
+            cur += step
+        return None
+
+    # 第一口径只吃主恢复大振荡已明显收敛的位置；找不到时再回退旧的宽口径，
+    # 避免无法自然收敛的样例被硬拖到后续长尾。
+    strict = _scan_with_ceiling(max(16.0, 0.149 * peak_abs), strict=True)
+    if strict is not None:
+        return strict
+    loose = _scan_with_ceiling(max(18.0, 0.22 * peak_abs), strict=False)
+    if loose is not None:
+        return loose
+
+    if best is None:
+        block = y[k0 : k_end + 1]
+        mn = float(np.min(block))
+        mx = float(np.max(block))
+        return _ErrRecoveryBase(0.5 * (mx + mn), k0, k_end, 0.5 * (mx - mn))
+    start_idx = int(best[0])
+    end_idx = min(n - 1, start_idx + base_len - 1)
+    return _ErrRecoveryBase(float(best[2]), start_idx, end_idx, float(best[1]))
 
 
 def _err_hb_v_before_rise(
@@ -927,6 +1117,60 @@ def _err_interp_cross_time(
     return t0 + frac * (t1 - t0)
 
 
+def _err_interp_value_at_time(t: np.ndarray, y: np.ndarray, t_value: float) -> float:
+    if len(t) == 0 or len(y) == 0:
+        return 0.0
+    tv = float(t_value)
+    if tv <= float(t[0]):
+        return float(y[0])
+    if tv >= float(t[-1]):
+        return float(y[-1])
+    k = int(np.searchsorted(t, tv, side="right") - 1)
+    k = max(0, min(k, len(t) - 2))
+    t0, t1 = float(t[k]), float(t[k + 1])
+    y0, y1 = float(y[k]), float(y[k + 1])
+    if abs(t1 - t0) < 1e-30:
+        return y0
+    frac = float(np.clip((tv - t0) / (t1 - t0), 0.0, 1.0))
+    return y0 + frac * (y1 - y0)
+
+
+def _err_low_current_recovery_endpoint_t(
+    t: np.ndarray,
+    irr: np.ndarray,
+    ipk_global: int,
+    i_end: int,
+    dt: float,
+) -> float | None:
+    """低电流 Err A：峰后等待足够恢复时间，再取右侧稳定纵向落点。"""
+    y = np.asarray(irr, dtype=np.float64)
+    if len(y) < 12:
+        return None
+    k0 = max(0, min(int(ipk_global), len(y) - 2))
+    peak_abs = abs(float(y[k0]))
+    if peak_abs <= 1.0 or peak_abs >= 90.0:
+        return None
+    k_end = max(k0 + 2, min(int(i_end), len(y) - 1))
+    base_len = max(16, int(60e-9 / max(dt, 1e-15)))
+    scan_hi = k_end - base_len
+    if scan_hi <= k0:
+        return None
+    min_after_ns = 280.0 + max(0.0, peak_abs - 60.0) * 3.0
+    scan_lo = min(scan_hi, k0 + max(4, int(min_after_ns * 1e-9 / max(dt, 1e-15))))
+    amp_ceiling = max(3.5, 0.10 * peak_abs)
+    point_ceiling = max(3.2, 0.04 * peak_abs)
+    for k in range(scan_lo, scan_hi + 1):
+        block = y[k : k + base_len]
+        if len(block) < base_len:
+            break
+        amp = 0.5 * (float(np.max(block)) - float(np.min(block)))
+        if amp > amp_ceiling:
+            continue
+        if abs(float(y[k])) <= point_ceiling:
+            return float(t[k])
+    return None
+
+
 def _err_ic_fall_cross_after_peak(
     t_seg: np.ndarray,
     seg_abs: np.ndarray,
@@ -948,53 +1192,6 @@ def _err_ic_fall_cross_after_peak(
     return ipk, float(t_seg[ipk])
 
 
-def _err_v_rise_cross_hb(
-    t_seg: np.ndarray,
-    seg_v: np.ndarray,
-    hb: float,
-    ipk: int,
-    dt: float,
-) -> tuple[int, float]:
-    """B：|Vd| 主抬升沿与 Hb 的上升穿越。
-
-    尖峰前 Vd 仍处低平台（典型上桥）：取尖峰前最后一段有效穿越。
-    尖峰前 |Vd| 已偏高（典型下桥）：取段内首次有效穿越，避免 B 贴在尖峰上。
-    """
-    seg_v = np.asarray(seg_v, dtype=np.float64)
-    hold = max(3, int(20e-9 / max(dt, 1e-15)))
-    v_hi = hb + max(30.0, 0.2 * max(float(np.max(seg_v[: ipk + 1])) - hb, 1.0))
-
-    def _rising_cross_at(kk: int) -> bool:
-        if kk + 1 >= len(seg_v):
-            return False
-        if not (seg_v[kk] < hb <= seg_v[kk + 1]):
-            return False
-        return float(np.max(seg_v[kk + 1 : min(len(seg_v), kk + 1 + hold)])) >= v_hi
-
-    w_pre = max(5, int(32e-9 / max(dt, 1e-15)))
-    pre_med = (
-        float(np.median(seg_v[max(0, ipk - w_pre) : ipk])) if ipk > 0 else 0.0
-    )
-    v_pk = float(seg_v[ipk]) if ipk < len(seg_v) else pre_med
-    if pre_med > hb + max(50.0, 0.25 * max(v_pk - hb, 1.0)):
-        for kk in range(0, max(1, ipk)):
-            if _rising_cross_at(kk):
-                return kk, _err_interp_cross_time(t_seg, seg_v, kk, hb)
-
-    lo = max(0, ipk - w_pre)
-    hi = max(lo + 2, ipk - int(5e-9 / max(dt, 1e-15)))
-    best_kk: int | None = None
-    for kk in range(lo, hi):
-        if _rising_cross_at(kk):
-            best_kk = kk
-    if best_kk is not None:
-        return best_kk, _err_interp_cross_time(t_seg, seg_v, best_kk, hb)
-    ix = _crossing_pair_index(seg_v, hb, "rising", lo)
-    if ix is not None and int(ix) < ipk:
-        return int(ix), _err_interp_cross_time(t_seg, seg_v, int(ix), hb)
-    return max(0, ipk - 1), float(t_seg[max(0, ipk - 1)])
-
-
 def _err_window_mid(arr: np.ndarray, t: np.ndarray, t_lo_s: float, t_hi_s: float) -> float:
     """[t_lo,t_hi] 秒窗内波形 (max+min)/2（带符号，平台有效值）。"""
     i0 = int(np.searchsorted(t, float(t_lo_s), side="left"))
@@ -1007,43 +1204,99 @@ def _err_window_mid(arr: np.ndarray, t: np.ndarray, t_lo_s: float, t_hi_s: float
     return 0.5 * (float(np.max(seg)) + float(np.min(seg)))
 
 
+def _err_vd_main_rise_search(
+    t: np.ndarray, vd: np.ndarray, hb_hint: float, ipk_global: int, dt: float
+) -> tuple[int, int, int | None, float]:
+    """Err Vd 主上升沿搜索：限定在第二脉冲开通过程/反向恢复 IRM 附近。"""
+    ipk_global = int(ipk_global)
+    lo = max(0, ipk_global - int(800e-9 / max(dt, 1e-15)))
+    hi = min(len(vd) - 2, ipk_global + int(50e-9 / max(dt, 1e-15)))
+    if hi <= lo + 1:
+        return lo, hi, None, float(vd[min(ipk_global, len(vd) - 1)])
+    v_peak = float(np.max(vd[lo : ipk_global + 1]))
+    span = max(abs(v_peak - float(hb_hint)), 1.0)
+    trigger_step = min(max(30.0, 0.50 * span), 0.85 * span)
+    trigger = float(hb_hint) + trigger_step
+    k_trigger: int | None = None
+    for k in range(lo, hi + 1):
+        if float(vd[k]) >= trigger:
+            k_trigger = k
+            break
+    return lo, hi, k_trigger, v_peak
+
+
+def _err_vd_base_before_main_rise(
+    t: np.ndarray, vd: np.ndarray, hb_hint: float, ipk_global: int, dt: float
+) -> float:
+    """Err Hb：第二脉冲开通过程中，Vd 主上升沿前的本地 base。"""
+    _lo, _hi, k_trigger, _v_peak = _err_vd_main_rise_search(
+        t, vd, hb_hint, ipk_global, dt
+    )
+    if k_trigger is None:
+        return float(hb_hint)
+    pre_hi = int(np.searchsorted(t, float(t[k_trigger]) - 20e-9, side="left"))
+    pre_lo = int(np.searchsorted(t, float(t[k_trigger]) - 120e-9, side="left"))
+    pre_lo = max(0, min(pre_lo, len(vd) - 1))
+    pre_hi = max(pre_lo + 1, min(pre_hi, len(vd)))
+    seg = np.asarray(vd[pre_lo:pre_hi], dtype=np.float64)
+    if len(seg) < 8:
+        return float(hb_hint)
+    return float(np.median(seg))
+
+
 def _err_vd_rise_cross_hb_t(
     t: np.ndarray, vd: np.ndarray, hb: float, ipk_global: int, i0: int, dt: float
 ) -> float:
-    """Vd 主抬升沿与 Hb（带符号）的上升穿越：主峰前最后一次有效穿 Hb 的脚。
+    """Vd 主上升沿第一次穿 Hb（带符号）的交点。
 
     搜索窗以 IRM 为锚向左延伸，不得仅用 reverse_recovery 段起点截断（WH 等工况
     段起点常晚于真实抬升脚，否则会误落在段界上）。
     """
     _ = i0  # 保留参数以兼容调用方
-    ipk_global = int(ipk_global)
-    lo = max(0, ipk_global - int(800e-9 / max(dt, 1e-15)))
-    hi = min(len(vd) - 2, ipk_global + int(50e-9 / max(dt, 1e-15)))
+    lo, hi, _k_trigger, v_peak = _err_vd_main_rise_search(
+        t, vd, hb, ipk_global, dt
+    )
     if hi <= lo + 1:
         return float(t[min(ipk_global, len(t) - 1)])
-    hold = max(3, int(20e-9 / max(dt, 1e-15)))
-    v_hi = float(hb) + max(
-        30.0, 0.15 * max(float(np.max(vd[lo : ipk_global + 1])) - float(hb), 1.0)
+    _, t_cross = _main_edge_level_crossing(
+        t[lo : hi + 1],
+        vd[lo : hi + 1],
+        float(hb),
+        v_peak,
+        "rising",
+        0,
+        dt,
+        min_trigger=30.0,
+        prefer_raw_crossing=True,
+        raw_window_ns=160.0,
     )
-    best_t: float | None = None
-    for k in range(lo, min(ipk_global, hi)):
-        y0, y1 = float(vd[k]), float(vd[k + 1])
-        if y0 <= hb < y1:
-            if float(np.max(vd[k + 1 : min(len(vd), k + 1 + hold)])) >= v_hi:
-                best_t = _err_interp_cross_time(t, vd, k, hb)
-    if best_t is not None:
-        return best_t
-    d = np.diff(vd[lo : hi + 1]) / np.maximum(np.diff(t[lo : hi + 1]), 1e-15)
-    ks = lo + int(np.argmax(d))
-    for k in range(min(ks, ipk_global), lo - 1, -1):
-        y0, y1 = float(vd[k]), float(vd[k + 1])
-        if y0 <= hb < y1:
-            return _err_interp_cross_time(t, vd, k, hb)
-    for k in range(lo, min(ipk_global, hi)):
-        y0, y1 = float(vd[k]), float(vd[k + 1])
-        if y0 <= hb < y1:
-            return _err_interp_cross_time(t, vd, k, hb)
-    return float(t[lo])
+    return float(t_cross)
+
+
+def _err_has_dominant_opposite_rebound(
+    irr: np.ndarray,
+    ipk_global: int,
+    i_end: int,
+    peak: float,
+    dt: float,
+) -> bool:
+    """True when a post-IRM opposite rebound would make the first |Irr| cross early."""
+    if abs(float(peak)) < 1.0:
+        return False
+    k0 = max(0, int(ipk_global) + int(80e-9 / max(dt, 1e-15)))
+    k1 = min(
+        len(irr) - 1,
+        int(i_end),
+        int(ipk_global) + int(350e-9 / max(dt, 1e-15)),
+    )
+    if k1 <= k0 + 2:
+        return False
+    seg = np.asarray(irr[k0 : k1 + 1], dtype=np.float64)
+    if float(peak) > 0.0:
+        rebound = max(0.0, -float(np.min(seg)))
+    else:
+        rebound = max(0.0, float(np.max(seg)))
+    return rebound >= 0.95 * abs(float(peak))
 
 
 def _err_irr_fall_cross_ha_t(
@@ -1053,37 +1306,45 @@ def _err_irr_fall_cross_ha_t(
     ipk_global: int,
     i_end: int,
     dt: float,
+    *,
+    force_signed: bool = False,
+    settle_idx: int | None = None,
+    settle_strict: bool = False,
 ) -> float:
-    """IRM 主峰后下降沿与 Ha 的首个下降穿越（秒）。
+    """IRM 主峰后恢复沿与 Ha 的第一个真实交点（秒）。
 
     上桥软恢复：Irr 为正、Ha 为尾段带符号平台时，示波器读数为 |Irr| 与 |Ha|，
-    按幅值下降穿越；硬恢复/下桥负向过冲仍用带符号下降穿越。
+    按幅值穿越；硬恢复/下桥负向过冲仍用带符号 Irr 穿越。
     """
     k0 = max(0, int(ipk_global))
     k1 = max(k0 + 1, min(int(i_end), len(irr) - 1))
     peak = float(irr[k0]) if k0 < len(irr) else 0.0
-    use_mag = peak > 0.0 and (
-        float(ha) > 0.0 or (float(ha) < 0.0 and abs(peak) > 3.0 * abs(float(ha)))
-    )
+    use_mag = not force_signed and peak > 0.0 and float(ha) > 0.0
+    y = np.abs(np.asarray(irr, dtype=np.float64)) if use_mag else np.asarray(irr, dtype=np.float64)
+    lvl = abs(float(ha)) if use_mag else float(ha)
+
+    crossings: list[tuple[int, float, str]] = []
+    for k in range(k0, k1):
+        y0, y1 = float(y[k]), float(y[k + 1])
+        if min(y0, y1) <= lvl <= max(y0, y1) and abs(y1 - y0) > 1e-30:
+            direction = "falling" if y1 < y0 else "rising"
+            crossings.append((k, _err_interp_cross_time(t, y, k, lvl), direction))
+
+    if crossings:
+        for _k, t_cross, direction in crossings:
+            if direction == "falling":
+                return float(t_cross)
+        return float(crossings[0][1])
+
     if use_mag:
         lvl = abs(float(ha))
-        for k in range(k0, k1):
-            y0, y1 = abs(float(irr[k])), abs(float(irr[k + 1]))
-            if y0 > lvl >= y1:
-                return _err_interp_cross_time(
-                    t, np.abs(np.asarray(irr, dtype=np.float64)), k, lvl
-                )
     else:
-        for k in range(k0, k1):
-            y0, y1 = float(irr[k]), float(irr[k + 1])
-            if y0 > float(ha) >= y1:
-                return _err_interp_cross_time(t, irr, k, float(ha))
+        lvl = float(ha)
     t_seg = t[k0 : k1 + 1]
     seg_abs = np.abs(np.asarray(irr[k0 : k1 + 1], dtype=np.float64))
-    lvl = abs(float(ha))
     if len(seg_abs) >= 4:
         _, t_cross = _err_ic_fall_cross_after_peak(
-            t_seg, seg_abs, 0, lvl, dt
+            t_seg, seg_abs, 0, abs(lvl), dt
         )
         if t_cross > float(t[k0]):
             return float(t_cross)
@@ -1126,26 +1387,49 @@ def err_energy_markers(
     irr_full = np.asarray(irr, dtype=np.float64)
     vd_full = np.asarray(v_diode, dtype=np.float64)
     tpk = float(t[ipk_global])
-    # Ha=恢复后稳定 Irr 平台；正向软恢复按示波器幅值读数显示/拖动，
-    # 使横向光标与 A 点使用同一个实际交点口径。
-    ha_tail = _err_window_mid(irr_full, t, tpk + 400e-9, tpk + 800e-9)
+    # Ha=恢复后稳定 Irr 平台；稳定窗由本次反向恢复右侧的局部振荡收敛决定，
+    # 不再使用峰后固定 400~800ns 尾窗。
+    err_base = _err_recovery_settled_base(irr_full, ipk_global, dt, i_search_end)
+    ha_tail = float(err_base.level)
     peak = float(irr_full[ipk_global])
+    signed_tail_after_rebound = peak > 0.0 and float(ha_tail) < 0.0 and (
+        abs(float(ha_tail)) >= max(3.0, 0.03 * abs(float(peak)))
+        or _err_has_dominant_opposite_rebound(irr_full, ipk_global, i_search_end, peak, dt)
+    )
     use_irr_mag = peak > 0.0 and (
         float(ha_tail) > 0.0
-        or (float(ha_tail) < 0.0 and abs(peak) > 3.0 * abs(float(ha_tail)))
+        or (
+            float(ha_tail) < 0.0
+            and not signed_tail_after_rebound
+            and abs(peak) > 3.0 * abs(float(ha_tail))
+        )
     )
-    ha = abs(float(ha_tail)) if use_irr_mag else float(ha_tail)
-    # Hb=恢复前正向导通 Vd 平台 (max+min)/2（主峰前 200–600ns，带符号）
-    hb_v = _err_window_mid(vd_full, t, tpk - 600e-9, tpk - 200e-9)
+    ha = (
+        float(ha_tail)
+        if signed_tail_after_rebound
+        else (abs(float(ha_tail)) if use_irr_mag else float(ha_tail))
+    )
+    # Hb=第二脉冲开通过程中，对管电压 Vd 主上升沿前的本地 base。
+    # B 必须贴同一段 Vd 与该横线的真实交点，不能取全局或关断过程 base。
+    hb_hint = _err_window_mid(vd_full, t, tpk - 600e-9, tpk - 200e-9)
+    hb_v = _err_vd_base_before_main_rise(t, vd_full, hb_hint, ipk_global, dt)
     i_fall_end = max(
         ipk_global + 2,
         min(
             int(i_search_end),
-            ipk_global + int(800e-9 / max(dt, 1e-15)),
+            max(err_base.end_idx + 2, ipk_global + int(120e-9 / max(dt, 1e-15))),
         ),
     )
     t_a_irr = _err_irr_fall_cross_ha_t(
-        t, irr_full, ha, ipk_global, i_fall_end, dt
+        t,
+        irr_full,
+        ha,
+        ipk_global,
+        i_fall_end,
+        dt,
+        force_signed=signed_tail_after_rebound,
+        settle_idx=err_base.start_idx,
+        settle_strict=err_base.strict,
     )
     # B=Vd 主抬升沿与 Hb 的首个上升穿越（带符号 Vd）
     t_b_v = _err_vd_rise_cross_hb_t(t, vd_full, hb_v, ipk_global, i0, dt)

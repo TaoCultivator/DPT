@@ -111,3 +111,8 @@ class ExtractResult:
     single_pulse_mode: bool = False
     #: 短路工况：使用独立的短路参数表和导出模板
     short_circuit_mode: bool = False
+    #: 缺少关联通道时，仅隐藏受影响参数；键为 (分区, 参数名)。
+    unavailable_metrics: set[tuple[str, str]] = field(default_factory=set)
+
+    def is_metric_unavailable(self, section: str, name: str) -> bool:
+        return (section, name) in self.unavailable_metrics

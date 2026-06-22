@@ -24,9 +24,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from dpt_extractor.gui.theme import apply_combo_popup_style
 from dpt_extractor.gui.waveform_plot import (
     DISP_HALF_DIV,
     _pick_vdiv_ladder,
+    _scaled_div_value,
     _vdiv_ladder_for_channel,
     _vdiv_max_for_channel,
 )
@@ -155,6 +157,18 @@ QComboBox QAbstractItemView::item {
     min-height: 24px;
     padding: 4px 8px;
     color: #050505;
+    background-color: #f2f2f2;
+}
+QComboBox QAbstractItemView::item:hover {
+    background-color: #dce6e8;
+    color: #050505;
+}
+QComboBox QAbstractItemView::item:selected {
+    background-color: #28bce8;
+    color: #050505;
+}
+QComboBox QAbstractItemView::item:disabled {
+    color: #747a7d;
 }
 QLineEdit#chTagValue {
     min-height: 34px;
@@ -216,17 +230,20 @@ def _vdiv_options_for(key: str) -> list[float]:
     return [float(v) for v in _vdiv_ladder_for_channel(key) if float(v) <= cap]
 
 
-def _vdiv_decimals_for(key: str, current_scale: float) -> int:
-    values = [abs(float(current_scale))]
-    values.extend(abs(v) for v in _vdiv_options_for(key) if v > 0)
-    min_value = min((v for v in values if v > 0), default=1.0)
-    if min_value < 1e-6:
-        return 9
-    if min_value < 1e-3:
-        return 6
-    if min_value < 1.0 or abs(current_scale - round(current_scale)) > 1e-9:
+def _vdiv_display_decimals(value: float) -> int:
+    value = abs(float(value))
+    if value <= 0.0:
+        return 0
+    for decimals in range(0, 4):
+        if abs(round(value, decimals) - value) < 1e-9:
+            return decimals
+    if value >= 1.0:
         return 3
-    return 0
+    if value >= 1e-3:
+        return 3
+    if value >= 1e-6:
+        return 6
+    return 9
 
 
 def _vdiv_neighbor(cur: float, key: str, up: bool) -> float:
@@ -281,7 +298,6 @@ class ChannelSettingsPanel(QDialog):
         self.setFixedWidth(430)
 
         ch_idx = list(plot._trace_items.keys()).index(key) + 1
-        unit = plot._unit_for_channel(key)
         hidden = key in plot._hidden_channels
 
         dialog_lay = QVBoxLayout(self)
@@ -345,14 +361,10 @@ class ChannelSettingsPanel(QDialog):
         vdiv_row.setContentsMargins(0, 0, 0, 0)
         vdiv_row.setSpacing(4)
         current_scale = float(plot._disp_scale.get(key, 1.0))
+        self._vdiv_display_factor = 1.0
         self._vdiv_spin = QDoubleSpinBox()
-        self._vdiv_spin.setDecimals(_vdiv_decimals_for(key, current_scale))
-        vdiv_options = _vdiv_options_for(key)
-        min_vdiv = vdiv_options[0] if vdiv_options else min(1.0, current_scale)
-        self._vdiv_spin.setRange(min_vdiv, _vdiv_max_for_channel(key))
-        self._vdiv_spin.setSuffix(f" {unit}/div")
         self._vdiv_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
-        self._vdiv_spin.setValue(current_scale)
+        self._sync_vdiv_spin_from_scale(current_scale)
         self._vdiv_spin.valueChanged.connect(self._on_vdiv_changed)
         btn_up = QPushButton("▲")
         btn_dn = QPushButton("▼")
@@ -403,6 +415,7 @@ class ChannelSettingsPanel(QDialog):
         mapping_row.setContentsMargins(0, 0, 0, 0)
         mapping_row.setSpacing(8)
         self._mapping_combo = QComboBox()
+        apply_combo_popup_style(self._mapping_combo, light=True)
         for role, label in _MAPPING_OPTIONS:
             self._mapping_combo.addItem(label, role)
         current_role = plot.mapping_role_for_source(key)
@@ -481,17 +494,14 @@ class ChannelSettingsPanel(QDialog):
         self._btn_off.setChecked(not on)
 
     def _on_vdiv_changed(self, value: float) -> None:
-        scale = _pick_vdiv_ladder(float(value), self._key)
-        if abs(scale - self._vdiv_spin.value()) > 1e-9:
-            self._vdiv_spin.blockSignals(True)
-            self._vdiv_spin.setValue(scale)
-            self._vdiv_spin.blockSignals(False)
+        scale = _pick_vdiv_ladder(float(value) / self._vdiv_display_factor, self._key)
         self._plot._set_channel_scale(self._key, scale)
+        self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, scale))
 
     def _step_vdiv(self, direction: int) -> None:
-        cur = float(self._vdiv_spin.value())
+        cur = float(self._vdiv_spin.value()) / self._vdiv_display_factor
         nxt = _vdiv_neighbor(cur, self._key, direction > 0)
-        self._vdiv_spin.setValue(nxt)
+        self._vdiv_spin.setValue(nxt * self._vdiv_display_factor)
 
     def _on_pos_changed(self, value: float) -> None:
         self._plot._set_channel_offset(self._key, float(value))
@@ -501,9 +511,7 @@ class ChannelSettingsPanel(QDialog):
 
     def _on_auto_scale(self) -> None:
         self._plot._set_channel_scale(self._key, None)
-        self._vdiv_spin.blockSignals(True)
-        self._vdiv_spin.setValue(self._plot._disp_scale.get(self._key, 1.0))
-        self._vdiv_spin.blockSignals(False)
+        self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, 1.0))
         self._pos_spin.setValue(self._plot._disp_offset.get(self._key, 0.0))
 
     def _on_center(self) -> None:
@@ -526,14 +534,27 @@ class ChannelSettingsPanel(QDialog):
         self.close()
         self._plot._delete_math_channel(self._key)
 
+    def _sync_vdiv_spin_from_scale(self, scale: float) -> None:
+        unit = self._plot._unit_for_channel(self._key)
+        display_value, display_unit, factor = _scaled_div_value(float(scale), unit)
+        self._vdiv_display_factor = float(factor)
+        options = _vdiv_options_for(self._key)
+        min_vdiv = options[0] if options else min(1.0, float(scale))
+        max_vdiv = _vdiv_max_for_channel(self._key)
+        self._vdiv_spin.blockSignals(True)
+        self._vdiv_spin.setDecimals(_vdiv_display_decimals(display_value))
+        self._vdiv_spin.setRange(min_vdiv * factor, max_vdiv * factor)
+        suffix = f" {display_unit}/div" if display_unit else " /div"
+        self._vdiv_spin.setSuffix(suffix)
+        self._vdiv_spin.setValue(display_value)
+        self._vdiv_spin.blockSignals(False)
+
     def sync_from_plot(self) -> None:
         """外部改刻度/位置后刷新控件。"""
-        self._vdiv_spin.blockSignals(True)
         self._pos_spin.blockSignals(True)
-        self._vdiv_spin.setValue(self._plot._disp_scale.get(self._key, 1.0))
+        self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, 1.0))
         self._pos_spin.setValue(self._plot._disp_offset.get(self._key, 0.0))
         hidden = self._key in self._plot._hidden_channels
         self._btn_on.setChecked(not hidden)
         self._btn_off.setChecked(hidden)
-        self._vdiv_spin.blockSignals(False)
         self._pos_spin.blockSignals(False)

@@ -20,7 +20,11 @@ DATA_START_ROW = 5
 LAST_COL = 12
 SHEET_ZOOM_PERCENT = 85
 PHASE_CODES = ("UH", "UL", "VH", "VL", "WH", "WL")
-TEMP_LABELS = ("RT", "HT", "LT")
+TEMP_LABELS = {
+    "RT": ("25℃", 25),
+    "HT": ("150℃", 150),
+    "LT": ("-40℃", -40),
+}
 
 COL_TEMP = 1
 COL_PHASE = 2
@@ -88,6 +92,38 @@ def _num(v: float | None, digits: int = 4) -> float | None:
     if v != v:
         return None
     return round(float(v), digits)
+
+
+def _parse_temperature_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if match is None:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _temperature_code_from_value(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    if text in TEMP_LABELS:
+        return text
+    numeric = _parse_temperature_number(value)
+    if numeric is None:
+        return None
+    for code, (_display, expected) in TEMP_LABELS.items():
+        if abs(numeric - float(expected)) < 0.05:
+            return code
+    return None
+
+
+def _temperature_display(code: str) -> str:
+    return TEMP_LABELS[code][0]
 
 
 def _set_cell(
@@ -166,6 +202,8 @@ def _target_row(result: ExtractResult) -> int:
             first_code_row = row
         if row_code == code and temp is not None and row_temp == temp:
             return row
+    if temp is not None and first_code_row is not None:
+        return first_code_row
     if first_code_row is not None:
         return first_code_row
     return DATA_START_ROW
@@ -204,7 +242,7 @@ def build_short_circuit_workbook(result: ExtractResult | None = None) -> Workboo
                 fill = FILL_TAIL
             _set_cell(ws, row, col, None, fill=fill)
         if offset % 2 == 0:
-            _set_cell(ws, row, COL_TEMP, temp, fill=fill_info)
+            _set_cell(ws, row, COL_TEMP, _temperature_display(temp), fill=fill_info)
     for row in range(DATA_START_ROW, DATA_START_ROW + len(TEMPLATE_ROWS), 2):
         row_code = TEMPLATE_ROWS[row - DATA_START_ROW][1]
         if row_code:

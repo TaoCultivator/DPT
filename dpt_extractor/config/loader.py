@@ -34,7 +34,7 @@ class PulseSelectionConfig:
 
 @dataclass
 class TestModeConfig:
-    """测试模式：dpt=双脉冲计算，short_circuit=短路计算。"""
+    """测试模式：dpt=双脉冲计算，short_circuit=短路计算，offset_measurement=偏移测量。"""
 
     mode: str = "dpt"
 

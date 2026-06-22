@@ -11,6 +11,10 @@ from urllib.parse import unquote
 
 import numpy as np
 
+from dpt_extractor.metrics.offset_measurement import (
+    normalize_offset_metric_key,
+    normalize_offset_range_key,
+)
 from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
 
 _CHANNEL_RE = re.compile(r"^(CH[1-8]|MATH\d+|M\d+)$", re.I)
@@ -99,6 +103,7 @@ class _MathSetup:
     horizontal_scale_per_div: float | None = None
     horizontal_position_percent: float | None = None
     horizontal_delay: float | None = None
+    offset_measurements: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def _strip_setup_value(value: str) -> str:
@@ -152,6 +157,7 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
 
     setup = _MathSetup()
     fields: dict[str, dict[str, str]] = {}
+    measurement_fields: dict[int, dict[str, str]] = {}
     display_state: dict[str, bool] = {}
     for part in _split_lrn_setup(text):
         if " " in part:
@@ -194,6 +200,15 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
                     setup.horizontal_delay = delay
             except ValueError:
                 pass
+            continue
+
+        meas_match = re.fullmatch(
+            r":MEAS(?:U(?:REMENT)?)?:MEAS(\d+):(.+)",
+            key_u,
+        )
+        if meas_match:
+            meas_index = int(meas_match.group(1))
+            measurement_fields.setdefault(meas_index, {})[meas_match.group(2)] = value
             continue
 
         label_match = re.fullmatch(r":(?:(MATH):(MATH\d+)|(CH[1-8])):LABEL:NAME", key_u)
@@ -250,6 +265,40 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
         if display_state and display_state.get(math_key) is False and math_key not in setup.order:
             continue
         setup.formulas[math_key] = _normalise_formula(expr)
+
+    for meas_index in sorted(measurement_fields):
+        data = measurement_fields[meas_index]
+        state_text = (
+            data.get("STATE")
+            or data.get("DISPLAY")
+            or data.get("ENABLE")
+            or data.get("ENABLED")
+            or "1"
+        )
+        if state_text.strip().upper() in {"0", "OFF", "FALSE", "NONE"}:
+            continue
+        raw_source = (
+            data.get("SOURCE1")
+            or data.get("SOURCE")
+            or data.get("SOU1")
+            or data.get("SOU")
+            or ""
+        )
+        source_token = raw_source.split(",", 1)[0].strip()
+        source = _normalize_channel(source_token)
+        if not _CHANNEL_RE.match(source):
+            continue
+        raw_type = data.get("TYPE") or data.get("TYP") or data.get("MEASUREMENT") or ""
+        metric_key = normalize_offset_metric_key(raw_type)
+        if metric_key is None:
+            continue
+        range_key = normalize_offset_range_key(
+            data.get("RANGE")
+            or data.get("GATING")
+            or data.get("GATE")
+            or data.get("REGION")
+        )
+        setup.offset_measurements.append((source, metric_key, range_key))
 
     return setup
 
@@ -519,5 +568,10 @@ class TssParser:
         meta.horizontal_scale_per_div = math_setup.horizontal_scale_per_div
         meta.horizontal_position_percent = math_setup.horizontal_position_percent
         meta.horizontal_delay = math_setup.horizontal_delay
+        meta.offset_measurements = [
+            item
+            for item in math_setup.offset_measurements
+            if item[0] in channels
+        ]
         meta.record_length = n
         return WaveformBundle(t=t_ref, channels=channels, meta=meta)

@@ -115,6 +115,25 @@ def irr_parameter_peak_value(
     return abs(float(arr[idx]))
 
 
+def _window_mid_by_time(
+    t: np.ndarray, arr: np.ndarray, t_lo_s: float, t_hi_s: float
+) -> float | None:
+    t = np.asarray(t, dtype=np.float64)
+    arr = np.asarray(arr, dtype=np.float64)
+    n = min(len(t), len(arr))
+    if n < 2:
+        return None
+    lo, hi = sorted((float(t_lo_s), float(t_hi_s)))
+    i0 = int(np.searchsorted(t[:n], lo, side="left"))
+    i1 = int(np.searchsorted(t[:n], hi, side="right"))
+    i0 = max(0, min(i0, n - 1))
+    i1 = max(i0 + 1, min(i1, n))
+    seg = arr[i0:i1]
+    if len(seg) < 2:
+        return None
+    return 0.5 * (float(np.max(seg)) + float(np.min(seg)))
+
+
 def _lobe_valley_before_peak(seg: np.ndarray, ipk: int) -> int:
     """尖峰前主瓣谷底，用于限定 A/B 交点搜索范围。"""
     lookback = min(300, max(20, ipk))
@@ -360,3 +379,60 @@ def measure_irr_trr(
         trr_ns=max(0.0, (tb - ta) * 1e9),
         peak_idx=pk,
     )
+
+
+def default_irr_trr_measure(
+    t: np.ndarray,
+    irr: np.ndarray,
+    rr0: int,
+    rr1: int,
+    on_edge: int,
+    on0: int,
+    on1: int,
+) -> IrrTrrMeasure | None:
+    """
+    Trr 唯一默认口径：用反向恢复主瓣的同一 Ha/A/B 交点逻辑。
+
+    - Ha：主峰后 300--600ns 本地恢复参考线；若该窗无法取值，回退
+      ``measure_irr_trr`` 的主峰前平台默认 Ha。
+    - A：Irr 进入主恢复瓣时第一次与 Ha 相交的真实插值点。
+    - B：Irr 主峰之后第一次回落到 Ha 的真实插值点，不把后续衰减
+      振荡继续算进 Trr。
+    """
+    t_arr = np.asarray(t, dtype=np.float64)
+    irr_arr = np.asarray(irr, dtype=np.float64)
+    n = min(len(t_arr), len(irr_arr))
+    if n < 12:
+        return None
+
+    rr0 = max(0, min(int(rr0), n - 2))
+    rr1 = max(rr0 + 2, min(int(rr1), n - 1))
+    on0 = max(0, min(int(on0), n - 2))
+    on1 = max(on0 + 2, min(int(on1), n - 1))
+    on_edge = max(0, min(int(on_edge), n - 1))
+
+    peak_idx = irr_parameter_peak_index(irr_arr, rr0, rr1, on_edge, on0, on1)
+    peak_idx = max(rr0, min(int(peak_idx), min(on1, n - 1)))
+    measure_i1 = max(rr1, peak_idx)
+
+    peak_t = float(t_arr[peak_idx])
+    ha = _window_mid_by_time(t_arr, irr_arr, peak_t + 0.3e-6, peak_t + 0.6e-6)
+    marker = measure_irr_trr(
+        t_arr,
+        irr_arr,
+        rr0,
+        measure_i1,
+        ha=ha,
+        peak_idx=peak_idx,
+        i_fall_end=on1,
+    )
+    if marker is None and ha is not None:
+        marker = measure_irr_trr(
+            t_arr,
+            irr_arr,
+            rr0,
+            measure_i1,
+            peak_idx=peak_idx,
+            i_fall_end=on1,
+        )
+    return marker

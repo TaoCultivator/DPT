@@ -24,11 +24,10 @@ from dpt_extractor.metrics.iec_timings import (
     turn_on_timings,
 )
 from dpt_extractor.metrics.iec_windows import (
-    eoff_window_iec,
     eoff_window_scope_example,
     eon_window_scope_example,
     err_window_scope_example,
-    err_window_iec,
+    err_energy_markers,
     energy_window_power,
     integrate_err_recovery,
     integrate_vi_window,
@@ -58,6 +57,14 @@ from dpt_extractor.models.waveform import (
     bundle_reverse_recovery_current,
     bundle_total_current,
 )
+
+MetricKey = tuple[str, str]
+
+
+def _optional_channel(bundle: WaveformBundle, col: str) -> np.ndarray | None:
+    if not col:
+        return None
+    return bundle.channels.get(col)
 
 
 def _smooth_edge_padded(y: np.ndarray, window: int) -> np.ndarray:
@@ -293,11 +300,10 @@ def _turn_on_current_top_after_rr_end(
     t: np.ndarray,
     ic: np.ndarray,
     irr: np.ndarray,
-    v_diode: np.ndarray,
+    v_diode: np.ndarray | None,
     on0: int,
     on1: int,
     dt: float,
-    cfg: AppConfig,
 ) -> float:
     """
     开通电流：Ic 抬升后震荡结束平台 Ha（与 GUI 开通电流光标一致）。
@@ -310,8 +316,13 @@ def _turn_on_current_top_after_rr_end(
     _hb, ha = turn_on_current_hb_ha_t(t, ic, on0, on1, dt)
     if ha > 1e-6:
         return float(ha)
-    win = err_window_iec(t, irr, v_diode, on0, on1, dt, cfg)
-    a = max(0, min(win.i_end, n - 1))
+    if v_diode is not None:
+        win = err_energy_markers(
+            t, irr, v_diode, on0, on1, dt, i_search_end=on1
+        ).as_integration_window()
+        a = max(0, min(win.i_end, n - 1))
+    else:
+        a = max(0, min(on1 - max(5, int(200e-9 / dt)), n - 1))
     b = min(n, a + max(5, int(200e-9 / dt)))
     if b <= a + 1:
         b = min(n, a + 5)
@@ -360,11 +371,28 @@ def extract_all(
 
     vge = bundle.get(profile.vge)
     vce = bundle.get(profile.vce)
-    vce_other = bundle.get(profile.v_diode)
+    vce_other = _optional_channel(bundle, profile.v_diode)
     ic = bundle_total_current(bundle, profile)
     irr = bundle_reverse_recovery_current(bundle, profile)
     v_diode = vce_other
-    vge_other = bundle.get(profile.vge_other)
+    vge_other = _optional_channel(bundle, profile.vge_other)
+
+    unavailable: set[MetricKey] = set()
+    if vge_other is None:
+        unavailable.update(
+            {
+                ("关断过程", "串扰电压"),
+                ("开通", "串扰电压"),
+            }
+        )
+    if v_diode is None:
+        unavailable.update(
+            {
+                ("反向恢复", "Vrr"),
+                ("反向恢复", "dv/dt"),
+                ("反向恢复", "Err"),
+            }
+        )
 
     detector = PulseDetector(cfg)
     edges = detector.detect(t, vge, dt)
@@ -507,7 +535,11 @@ def extract_all(
     eoff_math = 0.0
     eoff_warn = False
 
-    off_vmax, off_vmin = crosstalk_extrema(vge_other, off0, off1, dt)
+    off_vmax, off_vmin = (
+        crosstalk_extrema(vge_other, off0, off1, dt)
+        if vge_other is not None
+        else (0.0, 0.0)
+    )
     turn_off = TurnOffResult(
         delta_vce=vce_off_max - vce_off_top,
         ic_off_max=ic_off_max,
@@ -549,6 +581,7 @@ def extract_all(
             off_pulse_index=edges.off_pulse_number,
             on_pulse_index=edges.on_pulse_number,
             single_pulse_mode=True,
+            unavailable_metrics=unavailable,
         )
 
     # --- Turn-on ---
@@ -588,7 +621,7 @@ def extract_all(
         ic, vce, on0, on1, dt, ic_top_on, vce_top_on
     )
     turn_on_current = _turn_on_current_top_after_rr_end(
-        t, ic, irr, v_diode, on0, on1, dt, cfg
+        t, ic, irr, v_diode, on0, on1, dt
     )
     # 开通斜率：在完整开通段内按 Top 百分比找穿越（Vge 上升窗不含 Vce 跌落/电流上升）
     dvdt_on_v = dvdt_on(
@@ -641,7 +674,11 @@ def extract_all(
     eon_math = 0.0
     eon_warn = False
 
-    on_vmax, on_vmin = crosstalk_extrema(vge_other, on0, on1, dt)
+    on_vmax, on_vmin = (
+        crosstalk_extrema(vge_other, on0, on1, dt)
+        if vge_other is not None
+        else (0.0, 0.0)
+    )
     turn_on = TurnOnResult(
         delta_vce=delta_vce_on,
         ic_on_max=ic_on_max,
@@ -666,7 +703,7 @@ def extract_all(
     # --- Reverse recovery ---
     irr_peak = _irr_peak(irr, rr0, rr1, edges.pulse2_on, on0, on1)
     # Vrr 口径：开通过程中换流二极管电压最大值
-    vrr = float(np.max(v_diode[on0:on1]))
+    vrr = float(np.max(v_diode[on0:on1])) if v_diode is not None else 0.0
     # 指导书：di/dt(1)=0.9*IDM->0.1*IDM，dv/dt(1)=0.1*(-VDM)->0.9*(-VDM)
     rr_s0, rr_s1 = rr_slope_window_indices(on0, rr1, len(t), dt)
     # 反向恢复 di/dt、dv/dt：由 GUI “范围取值”选择百分比计算
@@ -678,8 +715,10 @@ def extract_all(
     pct_hi = max(dv_a, dv_b)
     pct_hi_di = max(di_a, di_b)
     pct_lo_di = min(di_a, di_b)
-    dvdt_rr = dvdt_diode_recovery(
-        t, v_diode, rr_s0, rr_s1, pct_lo=pct_lo, pct_hi=pct_hi
+    dvdt_rr = (
+        dvdt_diode_recovery(t, v_diode, rr_s0, rr_s1, pct_lo=pct_lo, pct_hi=pct_hi)
+        if v_diode is not None
+        else 0.0
     )
     rr_measure = rr_di.ic_reference if rr_di.ic_reference in ("idm", "if_irm") else "idm"
     didt_rr = didt_diode_recovery(
@@ -691,19 +730,31 @@ def extract_all(
         pct_lo=pct_lo_di,
         measure=rr_measure,
     )
-    if dvdt_rr < 1e-6:
+    if v_diode is not None and dvdt_rr < 1e-6:
         dvdt_rr = dvdt_max(t, v_diode, rr0, rr1, dt, cfg)
     if didt_rr < 1e-6:
         didt_rr = didt_max(t, irr, rr0, rr1, dt, cfg)
-    # Trr 按示波器口径在完整开通过程内找 iD=0 -> iD(t>t1)=0
-    trr = reverse_recovery_trr(t, irr, v_diode, on0, on1, dt, cfg)
+    # Trr 与 GUI 默认卡尺共用同一套 Ha/A/B 主恢复瓣交点逻辑
+    trr = reverse_recovery_trr(
+        t,
+        irr,
+        v_diode if v_diode is not None else np.zeros_like(irr),
+        on0,
+        on1,
+        dt,
+        cfg,
+        rr0=rr0,
+        rr1=rr1,
+        on_edge=segs.pulse2_on,
+    )
     # Err 按示波器口径：从反向谷值到电流/电压同时回到 base 的区间积分
-    from dpt_extractor.metrics.iec_windows import err_energy_markers
-
-    win_rr_scope = err_energy_markers(
-        t, irr, v_diode, rr0, rr1, dt, i_search_end=on1
-    ).as_integration_window()
-    err = integrate_err_recovery(t, v_diode, irr, win_rr_scope)
+    if v_diode is not None:
+        win_rr_scope = err_energy_markers(
+            t, irr, v_diode, rr0, rr1, dt, i_search_end=on1
+        ).as_integration_window()
+        err = integrate_err_recovery(t, v_diode, irr, win_rr_scope)
+    else:
+        err = 0.0
     err_math = 0.0
     err_warn = False
 
@@ -737,4 +788,5 @@ def extract_all(
         off_pulse_index=edges.off_pulse_number,
         on_pulse_index=edges.on_pulse_number,
         single_pulse_mode=False,
+        unavailable_metrics=unavailable,
     )

@@ -530,63 +530,30 @@ def reverse_recovery_trr(
     i1: int,
     dt: float,
     cfg: AppConfig,
+    *,
+    rr0: int | None = None,
+    rr1: int | None = None,
+    on_edge: int | None = None,
 ) -> float:
     """
-    Trr = t2 - t1（示波器卡窗口径）：
-    - t1: 反向主谷值后首次过零（Irr 与 0A 交点）
-    - t2: 恢复正主瓣后回到近零（默认 5A）交点
+    Trr = B - A（示波器卡窗口径）。
+
+    自动结果不再使用固定 5A 近零阈值；它必须与 GUI 默认卡尺共用
+    ``measure_irr_trr``/``default_irr_trr_measure`` 的 Ha/A/B 交点逻辑。
     """
+    _ = v_diode, dt, cfg
     if i1 <= i0 + 5:
         return 0.0
 
-    ts = t[i0:i1]
-    ys = smooth(irr[i0:i1], dt, cfg.smoothing.detect_window_ns).astype(np.float64)
-    if len(ts) < 6 or len(ys) < 6:
-        return 0.0
+    from dpt_extractor.metrics.irr_measure import (
+        default_irr_trr_measure,
+        measure_irr_trr,
+    )
 
-    n = len(ys)
-    y = ys
-    if float(np.max(np.abs(y))) < 1.0:
+    if rr0 is not None and rr1 is not None and on_edge is not None:
+        marker = default_irr_trr_measure(t, irr, rr0, rr1, on_edge, i0, i1)
+    else:
+        marker = measure_irr_trr(t, irr, i0, i1, i_fall_end=i1)
+    if marker is None:
         return 0.0
-    i_pos = int(np.argmax(y))
-    lb = max(5, int(140e-9 / max(dt, 1e-15)))
-    a = max(0, i_pos - lb)
-    i_neg = a + int(np.argmin(y[a : i_pos + 1])) if i_pos > a else int(np.argmin(y))
-
-    t1 = None
-    for j in range(i_neg, n - 1):
-        y1 = y[j]
-        y2 = y[j + 1]
-        if y1 <= 0.0 and y2 >= 0.0:
-            dy = y2 - y1
-            if abs(dy) < 1e-12:
-                t1 = float(ts[j])
-            else:
-                f = -y1 / dy
-                f = max(0.0, min(1.0, f))
-                t1 = float(ts[j] + f * (ts[j + 1] - ts[j]))
-            break
-    if t1 is None:
-        return 0.0
-
-    i_start2 = max(i_pos, int(np.searchsorted(ts, t1, side="left")))
-    near0 = 5.0
-    t2 = None
-    for j in range(i_start2, n - 1):
-        y1 = y[j]
-        y2 = y[j + 1]
-        if y1 >= near0 and y2 <= near0:
-            dy = y2 - y1
-            if abs(dy) < 1e-12:
-                t2 = float(ts[j])
-            else:
-                f = (near0 - y1) / dy
-                f = max(0.0, min(1.0, f))
-                t2 = float(ts[j] + f * (ts[j + 1] - ts[j]))
-            break
-    if t2 is None:
-        return 0.0
-
-    if t2 <= t1:
-        return 0.0
-    return max(0.0, (t2 - t1) * 1e9)
+    return float(marker.trr_ns)

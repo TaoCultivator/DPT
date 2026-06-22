@@ -15,7 +15,7 @@ pulse_selection:
   off_pulse: 1
   on_pulse: 2
 
-# 测试模式：dpt | short_circuit（短路计算与双脉冲 pipeline 隔离）
+# 测试模式：dpt | short_circuit | offset_measurement（不同测试流程相互隔离）
 test_mode:
   mode: dpt
 

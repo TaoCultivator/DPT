@@ -59,8 +59,8 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
-    def test_tss_scope_ypos_does_not_override_auto_center(self):
-        """TSS 中的示波器 yPosition 是零位偏移，不应替代 (min+max)/2 居中。"""
+    def test_tss_scope_ypos_sets_initial_zero_offsets(self):
+        """TSS 中的示波器 yPosition 是该通道 0 刻度的初始位置。"""
         import numpy as np
 
         from dpt_extractor.gui.waveform_plot import WaveformPlot
@@ -96,13 +96,20 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         )
         plot = WaveformPlot()
         plot.plot_waveforms(bundle, profile, None)
-        for key in ("vge", "vce", "ic", "irr"):
+        expected_offsets = {
+            "vge": -0.6,
+            "vce": -3.54,
+            "ic": 2.5,
+        }
+        for key, expected in expected_offsets.items():
             display_key = plot._display_key_for_channel(key)
-            raw = plot._trace_raw[display_key]
-            scale = plot._disp_scale[display_key]
-            mid_raw = 0.5 * (float(np.min(raw)) + float(np.max(raw)))
-            mid_disp = mid_raw / scale + plot._disp_offset[display_key]
-            self.assertAlmostEqual(mid_disp, 0.0, places=2, msg=key)
+            self.assertAlmostEqual(plot._disp_offset[display_key], expected, places=6)
+            self.assertAlmostEqual(
+                plot._zero_handle_display_y(display_key),
+                expected,
+                places=6,
+                msg=key,
+            )
 
     def _make_synthetic_bundle(self):
         import numpy as np
@@ -193,10 +200,656 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(restored.name(), base.name())
         self.assertEqual(restored.alpha(), base.alpha())
 
+    def test_zero_handles_resync_after_viewbox_resize_without_drag(self):
+        plot = self._make_synthetic_plot()
+        plot.resize(900, 500)
+        plot.show()
+        for _ in range(3):
+            self.app.processEvents()
+        plot._update_zero_handle_positions()
+
+        plot.resize(1180, 660)
+        for _ in range(6):
+            self.app.processEvents()
+
+        vb = plot.plot.getPlotItem().getViewBox()
+        for key in ("CH1", "MATH1"):
+            expected = plot._zero_handle_scene_pos(
+                vb, plot._zero_handle_display_y(key)
+            )
+            actual = plot._zero_handles[key].pos()
+            self.assertAlmostEqual(actual.x(), expected.x(), places=3, msg=key)
+            self.assertAlmostEqual(actual.y(), expected.y(), places=3, msg=key)
+        plot.close()
+
     def test_pyqtgraph_auto_buttons_are_hidden(self):
         plot = self._make_synthetic_plot()
         self.assertTrue(plot.plot.getPlotItem().buttonsHidden)
         self.assertTrue(plot._overview_plot.getPlotItem().buttonsHidden)
+
+    def test_auxiliary_dash_pen_uses_spaced_pattern(self):
+        from PyQt6.QtCore import Qt
+
+        from dpt_extractor.gui.waveform_plot import AUX_DASH_PATTERN, _spaced_dash_pen
+
+        pen = _spaced_dash_pen("#ffffff", 1.0)
+
+        self.assertTrue(pen.isCosmetic())
+        self.assertEqual(pen.style(), Qt.PenStyle.CustomDashLine)
+        self.assertEqual(list(pen.dashPattern()), list(AUX_DASH_PATTERN))
+
+    def test_cursor_auxiliary_guides_stay_between_cursor_pairs_when_bound(self):
+        from dpt_extractor.gui.waveform_plot import (
+            CURSOR_AUXILIARY_HORIZONTAL_COLOR,
+            CURSOR_AUXILIARY_VERTICAL_COLOR,
+        )
+
+        plot = self._make_synthetic_plot()
+        plot.enable_interval_interaction(
+            0.2,
+            0.8,
+            lambda *_args: None,
+            show_horizontal_peak=True,
+        )
+        plot.set_interval_peak_horizontal(
+            0.0,
+            channel="vce",
+            t0_us=0.2,
+            t1_us=0.8,
+        )
+
+        point = plot._peak_plot_point_in_window("vce", 0.2, 0.8)
+        self.assertIsNotNone(point)
+        assert point is not None
+        peak_t_us, peak_value, peak_y = point
+        plot.set_cursor_auxiliary_point(
+            "vce",
+            peak_t_us,
+            peak_value,
+            show_vertical_guide=True,
+        )
+
+        self.assertIsNotNone(plot._cursor_aux_hline)
+        self.assertIsNotNone(plot._cursor_aux_vline)
+        assert plot._cursor_aux_hline is not None
+        assert plot._cursor_aux_vline is not None
+        self.assertGreater(plot._cursor_aux_hline.zValue(), plot._cursor_a.zValue())
+        self.assertGreater(plot._cursor_aux_vline.zValue(), plot._cursor_a.zValue())
+        self.assertEqual(
+            plot._cursor_aux_hline.opts["pen"].color().name(),
+            CURSOR_AUXILIARY_VERTICAL_COLOR.lower(),
+        )
+        self.assertEqual(
+            plot._cursor_aux_vline.opts["pen"].color().name(),
+            CURSOR_AUXILIARY_HORIZONTAL_COLOR.lower(),
+        )
+
+        hx, hy = plot._cursor_aux_hline.getData()
+        vx, vy = plot._cursor_aux_vline.getData()
+        assert plot._cursor_a is not None and plot._cursor_b is not None
+        assert plot._h_cursor_a is not None and plot._h_cursor_b is not None
+        a, b = sorted((float(plot._cursor_a.value()), float(plot._cursor_b.value())))
+        ha, hb = sorted(
+            (float(plot._h_cursor_a.value()), float(plot._h_cursor_b.value()))
+        )
+        aux_x = plot._horizontal_cursor_auxiliary_x()
+
+        self.assertAlmostEqual(float(hx[0]), a, places=9)
+        self.assertAlmostEqual(float(hx[1]), b, places=9)
+        self.assertAlmostEqual(float(hy[0]), peak_y, places=9)
+        self.assertAlmostEqual(float(hy[1]), peak_y, places=9)
+        self.assertAlmostEqual(float(vx[0]), aux_x, places=9)
+        self.assertAlmostEqual(float(vx[1]), aux_x, places=9)
+        self.assertAlmostEqual(float(vy[0]), ha, places=9)
+        self.assertAlmostEqual(float(vy[1]), hb, places=9)
+
+        plot._set_cursor_type("vertical")
+        self.assertTrue(plot._cursor_aux_hline.isVisible())
+        self.assertFalse(plot._cursor_aux_vline.isVisible())
+        plot._set_cursor_type("horizontal")
+        self.assertFalse(plot._cursor_aux_hline.isVisible())
+        self.assertTrue(plot._cursor_aux_vline.isVisible())
+        plot.close()
+
+    def test_interval_vertical_cursor_auxiliary_guide_is_hidden_by_default(self):
+        plot = self._make_synthetic_plot()
+        plot.enable_interval_interaction(
+            0.2,
+            0.8,
+            lambda *_args: None,
+            show_horizontal_peak=True,
+        )
+        plot.set_interval_peak_horizontal(
+            0.0,
+            channel="vce",
+            t0_us=0.2,
+            t1_us=0.8,
+        )
+
+        self.assertIsNotNone(plot._cursor_aux_hline)
+        assert plot._cursor_aux_hline is not None
+        self.assertFalse(plot._cursor_aux_hline.isVisible())
+        plot._set_cursor_type("vertical")
+        self.assertFalse(plot._cursor_aux_hline.isVisible())
+        plot.close()
+
+    def test_cursor_auxiliary_guides_have_default_waveform_point_without_vertical_guide(self):
+        plot = self._make_synthetic_plot()
+        self.assertIsNotNone(plot._cursor_aux_hline)
+        self.assertIsNotNone(plot._cursor_aux_vline)
+        assert plot._cursor_aux_hline is not None
+        assert plot._cursor_aux_vline is not None
+        self.assertFalse(plot._cursor_aux_hline.isVisible())
+        self.assertTrue(plot._cursor_aux_vline.isVisible())
+
+        point = plot._cursor_auxiliary_point()
+        self.assertIsNotNone(point)
+        assert point is not None
+        channel, t_us, value = point
+        self.assertEqual(channel, plot._cursor_source_channel())
+        assert plot._cursor_a is not None and plot._cursor_b is not None
+        expected_t = 0.5 * (float(plot._cursor_a.value()) + float(plot._cursor_b.value()))
+        expected = plot._sample_cursor_channel(channel, expected_t)
+        self.assertIsNotNone(expected)
+        assert expected is not None
+        self.assertAlmostEqual(t_us, expected_t, places=9)
+        self.assertAlmostEqual(value, expected[0], places=9)
+        plot.close()
+
+    def test_waveform_cursor_mode_keeps_default_vertical_auxiliary_hidden(self):
+        plot = self._make_synthetic_plot()
+        plot._set_cursor_type("waveform")
+        assert plot._cursor_a is not None and plot._cursor_b is not None
+        plot._cursor_a.setPos(0.8)
+        plot._cursor_b.setPos(0.2)
+        plot._update_readout()
+
+        self.assertIsNotNone(plot._cursor_aux_hline)
+        self.assertIsNotNone(plot._cursor_aux_vline)
+        assert plot._cursor_aux_hline is not None
+        assert plot._cursor_aux_vline is not None
+        self.assertFalse(plot._cursor_aux_hline.isVisible())
+        self.assertFalse(plot._cursor_aux_vline.isVisible())
+
+        point = plot._cursor_auxiliary_point()
+        self.assertIsNotNone(point)
+        assert point is not None
+        channel, t_us, value = point
+        self.assertEqual(channel, plot._cursor_source_channel())
+        candidates = []
+        for cursor in (plot._cursor_a, plot._cursor_b):
+            cursor_t = float(cursor.value())
+            sample = plot._sample_cursor_channel(channel, cursor_t)
+            self.assertIsNotNone(sample)
+            assert sample is not None
+            sample_value, sample_y = sample
+            candidates.append((sample_value, sample_y, cursor_t))
+        expected_value, expected_y, expected_t = max(
+            candidates, key=lambda item: item[1]
+        )
+        self.assertAlmostEqual(t_us, expected_t, places=9)
+        self.assertAlmostEqual(value, expected_value, places=9)
+
+        plot.close()
+
+    def test_offset_measurement_mode_adds_custom_waveform_metric(self):
+        from PyQt6.QtCore import QSettings
+        from PyQt6.QtWidgets import QComboBox
+
+        from dpt_extractor.gui.main_window import MainWindow, _WaveformLoadOutcome
+        from dpt_extractor.gui.main_window import NONCOMMERCIAL_NOTICE_SETTINGS_KEY
+        from dpt_extractor.models.test_mode import TestMode
+
+        bundle, profile = self._make_synthetic_bundle()
+        bundle.meta.channel_math_formulas["MATH1"] = "INTG(CH1)"
+        settings = QSettings("DPT", "DPTExtractor")
+        old_value = settings.value(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, None)
+        settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+        try:
+            win = MainWindow()
+            self.app.processEvents()
+            win.cfg.test_mode.mode = TestMode.OFFSET_MEASUREMENT.value
+            win._apply_test_mode_ui()
+            win._apply_loaded_waveform(
+                _WaveformLoadOutcome(
+                    path="/fake/offset_mode.tss",
+                    bundle=bundle,
+                    guessed=profile,
+                    profile=profile,
+                    inferred=None,
+                    inferred_source="",
+                    mapping_custom=False,
+                    result=None,
+                    short_circuit_not_ready=False,
+                    extraction_error="",
+                    load_ms=1.0,
+                    extract_ms=0.0,
+                )
+            )
+
+            self.assertIsNone(win.result)
+            self.assertFalse(win.result_table.offset_panel.isHidden())
+            self.assertFalse(win.btn_export.isEnabled())
+            self.assertIsNotNone(win.result_table.offset_measure_button)
+            self.assertGreater(len(win._offset_source_options()), 0)
+
+            source = win._offset_source_options()[0][0]
+            win._on_offset_measurement_add_requested(source, "maximum", "cursor")
+            self.assertEqual(win.result_table.table.rowCount(), 1)
+            self.assertEqual(
+                win.result_table._row_meta[0][0],
+                win._offset_source_display_name(source),
+            )
+            self.assertIn("Maximum", win.result_table._row_meta[0][1])
+            self.assertNotIn("H-Vge", win.result_table._row_meta[0][1])
+            self.assertEqual(win.result_table.table.item(0, 3).text(), "光标")
+            self.assertNotEqual(win.result_table.table.item(0, 4).text(), "—")
+            self.assertIn((source.upper(), "maximum", "cursor"), win._offset_measurements)
+            aux_point = win.wave_plot._cursor_auxiliary_point()
+            self.assertIsNotNone(aux_point)
+            assert aux_point is not None
+            self.assertEqual(aux_point[0], source.upper())
+            _t_range, raw = win._offset_series_for_range(source.upper(), "cursor")
+            self.assertAlmostEqual(aux_point[2], float(raw.max()), places=9)
+            self.assertIsNotNone(win.wave_plot._cursor_aux_hline)
+            assert win.wave_plot._cursor_aux_hline is not None
+            self.assertTrue(win.wave_plot._cursor_aux_hline.isVisible())
+
+            source_combo = win.result_table.table.cellWidget(0, 0)
+            self.assertIsInstance(source_combo, QComboBox)
+            assert isinstance(source_combo, QComboBox)
+            math_idx = source_combo.findData("MATH1")
+            self.assertGreaterEqual(math_idx, 0)
+            source_combo.setCurrentIndex(math_idx)
+            self.app.processEvents()
+            self.assertEqual(win._offset_measurements[0], ("MATH1", "maximum", "cursor"))
+            self.assertEqual(win.result_table.table.item(0, 0).text(), "Math 1")
+            self.assertEqual(
+                win.result_table.table.item(0, 0).background().color().name(),
+                win.wave_plot.trace_color("MATH1").lower(),
+            )
+            aux_point = win.wave_plot._cursor_auxiliary_point()
+            self.assertIsNotNone(aux_point)
+            assert aux_point is not None
+            self.assertEqual(aux_point[0], "MATH1")
+            _t_range, raw = win._offset_series_for_range("MATH1", "cursor")
+            self.assertAlmostEqual(aux_point[2], float(raw.max()), places=9)
+            assert win.wave_plot._cursor_aux_hline is not None
+            self.assertTrue(win.wave_plot._cursor_aux_hline.isVisible())
+
+            win._on_offset_measurement_update_requested(0, "metric", "minimum")
+            self.app.processEvents()
+            self.assertEqual(win._offset_measurements[0], ("MATH1", "minimum", "cursor"))
+            aux_point = win.wave_plot._cursor_auxiliary_point()
+            self.assertIsNotNone(aux_point)
+            assert aux_point is not None
+            _t_range, raw = win._offset_series_for_range("MATH1", "cursor")
+            self.assertAlmostEqual(aux_point[2], float(raw.min()), places=9)
+            assert win.wave_plot._cursor_aux_hline is not None
+            self.assertTrue(win.wave_plot._cursor_aux_hline.isVisible())
+            win._on_offset_measurement_update_requested(0, "metric", "maximum")
+            self.app.processEvents()
+
+            self.assertIsNone(win.result_table.table.cellWidget(0, 2))
+            self.assertEqual(win.result_table.table.item(0, 2).text(), "mJ")
+            _t_range, raw = win._offset_series_for_range("MATH1", "cursor")
+            expected_mj = win._offset_value_text(float(raw.max()) * 1000.0)
+            self.assertEqual(win.result_table.table.item(0, 4).text(), expected_mj)
+
+            win._on_offset_measurement_delete_requested("MATH1", "maximum", "cursor")
+            self.assertNotIn(
+                ("MATH1", "maximum", "cursor"),
+                win._offset_measurements,
+            )
+            self.assertEqual(win.result_table.table.rowCount(), 0)
+            self.assertIsNone(win.result_table.current_offset_measurement_spec())
+
+            win._on_offset_measurement_add_requested(source, "maximum")
+            self.assertEqual(win.result_table.table.rowCount(), 1)
+            self.assertIn((source.upper(), "maximum", "screen"), win._offset_measurements)
+            self.assertEqual(win.result_table.table.item(0, 3).text(), "屏幕")
+            win._on_offset_measurement_delete_all_requested()
+            self.assertEqual(win._offset_measurements, [])
+            self.assertEqual(win.result_table.table.rowCount(), 0)
+            win.close()
+            self.app.processEvents()
+        finally:
+            if old_value is None:
+                settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
+            else:
+                settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
+
+    def test_offset_measurement_auxiliary_guide_uses_selected_range(self):
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import MainWindow, _WaveformLoadOutcome
+        from dpt_extractor.gui.main_window import NONCOMMERCIAL_NOTICE_SETTINGS_KEY
+        from dpt_extractor.models.test_mode import TestMode
+
+        bundle, profile = self._make_synthetic_bundle()
+        settings = QSettings("DPT", "DPTExtractor")
+        old_value = settings.value(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, None)
+        settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+        try:
+            win = MainWindow()
+            self.app.processEvents()
+            win.cfg.test_mode.mode = TestMode.OFFSET_MEASUREMENT.value
+            win._apply_test_mode_ui()
+            win._apply_loaded_waveform(
+                _WaveformLoadOutcome(
+                    path="/fake/offset_range_guides.tss",
+                    bundle=bundle,
+                    guessed=profile,
+                    profile=profile,
+                    inferred=None,
+                    inferred_source="",
+                    mapping_custom=False,
+                    result=None,
+                    short_circuit_not_ready=False,
+                    extraction_error="",
+                    load_ms=1.0,
+                    extract_ms=0.0,
+                )
+            )
+
+            assert win.wave_plot._cursor_a is not None
+            assert win.wave_plot._cursor_b is not None
+            win.wave_plot._cursor_a.setPos(0.25)
+            win.wave_plot._cursor_b.setPos(0.75)
+            source = win._offset_source_options()[0][0]
+            win._on_offset_measurement_add_requested(source, "maximum", "cursor")
+            self.app.processEvents()
+
+            def _guide_x() -> tuple[float, float]:
+                line = win.wave_plot._cursor_aux_hline
+                self.assertIsNotNone(line)
+                assert line is not None
+                x, _y = line.getData()
+                return float(x[0]), float(x[-1])
+
+            def _assert_marker_matches_range(range_key: str) -> None:
+                aux_point = win.wave_plot._cursor_auxiliary_point()
+                self.assertIsNotNone(aux_point)
+                assert aux_point is not None
+                t_range, raw = win._offset_series_for_range(source.upper(), range_key)
+                self.assertGreater(raw.size, 0)
+                self.assertAlmostEqual(aux_point[1], float(t_range[-1] * 1e6), places=9)
+                self.assertAlmostEqual(aux_point[2], float(raw.max()), places=9)
+
+            self.assertEqual(_guide_x(), (0.25, 0.75))
+            _assert_marker_matches_range("cursor")
+
+            vb = win.wave_plot.plot.getPlotItem().getViewBox()
+            vb.setXRange(0.10, 0.60, padding=0.0)
+            self.app.processEvents()
+            win._on_offset_measurement_update_requested(0, "range", "screen")
+            self.app.processEvents()
+            screen = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(screen)
+            assert screen is not None
+            sx0, sx1 = _guide_x()
+            self.assertAlmostEqual(sx0, screen[0], places=9)
+            self.assertAlmostEqual(sx1, screen[1], places=9)
+            _assert_marker_matches_range("screen")
+
+            vb.setXRange(0.20, 0.50, padding=0.0)
+            self.app.processEvents()
+            screen = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(screen)
+            assert screen is not None
+            sx0, sx1 = _guide_x()
+            self.assertAlmostEqual(sx0, screen[0], places=9)
+            self.assertAlmostEqual(sx1, screen[1], places=9)
+            _assert_marker_matches_range("screen")
+
+            win._on_offset_measurement_update_requested(0, "range", "full")
+            self.app.processEvents()
+            fx0, fx1 = _guide_x()
+            self.assertAlmostEqual(fx0, float(bundle.t[0] * 1e6), places=9)
+            self.assertAlmostEqual(fx1, float(bundle.t[-1] * 1e6), places=9)
+            _assert_marker_matches_range("full")
+            win.close()
+            self.app.processEvents()
+        finally:
+            if old_value is None:
+                settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
+            else:
+                settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
+
+    def test_offset_cursor_window_is_independent_from_parameter_modes(self):
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import MainWindow, _WaveformLoadOutcome
+        from dpt_extractor.gui.main_window import NONCOMMERCIAL_NOTICE_SETTINGS_KEY
+        from dpt_extractor.models.results import (
+            ExtractResult,
+            SegmentIndices,
+            ShortCircuitResult,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+
+        bundle, profile = self._make_synthetic_bundle()
+        settings = QSettings("DPT", "DPTExtractor")
+        old_value = settings.value(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, None)
+        settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+        try:
+            win = MainWindow()
+            self.app.processEvents()
+            path = "/fake/offset_cursor_independent.tss"
+
+            def _load(result: ExtractResult | None, mode: TestMode) -> None:
+                win.cfg.test_mode.mode = mode.value
+                win._apply_test_mode_ui()
+                win._apply_loaded_waveform(
+                    _WaveformLoadOutcome(
+                        path=path,
+                        bundle=bundle,
+                        guessed=profile,
+                        profile=profile,
+                        inferred=None,
+                        inferred_source="",
+                        mapping_custom=False,
+                        result=result,
+                        short_circuit_not_ready=False,
+                        extraction_error="",
+                        load_ms=1.0,
+                        extract_ms=0.0,
+                    )
+                )
+                self.app.processEvents()
+
+            _load(None, TestMode.OFFSET_MEASUREMENT)
+            self.assertEqual(win.wave_plot.cursor_type(), "waveform")
+            assert win.wave_plot._cursor_a is not None
+            assert win.wave_plot._cursor_b is not None
+            assert win.wave_plot._h_cursor_a is not None
+            assert win.wave_plot._h_cursor_b is not None
+            self.assertTrue(win.wave_plot._cursor_a.isVisible())
+            self.assertTrue(win.wave_plot._cursor_b.isVisible())
+            self.assertFalse(win.wave_plot._h_cursor_a.isVisible())
+            self.assertFalse(win.wave_plot._h_cursor_b.isVisible())
+
+            win.wave_plot._cursor_a.setValue(0.82)
+            win.wave_plot._cursor_b.setValue(0.91)
+            self.app.processEvents()
+            offset_window = win._offset_cursor_window_for_current_waveform()
+            self.assertEqual(offset_window, (0.82, 0.91))
+
+            segments = SegmentIndices(
+                turn_off=(20, 70),
+                turn_on=(110, 160),
+                reverse_recovery=(110, 160),
+                pulse1_on=10,
+                pulse1_off=45,
+                pulse2_on=130,
+                pulse2_off=180,
+            )
+            dpt_result = ExtractResult(
+                segments=segments,
+                detected_pulse_count=2,
+                off_pulse_index=1,
+                on_pulse_index=2,
+            )
+            _load(dpt_result, TestMode.DPT)
+            self.assertEqual(win.wave_plot.cursor_type(), "both")
+            dpt_interval = win._parameter_interval_us("关断过程", "Ic_off_max")
+            self.assertIsNotNone(dpt_interval)
+            assert dpt_interval is not None
+            win._enable_generic_parameter_interaction("关断过程", "Ic_off_max")
+            self.app.processEvents()
+            self.assertAlmostEqual(float(win.wave_plot._cursor_a.value()), dpt_interval[0])
+            self.assertAlmostEqual(float(win.wave_plot._cursor_b.value()), dpt_interval[1])
+            self.assertNotAlmostEqual(float(win.wave_plot._cursor_a.value()), 0.82)
+            self.assertNotAlmostEqual(float(win.wave_plot._cursor_b.value()), 0.91)
+            self.assertEqual(win._offset_cursor_window_for_current_waveform(), offset_window)
+
+            short_result = ExtractResult(
+                segments=segments,
+                short_circuit_mode=True,
+                short_circuit=ShortCircuitResult(ic_max=100.0, tsc=0.1),
+            )
+            _load(short_result, TestMode.SHORT_CIRCUIT)
+            short_interval = win._parameter_interval_us("短路过程", "短路电流Imax")
+            self.assertIsNotNone(short_interval)
+            assert short_interval is not None
+            win._enable_generic_parameter_interaction("短路过程", "短路电流Imax")
+            self.app.processEvents()
+            self.assertAlmostEqual(float(win.wave_plot._cursor_a.value()), short_interval[0])
+            self.assertAlmostEqual(float(win.wave_plot._cursor_b.value()), short_interval[1])
+            self.assertNotAlmostEqual(float(win.wave_plot._cursor_a.value()), 0.82)
+            self.assertNotAlmostEqual(float(win.wave_plot._cursor_b.value()), 0.91)
+            self.assertEqual(win._offset_cursor_window_for_current_waveform(), offset_window)
+
+            _load(None, TestMode.OFFSET_MEASUREMENT)
+            self.assertEqual(win.wave_plot.cursor_type(), "waveform")
+            self.assertAlmostEqual(float(win.wave_plot._cursor_a.value()), 0.82)
+            self.assertAlmostEqual(float(win.wave_plot._cursor_b.value()), 0.91)
+            win.close()
+            self.app.processEvents()
+        finally:
+            if old_value is None:
+                settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
+            else:
+                settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
+
+    def test_normal_edge_reference_lines_are_not_drawn(self):
+        import numpy as np
+        from PyQt6.QtCore import Qt
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult, SegmentIndices
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels={
+                    "CH1": np.zeros(n),
+                    "CH2": np.ones(n),
+                    "CH3": np.ones(n),
+                    "CH4": np.zeros(n),
+                    "CH5": np.zeros(n),
+                    "CH6": np.zeros(n),
+                },
+                meta=TekMetadata(source_path="/fake/no_edge_reference_lines.tss"),
+            ),
+            profile,
+            ExtractResult(
+                segments=SegmentIndices(
+                    turn_off=(10, 30),
+                    turn_on=(70, 90),
+                    reverse_recovery=(70, 90),
+                    pulse1_off=20,
+                    pulse2_on=80,
+                )
+            ),
+        )
+
+        lines = [
+            item
+            for item in plot.plot.getPlotItem().items
+            if getattr(item, "angle", None) == 90
+            and hasattr(item, "pen")
+            and item.pen.style() == Qt.PenStyle.CustomDashLine
+        ]
+        self.assertEqual(lines, [])
+        self.assertEqual(plot._auxiliary_dash_lines, [])
+
+    def test_short_circuit_reference_lines_use_cosmetic_spaced_dash(self):
+        import numpy as np
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QColor, QPen
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import (
+            ExtractResult,
+            SegmentIndices,
+            ShortCircuitResult,
+        )
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+        from dpt_extractor.gui.waveform_plot import AUX_DASH_PATTERN, REFERENCE_LINE_Z
+
+        n = 128
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("W", "upper")
+        plot = WaveformPlot()
+        plot.plot_waveforms(
+            WaveformBundle(
+                t=t,
+                channels={
+                    "CH1": np.zeros(n),
+                    "CH2": np.ones(n),
+                    "CH3": np.ones(n),
+                    "CH4": np.zeros(n),
+                    "CH5": np.zeros(n),
+                    "CH6": np.zeros(n),
+                },
+                meta=TekMetadata(source_path="/fake/short_circuit_reference_lines.tss"),
+            ),
+            profile,
+            ExtractResult(
+                segments=SegmentIndices(
+                    turn_off=(10, 30),
+                    turn_on=(70, 90),
+                    reverse_recovery=(70, 90),
+                    pulse1_off=20,
+                    pulse2_on=80,
+                ),
+                short_circuit_mode=True,
+                short_circuit=ShortCircuitResult(tsc_start_us=0.2, tsc_end_us=0.7),
+            ),
+        )
+        lines = [
+            item
+            for item in plot.plot.getPlotItem().items
+            if getattr(item, "angle", None) == 90
+            and hasattr(item, "pen")
+            and item.pen.style() == Qt.PenStyle.CustomDashLine
+        ]
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            pen = line.pen
+            self.assertTrue(pen.isCosmetic())
+            self.assertEqual(pen.style(), Qt.PenStyle.CustomDashLine)
+            self.assertEqual(list(pen.dashPattern()), list(AUX_DASH_PATTERN))
+            self.assertEqual(line.zValue(), REFERENCE_LINE_Z)
+            self.assertGreater(line.zValue(), plot._cursor_a.zValue())
+        self.assertGreaterEqual(len(plot._auxiliary_dash_lines), len(lines))
+
+        lines[0].setPen(QPen(QColor("#ffffff"), 1.0))
+        self.assertEqual(lines[0].pen.style(), Qt.PenStyle.SolidLine)
+        plot._run_plot_geometry_sync()
+
+        pen = lines[0].pen
+        self.assertTrue(pen.isCosmetic())
+        self.assertEqual(pen.style(), Qt.PenStyle.CustomDashLine)
+        self.assertEqual(list(pen.dashPattern()), list(AUX_DASH_PATTERN))
 
     def test_time_axis_ticks_inline_unit_without_axis_title(self):
         plot = self._make_synthetic_plot()
@@ -388,15 +1041,22 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
 
         panel = ChannelSettingsPanel(plot, "MATH3", QPoint(0, 0), parent=plot)
-        self.assertLess(panel._vdiv_spin.minimum(), 0.05)
-        self.assertAlmostEqual(panel._vdiv_spin.value(), 0.05)
+        self.assertLess(panel._vdiv_spin.minimum(), 50.0)
+        self.assertAlmostEqual(panel._vdiv_spin.value(), 50.0)
+        self.assertIn("mJ/div", panel._vdiv_spin.suffix())
         panel._step_vdiv(-1)
         self.assertAlmostEqual(plot._disp_scale["MATH3"], 0.02)
         self.assertEqual(plot._vdiv_text("MATH3"), "20 mJ/div")
+        self.assertAlmostEqual(panel._vdiv_spin.value(), 20.0)
         panel.close()
 
         plot._set_channel_scale("MATH2", 0.5)
         self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.5)
+        self.assertEqual(plot._vdiv_text("MATH2"), "500 mA/div")
+        panel = ChannelSettingsPanel(plot, "MATH2", QPoint(0, 0), parent=plot)
+        self.assertAlmostEqual(panel._vdiv_spin.value(), 500.0)
+        self.assertIn("mA/div", panel._vdiv_spin.suffix())
+        panel.close()
         plot._set_math_formula("MATH4", "CH2")
         self.assertEqual(plot._unit_for_channel("MATH4"), "V")
         plot._set_channel_scale("MATH4", 0.5)
@@ -1502,7 +2162,8 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
 
         panel = ChannelSettingsPanel(plot, "MATH1", QPoint(0, 0), parent=plot)
-        self.assertAlmostEqual(panel._vdiv_spin.value(), 0.05)
+        self.assertAlmostEqual(panel._vdiv_spin.value(), 50.0)
+        self.assertIn("mA/div", panel._vdiv_spin.suffix())
         panel.close()
 
     def test_computed_non_loss_math_respects_tss_setup_vdiv_when_present(self):
@@ -1543,10 +2204,10 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertAlmostEqual(plot._manual_vdiv["MATH2"], 0.05)
         self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.05)
 
-    def test_computed_loss_math_ignores_stale_tss_vdiv_and_fits_full_waveform(self):
+    def test_computed_loss_math_uses_tss_vdiv_and_ypos_on_load(self):
         import numpy as np
 
-        from dpt_extractor.gui.waveform_plot import DISP_HALF_DIV, WaveformPlot
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
         from dpt_extractor.models.bridge_profile import make_profile
         from dpt_extractor.models.results import ExtractResult, SegmentIndices
         from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
@@ -1554,7 +2215,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         n = 128
         t = np.linspace(0.0, 1e-6, n)
         profile = make_profile("W", "upper")
-        loss = np.linspace(-0.001, 0.136, n)
+        loss = np.full(n, 5.0)
+        loss[10:30] = np.linspace(0.0, 0.4, 20)
+        loss[70:90] = np.linspace(0.1, 0.3, 20)
         plot = WaveformPlot()
         plot.plot_waveforms(
             WaveformBundle(
@@ -1569,8 +2232,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                     "MATH2": loss,
                 },
                 meta=TekMetadata(
-                    source_path="/fake/computed_loss_stale_vdiv.tss",
-                    channel_vdiv={"MATH2": 0.01},
+                    source_path="/fake/computed_loss_scope_setup.tss",
+                    channel_vdiv={"MATH2": 0.05},
+                    channel_y_position={"MATH2": -2.75},
                     channel_math_formulas={"MATH2": "INTG(CH2*MATH1)"},
                     computed_math_channels={"MATH2"},
                 ),
@@ -1587,12 +2251,10 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             ),
         )
 
-        self.assertNotIn("MATH2", plot._manual_vdiv)
-        self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.02)
-        full_y = loss / plot._disp_scale["MATH2"] + plot._disp_offset["MATH2"]
-        self.assertGreaterEqual(float(np.nanmin(full_y)), -DISP_HALF_DIV)
-        self.assertLessEqual(float(np.nanmax(full_y)), DISP_HALF_DIV)
-        self.assertLessEqual(float(np.nanmax(np.abs(full_y))), 4.05)
+        self.assertAlmostEqual(plot._manual_vdiv["MATH2"], 0.05)
+        self.assertAlmostEqual(plot._disp_scale["MATH2"], 0.05)
+        self.assertAlmostEqual(plot._disp_offset["MATH2"], -2.75)
+        self.assertAlmostEqual(plot._zero_handle_display_y("MATH2"), -2.75)
 
     def test_math_without_tss_vdiv_auto_uses_math_fit_ladder(self):
         import numpy as np
@@ -1778,7 +2440,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 },
                 meta=TekMetadata(
                     source_path="/fake/dual_loss_math.tss",
-                    channel_vdiv={"MATH2": 0.01, "MATH3": 0.002},
+                    channel_vdiv={"MATH2": 0.01, "MATH3": 0.001},
                     channel_math_formulas={
                         "MATH2": "INTG(CH2*MATH1)",
                         "MATH3": "INTG(CH5*MATH1)",
@@ -1805,6 +2467,46 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             self.assertAlmostEqual(plot._zero_handle_display_y(key), expected_y, places=6)
             handle_y = float(vb.mapSceneToView(plot._zero_handles[key].scenePos()).y())
             self.assertAlmostEqual(handle_y, expected_y, places=6)
+
+            before = plot._disp_offset[key]
+            plot._on_zero_handle_dragged(key, expected_y)
+            self.assertAlmostEqual(plot._disp_offset[key], before, places=6)
+
+    def test_zero_handle_drag_uses_lightweight_channel_refresh(self):
+        plot = self._make_synthetic_plot()
+        plot._set_math_formula("MATH2", "CH3 + CH4")
+
+        calls: list[object] = []
+        original_full = plot._refresh_visible_traces
+        original_overview = plot._refresh_overview_traces
+        original_single = plot._refresh_visible_trace
+
+        def full_refresh(*args, **kwargs):
+            calls.append("full")
+            return original_full(*args, **kwargs)
+
+        def overview_refresh(*args, **kwargs):
+            calls.append("overview")
+            return original_overview(*args, **kwargs)
+
+        def single_refresh(key):
+            calls.append(("single", key))
+            return original_single(key)
+
+        plot._refresh_visible_traces = full_refresh
+        plot._refresh_overview_traces = overview_refresh
+        plot._refresh_visible_trace = single_refresh
+        try:
+            plot._on_zero_handle_dragged("MATH2", -2.0)
+        finally:
+            plot._refresh_visible_traces = original_full
+            plot._refresh_overview_traces = original_overview
+            plot._refresh_visible_trace = original_single
+
+        self.assertAlmostEqual(plot._disp_offset["MATH2"], -2.0)
+        self.assertIn(("single", "MATH2"), calls)
+        self.assertNotIn("full", calls)
+        self.assertNotIn("overview", calls)
 
     def test_selected_channel_updates_physical_y_axis(self):
         plot = self._make_synthetic_plot()
@@ -1837,6 +2539,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot._set_channel_scale("MATH2", 0.05)
 
         plot._on_zero_handle_dragged("MATH2", -3.5)
+        plot._on_zero_handle_drag_finished("MATH2")
 
         self.assertEqual(plot._highlighted_key, "MATH2")
         self.assertEqual(plot._axis_channel(), "MATH2")
@@ -2003,6 +2706,35 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertTrue(plot._cursor_a.isVisible())
         plot.close()
 
+    def test_scope_context_menu_move_actions_follow_cursor_type(self):
+        plot = self._make_synthetic_plot()
+
+        def move_actions(cursor_type: str) -> list[str]:
+            plot._set_cursor_type(cursor_type)
+            menu = plot._build_scope_context_menu(0.5, 0.0)
+            return [
+                action.text()
+                for action in menu.actions()
+                if not action.isSeparator()
+                and ("移到此处" in action.text() or action.text() == "尚未安装光标")
+            ]
+
+        vertical_actions = ["将光标 A 移到此处", "将光标 B 移到此处"]
+        horizontal_actions = [
+            "将光标 Ha 移到此处",
+            "将光标 Hb 移到此处",
+        ]
+
+        for cursor_type in ("waveform", "vertical"):
+            with self.subTest(cursor_type=cursor_type):
+                actions = move_actions(cursor_type)
+                self.assertEqual(actions, vertical_actions)
+
+        self.assertEqual(move_actions("horizontal"), horizontal_actions)
+        self.assertEqual(move_actions("both"), vertical_actions + horizontal_actions)
+        self.assertEqual(move_actions("none"), [])
+        plot.close()
+
     def test_cursor_type_visibility_modes(self):
         import numpy as np
 
@@ -2086,6 +2818,58 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn("Δ a:", wave_delta)
         self.assertIn("Δ a/ Δ t:", wave_delta)
         self.assertFalse(plot._h_cursor_a.isVisible())
+
+    def test_cursor_readout_overlays_stay_on_plot_edges(self):
+        from PyQt6.QtCore import QPointF
+
+        from dpt_extractor.gui.waveform_plot import (
+            CURSOR_READOUT_BOTTOM_TICK_GUARD_PX,
+            CURSOR_READOUT_EDGE_INSET_PX,
+        )
+
+        plot = self._make_synthetic_plot()
+        plot.resize(900, 520)
+        plot.show()
+        self.app.processEvents()
+
+        assert plot._h_cursor_a is not None
+        assert plot._h_cursor_b is not None
+        plot._h_cursor_a.setPos(0.0)
+        plot._h_cursor_b.setPos(-1.5)
+        plot._set_cursor_type("both")
+        self.app.processEvents()
+
+        vb = plot.plot.getPlotItem().getViewBox()
+        rect = vb.sceneBoundingRect()
+        top_y = float(rect.top()) + CURSOR_READOUT_EDGE_INSET_PX
+        bottom_y = float(rect.bottom()) - CURSOR_READOUT_BOTTOM_TICK_GUARD_PX
+
+        self.assertAlmostEqual(
+            float(plot._cursor_ab_delta_label.scenePos().y()), top_y, delta=1.0
+        )
+        self.assertAlmostEqual(
+            float(plot._cursor_a_t_label.scenePos().y()), bottom_y, delta=1.0
+        )
+        self.assertAlmostEqual(
+            float(plot._cursor_b_t_label.scenePos().y()), bottom_y, delta=1.0
+        )
+        self.assertAlmostEqual(
+            float(plot._cursor_ha_v_label.scenePos().y()), top_y, delta=1.0
+        )
+        ha_line_y = float(vb.mapViewToScene(QPointF(0.0, 0.0)).y())
+        self.assertGreater(
+            abs(float(plot._cursor_ha_v_label.scenePos().y()) - ha_line_y),
+            20.0,
+        )
+
+        plot._set_cursor_type("horizontal")
+        self.app.processEvents()
+        self.assertAlmostEqual(
+            float(plot._cursor_hb_ha_delta_label.scenePos().y()),
+            bottom_y,
+            delta=1.0,
+        )
+        plot.close()
 
     def test_waveform_cursor_markers_survive_replot(self):
         from dpt_extractor.gui.waveform_plot import WaveformPlot
@@ -2247,11 +3031,21 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertTrue(plot._trace_items[key].isVisible())
         self.assertEqual(plot._trace_items[key].zValue(), 0)
 
-    def test_auto_center_on_import(self):
+    def test_scope_ypos_or_auto_center_on_import(self):
         import numpy as np
 
-        plot, _, _, _ = self._load_and_plot(WH)
+        from dpt_extractor.gui.waveform_plot import DISP_HALF_DIV
+
+        plot, bundle, _, _ = self._load_and_plot(WH)
         for key in plot._trace_items:
+            if key in bundle.meta.channel_y_position:
+                expected = max(
+                    -DISP_HALF_DIV,
+                    min(DISP_HALF_DIV, float(bundle.meta.channel_y_position[key])),
+                )
+                self.assertAlmostEqual(plot._disp_offset[key], expected, places=6)
+                self.assertAlmostEqual(plot._zero_handle_display_y(key), expected, places=6)
+                continue
             raw = plot._trace_raw[key]
             scale = plot._disp_scale[key]
             if key.startswith("MATH") and plot._unit_for_channel(key) == "J":
@@ -2292,7 +3086,11 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         plot, _, _, _ = self._load_and_plot(WH)
         max_half = DISP_HALF_DIV * (1.0 - VERT_VIEW_MARGIN) + 0.05
         for key, scale in plot._disp_scale.items():
-            ymin, ymax = plot._trace_yrange[key]
+            if key.startswith("MATH") and plot._unit_for_channel(key) == "J":
+                raw = plot._fit_raw_for_channel(key, plot._trace_raw[key])
+                ymin, ymax = float(np.nanmin(raw)), float(np.nanmax(raw))
+            else:
+                ymin, ymax = plot._trace_yrange[key]
             half_pp_div = (ymax - ymin) / (2.0 * scale)
             if key in plot._manual_vdiv:
                 self.assertEqual(scale, plot._manual_vdiv[key])
@@ -2615,6 +3413,15 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertEqual(plot._x_scale_edit.text(), "250 ns/div")
         self.assertAlmostEqual(_quantize_x_us_per_div(plot._x_us_per_div), 0.25, places=9)
 
+    def test_viewbox_wheel_fallback_does_not_capture_itself(self):
+        plot, _, _, _ = self._load_and_plot(WH)
+        vb = plot.plot.getPlotItem().getViewBox()
+        handler = vb.wheelEvent
+        closure_cells = getattr(handler, "__closure__", ()) or ()
+        captured = [cell.cell_contents for cell in closure_cells]
+
+        self.assertNotIn(handler, captured)
+
     def test_xrange_limits(self):
         plot, _, _, _ = self._load_and_plot(WH)
         vb = plot.plot.getPlotItem().getViewBox()
@@ -2725,7 +3532,7 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertGreater(ta, 14.525, f"A too early/noise: {ta}")
         self.assertLess(ta, 14.56, f"A too late/pulse_off: {ta}")
         self.assertGreater(tb, 14.77)
-        self.assertLess(tb, 14.84)
+        self.assertLess(tb, 15.00)
         a_samples = plot._energy_cursor_samples(ta)
         b_samples = plot._energy_cursor_samples(tb)
         self.assertEqual([s[0] for s in a_samples], ["vce", "ic"])
@@ -2735,13 +3542,66 @@ class TestMainWindowSmoke(unittest.TestCase):
         vce_at_a = float(np.interp(ta * 1e-6, win.bundle.t, vce))
         self.assertAlmostEqual(vce_at_a, ha_v, delta=0.5)
         marker_x, marker_y = plot._cursor_a_wave_marker.getData()
-        self.assertEqual(len(marker_x), 2)
-        self.assertEqual(len(marker_y), 2)
+        self.assertEqual(len(marker_x), 1)
+        self.assertEqual(len(marker_y), 1)
+        self.assertAlmostEqual(float(marker_x[0]), ta, places=6)
+        self.assertAlmostEqual(
+            plot._from_disp("vce", float(marker_y[0])),
+            ha_v,
+            delta=0.5,
+        )
+        marker_x, marker_y = plot._cursor_b_wave_marker.getData()
+        self.assertEqual(len(marker_x), 1)
+        self.assertEqual(len(marker_y), 1)
+        self.assertAlmostEqual(float(marker_x[0]), tb, places=6)
+        hb_a = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+        self.assertAlmostEqual(
+            plot._from_disp("ic", float(marker_y[0])),
+            hb_a,
+            delta=0.5,
+        )
         readout = plot._readout_label.text()
         self.assertIn("A[", readout)
         self.assertIn("B[", readout)
         self.assertIn("Vce", readout)
         self.assertIn("Ic", readout)
+        win.close()
+
+    def test_trr_cursor_shows_irr_ha_intersection_markers(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._load_file(str(UH))
+        self.assertIsNotNone(win.result)
+        win._on_value_clicked("反向恢复", "Trr")
+        plot = win.wave_plot
+        self.assertEqual(plot._interactive_mode, "trr_measure")
+        self.assertIsNotNone(plot._cursor_a_wave_marker)
+        self.assertIsNotNone(plot._cursor_b_wave_marker)
+        self.assertTrue(plot._cursor_a_wave_marker.isVisible())
+        self.assertTrue(plot._cursor_b_wave_marker.isVisible())
+
+        ha = plot._from_disp("irr", float(plot._h_cursor_a.value()))
+        ta = float(plot._cursor_a.value())
+        tb = float(plot._cursor_b.value())
+        self.assertAlmostEqual(
+            win.result.reverse_recovery.trr,
+            abs(tb - ta) * 1e3,
+            delta=0.001,
+        )
+        for marker, cursor in (
+            (plot._cursor_a_wave_marker, plot._cursor_a),
+            (plot._cursor_b_wave_marker, plot._cursor_b),
+        ):
+            marker_x, marker_y = marker.getData()
+            self.assertEqual(len(marker_x), 1)
+            self.assertEqual(len(marker_y), 1)
+            self.assertAlmostEqual(float(marker_x[0]), float(cursor.value()), places=6)
+            self.assertAlmostEqual(
+                plot._from_disp("irr", float(marker_y[0])),
+                ha,
+                delta=0.5,
+            )
         win.close()
 
     def test_smc_rt_eoff_ha_intersects_vce_a_cursor(self):

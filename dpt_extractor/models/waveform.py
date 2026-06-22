@@ -31,6 +31,9 @@ class TekMetadata:
     horizontal_position_percent: float | None = None
     #: Scope horizontal delay from the Tektronix session setup, seconds.
     horizontal_delay: float | None = None
+    #: Scope measurement definitions restored from the session setup:
+    #: (source channel, metric key, range key).
+    offset_measurements: list[tuple[str, str, str]] = field(default_factory=list)
 
     @property
     def dt(self) -> float:

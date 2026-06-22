@@ -1,5 +1,87 @@
 """Dark theme stylesheet for DPT extractor GUI."""
 
+from __future__ import annotations
+
+from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import QComboBox
+
+
+COMBO_POPUP_DARK_STYLESHEET = """
+QAbstractItemView {
+    background-color: #081719;
+    color: #edf6ee;
+    border: 1px solid #5a8b93;
+    selection-background-color: #28bce8;
+    selection-color: #061014;
+    outline: 0;
+}
+QAbstractItemView::item {
+    min-height: 26px;
+    padding: 5px 9px;
+    color: #edf6ee;
+    background-color: #081719;
+}
+QAbstractItemView::item:hover {
+    background-color: #123238;
+    color: #ffffff;
+}
+QAbstractItemView::item:selected {
+    background-color: #28bce8;
+    color: #061014;
+}
+QAbstractItemView::item:disabled {
+    color: #7a878c;
+}
+"""
+
+COMBO_POPUP_LIGHT_STYLESHEET = """
+QAbstractItemView {
+    background-color: #f2f4f4;
+    color: #101014;
+    border: 1px solid #6d7478;
+    selection-background-color: #28bce8;
+    selection-color: #061014;
+    outline: 0;
+}
+QAbstractItemView::item {
+    min-height: 26px;
+    padding: 5px 9px;
+    color: #101014;
+    background-color: #f2f4f4;
+}
+QAbstractItemView::item:hover {
+    background-color: #dce6e8;
+    color: #050607;
+}
+QAbstractItemView::item:selected {
+    background-color: #28bce8;
+    color: #061014;
+}
+QAbstractItemView::item:disabled {
+    color: #747a7d;
+}
+"""
+
+
+def apply_combo_popup_style(combo: QComboBox, *, light: bool = False) -> None:
+    view = combo.view()
+    view.setStyleSheet(
+        COMBO_POPUP_LIGHT_STYLESHEET if light else COMBO_POPUP_DARK_STYLESHEET
+    )
+    palette = view.palette()
+    if light:
+        base = QColor("#f2f4f4")
+        text = QColor("#101014")
+    else:
+        base = QColor("#081719")
+        text = QColor("#edf6ee")
+    palette.setColor(QPalette.ColorRole.Base, base)
+    palette.setColor(QPalette.ColorRole.Window, base)
+    palette.setColor(QPalette.ColorRole.Text, text)
+    palette.setColor(QPalette.ColorRole.Highlight, QColor("#28bce8"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#061014"))
+    view.setPalette(palette)
+
 DARK_STYLESHEET = """
 QMainWindow, QWidget {
     background-color: #1e1e2e;
@@ -38,10 +120,18 @@ QComboBox QAbstractItemView::item {
     min-height: 24px;
     padding: 4px 8px;
     color: #edf6ee;
+    background-color: #081719;
+}
+QComboBox QAbstractItemView::item:hover {
+    background-color: #123238;
+    color: #ffffff;
 }
 QComboBox QAbstractItemView::item:selected {
     background-color: #28bce8;
     color: #061014;
+}
+QComboBox QAbstractItemView::item:disabled {
+    color: #7a878c;
 }
 QLabel { color: #bac2de; }
 QToolTip {
@@ -119,6 +209,23 @@ QLabel#resultSummary {
     border: 1px solid #22464c;
     border-radius: 5px;
     padding: 4px 6px;
+}
+QFrame#offsetMeasurementPanel {
+    background-color: #0b181a;
+    border: 1px solid #284950;
+    border-radius: 5px;
+}
+QFrame#offsetMeasurementPanel QLabel#offsetActionLabel {
+    color: #d7e2dc;
+    font-weight: 700;
+}
+QFrame#offsetMeasurementPanel QPushButton#offsetMeasureButton {
+    background-color: #c9cece;
+    color: #111827;
+    border: 1px solid #7d8488;
+    border-radius: 5px;
+    padding: 5px 14px;
+    min-height: 28px;
 }
 QTableWidget#resultDataTable {
     background-color: #081314;

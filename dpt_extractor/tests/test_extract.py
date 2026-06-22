@@ -168,6 +168,38 @@ class TestExtractUH(unittest.TestCase):
         self.assertLess(result.turn_off.eoff, 120)
         self.assertGreater(result.reverse_recovery.irr, 80)
 
+    @unittest.skipUnless(UH.exists(), "UH sample missing")
+    def test_missing_opposite_channels_only_hide_dependent_metrics(self):
+        from dpt_extractor.models.waveform import WaveformBundle
+
+        bundle = load_waveform(UH)
+        cfg = load_config()
+        profile = guess_profile_from_path(UH.name)
+        channels = {
+            name: data
+            for name, data in bundle.channels.items()
+            if name not in {profile.v_diode, profile.vge_other}
+        }
+        missing_bundle = WaveformBundle(
+            t=bundle.t,
+            channels=channels,
+            meta=bundle.meta,
+        )
+
+        result = extract_all(missing_bundle, profile, cfg)
+
+        self.assertGreater(result.turn_off.eoff, 25)
+        self.assertGreater(result.turn_on.eon, 25)
+        self.assertGreater(result.reverse_recovery.irr, 80)
+        self.assertFalse(result.is_metric_unavailable("关断过程", "Eoff"))
+        self.assertFalse(result.is_metric_unavailable("开通", "Eon"))
+        self.assertFalse(result.is_metric_unavailable("反向恢复", "Irr"))
+        self.assertTrue(result.is_metric_unavailable("关断过程", "串扰电压"))
+        self.assertTrue(result.is_metric_unavailable("开通", "串扰电压"))
+        self.assertTrue(result.is_metric_unavailable("反向恢复", "Vrr"))
+        self.assertTrue(result.is_metric_unavailable("反向恢复", "dv/dt"))
+        self.assertTrue(result.is_metric_unavailable("反向恢复", "Err"))
+
 
 class TestExtractUL(unittest.TestCase):
     @unittest.skipUnless(UL.exists(), "UL sample missing")

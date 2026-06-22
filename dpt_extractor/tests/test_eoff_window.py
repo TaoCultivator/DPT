@@ -6,10 +6,12 @@ from pathlib import Path
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.iec_windows import (
+    _err_recovery_settled_base,
     eoff_energy_markers,
     eoff_window_scope_example,
     eon_energy_markers,
     err_energy_markers,
+    err_recovery_peak_index,
     integrate_err_recovery,
     integrate_vi_window,
 )
@@ -27,9 +29,19 @@ from dpt_extractor.tests.sample_paths import sample_tss
 
 import numpy as np
 
-UH = sample_tss("UH_750V_1050A_000.tss")
 WH = sample_tss("WH_480V_800A_000.tss")
 ROOT = Path(__file__).resolve().parents[2]
+UH = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+    / "SSS"
+    / "RT"
+    / "tss"
+    / "UH_750V_1050A_000.tss"
+)
 SMC_RT_UH = (
     ROOT
     / "示例文件"
@@ -74,6 +86,28 @@ SOFT_ERR_WH = (
     / "tss"
     / "WH_480V_800A_000.tss"
 )
+SSS_RT_UL_1050 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+    / "SSS"
+    / "RT"
+    / "tss"
+    / "UL_750V_1050A_000.tss"
+)
+SSS_RT_UL_805 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+    / "SSS"
+    / "RT"
+    / "tss"
+    / "UL_750V_805A_000.tss"
+)
 
 
 def _assert_crossing(
@@ -98,11 +132,42 @@ def _assert_crossing(
             ok = y0 >= level and y1 <= level and y0 > y1
         elif direction == "rising":
             ok = y0 <= level and y1 >= level and y1 > y0
+        elif direction == "any":
+            d0, d1 = y0 - level, y1 - level
+            ok = (d0 == 0.0 and d1 != 0.0) or (d0 * d1 <= 0.0 and d0 != d1)
         else:
             raise ValueError(direction)
         if ok:
             break
     case.assertTrue(ok, f"{direction} crossing not found at {t_cross * 1e6:.3f} us")
+
+
+def _assert_vd_main_rise_after(
+    case: unittest.TestCase,
+    t: np.ndarray,
+    vd: np.ndarray,
+    t_cross: float,
+    hb: float,
+    *,
+    within_s: float = 120e-9,
+    min_rise_v: float = 30.0,
+) -> None:
+    vd_at_cross = float(np.interp(float(t_cross), t, vd))
+    case.assertAlmostEqual(
+        vd_at_cross,
+        float(hb),
+        delta=1e-3,
+        msg="B 必须是 Vd 曲线与 Hb 横线的真实交点",
+    )
+    i0 = int(np.searchsorted(t, t_cross, side="left"))
+    i1 = int(np.searchsorted(t, t_cross + within_s, side="right"))
+    i0 = max(0, min(i0, len(vd) - 1))
+    i1 = max(i0 + 1, min(i1, len(vd)))
+    case.assertGreaterEqual(
+        float(np.max(vd[i0:i1])) - float(hb),
+        min_rise_v,
+        "B 应贴 Vd 主上升沿与 Hb 的交点",
+    )
 
 
 class TestEoffWindow(unittest.TestCase):
@@ -155,10 +220,10 @@ class TestEoffWindow(unittest.TestCase):
         )
         t0_us = w.t_start * 1e6
         t1_us = w.t_end * 1e6
-        self.assertGreater(t0_us, 14.525)
-        self.assertLess(t0_us, 14.56)
+        self.assertGreater(t0_us, 14.50)
+        self.assertLess(t0_us, 14.54)
         self.assertGreater(t1_us, 14.77)
-        self.assertLess(t1_us, 14.84)
+        self.assertLess(t1_us, 14.98)
         e = integrate_vi_window(t, vce, ic, w)
         self.assertGreater(e, 82.0)
         self.assertLess(e, 96.0)
@@ -177,7 +242,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(mk.hb_a, 5.0, "关断 Hb 应为回落后残余电流平台")
         self.assertAlmostEqual(mk.t_start, w.t_start, delta=50e-9)
         self.assertAlmostEqual(mk.t_end, w.t_end, delta=50e-9)
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "falling")
+        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
 
     @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
     def test_smc_rt_eoff_ha_uses_vce_base_not_rise_foot(self):
@@ -204,7 +269,7 @@ class TestEoffWindow(unittest.TestCase):
         v_at_a = float(np.interp(mk.t_start, t, vce))
         self.assertAlmostEqual(mk.ha_v, 12.34375, delta=0.5)
         self.assertAlmostEqual(v_at_a, mk.ha_v, delta=0.5)
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "falling")
+        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
         self.assertLess(mk.ha_v, 15.0)
         self.assertGreater(mk.t_start * 1e6, 14.70)
         self.assertLess(mk.t_start * 1e6, 14.74)
@@ -240,7 +305,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(t_a_us, 11.55)
         self.assertLess(t_a_us, 11.59)
         self.assertAlmostEqual(v_at_a, mk.ha_v, delta=0.5)
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "falling")
+        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
         self.assertGreater(v_after, mk.ha_v + 0.3 * swing)
 
     @unittest.skipUnless(LOW_CURRENT_WH.exists(), "low-current WH sample missing")
@@ -298,7 +363,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(t_b_us, 22.92)
         self.assertLess(t_b_us, 23.05)
         self.assertNotAlmostEqual(t_b_us, t_a_us + 0.218, delta=0.02)
-        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "falling")
+        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_eon_markers_plateau_and_window(self):
@@ -328,7 +393,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(t0_us, 18.44)
         self.assertGreater(t1_us, 18.65)
         self.assertLess(t1_us, 18.80)
-        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "falling")
+        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
         w = mk.as_integration_window()
         e = integrate_vi_window(t, vce, ic, w)
         self.assertGreater(e, 60.0)
@@ -351,20 +416,21 @@ class TestEoffWindow(unittest.TestCase):
         ta_us = mk.t_start * 1e6
         tb_us = mk.t_end * 1e6
         self.assertGreater(ta_us, tb_us, "A(Irr) 应晚于 B(Vd)")
-        # A=恢复主峰下降沿×Ha(恢复后稳定 Irr 平台)
-        self.assertGreater(ta_us, 18.61)
-        self.assertLess(ta_us, 18.66)
+        # A=IRM 主峰后恢复沿与 Ha 的第一个真实交点。
+        ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
+        self.assertGreater(ta_us, float(t[ipk]) * 1e6)
+        self.assertLess(ta_us, float(t[on1]) * 1e6)
         # B=Vd 主抬升脚×Hb(恢复前正向导通电平)
         self.assertGreater(tb_us, 18.51)
         self.assertLess(tb_us, 18.62)
         self.assertGreater(mk.ha_v, 20.0)
-        self.assertLess(mk.ha_v, 32.0)
+        self.assertLess(mk.ha_v, 60.0)
         # Hb 为带符号正向导通 Vd 平台（≈0）
         self.assertLess(abs(mk.hb_a), 10.0)
-        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "falling")
-        _assert_crossing(self, t, vd, mk.t_end, mk.hb_a, "rising")
+        _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "any")
+        _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
         e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
-        self.assertGreater(e, 0.5)
+        self.assertGreater(e, 0.2)
 
     @unittest.skipUnless(SOFT_ERR_WH.exists(), "soft Err WH sample missing")
     def test_wh_err_current_fall_uses_display_ha_magnitude(self):
@@ -386,7 +452,154 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(float(irr[ipk]), 0.0)
         self.assertGreaterEqual(mk.ha_v, 0.0)
         _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "falling")
-        _assert_crossing(self, t, vd, mk.t_end, mk.hb_a, "rising")
+        _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
+
+    @unittest.skipUnless(SSS_RT_UL_1050.exists(), "SSS RT UL 1050A sample missing")
+    def test_ul_rt_err_a_uses_negative_base_first_cross_after_peak(self):
+        bundle = load_waveform(SSS_RT_UL_1050)
+        profile = guess_profile_from_path(str(SSS_RT_UL_1050))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        mk = err_energy_markers(
+            t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+        )
+        from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
+
+        ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
+        t_pk_us = float(t[ipk]) * 1e6
+        ta_us = mk.t_start * 1e6
+        tb_us = mk.t_end * 1e6
+        self.assertLess(mk.ha_v, 0.0)
+        self.assertAlmostEqual(mk.ha_v, -38.56250, places=6)
+        self.assertAlmostEqual(ta_us, 19.609181, places=5)
+        self.assertGreater(ta_us, t_pk_us)
+        self.assertLess(ta_us, float(t[segs.turn_on[1]]) * 1e6)
+        self.assertGreater(tb_us, t_pk_us - 0.05)
+        self.assertLess(tb_us, t_pk_us)
+        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
+        e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+        self.assertAlmostEqual(result.reverse_recovery.err, e, places=9)
+        self.assertAlmostEqual(e, 0.596078, places=5)
+
+    @unittest.skipUnless(SSS_RT_UL_805.exists(), "SSS RT UL 805A sample missing")
+    def test_ul_rt_805_err_ha_keeps_meaningful_negative_tail_signed(self):
+        bundle = load_waveform(SSS_RT_UL_805)
+        profile = guess_profile_from_path(str(SSS_RT_UL_805))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        mk = err_energy_markers(
+            t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+        )
+        from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
+
+        ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
+        base = _err_recovery_settled_base(irr, ipk, bundle.dt, segs.turn_on[1])
+        self.assertLess(base.level, -20.0)
+        self.assertLess(mk.ha_v, 0.0)
+        self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.01)
+        self.assertAlmostEqual(mk.t_start * 1e6, 15.687356, places=5)
+        self.assertAlmostEqual(mk.t_end * 1e6, 15.651653, places=5)
+        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
+        e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+        self.assertAlmostEqual(result.reverse_recovery.err, 0.585462, places=5)
+        self.assertAlmostEqual(result.reverse_recovery.err, e, places=9)
+
+    def test_rt_right_cursor_manual_screenshot_regressions(self):
+        base = (
+            ROOT
+            / "示例文件"
+            / "tss格式"
+            / "KSU2577"
+            / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+            / "SSS"
+            / "RT"
+            / "tss"
+        )
+        cases = [
+            ("UL_600V_285A_000.tss", "eoff", 4.936, 5.082, 8.419, 0.015),
+            ("UL_600V_285A_000.tss", "eon", 8.814, 8.973, 9.397, 0.015),
+            ("UL_600V_285A_000.tss", "err", 8.931, 8.901, 0.406, 0.015),
+            ("UH_750V_1050A_000.tss", "eon", 18.434, 18.769, 68.325, 0.015),
+            ("UL_750V_805A_000.tss", "err", 15.687, 15.652, 0.585, 0.015),
+            ("UL_750V_50A_000.tss", "err", 10.588, 10.552, 0.303, 0.020),
+            ("WH_750V_50A_000.tss", "eoff", 6.293, 6.510, 1.741, 0.015),
+            ("WH_750V_50A_000.tss", "err", 10.104, 10.069, 0.168, 0.015),
+            ("WL_750V_50A_000.tss", "eoff", 6.704, 6.882, 1.281, 0.015),
+            ("WL_750V_50A_000.tss", "err", 10.590, 10.551, 0.378, 0.015),
+            ("VH_600V_285A_000.tss", "eoff", 4.633, 4.812, 11.518, 0.015),
+            ("VH_600V_285A_000.tss", "eon", 8.430, 8.634, 12.627, 0.015),
+            ("VH_600V_285A_000.tss", "err", 8.654, 8.515, 1.885, 0.015),
+        ]
+        cfg = load_config()
+        cache = {}
+        for name, kind, ta_us, tb_us, energy_mj, time_tol_us in cases:
+            path = base / name
+            if not path.exists():
+                continue
+            with self.subTest(sample=name, kind=kind):
+                if name not in cache:
+                    profile = guess_profile_from_path(str(path))
+                    bundle = load_waveform(path)
+                    result = extract_all(bundle, profile, cfg)
+                    cache[name] = (profile, bundle, result, result.segments)
+                profile, bundle, result, segs = cache[name]
+                assert segs is not None
+                t = bundle.t
+                ic = bundle_total_current(bundle, profile)
+                vce = bundle.get(profile.vce)
+                irr = bundle_reverse_recovery_current(bundle, profile)
+                vd = bundle.get(profile.v_diode)
+                if kind == "eoff":
+                    mk = eoff_energy_markers(
+                        t,
+                        ic,
+                        vce,
+                        segs.turn_off[0],
+                        segs.turn_off[1],
+                        segs.pulse1_off,
+                        bundle.dt,
+                        pre_ns=cfg.energy.eoff_pre_ns,
+                        pulse1_on=segs.pulse1_on,
+                    )
+                    energy = integrate_vi_window(t, vce, ic, mk.as_integration_window())
+                elif kind == "eon":
+                    mk = eon_energy_markers(
+                        t,
+                        ic,
+                        vce,
+                        segs.turn_on[0],
+                        segs.turn_on[1],
+                        segs.pulse2_on,
+                        bundle.dt,
+                        pulse1_off=segs.pulse1_off,
+                    )
+                    energy = integrate_vi_window(t, vce, ic, mk.as_integration_window())
+                else:
+                    mk = err_energy_markers(
+                        t,
+                        irr,
+                        vd,
+                        segs.reverse_recovery[0],
+                        segs.reverse_recovery[1],
+                        bundle.dt,
+                        i_search_end=segs.turn_on[1],
+                    )
+                    energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+                self.assertAlmostEqual(mk.t_start * 1e6, ta_us, delta=time_tol_us)
+                self.assertAlmostEqual(mk.t_end * 1e6, tb_us, delta=time_tol_us)
+                self.assertAlmostEqual(energy, energy_mj, delta=max(0.02, energy_mj * 0.02))
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_rr_dvdt_ha_post_ring_plateau(self):

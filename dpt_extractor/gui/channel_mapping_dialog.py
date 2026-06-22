@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from dpt_extractor.gui.theme import DARK_STYLESHEET
+from dpt_extractor.gui.theme import DARK_STYLESHEET, apply_combo_popup_style
 from dpt_extractor.models.bridge_profile import BridgeProfile, make_profile
 from dpt_extractor.models.channel_mapping import (
     LOGICAL_SIGNALS,
@@ -105,6 +105,7 @@ class ChannelMappingDialog(QDialog):
         for key, label, tip in LOGICAL_SIGNALS:
             combo = QComboBox()
             combo.setMinimumWidth(120)
+            apply_combo_popup_style(combo)
             for ch in available:
                 combo.addItem(ch, ch)
             combo.setToolTip(tip)

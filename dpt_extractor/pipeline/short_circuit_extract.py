@@ -419,8 +419,21 @@ def extract_short_circuit(
 
     vge = np.asarray(bundle.get(profile.vge), dtype=np.float64)
     vce = np.asarray(bundle.get(profile.vce), dtype=np.float64)
-    vce_other = np.asarray(bundle.get(profile.v_diode), dtype=np.float64)
+    vce_other_raw = bundle.channels.get(profile.v_diode) if profile.v_diode else None
+    vce_other = (
+        np.asarray(vce_other_raw, dtype=np.float64)
+        if vce_other_raw is not None
+        else None
+    )
     ic = np.asarray(bundle_total_current(bundle, profile), dtype=np.float64)
+    unavailable: set[tuple[str, str]] = set()
+    if vce_other is None:
+        unavailable.update(
+            {
+                ("短路过程", "短路能量Esc_对管"),
+                ("短路过程", "应力Vpeak_对管"),
+            }
+        )
 
     i0, i1 = _dominant_gate_window(vge, bundle.dt)
     i0, i1 = _clip_indices(i0, i1, n)
@@ -459,14 +472,18 @@ def extract_short_circuit(
         bundle.dt,
         smooth_ns=cfg.smoothing.detect_window_ns,
     )
-    vpeak_other_cursors = short_circuit_current_cursors(
-        t,
-        vce_other,
-        i0,
-        i1,
-        bundle.dt,
-        smooth_ns=cfg.smoothing.detect_window_ns,
-        peak_mode="max",
+    vpeak_other_cursors = (
+        short_circuit_current_cursors(
+            t,
+            vce_other,
+            i0,
+            i1,
+            bundle.dt,
+            smooth_ns=cfg.smoothing.detect_window_ns,
+            peak_mode="max",
+        )
+        if vce_other is not None
+        else None
     )
     vpeak_dut = (
         vpeak_dut_cursors.ha_a
@@ -477,6 +494,8 @@ def extract_short_circuit(
         vpeak_other_cursors.ha_a
         if vpeak_other_cursors is not None
         else float(np.nanmax(vce_other[i0 : i1 + 1]))
+        if vce_other is not None
+        else 0.0
     )
     desat_time: float | None = None
     desat_range = "预留"
@@ -500,9 +519,12 @@ def extract_short_circuit(
     esc_dut, e_dut_ch = short_circuit_energy_value(
         bundle, profile, energy_i0, energy_i1, other=False
     )
-    esc_other, e_other_ch = short_circuit_energy_value(
-        bundle, profile, energy_i0, energy_i1, other=True
-    )
+    if vce_other is not None:
+        esc_other, e_other_ch = short_circuit_energy_value(
+            bundle, profile, energy_i0, energy_i1, other=True
+        )
+    else:
+        esc_other, e_other_ch = 0.0, ""
     sc = ShortCircuitResult(
         ic_max=ic_max,
         tsc=tsc,
@@ -544,4 +566,5 @@ def extract_short_circuit(
         on_pulse_index=1,
         single_pulse_mode=False,
         short_circuit_mode=True,
+        unavailable_metrics=unavailable,
     )

@@ -39,6 +39,7 @@ TEMP_LABELS = {
     "HT": ("150℃", 150),
     "LT": ("-40℃", -40),
 }
+TemperatureLabels = Mapping[str, str | int | float]
 
 DPT_OVERVIEW_IMAGE_PARAM = ("总概览图", "全局")
 
@@ -147,16 +148,159 @@ class _DptDataTarget:
     inserted_row: bool = False
 
 
+def _format_temperature_number(value: float) -> str:
+    fv = float(value)
+    if abs(fv - round(fv)) < 0.05:
+        return str(int(round(fv)))
+    return f"{fv:.1f}".rstrip("0").rstrip(".")
+
+
+def _format_temperature_label(value: float) -> str:
+    return f"{_format_temperature_number(value)}℃"
+
+
+def _parse_temperature_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if match is None:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _canonical_temperature_text(value: object) -> str:
+    text = str(value or "").strip().upper().replace(" ", "")
+    text = text.replace("°C", "℃").replace("DEG", "℃")
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?C", text):
+        text = f"{text[:-1]}℃"
+    return text
+
+
+def _normalized_temperature_labels(
+    temperature_labels: TemperatureLabels | None = None,
+) -> dict[str, tuple[str, float]]:
+    labels = {
+        code: (display, float(value))
+        for code, (display, value) in TEMP_LABELS.items()
+    }
+    if not temperature_labels:
+        return labels
+    for code in TEMP_LABELS:
+        if code not in temperature_labels:
+            continue
+        raw = temperature_labels[code]
+        value = _parse_temperature_number(raw)
+        if value is None:
+            continue
+        raw_text = str(raw).strip() if isinstance(raw, str) else ""
+        display = (
+            raw_text
+            if raw_text
+            and (
+                "℃" in raw_text
+                or "°" in raw_text
+                or raw_text.upper().endswith("C")
+            )
+            else _format_temperature_label(value)
+        )
+        labels[code] = (display, value)
+    return labels
+
+
+def _temperature_code_from_token(
+    token: object,
+    temperature_labels: TemperatureLabels | None = None,
+) -> str | None:
+    labels = _normalized_temperature_labels(temperature_labels)
+    text = str(token or "").strip()
+    code_text = text.upper()
+    if code_text in labels:
+        return code_text
+    canonical = _canonical_temperature_text(text)
+    for code, (display, _value) in labels.items():
+        if canonical == _canonical_temperature_text(display):
+            return code
+    value = _parse_temperature_number(text)
+    if value is None:
+        return None
+    for code, (_display, expected) in labels.items():
+        if abs(value - expected) < 0.05:
+            return code
+    for code, (_display, expected) in TEMP_LABELS.items():
+        if abs(value - float(expected)) < 0.05:
+            return code
+    return None
+
+
+def _temperature_cell_matches(
+    value: object,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    return _temperature_code_from_token(value, temperature_labels) == temp_code
+
+
+def _temperature_display(
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> str:
+    return _normalized_temperature_labels(temperature_labels)[temp_code][0]
+
+
+def _phase_temp_label(
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> str:
+    return f"{phase_code}_{_temperature_display(temp_code, temperature_labels)}"
+
+
+def _merged_range_containing(
+    ws: Worksheet,
+    row: int,
+    col: int,
+) -> CellRange | None:
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            return rng
+    return None
+
+
+def _set_merged_cell_value(
+    ws: Worksheet,
+    row: int,
+    col: int,
+    value: object,
+) -> None:
+    rng = _merged_range_containing(ws, row, col)
+    if rng is not None:
+        ws.cell(rng.min_row, rng.min_col).value = value
+        return
+    ws.cell(row, col).value = value
+
+
 def dpt_report_image_params_for_result(
     result: ExtractResult,
 ) -> tuple[tuple[str, str], ...]:
-    if not result.single_pulse_mode:
-        return DPT_REPORT_IMAGE_PARAMS
     return tuple(
         param
         for param in DPT_REPORT_IMAGE_PARAMS
-        if param == DPT_OVERVIEW_IMAGE_PARAM
-        or param[0] not in _SINGLE_PULSE_SKIPPED_IMAGE_SECTIONS
+        if (
+            param == DPT_OVERVIEW_IMAGE_PARAM
+            or (
+                not result.is_metric_unavailable(*param)
+                and (
+                    not result.single_pulse_mode
+                    or param[0] not in _SINGLE_PULSE_SKIPPED_IMAGE_SECTIONS
+                )
+            )
+        )
     )
 
 
@@ -430,13 +574,13 @@ def _find_dpt_data_target(
     data_ws: Worksheet,
     phase_code: str,
     temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> _DptDataTarget:
-    temp_display = TEMP_LABELS[temp_code][0]
     vdc, idc = _match_setpoints(result)
     for group_index, group in enumerate(_dpt_data_groups(data_ws)):
         if group.phase.upper() != phase_code.upper():
             continue
-        if group.temp != temp_display:
+        if not _temperature_cell_matches(group.temp, temp_code, temperature_labels):
             continue
         row, inserted = _next_dpt_data_row(
             data_ws,
@@ -445,16 +589,39 @@ def _find_dpt_data_target(
             vdc=vdc,
             idc=idc,
         )
-        return _DptDataTarget(
+        target = _DptDataTarget(
             row=row,
             group_index=group_index,
             group_start_row=group.start_row,
             row_offset=row - group.start_row,
             inserted_row=inserted,
         )
+        _set_merged_cell_value(
+            data_ws,
+            group.start_row,
+            2,
+            _temperature_display(temp_code, temperature_labels),
+        )
+        return target
 
     row = 5
     return _DptDataTarget(row=row, group_index=0, group_start_row=row, row_offset=0)
+
+
+def _normalize_dpt_data_temperature_cells(
+    data_ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
+    for group in _dpt_data_groups(data_ws):
+        temp_code = _temperature_code_from_token(group.temp, temperature_labels)
+        if temp_code is None:
+            continue
+        _set_merged_cell_value(
+            data_ws,
+            group.start_row,
+            2,
+            _temperature_display(temp_code, temperature_labels),
+        )
 
 
 def _dpt_waveform_group_base(data_ws: Worksheet, group_index: int) -> int:
@@ -582,30 +749,36 @@ def _dpt_waveform_block_has_images(ws: Worksheet, anchor_row: int) -> bool:
     return False
 
 
-def _phase_temp_parts(label: str) -> tuple[str, str] | None:
-    match = re.fullmatch(r"([UVW][HL])_?(RT|HT|LT)", label.strip().upper())
+def _phase_temp_parts(
+    label: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> tuple[str, str] | None:
+    match = re.fullmatch(r"\s*([UVW][HL])\s*_?\s*(.+?)\s*", str(label or ""), re.I)
     if match is None:
         return None
-    return match.group(1), match.group(2)
+    temp_code = _temperature_code_from_token(match.group(2), temperature_labels)
+    if temp_code is None:
+        return None
+    return match.group(1).upper(), temp_code
 
 
 def _dpt_waveform_block_has_data_match(
     data_ws: Worksheet,
     phase_temp_label: str,
     condition_label: str | None,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> bool:
-    phase_temp = _phase_temp_parts(phase_temp_label)
+    phase_temp = _phase_temp_parts(phase_temp_label, temperature_labels)
     if phase_temp is None:
         return False
     phase_code, temp_code = phase_temp
     vdc, idc = _condition_values(condition_label)
     if vdc is None or idc is None:
         return False
-    temp_display = TEMP_LABELS[temp_code][0]
     for group in _dpt_data_groups(data_ws):
         if group.phase.upper() != phase_code:
             continue
-        if group.temp != temp_display:
+        if not _temperature_cell_matches(group.temp, temp_code, temperature_labels):
             continue
         for row in range(group.start_row, group.end_row):
             if _data_row_matches_setpoints(data_ws, row, vdc, idc):
@@ -618,6 +791,7 @@ def _dpt_waveform_block_is_reusable(
     data_ws: Worksheet,
     anchor_row: int,
     existing_label: str,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> bool:
     if _dpt_waveform_block_has_images(ws, anchor_row):
         return False
@@ -626,6 +800,7 @@ def _dpt_waveform_block_is_reusable(
         data_ws,
         existing_label,
         condition_label,
+        temperature_labels,
     )
 
 
@@ -637,15 +812,18 @@ def _ensure_dpt_waveform_anchor(
     temp_code: str,
     vdc: float | None,
     idc: float | None,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> int:
     group_base = _dpt_waveform_group_base(data_ws, target.group_index)
     row_index = _dpt_waveform_row_index(data_ws, target.group_start_row, target.row)
     anchor_row = group_base + row_index * DPT_WAVEFORM_BLOCK_STRIDE
-    phase_temp = f"{phase_code}_{temp_code}".upper()
-    existing_label = _dpt_waveform_label(ws, anchor_row).upper()
+    phase_temp = _phase_temp_label(phase_code, temp_code, temperature_labels)
+    existing_label = _dpt_waveform_label(ws, anchor_row)
+    existing_parts = _phase_temp_parts(existing_label, temperature_labels)
+    existing_matches_target = existing_parts == (phase_code.upper(), temp_code)
     mismatched_live_block = (
         existing_label
-        and existing_label != phase_temp
+        and not existing_matches_target
         and (
             target.inserted_row
             or not _dpt_waveform_block_is_reusable(
@@ -653,6 +831,7 @@ def _ensure_dpt_waveform_anchor(
                 data_ws,
                 anchor_row,
                 existing_label,
+                temperature_labels,
             )
         )
     )
@@ -902,7 +1081,10 @@ def _all_header_ranges_by_texts(ws: Worksheet, header_texts) -> list[CellRange]:
     return ranges
 
 
-def _normalize_dpt_waveform_text(ws: Worksheet) -> None:
+def _normalize_dpt_waveform_text(
+    ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
     header_texts = {header_text for _block, header_text in _DPT_IMAGE_HEADERS.values()}
     for rng in _all_header_ranges_by_texts(ws, header_texts):
         _set_row_height_px(ws, rng.min_row, _WAVEFORM_HEADER_ROW_HEIGHT_PX)
@@ -916,8 +1098,14 @@ def _normalize_dpt_waveform_text(ws: Worksheet) -> None:
 
     labels = _left_merged_ranges_with_value(ws)
     for phase_rng, phase_label in labels:
-        if not re.fullmatch(r"[UVW][HL]_?(RT|HT|LT)", phase_label.upper()):
+        phase_temp = _phase_temp_parts(phase_label, temperature_labels)
+        if phase_temp is None:
             continue
+        _set_range_value(
+            ws,
+            phase_rng,
+            _phase_temp_label(phase_temp[0], phase_temp[1], temperature_labels),
+        )
         state_col = phase_rng.max_col + 1
         for offset in (0, 17, 34):
             row = phase_rng.min_row + offset
@@ -944,7 +1132,10 @@ def _normalize_dpt_waveform_text(ws: Worksheet) -> None:
             )
 
 
-def _normalize_short_picture_text(ws: Worksheet) -> None:
+def _normalize_short_picture_text(
+    ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
     for rng in _all_header_ranges_by_texts(ws, _SHORT_IMAGE_HEADERS.values()):
         _set_row_height_px(ws, rng.min_row, _WAVEFORM_HEADER_ROW_HEIGHT_PX)
         _style_text_cell(
@@ -955,7 +1146,13 @@ def _normalize_short_picture_text(ws: Worksheet) -> None:
             bold=True,
         )
     for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5):
-        if re.fullmatch(r"[UVW][HL]_?(RT|HT|LT)", value.upper()):
+        phase_temp = _phase_temp_parts(value, temperature_labels)
+        if phase_temp is not None:
+            _set_range_value(
+                ws,
+                rng,
+                _phase_temp_label(phase_temp[0], phase_temp[1], temperature_labels),
+            )
             _style_text_cell(
                 ws,
                 rng,
@@ -1118,13 +1315,16 @@ def _all_picture_ranges_by_headers(
     return ranges
 
 
-def _all_dpt_overview_ranges(ws: Worksheet) -> list[CellRange]:
+def _all_dpt_overview_ranges(
+    ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> list[CellRange]:
     ranges: list[CellRange] = []
     seen: set[tuple[int, int, int, int]] = set()
     labels = _left_merged_ranges_with_value(ws)
     by_row = {rng.min_row: value for rng, value in labels}
     for phase_rng, phase_label in labels:
-        if not re.fullmatch(r"[UVW][HL]_?(RT|HT|LT)", phase_label.upper()):
+        if _phase_temp_parts(phase_label, temperature_labels) is None:
             continue
         condition_label = by_row.get(phase_rng.min_row + 17)
         if condition_label is None:
@@ -1196,17 +1396,20 @@ def _clear_duplicate_dpt_waveform_blocks(
     temp_code: str,
     vdc: float | None,
     idc: float | None,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> None:
     if target_anchor_row is None:
         return
-    phase_temp = f"{phase_code}_{temp_code}".upper()
     labels = _left_merged_ranges_with_value(ws)
     label_by_row = {rng.min_row: value for rng, value in labels}
     for phase_rng, phase_label in labels:
         anchor_row = phase_rng.min_row
         if anchor_row == target_anchor_row:
             continue
-        if phase_label.upper() != phase_temp:
+        if _phase_temp_parts(phase_label, temperature_labels) != (
+            phase_code.upper(),
+            temp_code,
+        ):
             continue
         condition_label = label_by_row.get(anchor_row + 17)
         if not _condition_matches_setpoints(condition_label, vdc, idc):
@@ -1316,9 +1519,10 @@ def _write_dpt_images(
     images: ImageMap,
     result: ExtractResult,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> int:
     if anchor_row is None:
-        _normalize_dpt_waveform_text(ws)
+        _normalize_dpt_waveform_text(ws, temperature_labels)
         return 0
     allowed_params = set(dpt_report_image_params_for_result(result))
     block_rows = {
@@ -1354,7 +1558,7 @@ def _write_dpt_images(
     overview_display_size = _prepare_uniform_image_slots(
         ws,
         overview_items,
-        template_ranges=_all_dpt_overview_ranges(ws),
+        template_ranges=_all_dpt_overview_ranges(ws, temperature_labels),
     )
     all_parameter_slots = _all_picture_ranges_by_headers(
         ws,
@@ -1366,7 +1570,7 @@ def _write_dpt_images(
         regular_items,
         template_ranges=all_parameter_slots,
     )
-    _normalize_dpt_waveform_text(ws)
+    _normalize_dpt_waveform_text(ws, temperature_labels)
     image_total = len(overview_items) + len(regular_items)
     for image_path, target in overview_items:
         _insert_image(
@@ -1397,8 +1601,8 @@ def _short_target_row(
     ws: Worksheet,
     phase_code: str,
     temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> int:
-    temp_value = TEMP_LABELS[temp_code][1]
     first_phase_row: int | None = None
     for row in range(5, ws.max_row + 1):
         phase = str(ws.cell(row, 2).value or "").upper()
@@ -1407,12 +1611,57 @@ def _short_target_row(
         if first_phase_row is None:
             first_phase_row = row
         row_temp = _merged_value(ws, row, 1)
-        try:
-            if int(float(row_temp)) == temp_value:
-                return row
-        except (TypeError, ValueError):
-            pass
-    return first_phase_row or 5
+        if _temperature_cell_matches(row_temp, temp_code, temperature_labels):
+            _set_merged_cell_value(
+                ws,
+                row,
+                1,
+                _temperature_display(temp_code, temperature_labels),
+            )
+            return row
+    row = first_phase_row or 5
+    _set_merged_cell_value(
+        ws,
+        row,
+        1,
+        _temperature_display(temp_code, temperature_labels),
+    )
+    return row
+
+
+def _normalize_short_temperature_cells(
+    ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
+    for row in range(5, ws.max_row + 1):
+        temp_code = _temperature_code_from_token(
+            _merged_value(ws, row, 1),
+            temperature_labels,
+        )
+        if temp_code is None:
+            continue
+        _set_merged_cell_value(
+            ws,
+            row,
+            1,
+            _temperature_display(temp_code, temperature_labels),
+        )
+
+
+def _normalize_report_temperature_labels(
+    wb,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
+    for ws in wb.worksheets:
+        title = str(ws.title)
+        if title.endswith("_双脉冲数据") or title.endswith("相_双脉冲数据"):
+            _normalize_dpt_data_temperature_cells(ws, temperature_labels)
+        elif title.endswith("_双脉冲波形") or title.endswith("相_双脉冲波形"):
+            _normalize_dpt_waveform_text(ws, temperature_labels)
+        elif title == "短路测试":
+            _normalize_short_temperature_cells(ws, temperature_labels)
+        elif title == "短路测试图片":
+            _normalize_short_picture_text(ws, temperature_labels)
 
 
 def _write_short_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
@@ -1494,10 +1743,18 @@ def _short_image_anchor_row(
     ws: Worksheet,
     phase_code: str,
     temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> int | None:
-    phase_temp = f"{phase_code}_{temp_code}".upper()
     for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5):
-        if value.upper() == phase_temp:
+        if _phase_temp_parts(value, temperature_labels) == (
+            phase_code.upper(),
+            temp_code,
+        ):
+            _set_range_value(
+                ws,
+                rng,
+                _phase_temp_label(phase_code, temp_code, temperature_labels),
+            )
             return rng.min_row
     return None
 
@@ -1508,9 +1765,10 @@ def _write_short_images(
     images: ImageMap,
     result: ExtractResult,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> int:
     if anchor_row is None:
-        _normalize_short_picture_text(ws)
+        _normalize_short_picture_text(ws, temperature_labels)
         return 0
     _write_short_picture_conditions(ws, anchor_row, result)
     written = 0
@@ -1534,7 +1792,7 @@ def _write_short_images(
         items,
         template_ranges=all_parameter_slots,
     )
-    _normalize_short_picture_text(ws)
+    _normalize_short_picture_text(ws, temperature_labels)
     image_total = len(items)
     for image_path, target in items:
         _insert_image(
@@ -1557,6 +1815,7 @@ def write_report_template(
     images: ImageMap | None = None,
     target_screen_width_px: int | None = None,
     progress_callback: ReportProgressCallback | None = None,
+    temperature_labels: TemperatureLabels | None = None,
 ) -> ReportWriteSummary:
     path = Path(report_path)
     progress_total = max(6, 6 + len(images or {}))
@@ -1582,21 +1841,34 @@ def write_report_template(
         if data_sheet not in wb.sheetnames:
             raise ValueError("报告模板缺少工作表：短路测试")
         data_ws = wb[data_sheet]
-        data_row = _short_target_row(data_ws, phase_code, temp_code)
+        data_row = _short_target_row(
+            data_ws,
+            phase_code,
+            temp_code,
+            temperature_labels,
+        )
         _write_short_data(data_ws, data_row, result)
+        _normalize_short_temperature_cells(data_ws, temperature_labels)
         emit(2, "写入报告数据")
         images_written = 0
         anchor_row = None
         if picture_sheet in wb.sheetnames:
             image_ws = wb[picture_sheet]
-            anchor_row = _short_image_anchor_row(image_ws, phase_code, temp_code)
+            anchor_row = _short_image_anchor_row(
+                image_ws,
+                phase_code,
+                temp_code,
+                temperature_labels,
+            )
             images_written = _write_short_images(
                 image_ws,
                 anchor_row,
                 image_map,
                 result,
                 progress_callback=lambda done, _total, label: emit(2 + done, label),
+                temperature_labels=temperature_labels,
             )
+        _normalize_report_temperature_labels(wb, temperature_labels)
         _set_report_open_zoom(wb, target_screen_width_px)
         emit(progress_total - 1, "保存报告文件")
         wb.save(path)
@@ -1621,9 +1893,11 @@ def write_report_template(
         data_ws,
         phase_code,
         temp_code,
+        temperature_labels,
     )
     data_row = target.row
     _write_dpt_data(data_ws, data_row, result)
+    _normalize_dpt_data_temperature_cells(data_ws, temperature_labels)
     emit(2, "写入报告数据")
     vdc, idc = _match_setpoints(result)
     waveform_anchor_row = (
@@ -1635,6 +1909,7 @@ def write_report_template(
             temp_code,
             vdc,
             idc,
+            temperature_labels,
         )
         if waveform_ws is not None
         else None
@@ -1647,6 +1922,7 @@ def write_report_template(
             temp_code,
             vdc,
             idc,
+            temperature_labels,
         )
     images_written = (
         _write_dpt_images(
@@ -1655,10 +1931,12 @@ def write_report_template(
             image_map,
             result,
             progress_callback=lambda done, _total, label: emit(2 + done, label),
+            temperature_labels=temperature_labels,
         )
         if waveform_ws is not None
         else 0
     )
+    _normalize_report_temperature_labels(wb, temperature_labels)
     _set_report_open_zoom(wb, target_screen_width_px)
     emit(progress_total - 1, "保存报告文件")
     wb.save(path)
