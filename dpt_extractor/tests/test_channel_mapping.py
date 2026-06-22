@@ -51,6 +51,189 @@ class TestChannelMapping(unittest.TestCase):
         errs = validate_mapping(m, None)
         self.assertTrue(any("重复" in e for e in errs))
 
+    def test_bundle_get_supports_signed_channel_references(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        raw = np.array([1.0, -2.0, 3.5])
+        bundle = WaveformBundle(
+            t=np.arange(raw.size, dtype=np.float64),
+            channels={"CH3": raw},
+            meta=TekMetadata(),
+        )
+
+        np.testing.assert_allclose(bundle.get("-CH3"), -raw)
+        np.testing.assert_allclose(bundle.get("+CH3"), raw)
+        self.assertTrue(bundle.has_channel_reference("-CH3"))
+        with self.assertRaises(KeyError):
+            bundle.get("-CH9")
+
+    def test_channels_for_mapping_can_include_inverted_refs(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 4),
+            channels={"CH1": np.zeros(4), "MATH1": np.ones(4)},
+            meta=TekMetadata(),
+        )
+
+        names = channels_for_mapping(bundle, include_inverted=True)
+        self.assertEqual(names, ["CH1", "-CH1", "MATH1", "-MATH1"])
+
+    def test_validate_accepts_signed_existing_channels(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 8),
+            channels={
+                "CH1": np.zeros(8),
+                "CH2": np.zeros(8),
+                "CH3": np.zeros(8),
+                "MATH1": np.zeros(8),
+            },
+            meta=TekMetadata(),
+        )
+        m = ChannelMapping(
+            vge="-CH1",
+            vce="CH2",
+            ic="-MATH1",
+            il="",
+            irr="-CH3",
+            v_diode="",
+            vge_other="",
+        )
+
+        self.assertFalse(validate_mapping(m, bundle))
+
+    def test_current_helpers_apply_signed_refs(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            bundle_reverse_recovery_current,
+            try_bundle_total_current,
+        )
+
+        ch3 = np.array([1.0, 2.0, 3.0])
+        ch4 = np.array([10.0, 20.0, 30.0])
+        bundle = WaveformBundle(
+            t=np.arange(ch3.size, dtype=np.float64),
+            channels={"CH3": ch3, "CH4": ch4},
+            meta=TekMetadata(),
+        )
+        profile = replace(
+            make_profile("U", "upper"),
+            ic="",
+            irr="-CH3",
+            il="CH4",
+            ic_from_sum_irr_il=True,
+            irr_from_ic_minus_il=False,
+        )
+
+        np.testing.assert_allclose(try_bundle_total_current(bundle, profile), ch4 - ch3)
+        np.testing.assert_allclose(
+            bundle_reverse_recovery_current(bundle, profile),
+            -ch3,
+        )
+
+    def test_direct_ic_overrides_sum_formula_fallback(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            bundle_reverse_recovery_current,
+            try_bundle_total_current,
+        )
+
+        ch3 = np.array([1.0, 2.0, 3.0])
+        ch4 = np.array([10.0, 20.0, 30.0])
+        total = np.array([100.0, 200.0, 300.0])
+        bundle = WaveformBundle(
+            t=np.arange(ch3.size, dtype=np.float64),
+            channels={"CH3": ch3, "CH4": ch4, "MATH1": total},
+            meta=TekMetadata(),
+        )
+        profile = replace(
+            make_profile("U", "upper"),
+            ic="MATH1",
+            irr="-CH3",
+            il="CH4",
+            ic_from_sum_irr_il=True,
+        )
+
+        np.testing.assert_allclose(try_bundle_total_current(bundle, profile), total)
+        np.testing.assert_allclose(
+            bundle_reverse_recovery_current(bundle, profile),
+            -ch3,
+        )
+
+    def test_direct_irr_overrides_ic_minus_il_fallback(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            bundle_reverse_recovery_current,
+            try_bundle_total_current,
+        )
+
+        ic = np.array([10.0, 20.0, 30.0])
+        il = np.array([1.0, 2.0, 3.0])
+        irr = np.array([4.0, 5.0, 6.0])
+        bundle = WaveformBundle(
+            t=np.arange(ic.size, dtype=np.float64),
+            channels={"CH3": ic, "CH4": il, "MATH1": irr},
+            meta=TekMetadata(),
+        )
+        profile = replace(
+            make_profile("U", "lower"),
+            ic="CH3",
+            il="CH4",
+            irr="-MATH1",
+            irr_from_ic_minus_il=True,
+        )
+
+        np.testing.assert_allclose(try_bundle_total_current(bundle, profile), ic)
+        np.testing.assert_allclose(
+            bundle_reverse_recovery_current(bundle, profile),
+            -irr,
+        )
+
+    def test_validate_direct_current_satisfies_formula_fallback_mapping(self):
+        m = ChannelMapping(
+            vge="CH1",
+            vce="CH2",
+            ic="CH3",
+            il="",
+            irr="-CH3",
+            v_diode="",
+            vge_other="",
+            ic_from_sum_irr_il=True,
+            irr_from_ic_minus_il=True,
+        )
+
+        self.assertFalse(validate_mapping(m, None))
+
+    def test_formula_current_inputs_reject_same_underlying_channel(self):
+        m = ChannelMapping(
+            ic_from_sum_irr_il=True,
+            irr="-CH3",
+            il="CH3",
+            ic="",
+        )
+        errs = validate_mapping(m, None)
+        self.assertTrue(any("Irr" in e and "IL" in e for e in errs))
+
     def test_validate_can_allow_missing_current_file_channels(self):
         import numpy as np
 

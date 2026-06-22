@@ -93,7 +93,7 @@ from dpt_extractor.models.slope_range import (
     default_slope_ranges,
     normalize_slope_range,
 )
-from dpt_extractor.models.waveform import WaveformBundle
+from dpt_extractor.models.waveform import WaveformBundle, normalize_channel_reference
 from dpt_extractor.metrics.iec_windows import (
     IntegrationWindow,
     eoff_energy_markers,
@@ -1988,7 +1988,7 @@ class MainWindow(QMainWindow):
     def _on_waveform_channel_mapping_requested(self, source_key: str, logical_role: str) -> None:
         if self.bundle is None:
             return
-        source_key = source_key.upper()
+        source_key = normalize_channel_reference(source_key)
         phase = self.combo_phase.currentData()
         bridge = self.combo_bridge.currentData()
         current = ChannelMapping.from_profile(self.profile)
@@ -2001,18 +2001,10 @@ class MainWindow(QMainWindow):
                 return
             previous_channel = str(parts.get(logical_role) or "")
             parts[logical_role] = source_key
-            if logical_role == "ic":
-                ic_sum = False
-            if logical_role == "irr":
-                irr_diff = False
         else:
             for key in LOGICAL_SIGNAL_KEYS:
-                if parts.get(key) == source_key:
+                if normalize_channel_reference(parts.get(key)) == source_key:
                     parts[key] = ""
-            if parts.get("irr") == "" and ic_sum:
-                ic_sum = False
-            if parts.get("ic") == "" and irr_diff:
-                irr_diff = False
 
         mapping = ChannelMapping(
             **parts,
@@ -2337,10 +2329,13 @@ class MainWindow(QMainWindow):
         source_key: str,
         range_key: str,
     ) -> tuple[np.ndarray, np.ndarray]:
-        if self.bundle is None or source_key not in self.bundle.channels:
+        if self.bundle is None:
+            return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+        channel = self.bundle.maybe_get(source_key)
+        if channel is None:
             return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
         t = np.asarray(self.bundle.t, dtype=np.float64)
-        y = np.asarray(self.bundle.channels[source_key], dtype=np.float64)
+        y = np.asarray(channel, dtype=np.float64)
         window = self._offset_range_window_s(range_key)
         if window is None:
             return t, y
@@ -4586,16 +4581,8 @@ class MainWindow(QMainWindow):
         vce = self.bundle.get(self.profile.vce)
         ic = bundle_total_current(self.bundle, self.profile)
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
-        v_diode = (
-            self.bundle.channels.get(self.profile.v_diode)
-            if self.profile.v_diode
-            else None
-        )
-        vge_other = (
-            self.bundle.channels.get(self.profile.vge_other)
-            if self.profile.vge_other
-            else None
-        )
+        v_diode = self.bundle.maybe_get(self.profile.v_diode)
+        vge_other = self.bundle.maybe_get(self.profile.vge_other)
         dur_ns = max(0.0, (t[i1] - t[i0]) * 1e9)
 
         if section == "短路过程":
@@ -4888,11 +4875,7 @@ class MainWindow(QMainWindow):
         vce = self.bundle.get(self.profile.vce)
         ic = bundle_total_current(self.bundle, self.profile)
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
-        v_diode = (
-            self.bundle.channels.get(self.profile.v_diode)
-            if self.profile.v_diode
-            else None
-        )
+        v_diode = self.bundle.maybe_get(self.profile.v_diode)
 
         if section == "短路过程":
             if name in {

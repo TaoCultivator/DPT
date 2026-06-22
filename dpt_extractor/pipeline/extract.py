@@ -70,7 +70,7 @@ _REVERSE_RECOVERY_CURRENT_METRICS: set[MetricKey] = {
 def _optional_channel(bundle: WaveformBundle, col: str) -> np.ndarray | None:
     if not col:
         return None
-    return bundle.channels.get(col)
+    return bundle.maybe_get(col)
 
 
 def _smooth_edge_padded(y: np.ndarray, window: int) -> np.ndarray:

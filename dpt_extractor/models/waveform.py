@@ -2,10 +2,51 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 
 import numpy as np
 
 from dpt_extractor.models.bridge_profile import BridgeProfile
+
+
+_UNICODE_MINUS = ("\N{MINUS SIGN}", "\N{EN DASH}", "\N{EM DASH}")
+
+
+def normalize_channel_reference(ref: str | None) -> str:
+    """Normalize a CH/MATH reference, preserving an optional leading minus sign."""
+    text = str(ref or "").strip()
+    for minus in _UNICODE_MINUS:
+        text = text.replace(minus, "-")
+    text = re.sub(r"\s+", "", text).upper()
+    if not text:
+        return ""
+    sign = ""
+    if text[0] in "+-":
+        sign = "-" if text[0] == "-" else ""
+        text = text[1:]
+    if not text:
+        return sign
+    return f"{sign}{text}"
+
+
+def split_channel_reference(ref: str | None) -> tuple[int, str]:
+    """Return (sign, base channel) for refs like CH3, +CH3 or -MATH1."""
+    normalized = normalize_channel_reference(ref)
+    if not normalized:
+        return 1, ""
+    if normalized.startswith("-"):
+        return -1, normalized[1:]
+    if normalized.startswith("+"):
+        return 1, normalized[1:]
+    return 1, normalized
+
+
+def channel_reference_base_name(ref: str | None) -> str:
+    return split_channel_reference(ref)[1]
+
+
+def channel_reference_sign(ref: str | None) -> int:
+    return split_channel_reference(ref)[0]
 
 
 @dataclass
@@ -57,9 +98,25 @@ class WaveformBundle:
         return len(self.t)
 
     def get(self, col: str) -> np.ndarray:
-        if col not in self.channels:
+        channel = self.maybe_get(col)
+        if channel is None:
             raise KeyError(f"Channel {col} not in bundle")
-        return self.channels[col]
+        return channel
+
+    def maybe_get(self, col: str | None) -> np.ndarray | None:
+        sign, base = split_channel_reference(col)
+        if not base:
+            return None
+        channel = self.channels.get(base)
+        if channel is None:
+            return None
+        if sign < 0:
+            return -np.asarray(channel, dtype=np.float64)
+        return channel
+
+    def has_channel_reference(self, col: str | None) -> bool:
+        _sign, base = split_channel_reference(col)
+        return bool(base and base in self.channels)
 
     def slice(self, i0: int, i1: int) -> WaveformBundle:
         return WaveformBundle(
@@ -70,7 +127,7 @@ class WaveformBundle:
 
 
 def bundle_total_current(bundle: WaveformBundle, profile: BridgeProfile) -> np.ndarray:
-    """Total device current: mapped Ic column, or Irr + IL when ic_from_sum_irr_il."""
+    """Total device current: direct Ic mapping first, then Irr + IL fallback."""
     current = try_bundle_total_current(bundle, profile)
     if current is None:
         raise KeyError("Total current channel is not available in bundle")
@@ -82,23 +139,21 @@ def try_bundle_total_current(
     profile: BridgeProfile,
 ) -> np.ndarray | None:
     """Return total device current when the mapped source channels are available."""
+    direct = bundle.maybe_get(profile.ic)
+    if direct is not None:
+        return direct
     if profile.ic_from_sum_irr_il:
-        irr = bundle.channels.get(profile.irr) if profile.irr else None
-        il = bundle.channels.get(profile.il) if profile.il else None
+        irr = bundle.maybe_get(profile.irr)
+        il = bundle.maybe_get(profile.il)
         if irr is not None and il is not None:
             return irr + il
-        if profile.ic:
-            return bundle.channels.get(profile.ic)
-        return None
-    if not profile.ic:
-        return None
-    return bundle.channels.get(profile.ic)
+    return None
 
 
 def bundle_reverse_recovery_current(
     bundle: WaveformBundle, profile: BridgeProfile
 ) -> np.ndarray:
-    """Reverse recovery current: mapped Irr column, or Ic − IL when irr_from_ic_minus_il."""
+    """Reverse recovery current: direct Irr mapping first, then Ic − IL fallback."""
     current = try_bundle_reverse_recovery_current(bundle, profile)
     if current is None:
         return np.zeros_like(bundle.t, dtype=np.float64)
@@ -111,17 +166,15 @@ def try_bundle_reverse_recovery_current(
     total_current: np.ndarray | None = None,
 ) -> np.ndarray | None:
     """Return reverse-recovery current when its mapped source channels are available."""
+    direct = bundle.maybe_get(profile.irr)
+    if direct is not None:
+        return direct
     if profile.irr_from_ic_minus_il:
-        il = bundle.channels.get(profile.il) if profile.il else None
+        il = bundle.maybe_get(profile.il)
         if il is not None:
             ic = total_current
             if ic is None:
                 ic = try_bundle_total_current(bundle, profile)
             if ic is not None:
                 return ic - il
-        if profile.irr:
-            return bundle.channels.get(profile.irr)
-        return None
-    if not profile.irr:
-        return None
-    return bundle.channels.get(profile.irr)
+    return None

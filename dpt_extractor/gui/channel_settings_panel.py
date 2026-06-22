@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QPoint, QRect, Qt
@@ -27,10 +28,9 @@ from PyQt6.QtWidgets import (
 from dpt_extractor.gui.theme import apply_combo_popup_style
 from dpt_extractor.gui.waveform_plot import (
     DISP_HALF_DIV,
-    _pick_vdiv_ladder,
     _scaled_div_value,
-    _vdiv_ladder_for_channel,
-    _vdiv_max_for_channel,
+    _unit_factor_for_display_unit,
+    _vdiv_unit_options,
 )
 
 if TYPE_CHECKING:
@@ -225,11 +225,6 @@ _MAPPING_OPTIONS = (
 )
 
 
-def _vdiv_options_for(key: str) -> list[float]:
-    cap = _vdiv_max_for_channel(key)
-    return [float(v) for v in _vdiv_ladder_for_channel(key) if float(v) <= cap]
-
-
 def _vdiv_display_decimals(value: float) -> int:
     value = abs(float(value))
     if value <= 0.0:
@@ -246,20 +241,25 @@ def _vdiv_display_decimals(value: float) -> int:
     return 9
 
 
-def _vdiv_neighbor(cur: float, key: str, up: bool) -> float:
-    opts = _vdiv_options_for(key)
-    if not opts:
-        return cur
-    best_i = 0
-    best_d = abs(opts[0] - cur)
-    for i, v in enumerate(opts):
-        d = abs(v - cur)
-        if d < best_d:
-            best_d = d
-            best_i = i
+def _vdiv_neighbor(cur: float, up: bool) -> float:
+    cur = max(abs(float(cur)), 1e-15)
+    exp = int(math.floor(math.log10(cur)))
+    candidates = sorted(
+        step * (10.0**power)
+        for power in range(exp - 3, exp + 4)
+        for step in (1.0, 2.0, 5.0)
+        if step * (10.0**power) > 0.0
+    )
+    eps = max(cur * 1e-9, 1e-15)
     if up:
-        return opts[min(best_i + 1, len(opts) - 1)]
-    return opts[max(best_i - 1, 0)]
+        for value in candidates:
+            if value > cur + eps:
+                return float(value)
+        return cur * 10.0
+    for value in reversed(candidates):
+        if value < cur - eps:
+            return float(value)
+    return cur / 10.0
 
 
 def _cell(caption: str, widget: QWidget) -> QWidget:
@@ -362,17 +362,27 @@ class ChannelSettingsPanel(QDialog):
         vdiv_row.setSpacing(4)
         current_scale = float(plot._disp_scale.get(key, 1.0))
         self._vdiv_display_factor = 1.0
+        self._vdiv_base_unit = plot._unit_for_channel(key)
+        self._syncing_vdiv = False
         self._vdiv_spin = QDoubleSpinBox()
         self._vdiv_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        self._vdiv_spin.setFixedWidth(104)
+        self._vdiv_spin.setRange(1e-99, 1e99)
+        self._vdiv_unit_combo = QComboBox()
+        self._vdiv_unit_combo.setFixedWidth(82)
+        apply_combo_popup_style(self._vdiv_unit_combo, light=True)
         self._sync_vdiv_spin_from_scale(current_scale)
         self._vdiv_spin.valueChanged.connect(self._on_vdiv_changed)
+        self._vdiv_unit_combo.currentIndexChanged.connect(self._on_vdiv_unit_changed)
         btn_up = QPushButton("▲")
         btn_dn = QPushButton("▼")
         for b in (btn_up, btn_dn):
             b.setObjectName("chStepBtn")
         btn_up.clicked.connect(lambda: self._step_vdiv(+1))
         btn_dn.clicked.connect(lambda: self._step_vdiv(-1))
-        vdiv_row.addWidget(self._vdiv_spin, stretch=1)
+        vdiv_row.addWidget(self._vdiv_spin, stretch=0)
+        vdiv_row.addWidget(self._vdiv_unit_combo, stretch=0)
+        vdiv_row.addWidget(QLabel("/div"), stretch=0)
         vdiv_row.addWidget(btn_up)
         vdiv_row.addWidget(btn_dn)
         vdiv_w = QWidget()
@@ -388,15 +398,25 @@ class ChannelSettingsPanel(QDialog):
         self._pos_spin.setDecimals(2)
         self._pos_spin.setRange(-DISP_HALF_DIV, DISP_HALF_DIV)
         self._pos_spin.setSuffix(" divs")
-        self._pos_spin.setSingleStep(0.5)
+        self._pos_spin.setSingleStep(0.1)
         self._pos_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        self._pos_spin.setFixedWidth(170)
         self._pos_spin.setValue(plot._disp_offset.get(key, 0.0))
         self._pos_spin.valueChanged.connect(self._on_pos_changed)
+        pos_up = QPushButton("▲")
+        pos_dn = QPushButton("▼")
+        for b in (pos_up, pos_dn):
+            b.setObjectName("chStepBtn")
+        pos_up.clicked.connect(lambda: self._step_position(+1))
+        pos_dn.clicked.connect(lambda: self._step_position(-1))
         btn_zero = QPushButton("设为 0")
         btn_zero.setObjectName("chZeroBtn")
         btn_zero.clicked.connect(self._on_pos_zero)
-        pos_row.addWidget(self._pos_spin, stretch=1)
+        pos_row.addWidget(self._pos_spin, stretch=0)
+        pos_row.addWidget(pos_up)
+        pos_row.addWidget(pos_dn)
         pos_row.addWidget(btn_zero)
+        pos_row.addStretch(1)
         pos_w = QWidget()
         pos_w.setObjectName("chPanelRow")
         pos_w.setLayout(pos_row)
@@ -494,17 +514,30 @@ class ChannelSettingsPanel(QDialog):
         self._btn_off.setChecked(not on)
 
     def _on_vdiv_changed(self, value: float) -> None:
-        scale = _pick_vdiv_ladder(float(value) / self._vdiv_display_factor, self._key)
+        if self._syncing_vdiv:
+            return
+        scale = max(float(value) / self._vdiv_display_factor, 1e-15)
         self._plot._set_channel_scale(self._key, scale)
         self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, scale))
 
+    def _on_vdiv_unit_changed(self, _index: int = 0) -> None:
+        if self._syncing_vdiv:
+            return
+        unit = str(self._vdiv_unit_combo.currentData() or "")
+        scale = float(self._plot._disp_scale.get(self._key, 1.0))
+        self._sync_vdiv_spin_from_scale(scale, display_unit=unit)
+
     def _step_vdiv(self, direction: int) -> None:
-        cur = float(self._vdiv_spin.value()) / self._vdiv_display_factor
-        nxt = _vdiv_neighbor(cur, self._key, direction > 0)
-        self._vdiv_spin.setValue(nxt * self._vdiv_display_factor)
+        cur = float(self._plot._disp_scale.get(self._key, 1.0))
+        nxt = _vdiv_neighbor(cur, direction > 0)
+        self._plot._set_channel_scale(self._key, nxt)
+        self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, nxt))
 
     def _on_pos_changed(self, value: float) -> None:
         self._plot._set_channel_offset(self._key, float(value))
+
+    def _step_position(self, direction: int) -> None:
+        self._pos_spin.setValue(float(self._pos_spin.value()) + 0.1 * float(direction))
 
     def _on_pos_zero(self) -> None:
         self._pos_spin.setValue(0.0)
@@ -534,20 +567,32 @@ class ChannelSettingsPanel(QDialog):
         self.close()
         self._plot._delete_math_channel(self._key)
 
-    def _sync_vdiv_spin_from_scale(self, scale: float) -> None:
-        unit = self._plot._unit_for_channel(self._key)
-        display_value, display_unit, factor = _scaled_div_value(float(scale), unit)
+    def _sync_vdiv_spin_from_scale(
+        self,
+        scale: float,
+        *,
+        display_unit: str | None = None,
+    ) -> None:
+        unit = self._vdiv_base_unit
+        if display_unit is None:
+            display_value, display_unit, factor = _scaled_div_value(float(scale), unit)
+        else:
+            factor = _unit_factor_for_display_unit(display_unit, unit)
+            display_value = float(scale) * factor
         self._vdiv_display_factor = float(factor)
-        options = _vdiv_options_for(self._key)
-        min_vdiv = options[0] if options else min(1.0, float(scale))
-        max_vdiv = _vdiv_max_for_channel(self._key)
-        self._vdiv_spin.blockSignals(True)
-        self._vdiv_spin.setDecimals(_vdiv_display_decimals(display_value))
-        self._vdiv_spin.setRange(min_vdiv * factor, max_vdiv * factor)
-        suffix = f" {display_unit}/div" if display_unit else " /div"
-        self._vdiv_spin.setSuffix(suffix)
-        self._vdiv_spin.setValue(display_value)
-        self._vdiv_spin.blockSignals(False)
+        self._syncing_vdiv = True
+        try:
+            self._vdiv_spin.setDecimals(_vdiv_display_decimals(display_value))
+            self._vdiv_spin.setValue(display_value)
+            units = _vdiv_unit_options(display_unit, unit)
+            self._vdiv_unit_combo.clear()
+            for option in units:
+                self._vdiv_unit_combo.addItem(option, option)
+            idx = self._vdiv_unit_combo.findData(display_unit)
+            if idx >= 0:
+                self._vdiv_unit_combo.setCurrentIndex(idx)
+        finally:
+            self._syncing_vdiv = False
 
     def sync_from_plot(self) -> None:
         """外部改刻度/位置后刷新控件。"""

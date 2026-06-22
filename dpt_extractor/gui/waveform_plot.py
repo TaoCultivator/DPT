@@ -614,6 +614,9 @@ from dpt_extractor.models.waveform import (
     WaveformBundle,
     bundle_reverse_recovery_current,
     bundle_total_current,
+    channel_reference_base_name,
+    channel_reference_sign,
+    normalize_channel_reference,
 )
 
 MAX_PLOT_POINTS = 8000
@@ -747,19 +750,22 @@ MATH_VDIV_LADDER = (
 )
 
 
-def _source_channel_sort_key(name: str) -> tuple[int, int, str]:
-    m = re.fullmatch(r"(CH|MATH)(\d+)", name.upper())
+def _source_channel_sort_key(name: str) -> tuple[int, int, int, str]:
+    key = normalize_channel_reference(name)
+    signed = 1 if key.startswith("-") else 0
+    base = channel_reference_base_name(key)
+    m = re.fullmatch(r"(CH|MATH)(\d+)", base)
     if not m:
-        return (2, 0, name.upper())
-    return (0 if m.group(1) == "CH" else 1, int(m.group(2)), name.upper())
+        return (2, signed, 0, key)
+    return (0 if m.group(1) == "CH" else 1, int(m.group(2)), signed, key)
 
 
 def _is_math_trace_key(key: str) -> bool:
-    return bool(re.fullmatch(r"MATH\d+", key.upper()))
+    return bool(re.fullmatch(r"MATH\d+", channel_reference_base_name(key)))
 
 
 def _is_source_channel_key(key: str) -> bool:
-    return bool(SOURCE_CHANNEL_RE.fullmatch(str(key or "").upper()))
+    return bool(SOURCE_CHANNEL_RE.fullmatch(channel_reference_base_name(key)))
 
 
 def _math_color(key: str) -> str:
@@ -772,18 +778,23 @@ def _math_color(key: str) -> str:
 
 
 def _source_trace_style(key: str) -> tuple[str, float]:
-    key = key.upper()
+    key = normalize_channel_reference(key)
     style = WAVEFORM_TRACE_STYLES.get(key)
     if style is not None:
         return style
+    base = channel_reference_base_name(key)
+    style = WAVEFORM_TRACE_STYLES.get(base)
+    if style is not None:
+        return style
     if _is_math_trace_key(key):
-        return _math_color(key), 1.5
+        return _math_color(base), 1.5
     return "#d0d0d0", 1.5
 
 
 def _source_channel_legend(key: str, labels: dict[str, str]) -> str:
-    key = key.upper()
-    label = (labels.get(key) or "").strip()
+    key = normalize_channel_reference(key)
+    base = channel_reference_base_name(key)
+    label = (labels.get(key) or labels.get(base) or "").strip()
     if label and label.upper() != key:
         return f"{key} {label}"
     return key
@@ -974,7 +985,8 @@ def _usable_y_divs() -> float:
 
 
 def _vdiv_max_for_channel(key: str) -> float:
-    if CHANNEL_UNITS.get(key) == "A":
+    normalized = normalize_channel_reference(key)
+    if CHANNEL_UNITS.get(normalized) == "A":
         return CURRENT_VDIV_MAX
     return float(_vdiv_ladder_for_channel(key)[-1])
 
@@ -1095,20 +1107,75 @@ def _clamp_offset_div(offset: float) -> float:
     return float(max(-DISP_HALF_DIV, min(DISP_HALF_DIV, float(offset))))
 
 
+_SI_DISPLAY_FACTORS: tuple[tuple[str, float], ...] = (
+    ("p", 1e12),
+    ("n", 1e9),
+    ("µ", 1e6),
+    ("m", 1e3),
+    ("", 1.0),
+    ("k", 1e-3),
+    ("M", 1e-6),
+    ("G", 1e-9),
+)
+_SI_PREFIX_TO_FACTOR = {prefix: factor for prefix, factor in _SI_DISPLAY_FACTORS}
+
+
+def _normalize_si_prefix(prefix: str) -> str:
+    prefix = str(prefix or "").strip()
+    if prefix in {"u", "U", "μ"}:
+        return "µ"
+    if prefix == "K":
+        return "k"
+    return prefix
+
+
+def _split_si_unit(display_unit: str, base_unit: str) -> tuple[str, str]:
+    base_unit = str(base_unit or "")
+    display_unit = str(display_unit or "").strip()
+    if not base_unit or not display_unit.endswith(base_unit):
+        return "", base_unit
+    prefix = display_unit[: -len(base_unit)]
+    return _normalize_si_prefix(prefix), base_unit
+
+
+def _unit_factor_for_display_unit(display_unit: str, base_unit: str) -> float:
+    prefix, _base = _split_si_unit(display_unit, base_unit)
+    return float(_SI_PREFIX_TO_FACTOR.get(prefix, 1.0))
+
+
+def _vdiv_unit_options(display_unit: str, base_unit: str, radius: int = 2) -> list[str]:
+    """Return nearby SI display units around the current unit."""
+    base_unit = str(base_unit or "")
+    if not base_unit:
+        return [""]
+    prefix, _base = _split_si_unit(display_unit, base_unit)
+    prefixes = [p for p, _factor in _SI_DISPLAY_FACTORS]
+    try:
+        center = prefixes.index(prefix)
+    except ValueError:
+        center = prefixes.index("")
+    lo = max(0, center - int(radius))
+    hi = min(len(prefixes), center + int(radius) + 1)
+    return [f"{prefixes[i]}{base_unit}" for i in range(lo, hi)]
+
+
 def _scaled_div_value(scale: float, unit: str) -> tuple[float, str, float]:
-    """Display small A/div and J/div scales with SI sub-units."""
+    """Display vertical scale with SI sub-units."""
     unit = unit or ""
     scale = float(scale)
-    if unit in {"A", "J"} and 0.0 < abs(scale) < 1.0:
-        for factor, prefix in (
-            (1e3, "m"),
-            (1e6, "µ"),
-            (1e9, "n"),
-            (1e12, "p"),
-        ):
-            if abs(scale * factor) >= 1.0 or factor == 1e12:
-                return scale * factor, f"{prefix}{unit}", factor
-    return scale, unit, 1.0
+    if not unit or scale == 0.0 or not np.isfinite(scale):
+        return scale, unit, 1.0
+    abs_scale = abs(scale)
+    smallest_prefix, smallest_factor = _SI_DISPLAY_FACTORS[0]
+    if abs_scale * smallest_factor < 1.0:
+        return scale * smallest_factor, f"{smallest_prefix}{unit}", smallest_factor
+    best_prefix, best_factor = _SI_DISPLAY_FACTORS[-1]
+    for prefix, factor in _SI_DISPLAY_FACTORS:
+        value = abs_scale * factor
+        if 1.0 <= value < 1000.0:
+            best_prefix, best_factor = prefix, factor
+            break
+    return scale * best_factor, f"{best_prefix}{unit}", best_factor
 
 
 def _format_vdiv_text(scale: float, unit: str) -> str:
@@ -3046,6 +3113,15 @@ class WaveformPlot(QWidget):
     @staticmethod
     def _physical_channel_units(profile: BridgeProfile) -> dict[str, str]:
         units: dict[str, str] = {}
+
+        def add_unit(channel: str, unit: str) -> None:
+            ref = normalize_channel_reference(channel)
+            base = channel_reference_base_name(ref)
+            if base:
+                units[base] = unit
+            if ref:
+                units[ref] = unit
+
         for channel, unit in (
             (profile.vge, "V"),
             (profile.vce, "V"),
@@ -3056,7 +3132,7 @@ class WaveformPlot(QWidget):
             (profile.vge_other, "V"),
         ):
             if channel:
-                units[channel.upper()] = unit
+                add_unit(channel, unit)
         return units
 
     @staticmethod
@@ -3072,11 +3148,15 @@ class WaveformPlot(QWidget):
             ("vge_other", profile.vge_other),
         ):
             if channel:
-                mapping[logical] = channel.upper()
-        if profile.ic_from_sum_irr_il:
-            mapping["ic"] = (profile.irr or profile.il or profile.ic).upper()
-        if profile.irr_from_ic_minus_il:
-            mapping["irr"] = (profile.irr or profile.ic or profile.il).upper()
+                mapping[logical] = normalize_channel_reference(channel)
+        if profile.ic_from_sum_irr_il and not profile.ic:
+            mapping["ic"] = normalize_channel_reference(
+                profile.irr or profile.il or profile.ic
+            )
+        if profile.irr_from_ic_minus_il and not profile.irr:
+            mapping["irr"] = normalize_channel_reference(
+                profile.irr or profile.ic or profile.il
+            )
         return mapping
 
     @staticmethod
@@ -3097,18 +3177,24 @@ class WaveformPlot(QWidget):
         for logical, channel in display_map.items():
             if channel:
                 roles.setdefault(channel, []).append(labels.get(logical, logical))
-        if profile.ic_from_sum_irr_il:
+        if profile.ic_from_sum_irr_il and not profile.ic:
             for channel in (profile.irr, profile.il):
                 if channel:
-                    role_list = roles.setdefault(channel.upper(), [])
+                    role_list = roles.setdefault(
+                        normalize_channel_reference(channel),
+                        [],
+                    )
                     if "Ic" in role_list:
                         role_list.remove("Ic")
                     if "Ic=Irr+IL" not in role_list:
                         role_list.append("Ic=Irr+IL")
-        if profile.irr_from_ic_minus_il:
+        if profile.irr_from_ic_minus_il and not profile.irr:
             for channel in (profile.ic, profile.il):
                 if channel:
-                    role_list = roles.setdefault(channel.upper(), [])
+                    role_list = roles.setdefault(
+                        normalize_channel_reference(channel),
+                        [],
+                    )
                     if "Irr" in role_list:
                         role_list.remove("Irr")
                     if "Irr=Ic-IL" not in role_list:
@@ -3125,12 +3211,24 @@ class WaveformPlot(QWidget):
     @staticmethod
     def _is_sum_formula(expr: str, a: str, b: str) -> bool:
         tokens, ops = WaveformPlot._formula_tokens(expr)
-        return len(tokens) == 2 and set(tokens) == {a.upper(), b.upper()} and ops == ["+"]
+        return (
+            len(tokens) == 2
+            and set(tokens)
+            == {channel_reference_base_name(a), channel_reference_base_name(b)}
+            and ops == ["+"]
+            and channel_reference_sign(a) > 0
+            and channel_reference_sign(b) > 0
+        )
 
     @staticmethod
     def _is_difference_formula(expr: str, a: str, b: str) -> bool:
         tokens, ops = WaveformPlot._formula_tokens(expr)
-        return tokens == [a.upper(), b.upper()] and ops == ["-"]
+        return (
+            tokens == [channel_reference_base_name(a), channel_reference_base_name(b)]
+            and ops == ["-"]
+            and channel_reference_sign(a) > 0
+            and channel_reference_sign(b) > 0
+        )
 
     def _prefer_math_display_keys_for_derived_currents(
         self,
@@ -3138,12 +3236,22 @@ class WaveformPlot(QWidget):
         formulas: dict[str, str],
     ) -> None:
         """Bind derived logical currents to visible TSS Math traces when available."""
-        if profile.ic_from_sum_irr_il and profile.irr and profile.il:
+        if (
+            profile.ic_from_sum_irr_il
+            and not profile.ic
+            and profile.irr
+            and profile.il
+        ):
             for key, expr in formulas.items():
                 if self._is_sum_formula(expr, profile.irr, profile.il):
                     self._logical_display_keys["ic"] = key.upper()
                     break
-        if profile.irr_from_ic_minus_il and profile.ic and profile.il:
+        if (
+            profile.irr_from_ic_minus_il
+            and not profile.irr
+            and profile.ic
+            and profile.il
+        ):
             for key, expr in formulas.items():
                 if self._is_difference_formula(expr, profile.ic, profile.il):
                     self._logical_display_keys["irr"] = key.upper()
@@ -3153,24 +3261,27 @@ class WaveformPlot(QWidget):
         logical = channel.strip().lower()
         if logical in self._logical_display_keys:
             return self._logical_display_keys[logical]
-        return channel.upper()
+        return normalize_channel_reference(channel)
 
     def _logical_role_for_source(self, source_key: str) -> str:
-        source_key = source_key.upper()
+        source_key = normalize_channel_reference(source_key)
         for logical, display_key in self._logical_display_keys.items():
             if display_key == source_key:
                 return logical
         return source_key.lower()
 
     def mapping_role_for_source(self, source_key: str) -> str:
-        source_key = source_key.upper()
+        source_key = normalize_channel_reference(source_key)
         for logical, display_key in self._logical_display_keys.items():
             if display_key == source_key:
                 return logical
         return ""
 
     def request_channel_mapping(self, source_key: str, logical_role: str) -> None:
-        self.channelMappingRequested.emit(source_key.upper(), logical_role)
+        self.channelMappingRequested.emit(
+            normalize_channel_reference(source_key),
+            logical_role,
+        )
 
     def _formula_eval_context(self, target_key: str) -> dict[str, np.ndarray | float]:
         ctx: dict[str, np.ndarray | float] = {}
@@ -3482,9 +3593,9 @@ class WaveformPlot(QWidget):
         zero_trace = np.zeros_like(np.asarray(t, dtype=np.float64), dtype=np.float64)
 
         def safe_channel(col: str) -> np.ndarray:
-            key = str(col or "").upper()
-            if key in bundle.channels:
-                return np.asarray(bundle.channels[key], dtype=np.float64)
+            channel = bundle.maybe_get(col)
+            if channel is not None:
+                return np.asarray(channel, dtype=np.float64)
             return zero_trace
 
         def safe_derived(fn) -> np.ndarray:
@@ -3507,11 +3618,29 @@ class WaveformPlot(QWidget):
         self._interactive_ic = ic
         self._interactive_dt = float(bundle.dt)
 
-        source_items = [
-            (ch.upper(), np.asarray(raw, dtype=np.float64))
+        source_item_map: dict[str, np.ndarray] = {
+            normalize_channel_reference(ch): np.asarray(raw, dtype=np.float64)
             for ch, raw in bundle.channels.items()
             if _is_source_channel_key(ch)
-        ]
+        }
+        for channel in (
+            profile.vge,
+            profile.vce,
+            profile.ic,
+            profile.il,
+            profile.irr,
+            profile.v_diode,
+            profile.vge_other,
+        ):
+            ref = normalize_channel_reference(channel)
+            if channel_reference_sign(ref) >= 0:
+                continue
+            if ref in source_item_map:
+                continue
+            signed = bundle.maybe_get(ref)
+            if signed is not None:
+                source_item_map[ref] = np.asarray(signed, dtype=np.float64)
+        source_items = list(source_item_map.items())
         source_items.sort(key=lambda item: _source_channel_sort_key(item[0]))
         t_us = np.asarray(t, dtype=np.float64) * 1e6
         self._trace_items.clear()
@@ -3565,13 +3694,18 @@ class WaveformPlot(QWidget):
             if key in self._manual_vdiv:
                 scale = float(self._manual_vdiv[key])
             else:
-                scope_scale = bundle.meta.channel_vdiv.get(key)
+                scope_scale = bundle.meta.channel_vdiv.get(
+                    key,
+                    bundle.meta.channel_vdiv.get(channel_reference_base_name(key)),
+                )
                 scale = _safe_initial_vdiv_for_channel(key, fit_raw, scope_scale)
             self._disp_scale[key] = scale
             if key in saved_offset:
                 offset = float(saved_offset[key])
             elif key in scope_y_position:
                 offset = float(scope_y_position[key])
+            elif channel_reference_base_name(key) in scope_y_position:
+                offset = float(scope_y_position[channel_reference_base_name(key)])
             else:
                 offset = _auto_center_offset_div(fit_raw, scale)
             self._disp_offset[key] = _clamp_offset_div(offset)
@@ -3735,12 +3869,14 @@ class WaveformPlot(QWidget):
 
     @staticmethod
     def _zero_handle_display_label(key: str) -> str:
-        key = key.upper()
-        if m := re.fullmatch(r"CH(\d+)", key):
-            return f"C{m.group(1)}"
-        if m := re.fullmatch(r"MATH(\d+)", key):
-            return f"M{m.group(1)}"
-        return key[:3]
+        key = normalize_channel_reference(key)
+        sign = "-" if key.startswith("-") else ""
+        base = channel_reference_base_name(key)
+        if m := re.fullmatch(r"CH(\d+)", base):
+            return f"{sign}C{m.group(1)}"
+        if m := re.fullmatch(r"MATH(\d+)", base):
+            return f"{sign}M{m.group(1)}"
+        return key[:4] if sign else key[:3]
 
     def _zero_handle_tooltip(self, key: str, legend: str) -> str:
         text = self._zero_handle_label(key, legend)
@@ -3816,8 +3952,12 @@ class WaveformPlot(QWidget):
             )
 
     def _can_delete_channel(self, key: str) -> bool:
-        key = key.upper()
-        return _is_math_trace_key(key) and key in self._trace_items
+        key = normalize_channel_reference(key)
+        return (
+            not key.startswith("-")
+            and _is_math_trace_key(key)
+            and key in self._trace_items
+        )
 
     def set_channel_label(self, key: str, label: str) -> None:
         key = key.upper()
@@ -4071,7 +4211,7 @@ class WaveformPlot(QWidget):
             self._manual_vdiv.pop(key, None)
             scale = _auto_vdiv_for_channel(key, fit_raw)
         else:
-            scale = _pick_vdiv_ladder(float(value), key)
+            scale = max(float(value), 1e-15)
             self._manual_vdiv[key] = scale
         self._disp_scale[key] = scale
         self._auto_center_channel(key)

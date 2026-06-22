@@ -8,17 +8,24 @@ from typing import Iterable
 import yaml
 
 from dpt_extractor.models.bridge_profile import BridgeProfile, make_profile
-from dpt_extractor.models.waveform import WaveformBundle
+from dpt_extractor.models.waveform import (
+    WaveformBundle,
+    channel_reference_base_name,
+    normalize_channel_reference,
+)
 
 
 def sort_channel_names(names: Iterable[str]) -> list[str]:
     """CH1..CH8 then MATH1..MATHn, matching Tekscope column order."""
 
-    def sort_key(name: str) -> tuple[int, int, str]:
-        m = re.fullmatch(r"(CH|MATH)(\d+)", name)
+    def sort_key(name: str) -> tuple[int, int, int, str]:
+        normalized = normalize_channel_reference(name)
+        signed = 1 if normalized.startswith("-") else 0
+        base = channel_reference_base_name(normalized)
+        m = re.fullmatch(r"(CH|MATH)(\d+)", base)
         if not m:
-            return (2, 0, name)
-        return (0 if m.group(1) == "CH" else 1, int(m.group(2)), name)
+            return (2, 0, signed, normalized)
+        return (0 if m.group(1) == "CH" else 1, int(m.group(2)), signed, normalized)
 
     return sorted(names, key=sort_key)
 
@@ -83,11 +90,18 @@ def infer_short_circuit_mapping_from_bundle(
     )
 
 
-def channels_for_mapping(bundle: WaveformBundle | None) -> list[str]:
+def channels_for_mapping(
+    bundle: WaveformBundle | None,
+    *,
+    include_inverted: bool = False,
+) -> list[str]:
     """Channel names available in the mapping UI from the loaded TSS."""
     if bundle is None:
         return []
-    return sort_channel_names(bundle.channels.keys())
+    names = sort_channel_names(bundle.channels.keys())
+    if include_inverted:
+        names = sort_channel_names([*names, *(f"-{name}" for name in names)])
+    return names
 
 # logical_key -> (中文名, 简要说明)
 LOGICAL_SIGNALS: tuple[tuple[str, str, str], ...] = (
@@ -110,6 +124,7 @@ LOGICAL_SIGNALS: tuple[tuple[str, str, str], ...] = (
 
 LOGICAL_SIGNAL_KEYS: tuple[str, ...] = tuple(k for k, _, _ in LOGICAL_SIGNALS)
 OPTIONAL_SIGNAL_KEYS = frozenset({"il", "irr", "v_diode", "vge_other"})
+ALLOW_SHARED_SOURCE_KEYS = frozenset({"ic", "irr"})
 
 
 @dataclass
@@ -151,7 +166,7 @@ class ChannelMapping:
             if v is None:
                 kwargs[k] = getattr(base, k)
             else:
-                kwargs[k] = str(v)
+                kwargs[k] = normalize_channel_reference(str(v))
         kwargs["ic_from_sum_irr_il"] = bool(
             data.get("ic_from_sum_irr_il", getattr(base, "ic_from_sum_irr_il"))
         )
@@ -189,55 +204,69 @@ def validate_mapping(
     def check_col(key: str, col: str) -> None:
         if not col:
             return
-        if require_existing and bundle is not None and col not in bundle.channels:
+        col_ref = normalize_channel_reference(col)
+        if (
+            require_existing
+            and bundle is not None
+            and not bundle.has_channel_reference(col_ref)
+        ):
             errors.append(f"{col} 在当前 TSS 中不存在")
-        if col in seen and seen[col] != key:
-            errors.append(f"{col} 被重复分配给 {seen[col]} 与 {key}")
-        seen[col] = key
-
-    if mapping.ic_from_sum_irr_il and mapping.irr_from_ic_minus_il:
-        errors.append("总电流 Irr+IL 与反向恢复 Ic−IL 不能同时启用")
+        if (
+            col_ref in seen
+            and seen[col_ref] != key
+            and {seen[col_ref], key} - ALLOW_SHARED_SOURCE_KEYS
+        ):
+            errors.append(f"{col_ref} 被重复分配给 {seen[col_ref]} 与 {key}")
+        seen[col_ref] = key
 
     require_col("vge", "Vge")
     require_col("vce", "Vce")
 
-    if mapping.ic_from_sum_irr_il:
+    direct_ic = bool(mapping.ic)
+    direct_irr = bool(mapping.irr)
+    need_ic_formula = bool(mapping.ic_from_sum_irr_il and not direct_ic)
+    need_irr_formula = bool(mapping.irr_from_ic_minus_il and not direct_irr)
+
+    if need_ic_formula and need_irr_formula:
+        errors.append("总电流 Irr+IL 与反向恢复 Ic−IL 不能同时作为兜底公式启用")
+
+    if not direct_ic and not mapping.ic_from_sum_irr_il:
+        errors.append("Ic: 须指定通道")
+
+    if need_ic_formula:
         require_col("irr", "Irr")
         require_col("il", "IL")
-        if mapping.irr and mapping.irr == mapping.il:
+        if (
+            mapping.irr
+            and mapping.il
+            and channel_reference_base_name(mapping.irr)
+            == channel_reference_base_name(mapping.il)
+        ):
             errors.append("总电流为 Irr+IL 相加时，Irr 与 IL 不能选择同一列")
-        for key in LOGICAL_SIGNAL_KEYS:
-            if key == "ic":
-                continue
-            check_col(key, getattr(mapping, key))
-    elif mapping.irr_from_ic_minus_il:
+
+    if need_irr_formula:
         require_col("ic", "Ic")
         require_col("il", "IL")
-        if mapping.ic and mapping.ic == mapping.il:
+        if (
+            mapping.ic
+            and mapping.il
+            and channel_reference_base_name(mapping.ic)
+            == channel_reference_base_name(mapping.il)
+        ):
             errors.append("反向恢复为 Ic−IL 时，Ic 与 IL 不能选择同一列")
-        for key in LOGICAL_SIGNAL_KEYS:
-            if key == "irr":
-                continue
-            check_col(key, getattr(mapping, key))
-    else:
-        require_col("ic", "Ic")
-        for key in LOGICAL_SIGNAL_KEYS:
-            col = getattr(mapping, key)
-            if not col and key not in OPTIONAL_SIGNAL_KEYS:
-                continue
-            check_col(key, col)
+
+    for key in LOGICAL_SIGNAL_KEYS:
+        col = getattr(mapping, key)
+        if not col and key not in OPTIONAL_SIGNAL_KEYS:
+            continue
+        check_col(key, col)
 
     return errors
 
 
 def active_mapping_keys(mapping: ChannelMapping) -> tuple[str, ...]:
     """Logical keys that are currently backed by a direct source channel."""
-    keys = list(LOGICAL_SIGNAL_KEYS)
-    if mapping.ic_from_sum_irr_il and "ic" in keys:
-        keys.remove("ic")
-    if mapping.irr_from_ic_minus_il and "irr" in keys:
-        keys.remove("irr")
-    return tuple(keys)
+    return LOGICAL_SIGNAL_KEYS
 
 
 def resolve_mapping_conflicts(
@@ -251,27 +280,29 @@ def resolve_mapping_conflicts(
     keys = active_mapping_keys(mapping)
     if changed_key not in keys:
         return mapping
-    current = str(getattr(mapping, changed_key) or "").upper()
+    current = normalize_channel_reference(getattr(mapping, changed_key) or "")
     if not current:
         return mapping
 
     conflicts = [
         key
         for key in keys
-        if key != changed_key and str(getattr(mapping, key) or "").upper() == current
+        if key != changed_key
+        and normalize_channel_reference(getattr(mapping, key) or "") == current
     ]
     if not conflicts:
         return mapping
 
     data = mapping.to_dict()
     previous = str(previous_channel or "")
-    previous_upper = previous.upper()
+    previous_upper = normalize_channel_reference(previous)
     for conflict_key in conflicts:
         replacement = ""
         if previous and previous_upper != current:
             used_elsewhere = any(
                 key not in {changed_key, conflict_key}
-                and str(getattr(mapping, key) or "").upper() == previous_upper
+                and normalize_channel_reference(getattr(mapping, key) or "")
+                == previous_upper
                 for key in keys
             )
             if not used_elsewhere:

@@ -77,7 +77,7 @@ class ChannelMappingDialog(QDialog):
         title.setStyleSheet("font-size:15px;font-weight:bold;color:#89b4fa;")
         layout.addWidget(title)
 
-        ch_list = channels_for_mapping(self._bundle)
+        ch_list = channels_for_mapping(self._bundle, include_inverted=True)
         if ch_list:
             ch_hint = "、".join(ch_list)
             hint_text = (
@@ -100,7 +100,7 @@ class ChannelMappingDialog(QDialog):
         form.setSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        available = channels_for_mapping(self._bundle)
+        available = channels_for_mapping(self._bundle, include_inverted=True)
 
         for key, label, tip in LOGICAL_SIGNALS:
             combo = QComboBox()
@@ -122,7 +122,7 @@ class ChannelMappingDialog(QDialog):
                 h.setContentsMargins(0, 0, 0, 0)
                 h.setSpacing(10)
                 self._ic_sum_cb = QCheckBox(
-                    "上桥总电流 = 下桥支路电流 + 电感电流（软件相加）"
+                    "未指定 Ic 时：总电流 = 下桥支路电流 + 电感电流（软件相加）"
                 )
                 self._ic_sum_cb.setStyleSheet("color:#a6adc8;font-size:12px;")
                 self._ic_sum_cb.toggled.connect(self._on_ic_sum_toggled)
@@ -135,7 +135,7 @@ class ChannelMappingDialog(QDialog):
                 h.setContentsMargins(0, 0, 0, 0)
                 h.setSpacing(10)
                 self._irr_diff_cb = QCheckBox(
-                    "下桥反向恢复 = 总电流 − 电感电流（软件相减）"
+                    "未指定 Irr 时：反向恢复 = 总电流 − 电感电流（软件相减）"
                 )
                 self._irr_diff_cb.setStyleSheet("color:#a6adc8;font-size:12px;")
                 self._irr_diff_cb.toggled.connect(self._on_irr_diff_toggled)
@@ -168,14 +168,10 @@ class ChannelMappingDialog(QDialog):
         layout.addWidget(buttons)
 
     def _on_ic_sum_toggled(self, checked: bool) -> None:
-        self._combos["ic"].setEnabled(not checked)
-        if checked and self._irr_diff_cb is not None and self._irr_diff_cb.isChecked():
-            self._irr_diff_cb.setChecked(False)
+        self._last_combo_values = self._current_combo_values()
 
     def _on_irr_diff_toggled(self, checked: bool) -> None:
-        self._combos["irr"].setEnabled(not checked)
-        if checked and self._ic_sum_cb is not None and self._ic_sum_cb.isChecked():
-            self._ic_sum_cb.setChecked(False)
+        self._last_combo_values = self._current_combo_values()
 
     def _current_combo_values(self) -> dict[str, str]:
         return {
@@ -213,17 +209,11 @@ class ChannelMappingDialog(QDialog):
             d = mapping.to_dict()
             if self._ic_sum_cb is not None:
                 self._ic_sum_cb.setChecked(bool(d.get("ic_from_sum_irr_il")))
-                self._combos["ic"].setEnabled(not d.get("ic_from_sum_irr_il"))
             if self._irr_diff_cb is not None:
                 self._irr_diff_cb.setChecked(bool(d.get("irr_from_ic_minus_il")))
-                self._combos["irr"].setEnabled(not d.get("irr_from_ic_minus_il"))
             for key in self._combos:
                 col = d.get(key)
                 if col is None:
-                    continue
-                if key == "ic" and d.get("ic_from_sum_irr_il"):
-                    continue
-                if key == "irr" and d.get("irr_from_ic_minus_il"):
                     continue
                 if isinstance(col, str) and col:
                     self._set_combo(key, col)
@@ -253,10 +243,6 @@ class ChannelMappingDialog(QDialog):
         parts = {k: str(self._combos[k].currentData() or "") for k in self._combos}
         use_sum = self._ic_sum_cb.isChecked() if self._ic_sum_cb else False
         use_diff = self._irr_diff_cb.isChecked() if self._irr_diff_cb else False
-        if use_sum:
-            parts["ic"] = ""
-        if use_diff:
-            parts["irr"] = ""
         return ChannelMapping(
             **parts,
             ic_from_sum_irr_il=use_sum,

@@ -10,7 +10,13 @@ import numpy as np
 from dpt_extractor.config.loader import AppConfig
 from dpt_extractor.models.bridge_profile import BridgeProfile, as_short_circuit_profile
 from dpt_extractor.models.results import ExtractResult, SegmentIndices, ShortCircuitResult
-from dpt_extractor.models.waveform import WaveformBundle, bundle_total_current
+from dpt_extractor.models.waveform import (
+    WaveformBundle,
+    bundle_total_current,
+    channel_reference_base_name,
+    channel_reference_sign,
+    normalize_channel_reference,
+)
 
 
 class ShortCircuitExtractNotReady(RuntimeError):
@@ -324,8 +330,12 @@ def find_energy_math_channel(
     current_channel: str,
 ) -> str | None:
     """Find a Tek MATH INTG(current * voltage) channel for the requested voltage."""
-    voltage_channel = voltage_channel.upper()
-    current_channel = current_channel.upper()
+    voltage_ref = normalize_channel_reference(voltage_channel)
+    current_ref = normalize_channel_reference(current_channel)
+    if channel_reference_sign(voltage_ref) < 0 or channel_reference_sign(current_ref) < 0:
+        return None
+    voltage_channel = channel_reference_base_name(voltage_ref)
+    current_channel = channel_reference_base_name(current_ref)
     for math_key, expr in sorted(bundle.meta.channel_math_formulas.items()):
         key = math_key.upper()
         if key not in bundle.channels:
@@ -396,8 +406,9 @@ def _vdc_from_pre_window(bundle: WaveformBundle, profile: BridgeProfile, i0: int
     b = max(a + 1, min(i0, n))
     vals: list[float] = []
     for ch in (profile.vce, profile.v_diode):
-        if ch in bundle.channels:
-            seg = np.asarray(bundle.channels[ch][a:b], dtype=np.float64)
+        channel = bundle.maybe_get(ch)
+        if channel is not None:
+            seg = np.asarray(channel[a:b], dtype=np.float64)
             if len(seg):
                 vals.append(float(np.nanpercentile(seg, 95)))
     if vals:
@@ -419,7 +430,7 @@ def extract_short_circuit(
 
     vge = np.asarray(bundle.get(profile.vge), dtype=np.float64)
     vce = np.asarray(bundle.get(profile.vce), dtype=np.float64)
-    vce_other_raw = bundle.channels.get(profile.v_diode) if profile.v_diode else None
+    vce_other_raw = bundle.maybe_get(profile.v_diode)
     vce_other = (
         np.asarray(vce_other_raw, dtype=np.float64)
         if vce_other_raw is not None

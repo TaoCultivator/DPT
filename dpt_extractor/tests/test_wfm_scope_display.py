@@ -48,16 +48,19 @@ class TestReadWfmVerticalScale(unittest.TestCase):
         formatted.explicit_dimensions = exp_dim
         formatted.explicit_user_view = None
         endian_key = b"AB"
+        wfm_file = MagicMock()
+        wfm_file._ENDIAN_PREFIX_LOOKUP = {endian_key: MagicMock(struct=">")}
+        string8 = MagicMock()
+        string8.unpack.return_value = "3.0"
+        version_number = MagicMock()
+        wfm_format = MagicMock(return_value=formatted)
 
         with (
             patch("dpt_extractor.io.wfm_scope_display.struct.unpack", return_value=(endian_key,)),
             patch(
-                "dpt_extractor.io.wfm_scope_display.WFMFile._ENDIAN_PREFIX_LOOKUP",
-                {endian_key: MagicMock(struct=">")},
+                "dpt_extractor.io.wfm_scope_display._wfm_dependencies",
+                return_value=(wfm_file, wfm_format, string8, version_number),
             ),
-            patch("dpt_extractor.io.wfm_scope_display.String8.unpack", return_value="3.0"),
-            patch("dpt_extractor.io.wfm_scope_display.VersionNumber"),
-            patch("dpt_extractor.io.wfm_scope_display.WfmFormat", return_value=formatted),
             patch("pathlib.Path.open", mock.mock_open()),
         ):
             scale = read_wfm_vertical_scale_per_div("dummy.wfm")
@@ -69,16 +72,19 @@ class TestReadWfmVerticalScale(unittest.TestCase):
         formatted = MagicMock()
         formatted.explicit_dimensions = exp_dim
         endian_key = b"AB"
+        wfm_file = MagicMock()
+        wfm_file._ENDIAN_PREFIX_LOOKUP = {endian_key: MagicMock(struct=">")}
+        string8 = MagicMock()
+        string8.unpack.return_value = "3.0"
+        version_number = MagicMock()
+        wfm_format = MagicMock(return_value=formatted)
 
         with (
             patch("dpt_extractor.io.wfm_scope_display.struct.unpack", return_value=(endian_key,)),
             patch(
-                "dpt_extractor.io.wfm_scope_display.WFMFile._ENDIAN_PREFIX_LOOKUP",
-                {endian_key: MagicMock(struct=">")},
+                "dpt_extractor.io.wfm_scope_display._wfm_dependencies",
+                return_value=(wfm_file, wfm_format, string8, version_number),
             ),
-            patch("dpt_extractor.io.wfm_scope_display.String8.unpack", return_value="3.0"),
-            patch("dpt_extractor.io.wfm_scope_display.VersionNumber"),
-            patch("dpt_extractor.io.wfm_scope_display.WfmFormat", return_value=formatted),
             patch("pathlib.Path.open", mock.mock_open()),
         ):
             self.assertIsNone(read_wfm_vertical_scale_per_div("dummy.wfm"))

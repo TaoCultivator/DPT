@@ -1076,9 +1076,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
 
         panel = ChannelSettingsPanel(plot, "MATH3", QPoint(0, 0), parent=plot)
-        self.assertLess(panel._vdiv_spin.minimum(), 50.0)
         self.assertAlmostEqual(panel._vdiv_spin.value(), 50.0)
-        self.assertIn("mJ/div", panel._vdiv_spin.suffix())
+        self.assertEqual(panel._vdiv_spin.suffix(), "")
+        self.assertEqual(panel._vdiv_unit_combo.currentText(), "mJ")
         panel._step_vdiv(-1)
         self.assertAlmostEqual(plot._disp_scale["MATH3"], 0.02)
         self.assertEqual(plot._vdiv_text("MATH3"), "20 mJ/div")
@@ -1090,12 +1090,27 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(plot._vdiv_text("MATH2"), "500 mA/div")
         panel = ChannelSettingsPanel(plot, "MATH2", QPoint(0, 0), parent=plot)
         self.assertAlmostEqual(panel._vdiv_spin.value(), 500.0)
-        self.assertIn("mA/div", panel._vdiv_spin.suffix())
+        self.assertEqual(panel._vdiv_unit_combo.currentText(), "mA")
         panel.close()
         plot._set_math_formula("MATH4", "CH2")
         self.assertEqual(plot._unit_for_channel("MATH4"), "V")
         plot._set_channel_scale("MATH4", 0.5)
         self.assertAlmostEqual(plot._disp_scale["MATH4"], 0.5)
+        self.assertEqual(plot._vdiv_text("MATH4"), "500 mV/div")
+
+        panel = ChannelSettingsPanel(plot, "MATH4", QPoint(0, 0), parent=plot)
+        self.assertAlmostEqual(panel._vdiv_spin.value(), 500.0)
+        self.assertEqual(panel._vdiv_unit_combo.currentText(), "mV")
+        self.assertIn(
+            "V",
+            [panel._vdiv_unit_combo.itemText(i) for i in range(panel._vdiv_unit_combo.count())],
+        )
+        plot._set_channel_scale("MATH4", 1000.0)
+        panel.sync_from_plot()
+        self.assertAlmostEqual(panel._vdiv_spin.value(), 1.0)
+        self.assertEqual(panel._vdiv_unit_combo.currentText(), "kV")
+        self.assertEqual(plot._vdiv_text("MATH4"), "1 kV/div")
+        panel.close()
 
     def test_source_channel_colors_follow_scope_palette(self):
         import numpy as np
@@ -2235,7 +2250,22 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         panel = ChannelSettingsPanel(plot, "MATH1", QPoint(0, 0), parent=plot)
         self.assertAlmostEqual(panel._vdiv_spin.value(), 50.0)
-        self.assertIn("mA/div", panel._vdiv_spin.suffix())
+        self.assertEqual(panel._vdiv_unit_combo.currentText(), "mA")
+        panel.close()
+
+    def test_channel_settings_position_steps_by_tenth_div(self):
+        from PyQt6.QtCore import QPoint
+
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
+        plot = self._make_synthetic_plot()
+        panel = ChannelSettingsPanel(plot, "CH5", QPoint(0, 0), parent=plot)
+        start = float(panel._pos_spin.value())
+        panel._step_position(+1)
+        self.assertAlmostEqual(panel._pos_spin.value(), start + 0.1)
+        self.assertAlmostEqual(plot._disp_offset["CH5"], start + 0.1)
+        panel._step_position(-1)
+        self.assertAlmostEqual(panel._pos_spin.value(), start)
         panel.close()
 
     def test_computed_non_loss_math_respects_tss_setup_vdiv_when_present(self):
