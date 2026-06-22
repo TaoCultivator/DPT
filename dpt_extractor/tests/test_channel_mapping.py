@@ -78,6 +78,82 @@ class TestChannelMapping(unittest.TestCase):
         self.assertTrue(any("CH6" in e and "不存在" in e for e in strict))
         self.assertFalse(relaxed)
 
+    def test_validate_allows_optional_channels_to_be_unused(self):
+        m = ChannelMapping(
+            vge="CH1",
+            vce="CH2",
+            ic="CH3",
+            il="",
+            irr="",
+            v_diode="",
+            vge_other="",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+
+        self.assertFalse(validate_mapping(m, None))
+
+    def test_validate_requires_total_current_source(self):
+        m = ChannelMapping(
+            vge="CH1",
+            vce="CH2",
+            ic="",
+            il="",
+            irr="",
+            v_diode="",
+            vge_other="",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+
+        self.assertTrue(any("Ic" in err for err in validate_mapping(m, None)))
+
+    def test_validate_formula_current_still_requires_its_inputs(self):
+        m = ChannelMapping(
+            vge="CH1",
+            vce="CH2",
+            ic="",
+            il="",
+            irr="CH3",
+            v_diode="",
+            vge_other="",
+            ic_from_sum_irr_il=True,
+            irr_from_ic_minus_il=False,
+        )
+
+        self.assertTrue(any("IL" in err for err in validate_mapping(m, None)))
+
+    def test_current_helpers_support_direct_total_without_rr_channels(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            try_bundle_reverse_recovery_current,
+            try_bundle_total_current,
+        )
+
+        total = np.linspace(0.0, 10.0, 8)
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 8),
+            channels={"CH1": np.zeros(8), "CH2": np.ones(8), "CH3": total},
+            meta=TekMetadata(),
+        )
+        profile = replace(
+            make_profile("U", "upper"),
+            ic="CH3",
+            il="",
+            irr="",
+            v_diode="",
+            vge_other="",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+
+        self.assertTrue(np.array_equal(try_bundle_total_current(bundle, profile), total))
+        self.assertIsNone(try_bundle_reverse_recovery_current(bundle, profile, total))
+
     def test_validate_irr_ic_minus_il_requires_distinct(self):
         m = ChannelMapping(
             irr_from_ic_minus_il=True,

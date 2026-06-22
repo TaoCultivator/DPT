@@ -54,11 +54,17 @@ from dpt_extractor.models.results import (
 )
 from dpt_extractor.models.waveform import (
     WaveformBundle,
-    bundle_reverse_recovery_current,
-    bundle_total_current,
+    try_bundle_reverse_recovery_current,
+    try_bundle_total_current,
 )
 
 MetricKey = tuple[str, str]
+_REVERSE_RECOVERY_CURRENT_METRICS: set[MetricKey] = {
+    ("反向恢复", "Irr"),
+    ("反向恢复", "Trr"),
+    ("反向恢复", "di/dt"),
+    ("反向恢复", "Err"),
+}
 
 
 def _optional_channel(bundle: WaveformBundle, col: str) -> np.ndarray | None:
@@ -372,12 +378,18 @@ def extract_all(
     vge = bundle.get(profile.vge)
     vce = bundle.get(profile.vce)
     vce_other = _optional_channel(bundle, profile.v_diode)
-    ic = bundle_total_current(bundle, profile)
-    irr = bundle_reverse_recovery_current(bundle, profile)
+    ic = try_bundle_total_current(bundle, profile)
+    if ic is None:
+        raise KeyError("缺少总电流通道，无法执行参数提取")
+    rr_current = try_bundle_reverse_recovery_current(bundle, profile, ic)
+    rr_current_available = rr_current is not None
+    irr = rr_current if rr_current_available else np.zeros_like(t, dtype=np.float64)
     v_diode = vce_other
     vge_other = _optional_channel(bundle, profile.vge_other)
 
     unavailable: set[MetricKey] = set()
+    if not rr_current_available:
+        unavailable.update(_REVERSE_RECOVERY_CURRENT_METRICS)
     if vge_other is None:
         unavailable.update(
             {

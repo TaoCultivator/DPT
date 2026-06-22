@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -72,6 +73,50 @@ class TestSinglePulse(unittest.TestCase):
         self.assertGreater(result.turn_off.ic_off_max, 0.0)
         self.assertEqual(result.turn_on.eon, 0.0)
         self.assertEqual(result.reverse_recovery.err, 0.0)
+
+    def test_extract_direct_total_current_without_opposite_channels(self):
+        dt = 8e-11
+        n = 250_000
+        t = np.arange(n) * dt
+        vge = _single_pulse_vge(n, dt, on_us=2.0, off_us=5.5)
+        i0 = int(5.5e-6 / dt)
+        i1 = min(n, i0 + 5000)
+        vce = np.full(n, 600.0)
+        seg = i1 - i0
+        vce[i0:i1] = np.linspace(600, 50, seg)
+        ic = np.zeros(n)
+        ic[i0:i1] = np.linspace(200, 0, seg)
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                "CH1": vge,
+                "CH2": vce,
+                "CH3": ic,
+            },
+            meta=TekMetadata(),
+        )
+        profile = replace(
+            make_profile("U", "upper"),
+            ic="CH3",
+            il="",
+            irr="",
+            v_diode="",
+            vge_other="",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+
+        result = extract_all(bundle, profile, AppConfig())
+
+        self.assertTrue(result.single_pulse_mode)
+        self.assertGreater(result.turn_off.ic_off_max, 0.0)
+        self.assertGreater(result.turn_off.eoff, 0.0)
+        self.assertTrue(result.is_metric_unavailable("关断过程", "串扰电压"))
+        self.assertTrue(result.is_metric_unavailable("开通", "串扰电压"))
+        self.assertTrue(result.is_metric_unavailable("反向恢复", "Irr"))
+        self.assertTrue(result.is_metric_unavailable("反向恢复", "Trr"))
+        self.assertTrue(result.is_metric_unavailable("反向恢复", "Vrr"))
+        self.assertTrue(result.is_metric_unavailable("反向恢复", "Err"))
 
 
 if __name__ == "__main__":

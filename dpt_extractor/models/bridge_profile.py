@@ -33,10 +33,14 @@ class BridgeProfile:
         ch: list[str] = [self.vge, self.vce]
         if not self.ic_from_sum_irr_il and self.ic:
             ch.append(self.ic)
-        ch.append(self.il)
+        if self.il:
+            ch.append(self.il)
         if not self.irr_from_ic_minus_il and self.irr:
             ch.append(self.irr)
-        ch.extend((self.v_diode, self.vge_other))
+        if self.v_diode:
+            ch.append(self.v_diode)
+        if self.vge_other:
+            ch.append(self.vge_other)
         return tuple(ch)
 
 

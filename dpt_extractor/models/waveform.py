@@ -71,17 +71,57 @@ class WaveformBundle:
 
 def bundle_total_current(bundle: WaveformBundle, profile: BridgeProfile) -> np.ndarray:
     """Total device current: mapped Ic column, or Irr + IL when ic_from_sum_irr_il."""
+    current = try_bundle_total_current(bundle, profile)
+    if current is None:
+        raise KeyError("Total current channel is not available in bundle")
+    return current
+
+
+def try_bundle_total_current(
+    bundle: WaveformBundle,
+    profile: BridgeProfile,
+) -> np.ndarray | None:
+    """Return total device current when the mapped source channels are available."""
     if profile.ic_from_sum_irr_il:
-        return bundle.get(profile.irr) + bundle.get(profile.il)
-    return bundle.get(profile.ic)
+        irr = bundle.channels.get(profile.irr) if profile.irr else None
+        il = bundle.channels.get(profile.il) if profile.il else None
+        if irr is not None and il is not None:
+            return irr + il
+        if profile.ic:
+            return bundle.channels.get(profile.ic)
+        return None
+    if not profile.ic:
+        return None
+    return bundle.channels.get(profile.ic)
 
 
 def bundle_reverse_recovery_current(
     bundle: WaveformBundle, profile: BridgeProfile
 ) -> np.ndarray:
     """Reverse recovery current: mapped Irr column, or Ic − IL when irr_from_ic_minus_il."""
-    if profile.irr_from_ic_minus_il:
-        return bundle_total_current(bundle, profile) - bundle.get(profile.il)
-    if not profile.irr:
+    current = try_bundle_reverse_recovery_current(bundle, profile)
+    if current is None:
         return np.zeros_like(bundle.t, dtype=np.float64)
-    return bundle.get(profile.irr)
+    return current
+
+
+def try_bundle_reverse_recovery_current(
+    bundle: WaveformBundle,
+    profile: BridgeProfile,
+    total_current: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Return reverse-recovery current when its mapped source channels are available."""
+    if profile.irr_from_ic_minus_il:
+        il = bundle.channels.get(profile.il) if profile.il else None
+        if il is not None:
+            ic = total_current
+            if ic is None:
+                ic = try_bundle_total_current(bundle, profile)
+            if ic is not None:
+                return ic - il
+        if profile.irr:
+            return bundle.channels.get(profile.irr)
+        return None
+    if not profile.irr:
+        return None
+    return bundle.channels.get(profile.irr)

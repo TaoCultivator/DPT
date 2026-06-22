@@ -106,6 +106,7 @@ class ChannelMappingDialog(QDialog):
             combo = QComboBox()
             combo.setMinimumWidth(120)
             apply_combo_popup_style(combo)
+            combo.addItem("未测试/不使用", "")
             for ch in available:
                 combo.addItem(ch, ch)
             combo.setToolTip(tip)

@@ -109,6 +109,7 @@ LOGICAL_SIGNALS: tuple[tuple[str, str, str], ...] = (
 )
 
 LOGICAL_SIGNAL_KEYS: tuple[str, ...] = tuple(k for k, _, _ in LOGICAL_SIGNALS)
+OPTIONAL_SIGNAL_KEYS = frozenset({"il", "irr", "v_diode", "vge_other"})
 
 
 @dataclass
@@ -178,6 +179,13 @@ def validate_mapping(
     errors: list[str] = []
     seen: dict[str, str] = {}
 
+    def require_col(key: str, label: str) -> bool:
+        col = str(getattr(mapping, key) or "")
+        if col:
+            return True
+        errors.append(f"{label}: 须指定通道")
+        return False
+
     def check_col(key: str, col: str) -> None:
         if not col:
             return
@@ -190,27 +198,32 @@ def validate_mapping(
     if mapping.ic_from_sum_irr_il and mapping.irr_from_ic_minus_il:
         errors.append("总电流 Irr+IL 与反向恢复 Ic−IL 不能同时启用")
 
+    require_col("vge", "Vge")
+    require_col("vce", "Vce")
+
     if mapping.ic_from_sum_irr_il:
-        if mapping.irr == mapping.il:
+        require_col("irr", "Irr")
+        require_col("il", "IL")
+        if mapping.irr and mapping.irr == mapping.il:
             errors.append("总电流为 Irr+IL 相加时，Irr 与 IL 不能选择同一列")
         for key in LOGICAL_SIGNAL_KEYS:
             if key == "ic":
                 continue
             check_col(key, getattr(mapping, key))
     elif mapping.irr_from_ic_minus_il:
-        if not mapping.ic:
-            errors.append("反向恢复为 Ic−IL 时须映射 Ic 列")
-        if mapping.ic == mapping.il:
+        require_col("ic", "Ic")
+        require_col("il", "IL")
+        if mapping.ic and mapping.ic == mapping.il:
             errors.append("反向恢复为 Ic−IL 时，Ic 与 IL 不能选择同一列")
         for key in LOGICAL_SIGNAL_KEYS:
             if key == "irr":
                 continue
             check_col(key, getattr(mapping, key))
     else:
+        require_col("ic", "Ic")
         for key in LOGICAL_SIGNAL_KEYS:
             col = getattr(mapping, key)
-            if not col:
-                errors.append(f"{key}: 须指定通道")
+            if not col and key not in OPTIONAL_SIGNAL_KEYS:
                 continue
             check_col(key, col)
 
