@@ -1073,6 +1073,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(plot._vdiv_text("MATH3"), "50 mJ/div")
 
         from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QLabel
         from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
 
         panel = ChannelSettingsPanel(plot, "MATH3", QPoint(0, 0), parent=plot)
@@ -1101,6 +1102,16 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         panel = ChannelSettingsPanel(plot, "MATH4", QPoint(0, 0), parent=plot)
         self.assertAlmostEqual(panel._vdiv_spin.value(), 500.0)
         self.assertEqual(panel._vdiv_unit_combo.currentText(), "mV")
+        panel.show()
+        QApplication.processEvents()
+        div_label = panel.findChild(QLabel, "vdivDivLabel")
+        self.assertIsNotNone(div_label)
+        spin_right = panel._vdiv_spin.mapTo(panel, panel._vdiv_spin.rect().topRight()).x()
+        unit_left = panel._vdiv_unit_combo.mapTo(panel, panel._vdiv_unit_combo.rect().topLeft()).x()
+        unit_right = panel._vdiv_unit_combo.mapTo(panel, panel._vdiv_unit_combo.rect().topRight()).x()
+        div_left = div_label.mapTo(panel, div_label.rect().topLeft()).x()
+        self.assertLess(spin_right, unit_left)
+        self.assertLess(unit_right, div_left)
         self.assertIn(
             "V",
             [panel._vdiv_unit_combo.itemText(i) for i in range(panel._vdiv_unit_combo.count())],

@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -42,12 +43,12 @@ QDialog#ChannelSettingsPanel {
     border: none;
 }
 QFrame#chPanelFrame {
-    background-color: rgba(126, 126, 126, 218);
+    background-color: rgba(118, 120, 118, 238);
     border: 3px solid rgba(255, 73, 88, 235);
     border-radius: 2px;
 }
 QFrame#chPanelBody {
-    background-color: rgba(142, 142, 138, 224);
+    background-color: rgba(153, 156, 151, 244);
 }
 QWidget#chPanelCell, QWidget#chPanelRow {
     background-color: transparent;
@@ -110,6 +111,21 @@ QPushButton#chStepBtn {
 }
 QPushButton#chStepBtn:hover { background-color: #eaeaea; }
 QPushButton#chStepBtn:pressed { background-color: #cccccc; }
+QPushButton#chScaleStepBtn {
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 17px;
+    max-height: 17px;
+    padding: 0;
+    border: 1px solid rgba(82, 91, 94, 225);
+    border-radius: 3px;
+    background-color: #f4f7f7;
+    color: #071014;
+    font-size: 11px;
+    font-weight: bold;
+}
+QPushButton#chScaleStepBtn:hover { background-color: #ffffff; }
+QPushButton#chScaleStepBtn:pressed { background-color: #d3dddd; }
 QPushButton#chZeroBtn {
     min-height: 34px;
     padding: 4px 14px;
@@ -169,6 +185,72 @@ QComboBox QAbstractItemView::item:selected {
 }
 QComboBox QAbstractItemView::item:disabled {
     color: #747a7d;
+}
+QFrame#vdivInputGroup {
+    min-height: 38px;
+    max-height: 38px;
+    background-color: #f8faf9;
+    border: 1px solid #566367;
+    border-radius: 4px;
+}
+QDoubleSpinBox#vdivValueSpin {
+    min-height: 34px;
+    max-height: 34px;
+    background-color: transparent;
+    color: #050505;
+    border: none;
+    border-right: 1px solid #c5cdcd;
+    border-radius: 0;
+    padding: 2px 7px;
+    font-size: 13px;
+}
+QComboBox#vdivUnitCombo {
+    min-height: 34px;
+    max-height: 34px;
+    background-color: #ffffff;
+    color: #071014;
+    border: none;
+    border-right: 1px solid #c5cdcd;
+    border-radius: 0;
+    padding: 2px 18px 2px 7px;
+    font-size: 13px;
+    font-weight: bold;
+}
+QComboBox#vdivUnitCombo::drop-down {
+    width: 16px;
+    border-left: 1px solid #d1d8d8;
+    background-color: #e8eeee;
+}
+QComboBox#vdivUnitCombo QAbstractItemView {
+    background-color: #f8faf9;
+    color: #071014;
+    selection-background-color: #28bce8;
+    selection-color: #061014;
+    border: 1px solid #566367;
+    outline: 0;
+}
+QComboBox#vdivUnitCombo QAbstractItemView::item {
+    min-height: 24px;
+    padding: 5px 9px;
+    color: #071014;
+    background-color: #f8faf9;
+}
+QComboBox#vdivUnitCombo QAbstractItemView::item:hover {
+    background-color: #e0eceb;
+    color: #050607;
+}
+QComboBox#vdivUnitCombo QAbstractItemView::item:selected {
+    background-color: #28bce8;
+    color: #061014;
+}
+QLabel#vdivDivLabel {
+    min-height: 34px;
+    max-height: 34px;
+    background-color: #edf2f1;
+    color: #263438;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 0 7px;
 }
 QLineEdit#chTagValue {
     min-height: 34px;
@@ -295,7 +377,7 @@ class ChannelSettingsPanel(QDialog):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(_PANEL_STYLE)
-        self.setFixedWidth(430)
+        self.setFixedWidth(450)
 
         ch_idx = list(plot._trace_items.keys()).index(key) + 1
         hidden = key in plot._hidden_channels
@@ -331,7 +413,7 @@ class ChannelSettingsPanel(QDialog):
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(16)
+        grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
 
         # --- 显示开关 ---
@@ -365,26 +447,51 @@ class ChannelSettingsPanel(QDialog):
         self._vdiv_base_unit = plot._unit_for_channel(key)
         self._syncing_vdiv = False
         self._vdiv_spin = QDoubleSpinBox()
+        self._vdiv_spin.setObjectName("vdivValueSpin")
         self._vdiv_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
-        self._vdiv_spin.setFixedWidth(104)
+        self._vdiv_spin.setFixedWidth(60)
         self._vdiv_spin.setRange(1e-99, 1e99)
         self._vdiv_unit_combo = QComboBox()
-        self._vdiv_unit_combo.setFixedWidth(82)
+        self._vdiv_unit_combo.setObjectName("vdivUnitCombo")
+        self._vdiv_unit_combo.setFixedWidth(62)
+        self._vdiv_unit_combo.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
         apply_combo_popup_style(self._vdiv_unit_combo, light=True)
         self._sync_vdiv_spin_from_scale(current_scale)
         self._vdiv_spin.valueChanged.connect(self._on_vdiv_changed)
         self._vdiv_unit_combo.currentIndexChanged.connect(self._on_vdiv_unit_changed)
+        div_label = QLabel("/div")
+        div_label.setObjectName("vdivDivLabel")
+        div_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        div_label.setFixedWidth(42)
+        vdiv_input = QFrame()
+        vdiv_input.setObjectName("vdivInputGroup")
+        vdiv_input.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        vdiv_input.setFixedWidth(164)
+        vdiv_input_lay = QHBoxLayout(vdiv_input)
+        vdiv_input_lay.setContentsMargins(0, 0, 0, 0)
+        vdiv_input_lay.setSpacing(0)
+        vdiv_input_lay.addWidget(self._vdiv_spin)
+        vdiv_input_lay.addWidget(self._vdiv_unit_combo)
+        vdiv_input_lay.addWidget(div_label)
         btn_up = QPushButton("▲")
         btn_dn = QPushButton("▼")
         for b in (btn_up, btn_dn):
-            b.setObjectName("chStepBtn")
+            b.setObjectName("chScaleStepBtn")
         btn_up.clicked.connect(lambda: self._step_vdiv(+1))
         btn_dn.clicked.connect(lambda: self._step_vdiv(-1))
-        vdiv_row.addWidget(self._vdiv_spin, stretch=0)
-        vdiv_row.addWidget(self._vdiv_unit_combo, stretch=0)
-        vdiv_row.addWidget(QLabel("/div"), stretch=0)
-        vdiv_row.addWidget(btn_up)
-        vdiv_row.addWidget(btn_dn)
+        vdiv_step_stack = QWidget()
+        vdiv_step_stack.setObjectName("chPanelRow")
+        vdiv_step_lay = QVBoxLayout(vdiv_step_stack)
+        vdiv_step_lay.setContentsMargins(0, 0, 0, 0)
+        vdiv_step_lay.setSpacing(2)
+        vdiv_step_lay.addWidget(btn_up)
+        vdiv_step_lay.addWidget(btn_dn)
+        vdiv_row.addWidget(vdiv_input, stretch=0)
+        vdiv_row.addWidget(vdiv_step_stack, stretch=0)
+        vdiv_row.addStretch(1)
         vdiv_w = QWidget()
         vdiv_w.setObjectName("chPanelRow")
         vdiv_w.setLayout(vdiv_row)
