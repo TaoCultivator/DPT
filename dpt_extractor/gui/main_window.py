@@ -2025,7 +2025,7 @@ class MainWindow(QMainWindow):
                 logical_role,
                 previous_channel,
             )
-        errors = validate_mapping(mapping, self.bundle)
+        errors = validate_mapping(mapping, self.bundle, require_existing=False)
         if errors:
             QMessageBox.warning(
                 self,

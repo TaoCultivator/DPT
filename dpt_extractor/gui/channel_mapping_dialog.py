@@ -275,7 +275,7 @@ class ChannelMappingDialog(QDialog):
             )
             return
         mapping = self._collect_mapping()
-        errors = validate_mapping(mapping, self._bundle)
+        errors = validate_mapping(mapping, self._bundle, require_existing=False)
         if errors:
             QMessageBox.warning(
                 self,

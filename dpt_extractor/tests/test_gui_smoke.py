@@ -1672,6 +1672,43 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             self.assertFalse(validate_mapping(dlg._collect_mapping(), bundle))
             dlg.close()
 
+    def test_mapping_dialog_allows_missing_optional_current_file_channel(self):
+        import tempfile
+        import numpy as np
+
+        from dpt_extractor.gui.channel_mapping_dialog import ChannelMappingDialog
+        from dpt_extractor.models.channel_mapping import ChannelMappingStore
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 8
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, n),
+            channels={f"CH{i}": np.zeros(n) for i in range(1, 6)},
+            meta=TekMetadata(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChannelMappingStore(Path(tmp) / "maps.yaml")
+            dlg = ChannelMappingDialog(
+                phase="U",
+                bridge="upper",
+                bundle=bundle,
+                store=store,
+            )
+
+            self.assertEqual(dlg._combos["vge_other"].currentData(), "CH6")
+            idx = dlg._combos["vce"].findData("CH5")
+            self.assertGreaterEqual(idx, 0)
+            dlg._combos["vce"].setCurrentIndex(idx)
+            dlg._on_apply()
+
+            self.assertTrue(dlg.was_applied())
+            saved = store.get("U", "upper")
+            self.assertIsNotNone(saved)
+            assert saved is not None
+            self.assertEqual(saved.vce, "CH5")
+            self.assertEqual(saved.vge_other, "CH6")
+            dlg.close()
+
     def test_added_math_channel_can_be_deleted(self):
         plot = self._make_synthetic_plot()
         self.assertFalse(plot._can_delete_channel("CH1"))

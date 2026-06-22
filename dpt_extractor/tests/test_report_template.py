@@ -192,6 +192,173 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(saved_short["A23"].value, "UH_150℃")
             self.assertEqual(saved_short["A44"].value, "UH_-40℃")
 
+    def test_dpt_template_leaves_unavailable_metric_cells_blank(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CURRENT,
+            COL_OFF,
+            COL_ON,
+            COL_RR,
+            COL_TAIL,
+            COL_VOLTAGE,
+        )
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import (
+            ExtractResult,
+            ReverseRecoveryResult,
+            TurnOffResult,
+            TurnOnResult,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            ws.cell(5, COL_VOLTAGE, 750)
+            ws.cell(5, COL_CURRENT, 1050)
+            ws.cell(5, COL_OFF["crosstalk"], "stale")
+            ws.cell(5, COL_RR["err"], 999)
+            ws.cell(5, COL_TAIL["etotal"], 999)
+            wb.save(report)
+
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
+                    profile_code="UH",
+                    turn_off=TurnOffResult(
+                        crosstalk_vmax=12.3,
+                        crosstalk_vmin=-4.5,
+                        eoff=10.0,
+                    ),
+                    turn_on=TurnOnResult(eon=20.0),
+                    reverse_recovery=ReverseRecoveryResult(err=30.0),
+                    unavailable_metrics={
+                        ("关断过程", "串扰电压"),
+                        ("反向恢复", "Err"),
+                    },
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertIsNone(saved.cell(5, COL_OFF["crosstalk"]).value)
+            self.assertIsNone(saved.cell(5, COL_RR["err"]).value)
+            self.assertIsNone(saved.cell(5, COL_TAIL["etotal"]).value)
+            self.assertEqual(saved.cell(5, COL_OFF["eoff"]).value, 10)
+            self.assertEqual(saved.cell(5, COL_ON["eon"]).value, 20)
+
+    def test_excel_layout_leaves_unavailable_metric_cells_blank(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_OFF,
+            COL_ON,
+            COL_RR,
+            COL_TAIL,
+            DATA_ROW,
+            build_mcu2506_workbook,
+            fill_data_row,
+        )
+        from dpt_extractor.models.results import (
+            ExtractResult,
+            ReverseRecoveryResult,
+            TurnOffResult,
+            TurnOnResult,
+        )
+
+        result = ExtractResult(
+            source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
+            profile_code="UH",
+            turn_off=TurnOffResult(eoff=10.0),
+            turn_on=TurnOnResult(eon=20.0),
+            reverse_recovery=ReverseRecoveryResult(vrr=900.0, err=30.0),
+            unavailable_metrics={
+                ("开通", "Eon"),
+                ("反向恢复", "Vrr"),
+            },
+        )
+        wb = build_mcu2506_workbook(result)
+        ws = wb.active
+        ws.cell(DATA_ROW, COL_ON["eon"], 999)
+        ws.cell(DATA_ROW, COL_RR["vrr"], 999)
+        ws.cell(DATA_ROW, COL_TAIL["etotal"], 999)
+
+        fill_data_row(ws, DATA_ROW, result)
+
+        self.assertEqual(ws.cell(DATA_ROW, COL_OFF["eoff"]).value, 10)
+        self.assertIsNone(ws.cell(DATA_ROW, COL_ON["eon"]).value)
+        self.assertIsNone(ws.cell(DATA_ROW, COL_RR["vrr"]).value)
+        self.assertEqual(ws.cell(DATA_ROW, COL_RR["err"]).value, 30)
+        self.assertIsNone(ws.cell(DATA_ROW, COL_TAIL["etotal"]).value)
+
+    def test_short_template_leaves_unavailable_metric_cells_blank(self):
+        from dpt_extractor.export.short_circuit_layout import COL_ESC_OTHER, COL_VPEAK_OTHER
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "short_report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "短路测试"
+            ws.merge_cells("A5:A6")
+            ws["A5"] = 25
+            ws["B5"] = "UH"
+            ws["B6"] = "UL"
+            ws.cell(5, COL_ESC_OTHER, 999)
+            ws.cell(5, COL_VPEAK_OTHER, 999)
+            wb.save(report)
+
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_000.tss"),
+                    profile_code="UH",
+                    short_circuit_mode=True,
+                    short_circuit=ShortCircuitResult(
+                        esc_other=12.3456,
+                        vpeak_other=789.123,
+                    ),
+                    unavailable_metrics={("短路过程", "短路能量Esc_对管")},
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)["短路测试"]
+            self.assertIsNone(saved.cell(5, COL_ESC_OTHER).value)
+            self.assertEqual(saved.cell(5, COL_VPEAK_OTHER).value, 789.123)
+
+    def test_short_layout_leaves_unavailable_metric_cells_blank(self):
+        from dpt_extractor.export.short_circuit_layout import (
+            COL_ESC_OTHER,
+            COL_VPEAK_OTHER,
+            DATA_START_ROW,
+            build_short_circuit_workbook,
+            fill_short_circuit_row,
+        )
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        result = ExtractResult(
+            source_path=str(Path("samples") / "RT" / "UH_750V_000.tss"),
+            profile_code="UH",
+            short_circuit_mode=True,
+            short_circuit=ShortCircuitResult(
+                esc_other=12.3456,
+                vpeak_other=789.123,
+            ),
+            unavailable_metrics={("短路过程", "短路能量Esc_对管")},
+        )
+        wb = build_short_circuit_workbook(result)
+        ws = wb.active
+        ws.cell(DATA_START_ROW, COL_ESC_OTHER, 999)
+        ws.cell(DATA_START_ROW, COL_VPEAK_OTHER, 999)
+
+        fill_short_circuit_row(ws, DATA_START_ROW, result)
+
+        self.assertIsNone(ws.cell(DATA_START_ROW, COL_ESC_OTHER).value)
+        self.assertEqual(ws.cell(DATA_START_ROW, COL_VPEAK_OTHER).value, 789.123)
+
     def test_dpt_template_rewrites_same_condition_in_first_waveform_block(self):
         from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_VOLTAGE
         from dpt_extractor.export.report_template import write_report_template

@@ -145,6 +145,23 @@ def _set_cell(
         c.font = Font(bold=True, color=font_color)
 
 
+def _set_metric_cell(
+    ws: Worksheet,
+    row: int,
+    col: int,
+    result: ExtractResult,
+    name: str,
+    value: Any,
+    *,
+    fill: PatternFill,
+) -> None:
+    if result.is_metric_unavailable("短路过程", name):
+        _set_cell(ws, row, col, None, fill=fill)
+        ws.cell(row, col).value = None
+        return
+    _set_cell(ws, row, col, value, fill=fill)
+
+
 def _apply_range_borders(ws: Worksheet, min_row: int, max_row: int) -> None:
     for row in range(min_row, max_row + 1):
         for col in range(1, LAST_COL + 1):
@@ -289,13 +306,25 @@ def fill_short_circuit_row(ws: Worksheet, row: int, result: ExtractResult) -> No
         _num(_infer_voltage_from_filename(result.source_path), 1),
         fill=FILL_INFO,
     )
-    _set_cell(ws, row, COL_ICMAX, _num(sc.ic_max, 3), fill=FILL_DUT)
-    _set_cell(ws, row, COL_TSC, _num(sc.tsc, 4), fill=FILL_DUT)
-    _set_cell(ws, row, COL_ESC_DUT, _num(sc.esc_dut, 4), fill=FILL_DUT)
-    _set_cell(ws, row, COL_VPEAK_DUT, _num(sc.vpeak_dut, 3), fill=FILL_DUT)
-    _set_cell(ws, row, COL_ESC_OTHER, _num(sc.esc_other, 4), fill=FILL_OTHER)
-    _set_cell(ws, row, COL_VPEAK_OTHER, _num(sc.vpeak_other, 3), fill=FILL_OTHER)
-    _set_cell(ws, row, COL_DESAT, _num(sc.desat_time, 4), fill=FILL_DUT)
+    _set_metric_cell(
+        ws, row, COL_ICMAX, result, "短路电流Imax", _num(sc.ic_max, 3), fill=FILL_DUT,
+    )
+    _set_metric_cell(ws, row, COL_TSC, result, "短路时间Tsc", _num(sc.tsc, 4), fill=FILL_DUT)
+    _set_metric_cell(
+        ws, row, COL_ESC_DUT, result, "短路能量Esc_本管", _num(sc.esc_dut, 4), fill=FILL_DUT,
+    )
+    _set_metric_cell(
+        ws, row, COL_VPEAK_DUT, result, "应力Vpeak_本管", _num(sc.vpeak_dut, 3), fill=FILL_DUT,
+    )
+    _set_metric_cell(
+        ws, row, COL_ESC_OTHER, result, "短路能量Esc_对管", _num(sc.esc_other, 4), fill=FILL_OTHER,
+    )
+    _set_metric_cell(
+        ws, row, COL_VPEAK_OTHER, result, "应力Vpeak_对管", _num(sc.vpeak_other, 3), fill=FILL_OTHER,
+    )
+    _set_metric_cell(
+        ws, row, COL_DESAT, result, "Desat动作时间", _num(sc.desat_time, 4), fill=FILL_DUT,
+    )
 
 
 def export_short_circuit(result: ExtractResult, path: str | Path) -> None:

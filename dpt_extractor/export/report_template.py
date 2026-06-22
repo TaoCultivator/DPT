@@ -859,6 +859,21 @@ def _set_value(ws: Worksheet, row: int, col: int, value) -> None:
     ws.cell(row, col, value)
 
 
+def _set_metric_value(
+    ws: Worksheet,
+    row: int,
+    col: int,
+    result: ExtractResult,
+    section: str,
+    name: str,
+    value,
+) -> None:
+    if result.is_metric_unavailable(section, name):
+        ws.cell(row, col).value = None
+        return
+    _set_value(ws, row, col, value)
+
+
 def _write_dpt_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
     off = result.turn_off
     on = result.turn_on
@@ -867,50 +882,70 @@ def _write_dpt_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
 
     _set_value(ws, row, 4, _num(vdc, 1))
     _set_value(ws, row, 5, _num(idc, 1))
-    _set_value(ws, row, COL_OFF["delta_vce"], _num(off.delta_vce))
-    _set_value(ws, row, COL_OFF["ic_off_max"], _num(off.ic_off_max))
-    _set_value(ws, row, COL_OFF["vce_off_max"], _num(off.vce_off_max))
-    _set_value(ws, row, COL_OFF["dvdt"], _num(off.dvdt))
-    _set_value(ws, row, COL_OFF["didt"], _num(off.didt))
-    _set_value(ws, row, COL_OFF["ls_off"], _num(off.ls_off))
-    _set_value(ws, row, COL_OFF["toff"], _num(off.toff))
-    _set_value(ws, row, COL_OFF["td_off"], _num(off.td_off))
-    _set_value(ws, row, COL_OFF["tf"], _num(off.tf))
-    _set_value(
+    _set_metric_value(
+        ws, row, COL_OFF["delta_vce"], result, "关断过程", "ΔVce", _num(off.delta_vce),
+    )
+    _set_metric_value(
+        ws, row, COL_OFF["ic_off_max"], result, "关断过程", "Ic_off_max", _num(off.ic_off_max),
+    )
+    _set_metric_value(
+        ws, row, COL_OFF["vce_off_max"], result, "关断过程", "Vce_off_max", _num(off.vce_off_max),
+    )
+    _set_metric_value(ws, row, COL_OFF["dvdt"], result, "关断过程", "dv/dt", _num(off.dvdt))
+    _set_metric_value(ws, row, COL_OFF["didt"], result, "关断过程", "di/dt", _num(off.didt))
+    _set_metric_value(ws, row, COL_OFF["ls_off"], result, "关断过程", "Ls_off", _num(off.ls_off))
+    _set_metric_value(ws, row, COL_OFF["toff"], result, "关断过程", "Toff", _num(off.toff))
+    _set_metric_value(ws, row, COL_OFF["td_off"], result, "关断过程", "Td_off", _num(off.td_off))
+    _set_metric_value(ws, row, COL_OFF["tf"], result, "关断过程", "Tf", _num(off.tf))
+    _set_metric_value(
         ws,
         row,
         COL_OFF["crosstalk"],
+        result,
+        "关断过程",
+        "串扰电压",
         _crosstalk_str(off.crosstalk_vmax, off.crosstalk_vmin),
     )
-    _set_value(ws, row, COL_OFF["eoff"], _num(off.eoff, 3))
+    _set_metric_value(ws, row, COL_OFF["eoff"], result, "关断过程", "Eoff", _num(off.eoff, 3))
 
-    _set_value(ws, row, COL_ON["delta_vce"], _num(on.delta_vce))
-    _set_value(ws, row, COL_ON["ic_on_max"], _num(on.ic_on_max))
-    _set_value(ws, row, COL_ON["vce_on_max"], _num(on.vce_on_max))
-    _set_value(ws, row, COL_ON["turn_on_current"], _num(on.turn_on_current))
-    _set_value(ws, row, COL_ON["dvdt"], _num(on.dvdt))
-    _set_value(ws, row, COL_ON["didt"], _num(on.didt))
-    _set_value(ws, row, COL_ON["ls_on"], _num(on.ls_on))
-    _set_value(ws, row, COL_ON["ton"], _num(on.ton))
-    _set_value(ws, row, COL_ON["td_on"], _num(on.td_on))
-    _set_value(ws, row, COL_ON["tr"], _num(on.tr))
-    _set_value(
+    _set_metric_value(ws, row, COL_ON["delta_vce"], result, "开通", "ΔVce", _num(on.delta_vce))
+    _set_metric_value(ws, row, COL_ON["ic_on_max"], result, "开通", "Ic_on_max", _num(on.ic_on_max))
+    _set_metric_value(ws, row, COL_ON["vce_on_max"], result, "开通", "Vce_on_max", _num(on.vce_on_max))
+    _set_metric_value(
+        ws, row, COL_ON["turn_on_current"], result, "开通", "开通电流", _num(on.turn_on_current),
+    )
+    _set_metric_value(ws, row, COL_ON["dvdt"], result, "开通", "dv/dt", _num(on.dvdt))
+    _set_metric_value(ws, row, COL_ON["didt"], result, "开通", "di/dt", _num(on.didt))
+    _set_metric_value(ws, row, COL_ON["ls_on"], result, "开通", "Ls_on", _num(on.ls_on))
+    _set_metric_value(ws, row, COL_ON["ton"], result, "开通", "Ton", _num(on.ton))
+    _set_metric_value(ws, row, COL_ON["td_on"], result, "开通", "Td_on", _num(on.td_on))
+    _set_metric_value(ws, row, COL_ON["tr"], result, "开通", "Tr", _num(on.tr))
+    _set_metric_value(
         ws,
         row,
         COL_ON["crosstalk"],
+        result,
+        "开通",
+        "串扰电压",
         _crosstalk_str(on.crosstalk_vmax, on.crosstalk_vmin),
     )
-    _set_value(ws, row, COL_ON["eon"], _num(on.eon, 3))
+    _set_metric_value(ws, row, COL_ON["eon"], result, "开通", "Eon", _num(on.eon, 3))
 
-    _set_value(ws, row, COL_RR["irr"], _num(rr.irr))
-    _set_value(ws, row, COL_RR["trr"], _num(rr.trr))
-    _set_value(ws, row, COL_RR["vrr"], _num(rr.vrr))
-    _set_value(ws, row, COL_RR["dvdt"], _num(rr.dvdt_max))
-    _set_value(ws, row, COL_RR["didt"], _num(rr.didt_irr))
-    _set_value(ws, row, COL_RR["err"], _num(rr.err, 3))
+    _set_metric_value(ws, row, COL_RR["irr"], result, "反向恢复", "Irr", _num(rr.irr))
+    _set_metric_value(ws, row, COL_RR["trr"], result, "反向恢复", "Trr", _num(rr.trr))
+    _set_metric_value(ws, row, COL_RR["vrr"], result, "反向恢复", "Vrr", _num(rr.vrr))
+    _set_metric_value(ws, row, COL_RR["dvdt"], result, "反向恢复", "dv/dt", _num(rr.dvdt_max))
+    _set_metric_value(ws, row, COL_RR["didt"], result, "反向恢复", "di/dt", _num(rr.didt_irr))
+    _set_metric_value(ws, row, COL_RR["err"], result, "反向恢复", "Err", _num(rr.err, 3))
 
     etotal = off.eoff + on.eon + rr.err
-    _set_value(ws, row, COL_TAIL["etotal"], _num(etotal, 3) if etotal > 0 else None)
+    if any(
+        result.is_metric_unavailable(*key)
+        for key in (("关断过程", "Eoff"), ("开通", "Eon"), ("反向恢复", "Err"))
+    ):
+        ws.cell(row, COL_TAIL["etotal"]).value = None
+    else:
+        _set_value(ws, row, COL_TAIL["etotal"], _num(etotal, 3) if etotal > 0 else None)
 
 
 def _normalized(text: object) -> str:
@@ -1670,13 +1705,13 @@ def _write_short_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
     if vdc is None:
         vdc, _idc = _match_setpoints(result)
     _set_value(ws, row, 4, _num(vdc, 1))
-    _set_value(ws, row, 5, _num(sc.ic_max, 3))
-    _set_value(ws, row, 6, _num(sc.tsc, 4))
-    _set_value(ws, row, 7, _num(sc.esc_dut, 4))
-    _set_value(ws, row, 8, _num(sc.vpeak_dut, 3))
-    _set_value(ws, row, 9, _num(sc.esc_other, 4))
-    _set_value(ws, row, 10, _num(sc.vpeak_other, 3))
-    _set_value(ws, row, 11, _num(sc.desat_time, 4))
+    _set_metric_value(ws, row, 5, result, "短路过程", "短路电流Imax", _num(sc.ic_max, 3))
+    _set_metric_value(ws, row, 6, result, "短路过程", "短路时间Tsc", _num(sc.tsc, 4))
+    _set_metric_value(ws, row, 7, result, "短路过程", "短路能量Esc_本管", _num(sc.esc_dut, 4))
+    _set_metric_value(ws, row, 8, result, "短路过程", "应力Vpeak_本管", _num(sc.vpeak_dut, 3))
+    _set_metric_value(ws, row, 9, result, "短路过程", "短路能量Esc_对管", _num(sc.esc_other, 4))
+    _set_metric_value(ws, row, 10, result, "短路过程", "应力Vpeak_对管", _num(sc.vpeak_other, 3))
+    _set_metric_value(ws, row, 11, result, "短路过程", "Desat动作时间", _num(sc.desat_time, 4))
 
 
 def _short_voltage_from_filename(path: str) -> float | None:

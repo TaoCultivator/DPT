@@ -169,14 +169,19 @@ def default_mapping_for(phase: str, bridge: str) -> ChannelMapping:
     return ChannelMapping.from_profile(make_profile(phase, bridge))
 
 
-def validate_mapping(mapping: ChannelMapping, bundle: WaveformBundle | None) -> list[str]:
+def validate_mapping(
+    mapping: ChannelMapping,
+    bundle: WaveformBundle | None,
+    *,
+    require_existing: bool = True,
+) -> list[str]:
     errors: list[str] = []
     seen: dict[str, str] = {}
 
     def check_col(key: str, col: str) -> None:
         if not col:
             return
-        if bundle is not None and col not in bundle.channels:
+        if require_existing and bundle is not None and col not in bundle.channels:
             errors.append(f"{col} 在当前 TSS 中不存在")
         if col in seen and seen[col] != key:
             errors.append(f"{col} 被重复分配给 {seen[col]} 与 {key}")

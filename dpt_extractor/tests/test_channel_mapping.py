@@ -51,6 +51,33 @@ class TestChannelMapping(unittest.TestCase):
         errs = validate_mapping(m, None)
         self.assertTrue(any("重复" in e for e in errs))
 
+    def test_validate_can_allow_missing_current_file_channels(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 8),
+            channels={f"CH{i}": np.zeros(8) for i in range(1, 6)},
+            meta=TekMetadata(),
+        )
+        m = ChannelMapping(
+            vge="CH1",
+            vce="CH2",
+            ic="CH3",
+            il="CH4",
+            irr="CH3",
+            v_diode="CH5",
+            vge_other="CH6",
+            irr_from_ic_minus_il=True,
+        )
+
+        strict = validate_mapping(m, bundle)
+        relaxed = validate_mapping(m, bundle, require_existing=False)
+
+        self.assertTrue(any("CH6" in e and "不存在" in e for e in strict))
+        self.assertFalse(relaxed)
+
     def test_validate_irr_ic_minus_il_requires_distinct(self):
         m = ChannelMapping(
             irr_from_ic_minus_il=True,
