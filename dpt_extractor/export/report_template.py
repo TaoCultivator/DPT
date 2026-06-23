@@ -34,7 +34,7 @@ from dpt_extractor.export.mcu2506_layout import (
     HEADER_NAME_ROW,
     HEADER_UNIT_ROW,
 )
-from dpt_extractor.models.results import ExtractResult
+from dpt_extractor.models.results import ExtractResult, power_metric_name
 from dpt_extractor.utils.filename import parse_setpoints_from_filename
 
 
@@ -1019,13 +1019,24 @@ def _rewrite_dpt_header_row(ws: Worksheet) -> None:
 
 
 def _ensure_dpt_data_power_columns(ws: Worksheet) -> bool:
-    """Upgrade old A:AK DPT data sheets to the Pdmax A:AN layout in-place."""
+    """Upgrade old A:AK DPT data sheets to the Pmax/Pdmax A:AN layout in-place."""
     present = {
-        section: _dpt_header_col(ws, section, ("Pdmax",)) is not None
+        section: _dpt_header_col(
+            ws,
+            section,
+            tuple(dict.fromkeys((power_metric_name(section), "Pdmax"))),
+        )
+        is not None
         for section in ("关断过程", "开通", "反向恢复")
     }
     if all(present.values()):
-        return False
+        needs_header_rewrite = any(
+            _dpt_header_col(ws, section, (power_metric_name(section),)) is None
+            for section in ("关断过程", "开通", "反向恢复")
+        )
+        if needs_header_rewrite:
+            _rewrite_dpt_header_row(ws)
+        return needs_header_rewrite
 
     _unmerge_dpt_header_rows(ws)
     insertion_plan = [
@@ -1041,7 +1052,7 @@ def _ensure_dpt_data_power_columns(ws: Worksheet) -> bool:
             continue
         ws.insert_cols(loss_col)
         _copy_column_style(ws, loss_col + 1, loss_col)
-        ws.cell(HEADER_NAME_ROW, loss_col).value = "Pdmax"
+        ws.cell(HEADER_NAME_ROW, loss_col).value = power_metric_name(section)
         ws.cell(HEADER_UNIT_ROW, loss_col).value = "KW"
         for row in range(DATA_ROW, ws.max_row + 1):
             ws.cell(row, loss_col).value = None
@@ -1110,7 +1121,7 @@ def _write_dpt_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
         "串扰电压",
         _crosstalk_str(off.crosstalk_vmax, off.crosstalk_vmin),
     )
-    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["pdmax"], "Pdmax", require_header=True), result, "关断过程", "Pdmax", _num(off.pdmax, 3))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["pmax"], "Pmax", "Pdmax", require_header=True), result, "关断过程", "Pmax", _num(off.pmax, 3))
     _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["eoff"], "Eoff"), result, "关断过程", "Eoff", _num(off.eoff, 3))
 
     _set_dpt_metric_value(ws, row, col("开通", COL_ON["delta_vce"], "ΔVce"), result, "开通", "ΔVce", _num(on.delta_vce))
@@ -1140,7 +1151,7 @@ def _write_dpt_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
         "串扰电压",
         _crosstalk_str(on.crosstalk_vmax, on.crosstalk_vmin),
     )
-    _set_dpt_metric_value(ws, row, col("开通", COL_ON["pdmax"], "Pdmax", require_header=True), result, "开通", "Pdmax", _num(on.pdmax, 3))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["pmax"], "Pmax", "Pdmax", require_header=True), result, "开通", "Pmax", _num(on.pmax, 3))
     _set_dpt_metric_value(ws, row, col("开通", COL_ON["eon"], "Eon"), result, "开通", "Eon", _num(on.eon, 3))
 
     _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["irr"], "Irr"), result, "反向恢复", "Irr", _num(rr.irr))
@@ -2026,6 +2037,8 @@ def _write_short_images(
     written = 0
     items: list[tuple[str | Path, CellRange]] = []
     for key, image_path in images.items():
+        if result.is_metric_unavailable(*key):
+            continue
         header_text = _SHORT_IMAGE_HEADERS.get(key)
         if header_text is None:
             continue

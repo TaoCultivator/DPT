@@ -5,14 +5,18 @@
 ## 使用原则
 
 - 开始任务前，先判断任务类型，并阅读下方对应规范文件。
+- 凡是根据用户需求进行代码、UI、计算、导出、文档等任何改动，必须先阅读 `docs/AGENT_COLLABORATION.md` 中的“需求边界确认”规则，并按该规则明确需求边界。
 - 涉及参数计算、提取、测量、积分、斜率、时间窗、平台线、损耗窗口、Trr/Err 或光标落点的改动，必须先阅读 `docs/MEASUREMENT_SPEC.md` 和 `docs/REGRESSION_BASELINES.md`。
+- 涉及短路计算、短路模式 UI、短路报告/导出或短路光标落点的改动，必须先阅读 `docs/SHORT_CIRCUIT_SPEC.md`；短路取值规范未确认完成前，不得开始修复优化。
 - 涉及波形显示、通道标识、交点示意点、表格展示或交互性能的改动，必须先阅读 `docs/WAVEFORM_UI_SPEC.md`。
 - 涉及发布、打包、GitHub Release、推送或远端认证的操作，必须先阅读 `docs/RELEASE_PROCESS.md`。
 - 涉及 Skill、CLI、OpenCLI、Playwright CLI 或外部工具选择的任务，必须先阅读 `docs/AGENT_SKILLS_AND_TOOLS.md`。
 
 ## 最高优先级红线
 
+- 每次实现必须只针对用户明确提出的需求开发；不得猜想、不得顺手扩展、不得画蛇添足。若改动可能影响其他参数计算、默认光标卡位或历史口径，必须先申请用户同意，并说明更合理的实现方式后再改。
 - 参数数值的计算千万别改；涉及提取、测量、积分、斜率、时间窗等计算逻辑时，除非用户明确要求，否则只允许改展示层、交互层或样式。
+- 修改短路计算逻辑严禁改动双脉冲 DPT 计算逻辑；短路修复如需触碰公共函数，必须先说明会影响哪些双脉冲参数、光标或历史口径，并获得用户同意。
 - 不要擅自新增弹窗提示、悬浮提示（ToolTip）或一次性提示；如确实需要，必须先说明用途并获得用户明确同意。
 - GitHub CLI 发布、上传 Release、推送等涉及远端认证的操作，需要使用 `sandbox_permissions="require_escalated"` 提权执行。
 - GitHub Release 资产命名必须沿用历史规则：上传的 Windows exe 统一命名为 `DPT_Windows_vX.Y.Z.exe`。
@@ -40,6 +44,7 @@
 - 工程开发红线：`docs/ENGINEERING_RULES.md`
 - 发布、打包与 GitHub Release：`docs/RELEASE_PROCESS.md`
 - 参数测量与损耗口径：`docs/MEASUREMENT_SPEC.md`
+- 短路计算规范：`docs/SHORT_CIRCUIT_SPEC.md`
 - 波形界面与交互规则：`docs/WAVEFORM_UI_SPEC.md`
 - TSS 回归样例、数值快照与全量验证：`docs/REGRESSION_BASELINES.md`
 - 本次拆分迁移对照表：`docs/AGENTS_MIGRATION_MAP.md`

@@ -86,7 +86,11 @@ from dpt_extractor.models.bridge_profile import (
     guess_profile_from_path,
     make_profile,
 )
-from dpt_extractor.models.results import ExtractResult
+from dpt_extractor.models.results import (
+    ExtractResult,
+    SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
+    power_metric_name,
+)
 from dpt_extractor.models.slope_range import (
     SLOPE_ROW_KEYS,
     SlopeRange,
@@ -139,9 +143,12 @@ from dpt_extractor.pipeline.extract import _turn_on_delta_vce_knee_point
 from dpt_extractor.pipeline.pulse_sequence import dpt_export_results
 from dpt_extractor.pipeline.run_extract import run_extraction
 from dpt_extractor.pipeline.short_circuit_extract import (
-    ShortCircuitExtractNotReady,
     find_desat_voltage_channel,
     short_circuit_current_cursors,
+    short_circuit_current_percent_cursors,
+    short_circuit_desat_cursors,
+    short_circuit_energy_peak_value,
+    short_circuit_tsc_range_percentages,
     short_circuit_energy_value,
     short_circuit_vpeak_cursors,
 )
@@ -162,6 +169,9 @@ TEMP_CONDITION_DEFAULTS = {
     "LT": -40.0,
 }
 TEMP_CONDITION_SETTINGS_PREFIX = "conditions/temperature/"
+SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY = "short_circuit/tsc_range"
+
+
 def _format_temperature_number(value: float) -> str:
     fv = float(value)
     if abs(fv - round(fv)) < 0.05:
@@ -542,10 +552,6 @@ def _compute_waveform_load_outcome(
         else:
             result = run_extraction(bundle, profile, cfg)
             short_circuit_not_ready = False
-    except ShortCircuitExtractNotReady as exc:
-        result = None
-        short_circuit_not_ready = True
-        extraction_error = str(exc) or "短路参数提取未返回结果"
     except Exception as exc:
         result = None
         short_circuit_not_ready = False
@@ -681,6 +687,7 @@ class MainWindow(QMainWindow):
         self._channel_store = ChannelMappingStore()
         self._mapping_custom = False
         self._slope_ranges = default_slope_ranges()
+        self.cfg.short_circuit_tsc_range = self._load_short_circuit_tsc_range()
         # 记忆每个参数手动调整的光标区间（µs），再次点击时恢复而非回退默认窗口
         self._manual_intervals: dict[tuple[str, str], tuple[float, float]] = {}
         # 开通电流：保存 A/B 时刻 + Hb/Ha 电平 (µs, µs, A, A)
@@ -716,6 +723,9 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self.result_table.set_range_handler(self._on_slope_range_changed)
+        self.result_table.set_short_circuit_tsc_range_handler(
+            self._on_short_circuit_tsc_range_changed
+        )
         self.result_table.set_eoff_pre_handler(self._on_eoff_pre_changed)
         self.result_table.set_value_click_handler(self._on_value_clicked)
         self.result_table.set_offset_measurement_add_handler(
@@ -1061,6 +1071,22 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 values[code] = float(default)
         return values
+
+    def _load_short_circuit_tsc_range(self) -> str:
+        raw = QSettings("DPT", "DPTExtractor").value(
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+            SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
+        )
+        _start, _end, normalized = short_circuit_tsc_range_percentages(str(raw))
+        return normalized
+
+    def _save_short_circuit_tsc_range(self, label: str) -> str:
+        _start, _end, normalized = short_circuit_tsc_range_percentages(label)
+        QSettings("DPT", "DPTExtractor").setValue(
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+            normalized,
+        )
+        return normalized
 
     def _save_temperature_value(self, code: str, value: float) -> None:
         if code not in TEMP_CONDITION_DEFAULTS:
@@ -2154,6 +2180,7 @@ class MainWindow(QMainWindow):
         cfg = deepcopy(self.cfg)
         cfg.vdc_override = None
         cfg.slope_ranges = default_slope_ranges()
+        cfg.short_circuit_tsc_range = self._load_short_circuit_tsc_range()
         return cfg
 
     def _set_load_busy(self, busy: bool, path: str = "") -> None:
@@ -2672,6 +2699,7 @@ class MainWindow(QMainWindow):
         self.lbl_current_file.setToolTip(path)
         self._set_temperature_code(_infer_temp_code_from_path(path))
         self._slope_ranges = default_slope_ranges()
+        self.cfg.short_circuit_tsc_range = self._load_short_circuit_tsc_range()
         self.result_table.set_slope_ranges(self._slope_ranges)
         self._clear_manual_adjustments()
         self._offset_measurements = self._default_offset_measurements_for_bundle()
@@ -2739,6 +2767,12 @@ class MainWindow(QMainWindow):
         self.cfg.energy.eoff_pre_ns = float(pre_ns)
         self._recalculate()
 
+    def _on_short_circuit_tsc_range_changed(self, label: str) -> None:
+        normalized = self._save_short_circuit_tsc_range(label)
+        self.cfg.short_circuit_tsc_range = normalized
+        self._manual_intervals.pop(("短路过程", "短路时间Tsc"), None)
+        self._recalculate()
+
     def _touch_manual_waveform_source(self) -> None:
         if self.bundle is not None:
             self._manual_waveform_source = self.bundle.meta.source_path
@@ -2796,6 +2830,9 @@ class MainWindow(QMainWindow):
                     "短路过程-Desat动作时间: 缺少 Desat 波形通道或参数值，已跳过截图"
                 )
                 return
+            if section == "短路过程" and name in {"短路电流Imax", "短路时间Tsc"}:
+                self._enable_short_circuit_current_interaction(name)
+                return
             self._enable_generic_parameter_interaction(section, name)
             return
         if (
@@ -2820,7 +2857,7 @@ class MainWindow(QMainWindow):
         if name == "di/dt":
             self._enable_didt_interaction(section)
             return
-        if name == "Pdmax":
+        if name in {"Pmax", "Pdmax"}:
             self._enable_power_interaction(section)
             return
         if name in {"Eoff", "Eon", "Err"}:
@@ -3887,23 +3924,24 @@ class MainWindow(QMainWindow):
     def _enable_power_interaction(self, section: str) -> None:
         if self.bundle is None or self.result is None or self.result.segments is None:
             return
+        metric_name = power_metric_name(section)
         if {
             "关断过程": "Eoff",
             "开通": "Eon",
             "反向恢复": "Err",
         }.get(section) is None:
-            self._enable_generic_parameter_interaction(section, "Pdmax")
+            self._enable_generic_parameter_interaction(section, metric_name)
             return
-        interval = self._parameter_interval_us(section, "Pdmax")
+        interval = self._parameter_interval_us(section, metric_name)
         if interval is None:
             return
 
-        restored = self._manual_intervals.get((section, "Pdmax"))
+        restored = self._manual_intervals.get((section, metric_name))
         t0_us, t1_us = restored if restored is not None else interval
         t0_us, t1_us = min(t0_us, t1_us), max(t0_us, t1_us)
 
         def _target_w() -> float | None:
-            target_kw = self._stored_param_value(section, "Pdmax")
+            target_kw = self._stored_param_value(section, metric_name)
             try:
                 if target_kw is not None:
                     return float(target_kw) * 1000.0
@@ -3919,21 +3957,21 @@ class MainWindow(QMainWindow):
                 prefer_abs=section == "反向恢复",
             )
 
-        def _store_pdmax(value_kw: float) -> None:
+        def _store_power_peak(value_kw: float) -> None:
             if section == "关断过程":
-                self.result.turn_off.pdmax = value_kw
+                self.result.turn_off.pmax = value_kw
             elif section == "开通":
-                self.result.turn_on.pdmax = value_kw
+                self.result.turn_on.pmax = value_kw
             elif section == "反向恢复":
                 self.result.reverse_recovery.pdmax = value_kw
-            self.result_table.set_metric_value(section, "Pdmax", value_kw)
+            self.result_table.set_metric_value(section, metric_name, value_kw)
 
         def _apply_power_peak(t0: float, t1: float, *, remember: bool) -> bool:
             lo, hi = min(t0, t1), max(t0, t1)
             matched = _power_peak(lo, hi)
             if matched is None:
                 self.statusBar().showMessage(
-                    f"{section}-Pdmax: 未显示功率波形，仅定位功率取值窗口 "
+                    f"{section}-{metric_name}: 未显示功率波形，仅定位功率取值窗口 "
                     f"{lo:.3f}~{hi:.3f}µs"
                 )
                 return False
@@ -3947,12 +3985,12 @@ class MainWindow(QMainWindow):
                 display_abs_peak=section == "反向恢复",
             )
             peak_kw = float(peak_w) / 1000.0
-            _store_pdmax(peak_kw)
+            _store_power_peak(peak_kw)
             if remember:
                 self._touch_manual_waveform_source()
-                self._manual_intervals[(section, "Pdmax")] = (lo, hi)
+                self._manual_intervals[(section, metric_name)] = (lo, hi)
             self.statusBar().showMessage(
-                f"{section}-Pdmax: {peak_kw:.3f} kW "
+                f"{section}-{metric_name}: {peak_kw:.3f} kW "
                 f"({channel}, {lo:.3f}~{hi:.3f}µs，A/B 为取值窗口)"
             )
             return True
@@ -3968,7 +4006,7 @@ class MainWindow(QMainWindow):
         )
         if matched is None:
             self.statusBar().showMessage(
-                f"{section}-Pdmax: 未显示功率波形，仅定位功率取值窗口 "
+                f"{section}-{metric_name}: 未显示功率波形，仅定位功率取值窗口 "
                 f"{t0_us:.3f}~{t1_us:.3f}µs"
             )
             return
@@ -3982,9 +4020,9 @@ class MainWindow(QMainWindow):
             display_abs_peak=section == "反向恢复",
         )
         if restored is not None:
-            _store_pdmax(float(peak_w) / 1000.0)
+            _store_power_peak(float(peak_w) / 1000.0)
         self.statusBar().showMessage(
-            f"{section}-Pdmax: {float(peak_w) / 1000.0:.3f} kW "
+            f"{section}-{metric_name}: {float(peak_w) / 1000.0:.3f} kW "
             f"({channel}, {t0_us:.3f}~{t1_us:.3f}µs，拖动 A/B 后重算)"
         )
 
@@ -4095,6 +4133,7 @@ class MainWindow(QMainWindow):
         self._active_slope_param = None
         if self.bundle is None or self.result is None or self.result.segments is None:
             return
+        power_name = power_metric_name(section)
         t = self.bundle.t
         dt = self.bundle.dt
         segs = self.result.segments
@@ -4103,7 +4142,7 @@ class MainWindow(QMainWindow):
         ic = bundle_total_current(self.bundle, self.profile)
         vce = self.bundle.get(self.profile.vce)
 
-        if section == "关断过程" and name in {"Eoff", "Pdmax"}:
+        if section == "关断过程" and name in {"Eoff", power_name, "Pdmax"}:
             markers = eoff_energy_markers(
                 t,
                 ic,
@@ -4174,16 +4213,16 @@ class MainWindow(QMainWindow):
             )
             win = IntegrationWindow(i0, i1, float(t[i0]), float(t[i1]))
             val = float(integrate_vi_window(t, vce, ic, win))
-            pdmax = float(peak_power_kw(vce, ic, win))
+            pmax = float(peak_power_kw(vce, ic, win))
             if section == "关断过程":
                 self.result.turn_off.eoff = val
-                self.result.turn_off.pdmax = pdmax
-                self.result_table.set_metric_value("关断过程", "Pdmax", pdmax)
+                self.result.turn_off.pmax = pmax
+                self.result_table.set_metric_value("关断过程", power_name, pmax)
                 self.result_table.set_metric_value("关断过程", "Eoff", val)
             else:
                 self.result.turn_on.eon = val
-                self.result.turn_on.pdmax = pdmax
-                self.result_table.set_metric_value("开通", "Pdmax", pdmax)
+                self.result.turn_on.pmax = pmax
+                self.result_table.set_metric_value("开通", power_name, pmax)
                 self.result_table.set_metric_value("开通", "Eon", val)
             if section == "开通":
                 ha_txt = f"Ha(Ic)={ha_v:.2f}A"
@@ -4193,13 +4232,13 @@ class MainWindow(QMainWindow):
                 hb_txt = f"Hb(Ic)={hb_a:.2f}A"
             self.statusBar().showMessage(
                 f"{section}-{name}: {ha_txt} {hb_txt} "
-                f"A={ta_us:.3f}µs B={tb_us:.3f}µs, Pdmax={pdmax:.3f} kW, {name}={val:.3f} mJ"
+                f"A={ta_us:.3f}µs B={tb_us:.3f}µs, {power_name}={pmax:.3f} kW, {name}={val:.3f} mJ"
             )
 
         key = (section, name)
         restored = self._manual_energy.get(key)
         # 关断 Eoff：每次进入均用算法光标，避免会话内旧手动位置（如 14.37µs）被恢复
-        if section == "关断过程" and name in {"Eoff", "Pdmax"}:
+        if section == "关断过程" and name in {"Eoff", power_name, "Pdmax"}:
             restored = None
         elif restored is not None:
             ta_r, tb_r, _, _ = restored
@@ -4555,55 +4594,107 @@ class MainWindow(QMainWindow):
         )
         _on_interval_change(t0_us, t1_us)
 
+    def _enable_short_circuit_current_interaction(self, name: str) -> None:
+        """短路 Imax/Tsc：按短路规范用 Ic 的 Hb 交点联动 A/B。"""
+        self._active_slope_param = None
+        if (
+            self.bundle is None
+            or self.result is None
+            or self.result.segments is None
+            or not self.result.short_circuit_mode
+        ):
+            return
+        if name not in {"短路电流Imax", "短路时间Tsc"}:
+            return
+        cursors = (
+            self._short_circuit_tsc_cursors()
+            if name == "短路时间Tsc"
+            else self._short_circuit_ic_default_cursors()
+        )
+        if cursors is None:
+            return
+        t_a_us, t_b_us, hb, ha = cursors
+        restored = self._manual_intervals.get(("短路过程", name))
+        if restored is not None:
+            t_a_us, t_b_us = restored
+        t = self.bundle.t
+        gate0, gate1 = self.result.segments.turn_off
+        s0 = float(t[max(0, min(int(gate0), len(t) - 1))] * 1e6)
+        s1 = float(t[max(0, min(int(gate1), len(t) - 1))] * 1e6)
+
+        def _on_change(
+            cur_a_us: float,
+            cur_b_us: float,
+            cur_hb: float,
+            cur_ha: float,
+        ) -> None:
+            ta, tb = min(float(cur_a_us), float(cur_b_us)), max(
+                float(cur_a_us), float(cur_b_us)
+            )
+            self._touch_manual_waveform_source()
+            self._manual_intervals[("短路过程", name)] = (ta, tb)
+            sc = self.result.short_circuit
+            if name == "短路电流Imax":
+                sc.ic_max = float(cur_ha)
+                self.result.idc = float(cur_ha)
+                self.result.idc_set = float(cur_ha)
+                self.result_table.set_metric_value("短路过程", name, float(cur_ha))
+                self.statusBar().showMessage(
+                    f"短路过程-短路电流Imax: Hb={cur_hb:.3f}A, "
+                    f"A={ta:.3f}us, B={tb:.3f}us, Imax={cur_ha:.3f}A"
+                )
+                return
+            dur_us = max(0.0, tb - ta)
+            sc.tsc = float(dur_us)
+            sc.tsc_start_us = ta
+            sc.tsc_end_us = tb
+            sc.tsc_range = self.cfg.short_circuit_tsc_range or sc.tsc_range
+            self.result_table.set_metric_value("短路过程", name, dur_us)
+            self.statusBar().showMessage(
+                f"短路过程-短路时间Tsc: {sc.tsc_range or '0%-0%'}, "
+                f"Hb={cur_hb:.3f}A, A={ta:.3f}us, B={tb:.3f}us, Tsc={dur_us:.3f}us"
+            )
+
+        self.wave_plot.enable_short_current_interaction(
+            search_t0_us=s0,
+            search_t1_us=s1,
+            t_a_us=t_a_us,
+            t_b_us=t_b_us,
+            hb=hb,
+            ha=ha,
+            on_change=_on_change,
+            channel="ic",
+            emit_result_on_enter=restored is not None,
+        )
+        if restored is None:
+            self._show_stored_metric_status("短路过程", name)
+
     def _enable_generic_parameter_interaction(self, section: str, name: str) -> None:
         self._active_slope_param = None
         if self.bundle is None or self.result is None:
+            return
+        if (
+            self.result.short_circuit_mode
+            and section == "短路过程"
+            and name in {"短路电流Imax", "短路时间Tsc"}
+        ):
+            self._enable_short_circuit_current_interaction(name)
             return
         interval = self._parameter_interval_us(section, name)
         if interval is None:
             return
         t = self.bundle.t
-        short_ic_cursor_names = {
-            "短路电流Imax",
-            "短路时间Tsc",
-            "短路能量Esc_本管",
-            "短路能量Esc_对管",
-        }
-        short_current_level_names = {
-            "短路电流Imax",
-            "短路时间Tsc",
-            "短路能量Esc_本管",
-            "短路能量Esc_对管",
-        }
-        short_vpeak_channels = {
-            "应力Vpeak_本管": self.profile.vce,
-        }
-        short_voltage_cursor_channels = {
-            "应力Vpeak_对管": self.profile.v_diode,
-        }
-        desat_channel = self._short_circuit_desat_channel()
-        if desat_channel is not None:
-            short_voltage_cursor_channels["Desat动作时间"] = desat_channel
-        is_short_ic_cursor_param = (
-            self.result.short_circuit_mode
-            and section == "短路过程"
-            and name in short_ic_cursor_names
+        is_short_circuit_param = (
+            self.result.short_circuit_mode and section == "短路过程"
         )
-        is_short_current_level_param = (
-            self.result.short_circuit_mode
-            and section == "短路过程"
-            and name in short_current_level_names
-        )
-        short_voltage_cursor_channel = (
-            short_voltage_cursor_channels.get(name)
-            if self.result.short_circuit_mode and section == "短路过程"
-            else None
-        )
-        short_vpeak_channel = (
-            short_vpeak_channels.get(name)
-            if self.result.short_circuit_mode and section == "短路过程"
-            else None
-        )
+        short_energy_names = {"短路能量Esc_本管", "短路能量Esc_对管"}
+        short_vpeak_roles = {
+            "应力Vpeak_本管": (self.profile.vce, "vge", self.profile.vge),
+            "应力Vpeak_对管": (self.profile.v_diode, "vge", self.profile.vge),
+        }
+        is_short_energy_param = is_short_circuit_param and name in short_energy_names
+        short_vpeak_role = short_vpeak_roles.get(name) if is_short_circuit_param else None
+        is_short_desat_param = is_short_circuit_param and name == "Desat动作时间"
 
         def _idx_from_t_us(t_us: float) -> int:
             ts = t_us * 1e-6
@@ -4621,37 +4712,59 @@ class MainWindow(QMainWindow):
             # 记住用户手动调整的区间，下次点击该参数时恢复
             self._touch_manual_waveform_source()
             self._manual_intervals[(section, name)] = (min(t0_us, t1_us), max(t0_us, t1_us))
-            peak_y = self._peak_y_for_param(section, name, i0, i1)
-            if peak_y is not None:
-                ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
-                self.wave_plot.set_interval_peak_horizontal(
-                    float(peak_y),
-                    channel=self._channel_for_param(section, name),
-                    t0_us=ta,
-                    t1_us=tb,
-                    use_abs_peak=name in {"Ic_off_max", "Ic_on_max"}
-                    or is_short_current_level_param,
-                )
-            if is_short_current_level_param:
+            ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
+            if is_short_energy_param:
+                marker = self._short_circuit_energy_peak_marker(name, i0, i1)
+                if marker is not None:
+                    peak_y, peak_channel = marker
+                    self.wave_plot.set_interval_peak_horizontal(
+                        float(peak_y),
+                        channel=peak_channel,
+                        t0_us=ta,
+                        t1_us=tb,
+                    )
                 cursors = self._short_circuit_ic_default_cursors()
                 if cursors is not None:
                     _ta, _tb, hb, _ha = cursors
                     self.wave_plot.set_interval_base_horizontal(hb, channel="ic")
-            elif short_vpeak_channel is not None:
+            elif short_vpeak_role is not None:
+                voltage_channel, gate_role, gate_channel = short_vpeak_role
+                peak_y = self._peak_y_for_param(section, name, i0, i1)
+                if peak_y is not None:
+                    self.wave_plot.set_interval_peak_horizontal(
+                        float(peak_y),
+                        channel=self._channel_for_param(section, name),
+                        t0_us=ta,
+                        t1_us=tb,
+                    )
                 cursors = self._short_circuit_vpeak_default_cursors(
-                    short_vpeak_channel
+                    voltage_channel,
+                    gate_channel=gate_channel,
                 )
                 if cursors is not None:
                     _ta, _tb, hb, _ha = cursors
-                    self.wave_plot.set_interval_base_horizontal(hb, channel="vge")
-            elif short_voltage_cursor_channel is not None:
-                cursors = self._short_circuit_waveform_default_cursors(
-                    short_voltage_cursor_channel
-                )
-                if cursors is not None:
-                    _ta, _tb, hb, _ha = cursors
-                    self.wave_plot.set_interval_base_horizontal(
-                        hb, channel=self._channel_for_param(section, name)
+                    self.wave_plot.set_interval_base_horizontal(hb, channel=gate_role)
+            elif is_short_desat_param:
+                cursors = self._short_circuit_desat_default_cursors()
+                desat_channel = self._short_circuit_desat_channel()
+                if cursors is not None and desat_channel is not None:
+                    _ta, _tb, hb, ha = cursors
+                    self.wave_plot.set_interval_peak_horizontal(
+                        ha,
+                        channel=desat_channel,
+                        t0_us=ta,
+                        t1_us=tb,
+                    )
+                    self.wave_plot.set_interval_base_horizontal(hb, channel=desat_channel)
+            else:
+                peak_y = self._peak_y_for_param(section, name, i0, i1)
+                if peak_y is not None:
+                    self.wave_plot.set_interval_peak_horizontal(
+                        float(peak_y),
+                        channel=self._channel_for_param(section, name),
+                        t0_us=ta,
+                        t1_us=tb,
+                        use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
                     )
             if section == "关断过程" and name in {"Ic_off_max", "Vce_off_max"} and self.result is not None:
                 cur = (
@@ -4690,9 +4803,6 @@ class MainWindow(QMainWindow):
         # 若该参数此前手动调整过，恢复手动区间而非默认窗口
         restored = self._manual_intervals.get((section, name))
         t0_us, t1_us = restored if restored is not None else interval
-        is_short_circuit_param = (
-            self.result.short_circuit_mode and section == "短路过程"
-        )
         if not is_short_circuit_param:
             self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_interval_interaction(
@@ -4706,8 +4816,6 @@ class MainWindow(QMainWindow):
                 "Ic_on_max",
                 "Vce_on_max",
                 "Vrr",
-                "短路电流Imax",
-                "短路时间Tsc",
                 "短路能量Esc_本管",
                 "应力Vpeak_本管",
                 "短路能量Esc_对管",
@@ -4722,11 +4830,9 @@ class MainWindow(QMainWindow):
             "Ic_on_max",
             "Vce_on_max",
             "Vrr",
-            "短路电流Imax",
             "应力Vpeak_本管",
             "应力Vpeak_对管",
         }
-        _SHORT_ENERGY_NAMES = {"短路能量Esc_本管", "短路能量Esc_对管"}
         if (section, name) in self._IEC_TIMING_PARAMS:
             self._refresh_iec_timing_status(section, name, t0_us, t1_us)
         elif restored is not None:
@@ -4738,7 +4844,7 @@ class MainWindow(QMainWindow):
                     f"{section}-{name} 区间最大值: [{t0_us:.3f},{t1_us:.3f}]us | "
                     f"{name}={stored:.3f}（拖动 A/B 后重算）"
                 )
-        elif name in _SHORT_ENERGY_NAMES:
+        elif name in short_energy_names:
             stored = self._stored_param_value(section, name)
             if stored is not None:
                 self.statusBar().showMessage(
@@ -4750,41 +4856,65 @@ class MainWindow(QMainWindow):
         i1 = int(np.searchsorted(t, max(t0_us, t1_us) * 1e-6, side="left"))
         i0 = max(0, min(i0, len(t) - 1))
         i1 = max(i0 + 1, min(i1, len(t) - 1))
-        peak_y = self._peak_y_for_param(section, name, i0, i1)
-        if peak_y is not None:
-            ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
-            self.wave_plot.set_interval_peak_horizontal(
-                float(peak_y),
-                channel=self._channel_for_param(section, name),
-                t0_us=ta,
-                t1_us=tb,
-                use_abs_peak=name in {"Ic_off_max", "Ic_on_max"}
-                or is_short_current_level_param,
-            )
-        if is_short_current_level_param:
+        ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
+        if is_short_energy_param:
+            marker = self._short_circuit_energy_peak_marker(name, i0, i1)
+            if marker is not None:
+                peak_y, peak_channel = marker
+                self.wave_plot.set_interval_peak_horizontal(
+                    float(peak_y),
+                    channel=peak_channel,
+                    t0_us=ta,
+                    t1_us=tb,
+                )
             cursors = self._short_circuit_ic_default_cursors()
             if cursors is not None:
                 _ta, _tb, hb, _ha = cursors
                 self.wave_plot.set_interval_base_horizontal(hb, channel="ic")
-        elif short_vpeak_channel is not None:
-            cursors = self._short_circuit_vpeak_default_cursors(short_vpeak_channel)
-            if cursors is not None:
-                _ta, _tb, hb, _ha = cursors
-                self.wave_plot.set_interval_base_horizontal(hb, channel="vge")
-        elif short_voltage_cursor_channel is not None:
-            cursors = self._short_circuit_waveform_default_cursors(
-                short_voltage_cursor_channel
+        elif short_vpeak_role is not None:
+            voltage_channel, gate_role, gate_channel = short_vpeak_role
+            peak_y = self._peak_y_for_param(section, name, i0, i1)
+            if peak_y is not None:
+                self.wave_plot.set_interval_peak_horizontal(
+                    float(peak_y),
+                    channel=self._channel_for_param(section, name),
+                    t0_us=ta,
+                    t1_us=tb,
+                )
+            cursors = self._short_circuit_vpeak_default_cursors(
+                voltage_channel,
+                gate_channel=gate_channel,
             )
             if cursors is not None:
                 _ta, _tb, hb, _ha = cursors
-                self.wave_plot.set_interval_base_horizontal(
-                    hb, channel=self._channel_for_param(section, name)
+                self.wave_plot.set_interval_base_horizontal(hb, channel=gate_role)
+        elif is_short_desat_param:
+            cursors = self._short_circuit_desat_default_cursors()
+            desat_channel = self._short_circuit_desat_channel()
+            if cursors is not None and desat_channel is not None:
+                _ta, _tb, hb, ha = cursors
+                self.wave_plot.set_interval_peak_horizontal(
+                    ha,
+                    channel=desat_channel,
+                    t0_us=ta,
+                    t1_us=tb,
+                )
+                self.wave_plot.set_interval_base_horizontal(hb, channel=desat_channel)
+        else:
+            peak_y = self._peak_y_for_param(section, name, i0, i1)
+            if peak_y is not None:
+                self.wave_plot.set_interval_peak_horizontal(
+                    float(peak_y),
+                    channel=self._channel_for_param(section, name),
+                    t0_us=ta,
+                    t1_us=tb,
+                    use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
                 )
         if name in _MAX_INTERVAL_NAMES:
             self.statusBar().showMessage(
                 f"{section}-{name} 区间最大值模式：拖动两根纵向光标，实时取窗口内最大值"
             )
-        elif name in _SHORT_ENERGY_NAMES:
+        elif name in short_energy_names:
             self.statusBar().showMessage(
                 f"{section}-{name} 积分窗口模式：拖动两根纵向光标，实时积分"
             )
@@ -4816,7 +4946,7 @@ class MainWindow(QMainWindow):
             sc = self.result.short_circuit
             dur_us = max(0.0, (t[i1] - t[i0]) * 1e6)
             if name == "短路电流Imax":
-                val = float(np.max(np.abs(ic[i0 : i1 + 1])))
+                val = float(np.max(ic[i0 : i1 + 1]))
                 sc.ic_max = val
                 self.result.idc = val
                 self.result.idc_set = val
@@ -4868,8 +4998,8 @@ class MainWindow(QMainWindow):
                 return val
             if name == "Desat动作时间":
                 sc.desat_time = dur_us
-                if self._short_circuit_desat_channel() is not None:
-                    sc.desat_range = "Desat-Hb交点"
+                if self._short_circuit_desat_default_cursors() is not None:
+                    sc.desat_range = "Vdesat阈值"
                 self.result_table.set_metric_value(section, name, dur_us)
                 return dur_us
 
@@ -5038,7 +5168,7 @@ class MainWindow(QMainWindow):
                 "Toff": off.toff,
                 "Td_off": off.td_off,
                 "Tf": off.tf,
-                "Pdmax": off.pdmax,
+                "Pmax": off.pmax,
                 "Eoff": off.eoff,
             }
             if name == "串扰电压":
@@ -5056,7 +5186,7 @@ class MainWindow(QMainWindow):
                 "Ton": on.ton,
                 "Td_on": on.td_on,
                 "Tr": on.tr,
-                "Pdmax": on.pdmax,
+                "Pmax": on.pmax,
                 "Eon": on.eon,
             }
             if name == "串扰电压":
@@ -5108,16 +5238,13 @@ class MainWindow(QMainWindow):
         v_diode = self.bundle.maybe_get(self.profile.v_diode)
 
         if section == "短路过程":
-            if name in {
-                "短路电流Imax",
-                "短路时间Tsc",
-                "短路能量Esc_本管",
-                "短路能量Esc_对管",
-            }:
+            if name in {"短路电流Imax", "短路时间Tsc"}:
                 seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
                 if len(seg) == 0:
                     return 0.0
-                return float(seg[int(np.argmax(np.abs(seg)))])
+                return float(np.nanmax(seg))
+            if name in {"短路能量Esc_本管", "短路能量Esc_对管"}:
+                return None
             if name == "应力Vpeak_本管":
                 return float(np.max(vce[i0 : i1 + 1]))
             if name == "应力Vpeak_对管":
@@ -5125,9 +5252,9 @@ class MainWindow(QMainWindow):
                     return None
                 return float(np.max(v_diode[i0 : i1 + 1]))
             if name == "Desat动作时间":
-                desat_channel = self._short_circuit_desat_channel()
-                if desat_channel is not None:
-                    return float(np.max(self.bundle.get(desat_channel)[i0 : i1 + 1]))
+                threshold_v = getattr(self.cfg, "short_circuit_desat_threshold_v", None)
+                if threshold_v is not None:
+                    return float(threshold_v)
 
         if section == "关断过程":
             if name == "Ic_off_max":
@@ -5511,7 +5638,7 @@ class MainWindow(QMainWindow):
     def _short_circuit_ic_default_cursors(
         self,
     ) -> tuple[float, float, float, float] | None:
-        """Default Imax cursors: A/B at Ic crossings with Hb, Ha at peak."""
+        """Default short-circuit current cursors at the Ic-Hb crossings."""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
         from dpt_extractor.models.waveform import bundle_total_current
@@ -5529,6 +5656,15 @@ class MainWindow(QMainWindow):
             self.bundle.dt,
             smooth_ns=self.cfg.smoothing.detect_window_ns,
         )
+        if cursors is None and len(t) > 1:
+            cursors = short_circuit_current_cursors(
+                t,
+                ic,
+                0,
+                len(t) - 1,
+                self.bundle.dt,
+                smooth_ns=self.cfg.smoothing.detect_window_ns,
+            )
         if cursors is None:
             i0 = max(0, min(int(gate0), len(t) - 1))
             i1 = max(i0, min(int(gate1), len(t) - 1))
@@ -5540,30 +5676,47 @@ class MainWindow(QMainWindow):
             cursors.ha_a,
         )
 
-    def _short_circuit_waveform_default_cursors(
+    def _short_circuit_tsc_cursors(
         self,
-        channel: str,
     ) -> tuple[float, float, float, float] | None:
+        """Short-circuit Tsc cursors using the selected Tsc range only."""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
+        start_pct, end_pct, normalized = short_circuit_tsc_range_percentages(
+            self.cfg.short_circuit_tsc_range
+        )
+        if normalized == SHORT_CIRCUIT_TSC_RANGE_DEFAULT:
+            return self._short_circuit_ic_default_cursors()
+        if abs(start_pct - end_pct) > 1e-12:
+            return self._short_circuit_ic_default_cursors()
+        from dpt_extractor.models.waveform import bundle_total_current
+
         t = self.bundle.t
         if len(t) == 0:
             return None
-        y = np.asarray(self.bundle.get(channel), dtype=np.float64)
+        ic = np.asarray(bundle_total_current(self.bundle, self.profile), dtype=np.float64)
         gate0, gate1 = self.result.segments.turn_off
-        cursors = short_circuit_current_cursors(
+        cursors = short_circuit_current_percent_cursors(
             t,
-            y,
+            ic,
             gate0,
             gate1,
             self.bundle.dt,
             smooth_ns=self.cfg.smoothing.detect_window_ns,
-            peak_mode="max",
+            percent=start_pct,
         )
+        if cursors is None and len(t) > 1:
+            cursors = short_circuit_current_percent_cursors(
+                t,
+                ic,
+                0,
+                len(t) - 1,
+                self.bundle.dt,
+                smooth_ns=self.cfg.smoothing.detect_window_ns,
+                percent=start_pct,
+            )
         if cursors is None:
-            i0 = max(0, min(int(gate0), len(t) - 1))
-            i1 = max(i0, min(int(gate1), len(t) - 1))
-            return t[i0] * 1e6, t[i1] * 1e6, 0.0, 0.0
+            return self._short_circuit_ic_default_cursors()
         return (
             cursors.t_a_s * 1e6,
             cursors.t_b_s * 1e6,
@@ -5574,14 +5727,16 @@ class MainWindow(QMainWindow):
     def _short_circuit_vpeak_default_cursors(
         self,
         voltage_channel: str,
+        gate_channel: str | None = None,
     ) -> tuple[float, float, float, float] | None:
-        """Default Vpeak cursors: A/B and Hb from DUT Vge, Ha from voltage max."""
+        """Default Vpeak cursors: A/B and Hb from mapped Vge, Ha from voltage max."""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
         t = self.bundle.t
         if len(t) == 0:
             return None
-        vge = np.asarray(self.bundle.get(self.profile.vge), dtype=np.float64)
+        gate_ref = gate_channel or self.profile.vge
+        vge = np.asarray(self.bundle.get(gate_ref), dtype=np.float64)
         voltage = np.asarray(self.bundle.get(voltage_channel), dtype=np.float64)
         gate0, gate1 = self.result.segments.turn_off
         cursors = short_circuit_vpeak_cursors(
@@ -5609,7 +5764,63 @@ class MainWindow(QMainWindow):
     def _short_circuit_desat_channel(self) -> str | None:
         if self.bundle is None:
             return None
-        return find_desat_voltage_channel(self.bundle)
+        return find_desat_voltage_channel(self.bundle, getattr(self.profile, "vdesat", ""))
+
+    def _short_circuit_desat_default_cursors(
+        self,
+    ) -> tuple[float, float, float, float] | None:
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        desat_channel = self._short_circuit_desat_channel()
+        threshold_v = getattr(self.cfg, "short_circuit_desat_threshold_v", None)
+        if desat_channel is None or threshold_v is None:
+            return None
+        t = self.bundle.t
+        if len(t) == 0:
+            return None
+        gate0, gate1 = self.result.segments.turn_off
+        cursors = short_circuit_desat_cursors(
+            t,
+            np.asarray(self.bundle.get(self.profile.vge), dtype=np.float64),
+            np.asarray(self.bundle.get(desat_channel), dtype=np.float64),
+            gate0,
+            gate1,
+            self.bundle.dt,
+            threshold_v=float(threshold_v),
+            smooth_ns=self.cfg.smoothing.detect_window_ns,
+        )
+        if cursors is None:
+            return None
+        return (
+            cursors.t_a_s * 1e6,
+            cursors.t_b_s * 1e6,
+            cursors.hb_a,
+            cursors.ha_a,
+        )
+
+    def _short_circuit_energy_peak_marker(
+        self,
+        name: str,
+        i0: int,
+        i1: int,
+    ) -> tuple[float, str] | None:
+        """Return a displayable Ha marker for short-circuit Esc, if a real trace exists."""
+        if self.bundle is None or self.result is None:
+            return None
+        sc = self.result.short_circuit
+        other = name == "短路能量Esc_对管"
+        math_channel = sc.energy_other_channel if other else sc.energy_dut_channel
+        peak, source = short_circuit_energy_peak_value(
+            self.bundle,
+            self.profile,
+            i0,
+            i1,
+            other=other,
+            math_channel=math_channel or None,
+        )
+        if source and self.bundle.has_channel_reference(source):
+            return float(peak), source
+        return None
 
     def _short_circuit_ic_window_indices(self) -> tuple[int, int] | None:
         cursors = self._short_circuit_ic_default_cursors()
@@ -5703,11 +5914,15 @@ class MainWindow(QMainWindow):
         if self.result.short_circuit_mode and section == "短路过程":
             if name in {
                 "短路电流Imax",
-                "短路时间Tsc",
                 "短路能量Esc_本管",
                 "短路能量Esc_对管",
             }:
                 cursors = self._short_circuit_ic_default_cursors()
+                if cursors is not None:
+                    t_a_us, t_b_us, _hb, _ha = cursors
+                    return t_a_us, t_b_us
+            if name == "短路时间Tsc":
+                cursors = self._short_circuit_tsc_cursors()
                 if cursors is not None:
                     t_a_us, t_b_us, _hb, _ha = cursors
                     return t_a_us, t_b_us
@@ -5717,17 +5932,18 @@ class MainWindow(QMainWindow):
                     t_a_us, t_b_us, _hb, _ha = cursors
                     return t_a_us, t_b_us
             if name == "应力Vpeak_对管":
-                cursors = self._short_circuit_waveform_default_cursors(self.profile.v_diode)
+                cursors = self._short_circuit_vpeak_default_cursors(
+                    self.profile.v_diode,
+                    gate_channel=self.profile.vge,
+                )
                 if cursors is not None:
                     t_a_us, t_b_us, _hb, _ha = cursors
                     return t_a_us, t_b_us
             if name == "Desat动作时间":
-                desat_channel = self._short_circuit_desat_channel()
-                if desat_channel is not None:
-                    cursors = self._short_circuit_waveform_default_cursors(desat_channel)
-                    if cursors is not None:
-                        t_a_us, t_b_us, _hb, _ha = cursors
-                        return t_a_us, t_b_us
+                cursors = self._short_circuit_desat_default_cursors()
+                if cursors is not None:
+                    t_a_us, t_b_us, _hb, _ha = cursors
+                    return t_a_us, t_b_us
                 return None
             i0, i1 = segs.turn_off
             return t[i0] * 1e6, t[i1] * 1e6
@@ -5737,7 +5953,7 @@ class MainWindow(QMainWindow):
             return iec_interval
 
         # 直接窗口型参数
-        if section == "关断过程" and name in {"Eoff", "Pdmax"}:
+        if section == "关断过程" and name in {"Eoff", "Pmax", "Pdmax"}:
             from dpt_extractor.models.waveform import bundle_total_current
 
             vce = self.bundle.get(self.profile.vce)
@@ -5754,7 +5970,7 @@ class MainWindow(QMainWindow):
                 pulse1_on=segs.pulse1_on,
             )
             return w.t_start * 1e6, w.t_end * 1e6
-        if section == "开通" and name in {"Eon", "Pdmax"}:
+        if section == "开通" and name in {"Eon", "Pmax", "Pdmax"}:
             from dpt_extractor.models.waveform import bundle_total_current
 
             vce = self.bundle.get(self.profile.vce)
@@ -5842,20 +6058,6 @@ class MainWindow(QMainWindow):
                 active_param = None
             try:
                 self.result = run_extraction(self.bundle, self.profile, self.cfg)
-            except ShortCircuitExtractNotReady as exc:
-                self.result = None
-                self._clear_manual_adjustments(reset_plot=False)
-                self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
-                self.result_table.set_mode_placeholder(
-                    "短路计算",
-                    self._extraction_placeholder_detail(
-                        str(exc) or "短路参数提取未返回结果。"
-                    ),
-                )
-                self.statusBar().showMessage(
-                    "短路计算：参数未计算，波形已保留"
-                )
-                return
             except Exception as exc:
                 self.result = None
                 self._clear_manual_adjustments(reset_plot=False)

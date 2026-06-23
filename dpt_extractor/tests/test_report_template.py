@@ -293,7 +293,7 @@ class TestReportTemplateWriter(unittest.TestCase):
         self.assertEqual(ws.cell(DATA_ROW, COL_RR["err"]).value, 30)
         self.assertIsNone(ws.cell(DATA_ROW, COL_TAIL["etotal"]).value)
 
-    def test_dpt_old_template_is_upgraded_with_pdmax_columns(self):
+    def test_dpt_old_template_is_upgraded_with_power_columns(self):
         from dpt_extractor.export.mcu2506_layout import (
             COL_OFF,
             COL_ON,
@@ -407,21 +407,21 @@ class TestReportTemplateWriter(unittest.TestCase):
                 ExtractResult(
                     source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
                     profile_code="UH",
-                    turn_off=TurnOffResult(pdmax=801.25, eoff=10.0),
-                    turn_on=TurnOnResult(pdmax=650.5, eon=20.0),
+                    turn_off=TurnOffResult(pmax=801.25, eoff=10.0),
+                    turn_on=TurnOnResult(pmax=650.5, eon=20.0),
                     reverse_recovery=ReverseRecoveryResult(pdmax=120.75, err=30.0),
                 ),
                 report,
             )
 
             saved = load_workbook(report)["U相_双脉冲数据"]
-            self.assertEqual(saved.cell(3, COL_OFF["pdmax"]).value, "Pdmax")
-            self.assertEqual(saved.cell(4, COL_OFF["pdmax"]).value, "KW")
-            self.assertEqual(saved.cell(3, COL_ON["pdmax"]).value, "Pdmax")
+            self.assertEqual(saved.cell(3, COL_OFF["pmax"]).value, "Pmax")
+            self.assertEqual(saved.cell(4, COL_OFF["pmax"]).value, "KW")
+            self.assertEqual(saved.cell(3, COL_ON["pmax"]).value, "Pmax")
             self.assertEqual(saved.cell(3, COL_RR["pdmax"]).value, "Pdmax")
-            self.assertEqual(saved.cell(DATA_ROW, COL_OFF["pdmax"]).value, 801.25)
+            self.assertEqual(saved.cell(DATA_ROW, COL_OFF["pmax"]).value, 801.25)
             self.assertEqual(saved.cell(DATA_ROW, COL_OFF["eoff"]).value, 10)
-            self.assertEqual(saved.cell(DATA_ROW, COL_ON["pdmax"]).value, 650.5)
+            self.assertEqual(saved.cell(DATA_ROW, COL_ON["pmax"]).value, 650.5)
             self.assertEqual(saved.cell(DATA_ROW, COL_ON["eon"]).value, 20)
             self.assertEqual(saved.cell(DATA_ROW, COL_RR["pdmax"]).value, 120.75)
             self.assertEqual(saved.cell(DATA_ROW, COL_RR["err"]).value, 30)

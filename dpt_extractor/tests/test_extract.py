@@ -8,18 +8,30 @@ import numpy as np
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.models.bridge_profile import LOWER_BRIDGE, UPPER_BRIDGE, guess_profile_from_path
+from dpt_extractor.models.waveform import bundle_total_current
+from dpt_extractor.metrics.iec_timings import turn_on_vce_top_from_ic_rise
 from dpt_extractor.pipeline.extract import (
     _turn_on_delta_vce,
     _turn_on_delta_vce_knee_point,
     extract_all,
 )
-from dpt_extractor.tests.sample_paths import sample_tss
+from dpt_extractor.tests.sample_paths import SAMPLE_ROOT, sample_tss
 
 WH = sample_tss("WH_480V_800A_000.tss")
 WL = sample_tss("WL_480V_800A_000.tss")
 UH = sample_tss("UH_750V_1050A_000.tss")
 UL = sample_tss("UL_750V_1050A_000.tss")
 VH = sample_tss("VH_750V_1050A_000.tss")
+WL_450_SMC_LT = (
+    SAMPLE_ROOT
+    / "tss格式"
+    / "KSU2506"
+    / "DCU"
+    / "SMC"
+    / "LT"
+    / "tss"
+    / "WL_450V_800A_000.tss"
+)
 
 
 class TestTurnOnDeltaVceKnee(unittest.TestCase):
@@ -80,6 +92,31 @@ class TestTurnOnDeltaVceKnee(unittest.TestCase):
         self.assertGreater(idx, plateau_start)
         self.assertLess(idx, plateau_end + 50)
         self.assertAlmostEqual(v_platform, 335.0, delta=4.0)
+
+    @unittest.skipUnless(WL_450_SMC_LT.exists(), "WL 450V SMC LT sample missing")
+    def test_real_wl_450_open_delta_vce_uses_pre_fall_platform(self):
+        bundle = load_waveform(WL_450_SMC_LT)
+        profile = guess_profile_from_path(WL_450_SMC_LT)
+        result = extract_all(bundle, profile, load_config())
+        assert result.segments is not None
+
+        vce = bundle.get(profile.vce)
+        ic = bundle_total_current(bundle, profile)
+        on0, on1 = result.segments.turn_on
+        v_top = turn_on_vce_top_from_ic_rise(
+            ic,
+            vce,
+            result.segments.pulse2_on,
+            result.segments.pulse2_off,
+            bundle.dt,
+        )
+        knee = _turn_on_delta_vce_knee_point(vce, on0, on1, bundle.dt, v_top)
+
+        self.assertIsNotNone(knee)
+        assert knee is not None
+        self.assertAlmostEqual(float(bundle.t[knee[0]] * 1e6), 24.43424, delta=0.03)
+        self.assertAlmostEqual(float(knee[1]), 348.0, delta=2.0)
+        self.assertAlmostEqual(result.turn_on.delta_vce, 96.05, delta=2.0)
 
 
 class TestTssSamples(unittest.TestCase):

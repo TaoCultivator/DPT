@@ -322,6 +322,7 @@ _MAPPING_OPTIONS = (
     ("irr", "Irr"),
     ("v_diode", "V_二极管"),
     ("vge_other", "对管Vge"),
+    ("vdesat", "Vdesat"),
 )
 
 _VDIV_VALUE_WIDTH = 76

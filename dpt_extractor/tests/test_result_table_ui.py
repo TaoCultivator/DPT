@@ -54,7 +54,7 @@ def _sample_result() -> ExtractResult:
             vce_off_max=1093.25,
             dvdt=7.594,
             didt=10.623,
-            pdmax=910.5,
+            pmax=910.5,
             eoff=88.884,
             eoff_range="V↑~Ic平稳",
         ),
@@ -65,7 +65,7 @@ def _sample_result() -> ExtractResult:
             turn_on_current=1036.12,
             dvdt=2.597,
             didt=6.565,
-            pdmax=640.2,
+            pmax=640.2,
             eon=68.662,
         ),
         reverse_recovery=ReverseRecoveryResult(
@@ -124,8 +124,12 @@ class TestResultTableUi(unittest.TestCase):
                 ENERGY_TEXT_COLOR,
             )
 
-        for section in ("关断过程", "开通", "反向恢复"):
-            row = _row_for(table, section, "Pdmax")
+        for section, name in (
+            ("关断过程", "Pmax"),
+            ("开通", "Pmax"),
+            ("反向恢复", "Pdmax"),
+        ):
+            row = _row_for(table, section, name)
             self.assertEqual(table.table.item(row, 2).text(), "KW")
 
         table.set_active_metric("开通", "di/dt")

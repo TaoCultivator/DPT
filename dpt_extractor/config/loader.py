@@ -93,6 +93,8 @@ class AppConfig:
     # runtime overrides
     vdc_override: float | None = None
     slope_ranges: dict[str, "SlopeRange"] = field(default_factory=dict)
+    short_circuit_tsc_range: str = "0%-0%"
+    short_circuit_desat_threshold_v: float | None = None
 
 
 def _merge_dataclass(cls, data: dict):
@@ -123,4 +125,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         energy=_merge_dataclass(EnergyConfig, raw.get("energy", {})),
         vdc=_merge_dataclass(VdcConfig, raw.get("vdc", {})),
         standard=_merge_dataclass(StandardConfig, raw.get("standard", {})),
+        short_circuit_desat_threshold_v=raw.get("short_circuit", {}).get(
+            "desat_threshold_v"
+        )
+        if isinstance(raw.get("short_circuit", {}), dict)
+        else None,
     )

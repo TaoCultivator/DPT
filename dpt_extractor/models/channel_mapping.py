@@ -121,10 +121,11 @@ LOGICAL_SIGNALS: tuple[tuple[str, str, str], ...] = (
     ),
     ("v_diode", "V_二极管", "换流/对管二极管电压"),
     ("vge_other", "Vge_对管", "对管门极（串扰）"),
+    ("vdesat", "Vdesat", "驱动器 DESAT 判定电压（短路可选）"),
 )
 
 LOGICAL_SIGNAL_KEYS: tuple[str, ...] = tuple(k for k, _, _ in LOGICAL_SIGNALS)
-OPTIONAL_SIGNAL_KEYS = frozenset({"il", "irr", "v_diode", "vge_other"})
+OPTIONAL_SIGNAL_KEYS = frozenset({"il", "irr", "v_diode", "vge_other", "vdesat"})
 ALLOW_SHARED_SOURCE_KEYS = frozenset({"ic", "irr"})
 
 
@@ -139,6 +140,7 @@ class ChannelMapping:
     irr: str = "CH3"
     v_diode: str = "CH5"
     vge_other: str = "CH6"
+    vdesat: str = ""
     #: True：总电流 = Irr 列 + IL 列逐点相加，忽略 ic 列映射
     ic_from_sum_irr_il: bool = False
     #: True：反向恢复 = Ic 列 − IL 列，忽略 irr 列映射

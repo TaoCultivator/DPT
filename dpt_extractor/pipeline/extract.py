@@ -136,11 +136,72 @@ def _turn_on_delta_vce_knee_point(
     if dv_peak <= 1e-12:
         return None
 
-    # 三斜率形态：下降速度曲线上有两个持续高速段，中间夹着较缓的中间斜率段。
-    # 此时人工卡尺更稳定的位置是两个高速段之间的时间中点。
     dv_state = _smooth_edge_padded(dv_fall, min(101, max(9, (len(dv_fall) // 80) | 1)))
     state_win = dv_state[j0 : j1 + 1]
     state_peak = float(max(np.max(state_win), 1e-12))
+
+    def _stable_subwindow(a: int, b: int) -> tuple[int, float, float] | None:
+        """Return the flattest local platform inside [a, b] as (idx, level, span)."""
+        a = max(0, min(int(a), len(seg_s) - 1))
+        b = max(a, min(int(b), len(seg_s) - 1))
+        length = b - a + 1
+        min_pts = max(20, int(8e-9 / max(dt, 1e-15)))
+        if length < min_pts:
+            return None
+        win_pts = min(length, max(min_pts, int(12e-9 / max(dt, 1e-15))))
+        best: tuple[float, int, float] | None = None
+        for start in range(a, b - win_pts + 2):
+            vals = seg_s[start : start + win_pts]
+            if len(vals) == 0:
+                continue
+            span = float(np.max(vals) - np.min(vals))
+            center = start + win_pts // 2
+            level = 0.5 * (float(np.max(vals)) + float(np.min(vals)))
+            if (
+                best is None
+                or span < best[0] - 1e-9
+                or (abs(span - best[0]) <= 1e-9 and center > best[1])
+            ):
+                best = (span, center, level)
+        if best is None:
+            return None
+        span, center, level = best
+        if span > max(0.035 * vce_top, 18.0):
+            return None
+        return center, level, span
+
+    # 有些开通波形先跌到一个短平台，再进入主跌落。该平台不在两个高速段之间，
+    # 需要在主跌落峰值之前单独识别，否则 Hb 会落到主跌落开始后的偏低位置。
+    plateau_slope_th = max(0.08 * state_peak, 0.10e9)
+    min_pre_drop = max(0.12 * vce_top, 45.0)
+    max_pre_drop = 0.80 * vce_top
+    min_pre_run = max(20, int(18e-9 / max(dt, 1e-15)))
+    candidates: list[tuple[float, int, float]] = []
+    run_start: int | None = None
+    for jj in range(j0, j_peak + 1):
+        drop = float(vce_top - seg_s[jj])
+        is_plateau_like = (
+            abs(float(dv_state[jj])) <= plateau_slope_th
+            and min_pre_drop <= drop <= max_pre_drop
+        )
+        if is_plateau_like and run_start is None:
+            run_start = jj
+        if (not is_plateau_like or jj == j_peak) and run_start is not None:
+            run_end = jj - 1 if not is_plateau_like else jj
+            if run_end - run_start + 1 >= min_pre_run:
+                stable = _stable_subwindow(run_start, run_end)
+                if stable is not None:
+                    center, level, span = stable
+                    drop_level = float(vce_top - level)
+                    if min_pre_drop <= drop_level <= max_pre_drop:
+                        candidates.append((span, center, level))
+            run_start = None
+    if candidates:
+        _span, center, level = min(candidates, key=lambda item: (item[0], -item[1]))
+        return i0 + center, float(level)
+
+    # 三斜率形态：下降速度曲线上有两个持续高速段，中间夹着较缓的中间斜率段。
+    # 此时人工卡尺更稳定的位置是两个高速段之间的时间中点。
     high_th = max(0.50 * state_peak, float(np.percentile(state_win, 80)))
     high_mask = state_win >= high_th
     min_run = max(20, int(1.2e-9 / max(dt, 1e-15)))
@@ -544,7 +605,7 @@ def extract_all(
         pulse1_on=edges.pulse1_on,
     )
     eoff_scope = integrate_vi_window(t, vce, ic, win_off_scope)
-    pdmax_off = peak_power_kw(vce, ic, win_off_scope)
+    pmax_off = peak_power_kw(vce, ic, win_off_scope)
     # 按用户提供的示波器示例定义：t1=Vce离开base，t2=Ic回落到base。
     eoff = eoff_scope
     eoff_math = 0.0
@@ -570,7 +631,7 @@ def extract_all(
         crosstalk_v=off_vmax,
         crosstalk_vmax=off_vmax,
         crosstalk_vmin=off_vmin,
-        pdmax=pdmax_off,
+        pmax=pmax_off,
         eoff=eoff,
         eoff_range="V↑~Ic平稳",
         eoff_check=eoff_math,
@@ -687,7 +748,7 @@ def extract_all(
     )
     # 开通损耗按用户口径：窗口精确到“电流base刚结束 -> 电压base刚回落”，积分用原始 V*I
     eon = integrate_vi_window(t, vce, ic, win_on_scope)
-    pdmax_on = peak_power_kw(vce, ic, win_on_scope)
+    pmax_on = peak_power_kw(vce, ic, win_on_scope)
     eon_math = 0.0
     eon_warn = False
 
@@ -712,7 +773,7 @@ def extract_all(
         crosstalk_v=on_vmax,
         crosstalk_vmax=on_vmax,
         crosstalk_vmin=on_vmin,
-        pdmax=pdmax_on,
+        pmax=pmax_on,
         eon=eon,
         eon_check=eon_math,
         energy_warn=eon_warn,

@@ -909,10 +909,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(lines, [])
         self.assertEqual(plot._auxiliary_dash_lines, [])
 
-    def test_short_circuit_reference_lines_use_cosmetic_spaced_dash(self):
+    def test_short_circuit_edge_reference_lines_are_not_drawn(self):
         import numpy as np
         from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QColor, QPen
 
         from dpt_extractor.gui.waveform_plot import WaveformPlot
         from dpt_extractor.models.bridge_profile import make_profile
@@ -922,7 +921,6 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             ShortCircuitResult,
         )
         from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
-        from dpt_extractor.gui.waveform_plot import AUX_DASH_PATTERN, REFERENCE_LINE_Z
 
         n = 128
         t = np.linspace(0.0, 1e-6, n)
@@ -954,6 +952,12 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 short_circuit=ShortCircuitResult(tsc_start_us=0.2, tsc_end_us=0.7),
             ),
         )
+        labels = {
+            getattr(getattr(item, "label", None), "format", None)
+            for item in plot.plot.getPlotItem().items
+        }
+        self.assertNotIn("短路开始", labels)
+        self.assertNotIn("短路结束", labels)
         lines = [
             item
             for item in plot.plot.getPlotItem().items
@@ -961,24 +965,8 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             and hasattr(item, "pen")
             and item.pen.style() == Qt.PenStyle.CustomDashLine
         ]
-        self.assertEqual(len(lines), 2)
-        for line in lines:
-            pen = line.pen
-            self.assertTrue(pen.isCosmetic())
-            self.assertEqual(pen.style(), Qt.PenStyle.CustomDashLine)
-            self.assertEqual(list(pen.dashPattern()), list(AUX_DASH_PATTERN))
-            self.assertEqual(line.zValue(), REFERENCE_LINE_Z)
-            self.assertGreater(line.zValue(), plot._cursor_a.zValue())
-        self.assertGreaterEqual(len(plot._auxiliary_dash_lines), len(lines))
-
-        lines[0].setPen(QPen(QColor("#ffffff"), 1.0))
-        self.assertEqual(lines[0].pen.style(), Qt.PenStyle.SolidLine)
-        plot._run_plot_geometry_sync()
-
-        pen = lines[0].pen
-        self.assertTrue(pen.isCosmetic())
-        self.assertEqual(pen.style(), Qt.PenStyle.CustomDashLine)
-        self.assertEqual(list(pen.dashPattern()), list(AUX_DASH_PATTERN))
+        self.assertEqual(lines, [])
+        self.assertEqual(plot._auxiliary_dash_lines, [])
 
     def test_time_axis_ticks_inline_unit_without_axis_title(self):
         plot = self._make_synthetic_plot()
@@ -4595,7 +4583,7 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertFalse(win.result.turn_off.eoff != win.result.turn_off.eoff)  # 不是 NaN
         win.close()
 
-    def test_pdmax_click_uses_power_peak_interval_not_energy_loss(self):
+    def test_pmax_click_uses_power_peak_interval_not_energy_loss(self):
         from dpt_extractor.gui.main_window import MainWindow
 
         win = MainWindow()
@@ -4605,11 +4593,11 @@ class TestMainWindowSmoke(unittest.TestCase):
         vce_key = win.wave_plot._display_key_for_channel("vce")
         ic_key = win.wave_plot._display_key_for_channel("ic")
         win.wave_plot._set_math_formula("MATH9", f"{vce_key} * {ic_key}")
-        interval = win._parameter_interval_us("关断过程", "Pdmax")
+        interval = win._parameter_interval_us("关断过程", "Pmax")
         self.assertIsNotNone(interval)
         assert interval is not None
 
-        win._on_value_clicked("关断过程", "Pdmax")
+        win._on_value_clicked("关断过程", "Pmax")
         plot = win.wave_plot
 
         self.assertEqual(plot._interactive_mode, "power_peak")

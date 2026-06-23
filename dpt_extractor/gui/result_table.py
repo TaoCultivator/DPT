@@ -47,7 +47,12 @@ from dpt_extractor.gui.theme import (
     TEXT_ON_SECTION,
     apply_combo_popup_style,
 )
-from dpt_extractor.models.results import ExtractResult
+from dpt_extractor.models.results import (
+    ExtractResult,
+    SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
+    SHORT_CIRCUIT_TSC_RANGE_OPTIONS,
+    power_metric_name,
+)
 from dpt_extractor.models.slope_range import (
     CUSTOM_RANGE_LABEL,
     RR_DIDT_CUSTOM_IDM,
@@ -143,7 +148,7 @@ def _range_label_for_row(section: str, name: str, result: ExtractResult) -> str:
     if result.short_circuit_mode:
         sc = result.short_circuit
         if section == "短路过程" and name == "短路时间Tsc":
-            return sc.tsc_range or "A-B"
+            return sc.tsc_range or SHORT_CIRCUIT_TSC_RANGE_DEFAULT
         if section == "短路过程" and name == "Desat动作时间":
             return sc.desat_range or "预留"
         if section == "短路过程" and name in {
@@ -168,7 +173,7 @@ def _range_label_for_row(section: str, name: str, result: ExtractResult) -> str:
         return rr.didt_range
     if section == "关断过程" and name == "Eoff":
         return off.eoff_range
-    if name == "Pdmax":
+    if name in {"Pmax", "Pdmax"}:
         return "V×I Max"
     return ""
 
@@ -665,6 +670,7 @@ class ResultTable(QWidget):
 
         self._slope_ranges = default_slope_ranges()
         self._on_range_changed: Callable[[str, SlopeRange], None] | None = None
+        self._on_short_circuit_tsc_range_changed: Callable[[str], None] | None = None
         self._on_eoff_pre_changed: Callable[[float], None] | None = None
         self._on_value_clicked: Callable[[str, str], None] | None = None
         self._on_offset_measurement_add: Callable[[str, str, str], None] | None = None
@@ -1137,6 +1143,11 @@ class ResultTable(QWidget):
     ) -> None:
         self._on_range_changed = handler
 
+    def set_short_circuit_tsc_range_handler(
+        self, handler: Callable[[str], None] | None,
+    ) -> None:
+        self._on_short_circuit_tsc_range_changed = handler
+
     def set_eoff_pre_handler(self, handler: Callable[[float], None] | None) -> None:
         self._on_eoff_pre_changed = handler
 
@@ -1303,7 +1314,7 @@ class ResultTable(QWidget):
                 ("Td_off", "ns", off.td_off),
                 ("Tf", "ns", off.tf),
                 ("串扰电压", "V", off.crosstalk_v),
-                ("Pdmax", "KW", off.pdmax),
+                (power_metric_name("关断过程"), "KW", off.pmax),
                 ("Eoff", "mJ", off.eoff),
             ],
             {"Eoff"},
@@ -1324,7 +1335,7 @@ class ResultTable(QWidget):
                     ("Td_on", "ns", on.td_on),
                     ("Tr", "ns", on.tr),
                     ("串扰电压", "V", on.crosstalk_v),
-                    ("Pdmax", "KW", on.pdmax),
+                    (power_metric_name("开通"), "KW", on.pmax),
                     ("Eon", "mJ", on.eon),
                 ],
                 {"Eon"},
@@ -1421,7 +1432,11 @@ class ResultTable(QWidget):
             range_item.setForeground(text_color)
             range_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             range_item.setFont(utility_font)
-            if row_key or (section == "关断过程" and name == "Eoff"):
+            if (
+                row_key
+                or (section == "关断过程" and name == "Eoff")
+                or (section == "短路过程" and name == "短路时间Tsc")
+            ):
                 range_item.setToolTip("双击修改范围取值")
             self.table.setItem(r, 3, range_item)
             val_item = QTableWidgetItem(val)
@@ -1593,6 +1608,27 @@ class ResultTable(QWidget):
         if col != 3 or row < 0 or row >= len(self._row_meta):
             return
         section, name = self._row_meta[row]
+        if section == "短路过程" and name == "短路时间Tsc":
+            item = self.table.item(row, col)
+            current = item.text() if item else SHORT_CIRCUIT_TSC_RANGE_DEFAULT
+            options = list(SHORT_CIRCUIT_TSC_RANGE_OPTIONS)
+            current_idx = options.index(current) if current in options else 0
+            selected, ok = QInputDialog.getItem(
+                self,
+                "短路时间 Tsc 取值范围",
+                "选择范围：",
+                options,
+                current_idx,
+                False,
+            )
+            if not ok:
+                return
+            if item:
+                item.setText(selected)
+            if self._on_short_circuit_tsc_range_changed:
+                self._on_short_circuit_tsc_range_changed(str(selected))
+            return
+
         if section == "关断过程" and name == "Eoff":
             item = self.table.item(row, col)
             text = item.text() if item else ""

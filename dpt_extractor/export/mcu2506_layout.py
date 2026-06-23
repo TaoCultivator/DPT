@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.workbook import Workbook as WorkbookType
 from openpyxl.worksheet.worksheet import Worksheet
 
-from dpt_extractor.models.results import ExtractResult
+from dpt_extractor.models.results import ExtractResult, power_metric_name
 from dpt_extractor.utils.filename import parse_setpoints_from_filename
 
 # 列号（1-based，A–AN 共 40 列）
@@ -32,7 +32,7 @@ COL_OFF = {
     "td_off": 13,
     "tf": 14,
     "crosstalk": 15,
-    "pdmax": 16,
+    "pmax": 16,
     "eoff": 17,
 }
 
@@ -48,7 +48,7 @@ COL_ON = {
     "td_on": 26,
     "tr": 27,
     "crosstalk": 28,
-    "pdmax": 29,
+    "pmax": 29,
     "eon": 30,
 }
 
@@ -115,7 +115,7 @@ COLUMNS: list[tuple[int, str, str, PatternFill]] = [
     (COL_OFF["td_off"], "Td_off", "ns", FILL_OFF_HDR),
     (COL_OFF["tf"], "Tf", "ns", FILL_OFF_HDR),
     (COL_OFF["crosstalk"], "串扰电压", "V", FILL_OFF_HDR),
-    (COL_OFF["pdmax"], "Pdmax", "KW", FILL_ENERGY),
+    (COL_OFF["pmax"], power_metric_name("关断过程"), "KW", FILL_ENERGY),
     (COL_OFF["eoff"], "Eoff", "mJ", FILL_ENERGY),
     (COL_ON["delta_vce"], "△Vce", "V", FILL_ON_HDR),
     (COL_ON["ic_on_max"], "Ic_on_max", "A", FILL_ON_HDR),
@@ -128,7 +128,7 @@ COLUMNS: list[tuple[int, str, str, PatternFill]] = [
     (COL_ON["td_on"], "Td_on", "ns", FILL_ON_HDR),
     (COL_ON["tr"], "Tr", "ns", FILL_ON_HDR),
     (COL_ON["crosstalk"], "串扰电压", "V", FILL_ON_HDR),
-    (COL_ON["pdmax"], "Pdmax", "KW", FILL_ENERGY),
+    (COL_ON["pmax"], power_metric_name("开通"), "KW", FILL_ENERGY),
     (COL_ON["eon"], "Eon", "mJ", FILL_ENERGY),
     (COL_RR["irr"], "Irr", "A", FILL_RR_HDR),
     (COL_RR["trr"], "Trr", "ns", FILL_RR_HDR),
@@ -335,7 +335,7 @@ def fill_data_row(ws: Worksheet, row: int, result: ExtractResult) -> None:
         "串扰电压",
         _crosstalk_str(off.crosstalk_vmax, off.crosstalk_vmin),
     )
-    _set_metric_value(ws, row, COL_OFF["pdmax"], result, "关断过程", "Pdmax", _num(off.pdmax, 3))
+    _set_metric_value(ws, row, COL_OFF["pmax"], result, "关断过程", power_metric_name("关断过程"), _num(off.pmax, 3))
     _set_metric_value(ws, row, COL_OFF["eoff"], result, "关断过程", "Eoff", _num(off.eoff, 3))
 
     _set_metric_value(ws, row, COL_ON["delta_vce"], result, "开通", "ΔVce", _num(on.delta_vce))
@@ -359,7 +359,7 @@ def fill_data_row(ws: Worksheet, row: int, result: ExtractResult) -> None:
         "串扰电压",
         _crosstalk_str(on.crosstalk_vmax, on.crosstalk_vmin),
     )
-    _set_metric_value(ws, row, COL_ON["pdmax"], result, "开通", "Pdmax", _num(on.pdmax, 3))
+    _set_metric_value(ws, row, COL_ON["pmax"], result, "开通", power_metric_name("开通"), _num(on.pmax, 3))
     _set_metric_value(ws, row, COL_ON["eon"], result, "开通", "Eon", _num(on.eon, 3))
 
     _set_metric_value(ws, row, COL_RR["irr"], result, "反向恢复", "Irr", _num(rr.irr))

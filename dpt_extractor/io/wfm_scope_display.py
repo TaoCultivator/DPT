@@ -141,6 +141,7 @@ def scope_vdiv_by_logical(meta: TekMetadata, profile: BridgeProfile) -> dict[str
         ("irr", profile.irr),
         ("v_diode", profile.v_diode),
         ("vge_other", profile.vge_other),
+        ("vdesat", getattr(profile, "vdesat", "")),
     ):
         base = channel_reference_base_name(ch)
         if base and base in ch_vdiv and key not in out:
@@ -166,6 +167,7 @@ def scope_y_position_by_logical(meta: TekMetadata, profile: BridgeProfile) -> di
         ("irr", profile.irr),
         ("v_diode", profile.v_diode),
         ("vge_other", profile.vge_other),
+        ("vdesat", getattr(profile, "vdesat", "")),
     ):
         base = channel_reference_base_name(ch)
         if base and base in ch_pos and key not in out:

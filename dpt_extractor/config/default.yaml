@@ -43,3 +43,7 @@ standard:
 vdc:
   use_plateau_before_off: true
   plateau_ic_fraction: 0.85
+
+short_circuit:
+  # 未设置阈值时不计算 Desat 动作时间，数据区显示 "-"，报告留空。
+  desat_threshold_v:

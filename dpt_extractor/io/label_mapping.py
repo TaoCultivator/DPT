@@ -62,6 +62,7 @@ _LOWER_VDIODE_PATTERNS = _UPPER_VCE_PATTERNS
 # --- 对管门极 ---
 _UPPER_VGE_OTHER_PATTERNS = _LOWER_VGE_PATTERNS
 _LOWER_VGE_OTHER_PATTERNS = _UPPER_VGE_PATTERNS
+_VDESAT_PATTERNS = (r"^DESAT$", r"VDESAT", r"DESATV", r"DSAT")
 
 # 上桥：下桥支路电流（IGBT: IC_VL / Ic；MOSFET: IVL / Id 低侧支路）
 _UPPER_LOWER_ARM_PATTERNS = (
@@ -338,6 +339,10 @@ def infer_channel_mapping(
         if ch:
             setattr(m, attr, ch)
             used.add(ch)
+    vdesat = _pick_channel(labeled, _VDESAT_PATTERNS, used)
+    if vdesat:
+        m.vdesat = vdesat
+        used.add(vdesat)
 
     if is_upper:
         if not _apply_upper_current_logic(m, labeled, used, avail):
@@ -415,6 +420,10 @@ def infer_short_circuit_mapping(
         if ch:
             setattr(m, attr, ch)
             used.add(ch)
+    vdesat = _pick_channel(labeled, _VDESAT_PATTERNS, used)
+    if vdesat:
+        m.vdesat = vdesat
+        used.add(vdesat)
 
     current = _pick_channel(
         labeled,

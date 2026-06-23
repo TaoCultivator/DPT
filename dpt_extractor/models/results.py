@@ -2,6 +2,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+SHORT_CIRCUIT_TSC_RANGE_DEFAULT = "0%-0%"
+SHORT_CIRCUIT_TSC_RANGE_10 = "10%-10%"
+SHORT_CIRCUIT_TSC_RANGE_OPTIONS = (
+    SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
+    SHORT_CIRCUIT_TSC_RANGE_10,
+)
+
+POWER_METRIC_SECTIONS = {"关断过程", "开通", "反向恢复"}
+
+
+def power_metric_name(section: str) -> str:
+    return "Pdmax" if section == "反向恢复" else "Pmax"
+
+
+def normalize_power_metric_name(section: str, name: str) -> str:
+    if section in POWER_METRIC_SECTIONS and name in {"Pmax", "Pdmax"}:
+        return power_metric_name(section)
+    return name
+
 
 @dataclass
 class SegmentIndices:
@@ -30,7 +49,7 @@ class TurnOffResult:
     crosstalk_v: float = 0.0
     crosstalk_vmax: float = 0.0
     crosstalk_vmin: float = 0.0
-    pdmax: float = 0.0
+    pmax: float = 0.0
     eoff: float = 0.0
     eoff_range: str = ""
     eoff_check: float = 0.0
@@ -54,7 +73,7 @@ class TurnOnResult:
     crosstalk_v: float = 0.0
     crosstalk_vmax: float = 0.0
     crosstalk_vmin: float = 0.0
-    pdmax: float = 0.0
+    pmax: float = 0.0
     eon: float = 0.0
     eon_check: float = 0.0
     energy_warn: bool = False
@@ -118,4 +137,8 @@ class ExtractResult:
     unavailable_metrics: set[tuple[str, str]] = field(default_factory=set)
 
     def is_metric_unavailable(self, section: str, name: str) -> bool:
-        return (section, name) in self.unavailable_metrics
+        normalized = normalize_power_metric_name(section, name)
+        return (
+            (section, name) in self.unavailable_metrics
+            or (section, normalized) in self.unavailable_metrics
+        )

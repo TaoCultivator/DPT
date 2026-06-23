@@ -676,6 +676,7 @@ SCOPE_VDIV_DEFAULT: dict[str, float] = {
     "irr": 200.0,      # CH3/CH4 电流
     "v_diode": 200.0,  # CH5 L-Vce
     "vge_other": 5.0,  # CH6 L-Vge
+    "vdesat": 5.0,
 }
 
 # 默认垂直位置偏移（格），对齐用户示波器布局
@@ -686,6 +687,7 @@ SCOPE_OFFSET_DEFAULT: dict[str, float] = {
     "irr": 2.5,
     "v_diode": -2.0,
     "vge_other": -0.5,
+    "vdesat": 0.0,
 }
 
 
@@ -706,6 +708,7 @@ CHANNEL_UNITS = {
     "irr": "A",
     "v_diode": "V",
     "vge_other": "V",
+    "vdesat": "V",
 }
 
 SOURCE_CHANNEL_PATTERN = r"(?:CH[1-8]|MATH\d+)"
@@ -2954,6 +2957,7 @@ class WaveformPlot(QWidget):
             irr=self._effective_reference_for_channel(profile.irr),
             v_diode=self._effective_reference_for_channel(profile.v_diode),
             vge_other=self._effective_reference_for_channel(profile.vge_other),
+            vdesat=self._effective_reference_for_channel(profile.vdesat),
         )
 
     def _current_x_window_for_display(self) -> tuple[float, float] | None:
@@ -3384,6 +3388,7 @@ class WaveformPlot(QWidget):
             (profile.il, "A"),
             (profile.v_diode, "V"),
             (profile.vge_other, "V"),
+            (profile.vdesat, "V"),
         ):
             if channel:
                 add_unit(channel, unit)
@@ -3405,6 +3410,7 @@ class WaveformPlot(QWidget):
             ("irr", profile.irr),
             ("v_diode", profile.v_diode),
             ("vge_other", profile.vge_other),
+            ("vdesat", profile.vdesat),
         ):
             if channel:
                 mapping[logical] = display_ref(channel)
@@ -3430,6 +3436,7 @@ class WaveformPlot(QWidget):
             "irr": "Irr",
             "v_diode": "V_二极管",
             "vge_other": "对管Vge",
+            "vdesat": "Vdesat",
         }
         roles: dict[str, list[str]] = {}
         display_map = logical_map or WaveformPlot._logical_display_key_map(profile)
@@ -4133,36 +4140,6 @@ class WaveformPlot(QWidget):
         self._hidden_channels.clear()
         self._active_channel = self._display_key_for_channel("ic")
         self._build_channel_bar()
-
-        if result and result.segments and result.short_circuit_mode:
-            segs: SegmentIndices = result.segments
-            sc = result.short_circuit
-            start_us = (
-                float(sc.tsc_start_us)
-                if sc.tsc_start_us is not None
-                else float(t[segs.turn_off[0]] * 1e6)
-            )
-            end_us = (
-                float(sc.tsc_end_us)
-                if sc.tsc_end_us is not None
-                else float(t[segs.turn_off[1]] * 1e6)
-            )
-            edge_marks_us = [
-                (start_us, "短路开始"),
-                (end_us, "短路结束"),
-            ]
-            for pos_us, label in edge_marks_us:
-                line = pg.InfiniteLine(
-                    pos=pos_us,
-                    angle=90,
-                    pen=_spaced_dash_pen(REFERENCE_LINE_COLOR, 1),
-                    label=label,
-                    labelOpts={"color": REFERENCE_LINE_COLOR, "position": 0.95},
-                )
-                self._register_auxiliary_dash_line(line)
-                line.setZValue(REFERENCE_LINE_Z)
-                line.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-                self.plot.addItem(line)
 
         # ---- 默认 X：铺满双脉冲全景（用原始 t 而非降采样后的 t_us，避免精度损失）----
         full_min = float(t[0] * 1e6)
@@ -6525,7 +6502,7 @@ class WaveformPlot(QWidget):
     _BASE_TOP_SLOPE_MODES = frozenset({"dvdt", "didt"})
 
     def _readout_channel(self) -> str:
-        if self._interactive_mode == "turn_on_current":
+        if self._interactive_mode in {"turn_on_current", "short_current"}:
             return self._display_key_for_channel("ic")
         if (
             self._interactive_mode in self._BASE_TOP_SLOPE_MODES
@@ -7582,6 +7559,199 @@ class WaveformPlot(QWidget):
         tb = float(self._cursor_b.value())
         self._interactive_on_change(ta, tb, hb, ha)
 
+    def enable_short_current_interaction(
+        self,
+        search_t0_us: float,
+        search_t1_us: float,
+        t_a_us: float,
+        t_b_us: float,
+        hb: float,
+        ha: float,
+        on_change,
+        *,
+        channel: str = "ic",
+        emit_result_on_enter: bool = False,
+    ) -> None:
+        """短路电流/Tsc：Hb 与电流交点联动 A/B，Ha 保持窗口内电流最大值。"""
+        lo = min(float(search_t0_us), float(search_t1_us), float(t_a_us), float(t_b_us))
+        hi = max(float(search_t0_us), float(search_t1_us), float(t_a_us), float(t_b_us))
+        self._interactive_enabled = True
+        self.clear_cursor_auxiliary_guides()
+        self._interactive_on_change = on_change
+        self._interactive_mode = "short_current"
+        self._active_channel = channel
+        self._slope_channel = channel
+        self._interval_max_hline_enabled = True
+        self._interval_peak_on_hb = False
+        self._interactive_search_t0_us = lo
+        self._interactive_search_t1_us = hi
+
+        if self._cursor_a is None or self._cursor_b is None:
+            self._install_persistent_cursors(t_a_us, t_b_us, 1.0)
+
+        self._interactive_syncing = True
+        try:
+            self._cursor_a.setPos(float(t_a_us))
+            self._cursor_a.setMovable(True)
+            self._cursor_b.setPos(float(t_b_us))
+            self._cursor_b.setMovable(True)
+            if self._h_cursor_a is not None:
+                self._h_cursor_a.setPos(self._to_disp(channel, float(ha)))
+                self._h_cursor_a.setMovable(False)
+                self._h_cursor_a_locked = True
+            if self._h_cursor_b is not None:
+                self._h_cursor_b.setPos(self._to_disp(channel, float(hb)))
+                self._h_cursor_b.setMovable(True)
+        finally:
+            self._interactive_syncing = False
+        self.set_cursor_auxiliary_point(channel, float(t_b_us), float(ha))
+        self._update_readout()
+        if emit_result_on_enter:
+            self._emit_short_current_changed()
+
+    def _short_current_search_slice(
+        self, channel: str
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        tt, yy = self._series_for_channel(channel)
+        if tt is None or yy is None or len(tt) < 4:
+            return None
+        lo = (
+            float(self._interactive_search_t0_us)
+            if self._interactive_search_t0_us is not None
+            else float(np.nanmin(tt))
+        )
+        hi = (
+            float(self._interactive_search_t1_us)
+            if self._interactive_search_t1_us is not None
+            else float(np.nanmax(tt))
+        )
+        if hi < lo:
+            lo, hi = hi, lo
+        mask = (tt >= lo) & (tt <= hi)
+        idx = np.where(mask)[0]
+        if len(idx) < 4:
+            idx = np.arange(len(tt))
+        return np.asarray(tt[idx], dtype=np.float64), np.asarray(yy[idx], dtype=np.float64)
+
+    @staticmethod
+    def _interp_crossing_time_us(
+        t0: float,
+        y0: float,
+        t1: float,
+        y1: float,
+        level: float,
+    ) -> float:
+        dy = float(y1) - float(y0)
+        if abs(dy) < 1e-30:
+            return float(t0)
+        frac = (float(level) - float(y0)) / dy
+        frac = max(0.0, min(1.0, frac))
+        return float(t0) + frac * (float(t1) - float(t0))
+
+    def _short_current_crossings_for_hb(
+        self, channel: str, hb: float
+    ) -> tuple[float, float, float, float] | None:
+        sliced = self._short_current_search_slice(channel)
+        if sliced is None:
+            return None
+        tt, yy = sliced
+        finite = np.isfinite(tt) & np.isfinite(yy)
+        tt = tt[finite]
+        yy = yy[finite]
+        if len(tt) < 4:
+            return None
+        peak_idx = int(np.nanargmax(yy))
+        if peak_idx <= 0 or peak_idx >= len(yy) - 1:
+            return None
+        ha = float(np.nanmax(yy))
+        rise_idx: int | None = None
+        for idx in range(0, peak_idx):
+            if float(yy[idx]) <= hb <= float(yy[idx + 1]):
+                rise_idx = idx
+                break
+        fall_idx: int | None = None
+        for idx in range(peak_idx, len(yy) - 1):
+            if float(yy[idx]) >= hb >= float(yy[idx + 1]):
+                fall_idx = idx
+                break
+        if rise_idx is None or fall_idx is None:
+            return None
+        ta = self._interp_crossing_time_us(
+            tt[rise_idx], yy[rise_idx], tt[rise_idx + 1], yy[rise_idx + 1], hb
+        )
+        tb = self._interp_crossing_time_us(
+            tt[fall_idx], yy[fall_idx], tt[fall_idx + 1], yy[fall_idx + 1], hb
+        )
+        if tb <= ta:
+            return None
+        return ta, tb, float(hb), ha
+
+    def _sync_short_current_from_hb(self) -> None:
+        if (
+            self._h_cursor_b is None
+            or self._cursor_a is None
+            or self._cursor_b is None
+        ):
+            return
+        channel = self._active_channel or "ic"
+        hb = float(self._from_disp(channel, float(self._h_cursor_b.value())))
+        crosses = self._short_current_crossings_for_hb(channel, hb)
+        if crosses is None:
+            return
+        ta, tb, hb, ha = crosses
+        self._cursor_a.setPos(float(ta))
+        self._cursor_b.setPos(float(tb))
+        if self._h_cursor_a is not None:
+            self._h_cursor_a.setPos(self._to_disp(channel, float(ha)))
+            self._h_cursor_a.setMovable(False)
+            self._h_cursor_a_locked = True
+        self.set_cursor_auxiliary_point(channel, float(tb), float(ha))
+
+    def _sync_short_current_peak_from_window(self) -> None:
+        if (
+            self._cursor_a is None
+            or self._cursor_b is None
+            or self._h_cursor_a is None
+        ):
+            return
+        channel = self._active_channel or "ic"
+        tt, yy = self._series_for_channel(channel)
+        if tt is None or yy is None or len(tt) == 0:
+            return
+        lo = min(float(self._cursor_a.value()), float(self._cursor_b.value()))
+        hi = max(float(self._cursor_a.value()), float(self._cursor_b.value()))
+        mask = (tt >= lo) & (tt <= hi)
+        if not np.any(mask):
+            return
+        idxs = np.where(mask)[0]
+        seg = np.asarray(yy[idxs], dtype=np.float64)
+        if len(seg) == 0 or not np.isfinite(seg).any():
+            return
+        local = int(np.nanargmax(seg))
+        peak_idx = int(idxs[local])
+        ha = float(yy[peak_idx])
+        self._h_cursor_a.setPos(self._to_disp(channel, ha))
+        self._h_cursor_a.setMovable(False)
+        self._h_cursor_a_locked = True
+        self.set_cursor_auxiliary_point(channel, float(tt[peak_idx]), ha)
+
+    def _emit_short_current_changed(self) -> None:
+        if self._interactive_on_change is None:
+            return
+        if (
+            self._cursor_a is None
+            or self._cursor_b is None
+            or self._h_cursor_a is None
+            or self._h_cursor_b is None
+        ):
+            return
+        channel = self._active_channel or "ic"
+        ta = float(self._cursor_a.value())
+        tb = float(self._cursor_b.value())
+        hb = float(self._from_disp(channel, float(self._h_cursor_b.value())))
+        ha = float(self._from_disp(channel, float(self._h_cursor_a.value())))
+        self._interactive_on_change(ta, tb, hb, ha)
+
     def enable_irr_peak_interaction(
         self,
         start_t_us: float,
@@ -7840,6 +8010,9 @@ class WaveformPlot(QWidget):
             if self._interactive_mode == "turn_on_current":
                 self._emit_turn_on_current_changed()
                 return
+            if self._interactive_mode == "short_current":
+                self._emit_short_current_changed()
+                return
             if self._interactive_mode == "trr_measure":
                 self._emit_trr_measure_changed()
                 return
@@ -7912,6 +8085,15 @@ class WaveformPlot(QWidget):
             self._emit_turn_on_current_changed()
             self._update_readout()
             return
+        if self._interactive_mode == "short_current":
+            self._interactive_syncing = True
+            try:
+                self._sync_short_current_peak_from_window()
+            finally:
+                self._interactive_syncing = False
+            self._emit_short_current_changed()
+            self._update_readout()
+            return
         if self._interactive_mode == "trr_measure":
             self._emit_trr_measure_changed()
             return
@@ -7964,6 +8146,9 @@ class WaveformPlot(QWidget):
                 return
             if self._interactive_mode == "turn_on_current":
                 self._emit_turn_on_current_changed()
+                return
+            if self._interactive_mode == "short_current":
+                self._emit_short_current_changed()
                 return
             if self._interactive_mode == "trr_measure":
                 self._emit_trr_measure_changed()
@@ -8044,6 +8229,19 @@ class WaveformPlot(QWidget):
             finally:
                 self._interactive_syncing = False
             self._emit_turn_on_current_changed()
+            self._update_readout()
+            return
+        if self._interactive_mode == "short_current":
+            sender = self.sender()
+            self._interactive_syncing = True
+            try:
+                if sender is self._h_cursor_b:
+                    self._sync_short_current_from_hb()
+                else:
+                    self._sync_short_current_peak_from_window()
+            finally:
+                self._interactive_syncing = False
+            self._emit_short_current_changed()
             self._update_readout()
             return
         if self._interactive_mode == "trr_measure":

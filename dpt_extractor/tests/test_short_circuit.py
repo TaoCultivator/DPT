@@ -67,27 +67,44 @@ class TestShortCircuitLabelMapping(unittest.TestCase):
     def test_short_circuit_energy_math_channel_uses_display_inversion(self):
         import numpy as np
 
-        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.bridge_profile import as_short_circuit_profile, make_profile
         from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
-        from dpt_extractor.pipeline.short_circuit_extract import short_circuit_energy_value
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_energy_peak_value,
+            short_circuit_energy_value,
+        )
 
-        raw_energy = np.array([3.0, 2.0, 1.0], dtype=np.float64)
+        raw_energy = np.array([-3.0, -2.0, -1.0], dtype=np.float64)
+        profile = as_short_circuit_profile(make_profile("U", "upper"))
         bundle = WaveformBundle(
             t=np.arange(raw_energy.size, dtype=np.float64),
-            channels={"MATH1": raw_energy},
+            channels={
+                "CH2": np.array([10.0, 10.0, 10.0], dtype=np.float64),
+                "CH3": np.array([1.0, 2.0, 3.0], dtype=np.float64),
+                "MATH1": raw_energy,
+            },
             meta=TekMetadata(channel_display_inversions={"MATH1"}),
         )
 
         value, source = short_circuit_energy_value(
             bundle,
-            make_profile("U", "upper"),
+            profile,
+            0,
+            2,
+            math_channel="MATH1",
+        )
+        peak, peak_source = short_circuit_energy_peak_value(
+            bundle,
+            profile,
             0,
             2,
             math_channel="MATH1",
         )
 
         self.assertEqual(source, "MATH1")
-        self.assertAlmostEqual(value, 2.0)
+        self.assertAlmostEqual(value, 40.0)
+        self.assertEqual(peak_source, "MATH1")
+        self.assertAlmostEqual(peak, 3.0)
 
 
 @unittest.skipUnless(DL_UH.exists() and DL_UL.exists(), "short-circuit DL samples missing")
@@ -139,14 +156,14 @@ class TestShortCircuitExtract(unittest.TestCase):
             bundle.dt,
             smooth_ns=cfg.smoothing.detect_window_ns,
         )
-        other_vce_cursors = short_circuit_current_cursors(
+        other_vce_cursors = short_circuit_vpeak_cursors(
             bundle.t,
+            bundle.get(profile.vge),
             bundle.get(profile.v_diode),
             i0,
             i1,
             bundle.dt,
             smooth_ns=cfg.smoothing.detect_window_ns,
-            peak_mode="max",
         )
         self.assertIsNotNone(dut_vce_cursors)
         self.assertIsNotNone(other_vce_cursors)
@@ -168,7 +185,7 @@ class TestShortCircuitExtract(unittest.TestCase):
         self.assertLess(sc.tsc, 5.0)
         self.assertAlmostEqual(
             sc.ic_max,
-            float(abs(bundle.channels["CH3"][cursors.i0 : cursors.i1 + 1]).max()),
+            float(bundle.channels["CH3"][cursors.i0 : cursors.i1 + 1].max()),
             delta=1e-6,
         )
         self.assertAlmostEqual(
@@ -182,11 +199,85 @@ class TestShortCircuitExtract(unittest.TestCase):
         self.assertAlmostEqual(sc.tsc_start_us, cursors.t_a_s * 1e6, delta=1e-6)
         self.assertAlmostEqual(sc.tsc_end_us, cursors.t_b_s * 1e6, delta=1e-6)
         self.assertAlmostEqual(sc.tsc, sc.tsc_end_us - sc.tsc_start_us, delta=1e-6)
-        self.assertEqual(sc.tsc_range, "Ic-Hb交点")
+        self.assertEqual(sc.tsc_range, "0%-0%")
         self.assertAlmostEqual(sc.esc_dut, esc_dut_expected, delta=1e-6)
         self.assertAlmostEqual(sc.esc_other, esc_other_expected, delta=1e-6)
         self.assertAlmostEqual(sc.vpeak_dut, dut_vce_cursors.ha_a, delta=1e-6)
         self.assertAlmostEqual(sc.vpeak_other, other_vce_cursors.ha_a, delta=1e-6)
+
+    def test_short_circuit_tsc_can_use_10_percent_current_range(self):
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import as_short_circuit_profile, guess_profile_from_path
+        from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_10
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.models.waveform import bundle_total_current
+        from dpt_extractor.pipeline.run_extract import run_extraction
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_current_percent_cursors,
+        )
+
+        bundle = load_waveform(DL_UH)
+        profile = guess_profile_from_path(DL_UH)
+        cfg_default = load_config()
+        cfg_default.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        default_result = run_extraction(bundle, profile, cfg_default)
+
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        cfg.short_circuit_tsc_range = SHORT_CIRCUIT_TSC_RANGE_10
+        result = run_extraction(bundle, profile, cfg)
+        sc = result.short_circuit
+        assert result.segments is not None
+        i0, i1 = result.segments.turn_off
+        sc_profile = as_short_circuit_profile(profile)
+        cursors = short_circuit_current_percent_cursors(
+            bundle.t,
+            bundle_total_current(bundle, sc_profile),
+            i0,
+            i1,
+            bundle.dt,
+            smooth_ns=cfg.smoothing.detect_window_ns,
+            percent=10.0,
+        )
+
+        self.assertIsNotNone(cursors)
+        assert cursors is not None
+        self.assertEqual(sc.tsc_range, SHORT_CIRCUIT_TSC_RANGE_10)
+        self.assertAlmostEqual(sc.tsc_start_us, cursors.t_a_s * 1e6, delta=1e-6)
+        self.assertAlmostEqual(sc.tsc_end_us, cursors.t_b_s * 1e6, delta=1e-6)
+        self.assertAlmostEqual(sc.tsc, (cursors.t_b_s - cursors.t_a_s) * 1e6, delta=1e-6)
+        self.assertLess(sc.tsc, default_result.short_circuit.tsc)
+        self.assertAlmostEqual(sc.esc_dut, default_result.short_circuit.esc_dut, delta=1e-6)
+        self.assertAlmostEqual(sc.esc_other, default_result.short_circuit.esc_other, delta=1e-6)
+
+    def test_lower_short_circuit_tsc_10_percent_keeps_energy_and_profile(self):
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import guess_profile_from_path
+        from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_10
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.pipeline.run_extract import run_extraction
+
+        bundle = load_waveform(DL_UL)
+        profile = guess_profile_from_path(DL_UL)
+        cfg_default = load_config()
+        cfg_default.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        default_result = run_extraction(bundle, profile, cfg_default)
+
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        cfg.short_circuit_tsc_range = SHORT_CIRCUIT_TSC_RANGE_10
+        result = run_extraction(bundle, profile, cfg)
+        sc = result.short_circuit
+
+        self.assertEqual(result.profile_code, "UL")
+        self.assertEqual(sc.tsc_range, SHORT_CIRCUIT_TSC_RANGE_10)
+        self.assertGreater(sc.tsc, 0.0)
+        self.assertLess(sc.tsc, default_result.short_circuit.tsc)
+        self.assertAlmostEqual(sc.ic_max, default_result.short_circuit.ic_max, delta=1e-6)
+        self.assertAlmostEqual(sc.esc_dut, default_result.short_circuit.esc_dut, delta=1e-6)
+        self.assertAlmostEqual(sc.esc_other, default_result.short_circuit.esc_other, delta=1e-6)
 
     def test_extracts_lower_short_circuit_uses_lower_vce_as_dut(self):
         _bundle, result = self._extract(DL_UL)
@@ -198,6 +289,44 @@ class TestShortCircuitExtract(unittest.TestCase):
         self.assertGreater(sc.esc_dut, 1.0)
         self.assertGreater(sc.vpeak_dut, sc.vpeak_other)
         self.assertGreater(sc.tsc, 1.0)
+
+    def test_vpeak_other_uses_dut_vge_window_for_upper_and_lower(self):
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import (
+            as_short_circuit_profile,
+            guess_profile_from_path,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.pipeline.run_extract import run_extraction
+        from dpt_extractor.pipeline.short_circuit_extract import short_circuit_vpeak_cursors
+
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        for path in (DL_UH, DL_UL):
+            bundle = load_waveform(path)
+            profile = as_short_circuit_profile(guess_profile_from_path(path))
+            result = run_extraction(bundle, profile, cfg)
+            assert result.segments is not None
+            i0, i1 = result.segments.turn_off
+            cursors = short_circuit_vpeak_cursors(
+                bundle.t,
+                bundle.get(profile.vge),
+                bundle.get(profile.v_diode),
+                i0,
+                i1,
+                bundle.dt,
+                smooth_ns=cfg.smoothing.detect_window_ns,
+            )
+
+            self.assertIsNotNone(cursors, path.name)
+            assert cursors is not None
+            self.assertAlmostEqual(
+                result.short_circuit.vpeak_other,
+                cursors.ha_a,
+                delta=1e-6,
+                msg=path.name,
+            )
 
 
 @unittest.skipUnless(DDD_UH.exists(), "short-circuit DDD sample missing")
@@ -411,6 +540,33 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
+    def setUp(self):
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY
+        from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_DEFAULT
+
+        self._tsc_settings = QSettings("DPT", "DPTExtractor")
+        self._old_tsc_range = self._tsc_settings.value(
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+            None,
+        )
+        self._tsc_settings.setValue(
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+            SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
+        )
+
+    def tearDown(self):
+        from dpt_extractor.gui.main_window import SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY
+
+        if self._old_tsc_range is None:
+            self._tsc_settings.remove(SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY)
+        else:
+            self._tsc_settings.setValue(
+                SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+                self._old_tsc_range,
+            )
+
     def test_short_circuit_parameter_click_keeps_current_view(self):
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.models.test_mode import TestMode
@@ -453,9 +609,7 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
         hb_line = win.wave_plot._from_disp("ic", float(win.wave_plot._h_cursor_b.value()))
         self.assertAlmostEqual(float(ha_line), float(ha), places=3)
         self.assertAlmostEqual(float(hb_line), float(hb), places=3)
-        self.assertIsNotNone(win.wave_plot._cursor_aux_hline)
-        assert win.wave_plot._cursor_aux_hline is not None
-        self.assertFalse(win.wave_plot._cursor_aux_hline.isVisible())
+        self.assertTrue(win.wave_plot._interval_max_hline_enabled)
         self.assertAlmostEqual(win.result.short_circuit.tsc, t_b_us - t_a_us, places=6)
 
         win._enable_generic_parameter_interaction("短路过程", "短路时间Tsc")
@@ -467,9 +621,46 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
         self.assertAlmostEqual(
             float(win.wave_plot._cursor_b.value()), float(t_b_us), places=6
         )
+        self.assertTrue(win.wave_plot._interval_max_hline_enabled)
         win.close()
 
-    def test_initial_short_circuit_edge_markers_use_tsc_window(self):
+    def test_short_circuit_tsc_range_persists_across_restart_and_file_load(self):
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+        )
+        from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_10
+        from dpt_extractor.models.test_mode import TestMode
+
+        win = MainWindow()
+        win.cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        win._apply_test_mode_ui()
+        win._load_file(str(DL_UH), background=False)
+        self.app.processEvents()
+        win._on_short_circuit_tsc_range_changed(SHORT_CIRCUIT_TSC_RANGE_10)
+        self.app.processEvents()
+        self.assertEqual(
+            self._tsc_settings.value(SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY),
+            SHORT_CIRCUIT_TSC_RANGE_10,
+        )
+        win.close()
+
+        win2 = MainWindow()
+        self.assertEqual(win2.cfg.short_circuit_tsc_range, SHORT_CIRCUIT_TSC_RANGE_10)
+        win2.cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        win2._apply_test_mode_ui()
+        win2._load_file(str(DL_UH), background=False)
+        self.app.processEvents()
+        self.assertEqual(win2.cfg.short_circuit_tsc_range, SHORT_CIRCUIT_TSC_RANGE_10)
+        assert win2.result is not None
+        self.assertEqual(win2.result.short_circuit.tsc_range, SHORT_CIRCUIT_TSC_RANGE_10)
+        self.assertEqual(
+            win2._load_cfg_for_new_file().short_circuit_tsc_range,
+            SHORT_CIRCUIT_TSC_RANGE_10,
+        )
+        win2.close()
+
+    def test_initial_short_circuit_cursors_use_tsc_window_without_edge_markers(self):
         if not DDD_RT_VH.exists():
             self.skipTest("screenshot-matching short-circuit sample missing")
 
@@ -488,24 +679,25 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
         self.assertIsNotNone(sc.tsc_end_us)
         assert sc.tsc_start_us is not None and sc.tsc_end_us is not None
 
-        positions: dict[str, float] = {}
+        labels: set[str] = set()
         for item in win.wave_plot.plot.getPlotItem().items:
             label = getattr(getattr(item, "label", None), "format", None)
-            if label in {"短路开始", "短路结束"}:
-                positions[str(label)] = float(item.value())
+            if isinstance(label, str):
+                labels.add(label)
 
-        self.assertAlmostEqual(positions["短路开始"], sc.tsc_start_us, places=6)
-        self.assertAlmostEqual(positions["短路结束"], sc.tsc_end_us, places=6)
-        self.assertAlmostEqual(sc.tsc, positions["短路结束"] - positions["短路开始"], places=6)
+        self.assertNotIn("短路开始", labels)
+        self.assertNotIn("短路结束", labels)
         gate0, gate1 = win.result.segments.turn_off
-        self.assertGreater(abs(positions["短路开始"] - float(win.bundle.t[gate0] * 1e6)), 0.01)
-        self.assertGreater(abs(positions["短路结束"] - float(win.bundle.t[gate1] * 1e6)), 0.05)
+        self.assertGreater(abs(sc.tsc_start_us - float(win.bundle.t[gate0] * 1e6)), 0.01)
+        self.assertGreater(abs(sc.tsc_end_us - float(win.bundle.t[gate1] * 1e6)), 0.05)
         assert win.wave_plot._cursor_a is not None and win.wave_plot._cursor_b is not None
         self.assertAlmostEqual(float(win.wave_plot._cursor_a.value()), sc.tsc_start_us, places=6)
         self.assertAlmostEqual(float(win.wave_plot._cursor_b.value()), sc.tsc_end_us, places=6)
         win.close()
 
     def test_short_circuit_energy_and_vpeak_default_windows(self):
+        import numpy as np
+
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.models.test_mode import TestMode
 
@@ -523,7 +715,10 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
         win.wave_plot.focus_interval_us = _spy_focus  # type: ignore[method-assign]
         ic_cursors = win._short_circuit_ic_default_cursors()
         dut_vce_cursors = win._short_circuit_vpeak_default_cursors(win.profile.vce)
-        other_vce_cursors = win._short_circuit_waveform_default_cursors(win.profile.v_diode)
+        other_vce_cursors = win._short_circuit_vpeak_default_cursors(
+            win.profile.v_diode,
+            gate_channel=win.profile.vge,
+        )
         self.assertIsNotNone(ic_cursors)
         self.assertIsNotNone(dut_vce_cursors)
         self.assertIsNotNone(other_vce_cursors)
@@ -544,21 +739,26 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
             win._enable_generic_parameter_interaction("短路过程", name)
             self.app.processEvents()
             _assert_ab(ic_cursors)
-            _ta, _tb, hb, ha = ic_cursors
+            _ta, _tb, hb, _ha = ic_cursors
             assert win.wave_plot._h_cursor_a is not None
             assert win.wave_plot._h_cursor_b is not None
-            ha_line = win.wave_plot._from_disp(
-                "ic", float(win.wave_plot._h_cursor_a.value())
-            )
             hb_line = win.wave_plot._from_disp(
                 "ic", float(win.wave_plot._h_cursor_b.value())
             )
-            self.assertAlmostEqual(float(ha_line), float(ha), places=3)
             self.assertAlmostEqual(float(hb_line), float(hb), places=3)
+            i0 = int(np.searchsorted(win.bundle.t, min(_ta, _tb) * 1e-6, side="left"))
+            i1 = int(np.searchsorted(win.bundle.t, max(_ta, _tb) * 1e-6, side="left"))
+            marker = win._short_circuit_energy_peak_marker(name, i0, i1)
+            if marker is not None:
+                peak, peak_channel = marker
+                ha_line = win.wave_plot._from_disp(
+                    peak_channel, float(win.wave_plot._h_cursor_a.value())
+                )
+                self.assertAlmostEqual(float(ha_line), float(peak), places=3)
 
         for name, cursors, channel, base_channel in (
             ("应力Vpeak_本管", dut_vce_cursors, "vce", "vge"),
-            ("应力Vpeak_对管", other_vce_cursors, "v_diode", "v_diode"),
+            ("应力Vpeak_对管", other_vce_cursors, "v_diode", "vge"),
         ):
             win._enable_generic_parameter_interaction("短路过程", name)
             self.app.processEvents()

@@ -24,6 +24,7 @@ class BridgeProfile:
     irr: str
     v_diode: str
     vge_other: str
+    vdesat: str = ""
     #: 为 True 时总电流在软件内用 Irr+IL 波形相加，不使用示波器 MATH 列
     ic_from_sum_irr_il: bool = False
     #: 为 True 时反向恢复电流 = Ic 列 − IL 列（下桥典型接线），不使用 MATH 列
@@ -41,6 +42,8 @@ class BridgeProfile:
             ch.append(self.v_diode)
         if self.vge_other:
             ch.append(self.vge_other)
+        if self.vdesat:
+            ch.append(self.vdesat)
         return tuple(ch)
 
 
@@ -53,6 +56,7 @@ _UPPER_CHANNELS = dict(
     irr="CH3",
     v_diode="CH5",
     vge_other="CH6",
+    vdesat="",
     ic_from_sum_irr_il=True,
 )
 
@@ -66,6 +70,7 @@ _LOWER_CHANNELS = dict(
     irr="",
     v_diode="CH2",
     vge_other="CH1",
+    vdesat="",
     ic_from_sum_irr_il=False,
     irr_from_ic_minus_il=True,
 )
@@ -78,6 +83,7 @@ _SHORT_CIRCUIT_UPPER_CHANNELS = dict(
     irr="",
     v_diode="CH5",
     vge_other="CH6",
+    vdesat="",
     ic_from_sum_irr_il=False,
     irr_from_ic_minus_il=False,
 )
@@ -90,6 +96,7 @@ _SHORT_CIRCUIT_LOWER_CHANNELS = dict(
     irr="",
     v_diode="CH2",
     vge_other="CH1",
+    vdesat="",
     ic_from_sum_irr_il=False,
     irr_from_ic_minus_il=False,
 )
@@ -147,6 +154,7 @@ def as_short_circuit_profile(profile: BridgeProfile) -> BridgeProfile:
         ic=profile.ic if profile.ic and not profile.ic_from_sum_irr_il else base.ic,
         v_diode=profile.v_diode or base.v_diode,
         vge_other=profile.vge_other or base.vge_other,
+        vdesat=profile.vdesat,
         ic_from_sum_irr_il=False,
         irr_from_ic_minus_il=False,
     )
