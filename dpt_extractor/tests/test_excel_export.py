@@ -35,6 +35,9 @@ class TestExcelExport(unittest.TestCase):
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.export.excel_export import export_to_excel
         from dpt_extractor.export.mcu2506_layout import (
+            COL_OFF,
+            COL_ON,
+            COL_RR,
             DATA_ROW,
             HEADER_NAME_ROW,
             MERGE_INFO,
@@ -63,19 +66,25 @@ class TestExcelExport(unittest.TestCase):
             self.assertEqual(ws.cell(1, MERGE_SUMMARY[1]).value, "汇总")
             merged = {m.coord for m in ws.merged_cells.ranges}
             self.assertIn("A1:E2", merged)
-            self.assertIn("F1:P2", merged)
-            self.assertIn("AI1:AK2", merged)
-            self.assertIn("AC2:AH2", merged)
+            self.assertIn("F1:Q2", merged)
+            self.assertIn("AL1:AN2", merged)
+            self.assertIn("AE2:AK2", merged)
             self.assertEqual(ws.sheet_view.zoomScale, SHEET_ZOOM_PERCENT)
             self.assertIsNotNone(ws.cell(DATA_ROW, 2).border.left.style)
-            self.assertEqual(ws.cell(2, 17).value, "开通")
-            self.assertEqual(ws.cell(2, 29).value, "反向恢复")
+            self.assertEqual(ws.cell(2, 18).value, "开通")
+            self.assertEqual(ws.cell(2, 31).value, "反向恢复")
             self.assertEqual(ws.cell(DATA_ROW, 1).value, "WH")
             self.assertAlmostEqual(float(ws.cell(DATA_ROW, 4).value), 480.0, delta=1)
             self.assertAlmostEqual(float(ws.cell(DATA_ROW, 5).value), 800.0, delta=1)
-            self.assertGreater(float(ws.cell(DATA_ROW, 16).value), 0)
-            self.assertGreater(float(ws.cell(DATA_ROW, 28).value), 0)
-            self.assertGreater(float(ws.cell(DATA_ROW, 34).value), 0)
+            self.assertEqual(ws.cell(HEADER_NAME_ROW, COL_OFF["pdmax"]).value, "Pdmax")
+            self.assertEqual(ws.cell(HEADER_NAME_ROW, COL_ON["pdmax"]).value, "Pdmax")
+            self.assertEqual(ws.cell(HEADER_NAME_ROW, COL_RR["pdmax"]).value, "Pdmax")
+            self.assertGreater(float(ws.cell(DATA_ROW, COL_OFF["pdmax"]).value), 0)
+            self.assertGreater(float(ws.cell(DATA_ROW, COL_OFF["eoff"]).value), 0)
+            self.assertGreater(float(ws.cell(DATA_ROW, COL_ON["pdmax"]).value), 0)
+            self.assertGreater(float(ws.cell(DATA_ROW, COL_ON["eon"]).value), 0)
+            self.assertGreater(float(ws.cell(DATA_ROW, COL_RR["pdmax"]).value), 0)
+            self.assertGreater(float(ws.cell(DATA_ROW, COL_RR["err"]).value), 0)
 
     def test_uh_data_on_row_5(self):
         from openpyxl import load_workbook

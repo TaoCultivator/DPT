@@ -168,6 +168,8 @@ def _range_label_for_row(section: str, name: str, result: ExtractResult) -> str:
         return rr.didt_range
     if section == "关断过程" and name == "Eoff":
         return off.eoff_range
+    if name == "Pdmax":
+        return "V×I Max"
     return ""
 
 
@@ -537,7 +539,7 @@ class OffsetMeasurementDialog(QDialog):
         self.source_combo.blockSignals(True)
         self.source_combo.clear()
         for key, label in sources:
-            self.source_combo.addItem(label, key)
+            self.source_combo.addItem(_offset_source_short_label(key), key)
         index = self.source_combo.findData(current)
         if index < 0 and self.source_combo.count() > 0:
             index = 0
@@ -1301,6 +1303,7 @@ class ResultTable(QWidget):
                 ("Td_off", "ns", off.td_off),
                 ("Tf", "ns", off.tf),
                 ("串扰电压", "V", off.crosstalk_v),
+                ("Pdmax", "KW", off.pdmax),
                 ("Eoff", "mJ", off.eoff),
             ],
             {"Eoff"},
@@ -1321,6 +1324,7 @@ class ResultTable(QWidget):
                     ("Td_on", "ns", on.td_on),
                     ("Tr", "ns", on.tr),
                     ("串扰电压", "V", on.crosstalk_v),
+                    ("Pdmax", "KW", on.pdmax),
                     ("Eon", "mJ", on.eon),
                 ],
                 {"Eon"},
@@ -1334,6 +1338,7 @@ class ResultTable(QWidget):
                     ("Vrr", "V", rr.vrr),
                     ("dv/dt", "V/ns", rr.dvdt_max),
                     ("di/dt", "A/ns", rr.didt_irr),
+                    ("Pdmax", "KW", rr.pdmax),
                     ("Err", "mJ", rr.err),
                 ],
                 {"Err"},

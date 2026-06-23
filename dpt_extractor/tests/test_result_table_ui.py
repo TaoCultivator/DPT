@@ -54,6 +54,7 @@ def _sample_result() -> ExtractResult:
             vce_off_max=1093.25,
             dvdt=7.594,
             didt=10.623,
+            pdmax=910.5,
             eoff=88.884,
             eoff_range="V↑~Ic平稳",
         ),
@@ -64,6 +65,7 @@ def _sample_result() -> ExtractResult:
             turn_on_current=1036.12,
             dvdt=2.597,
             didt=6.565,
+            pdmax=640.2,
             eon=68.662,
         ),
         reverse_recovery=ReverseRecoveryResult(
@@ -72,6 +74,7 @@ def _sample_result() -> ExtractResult:
             vrr=985.03,
             dvdt_max=12.971,
             didt_irr=13.738,
+            pdmax=158.9,
             err=1.116,
         ),
     )
@@ -120,6 +123,10 @@ class TestResultTableUi(unittest.TestCase):
                 table.table.item(row, 4).foreground().color().name(),
                 ENERGY_TEXT_COLOR,
             )
+
+        for section in ("关断过程", "开通", "反向恢复"):
+            row = _row_for(table, section, "Pdmax")
+            self.assertEqual(table.table.item(row, 2).text(), "KW")
 
         table.set_active_metric("开通", "di/dt")
         self.assertEqual(table.table.currentRow(), _row_for(table, "开通", "di/dt"))
@@ -201,7 +208,7 @@ class TestResultTableUi(unittest.TestCase):
         table.set_offset_measurement_add_handler(
             lambda source, metric, range_key: events.append((source, metric, range_key))
         )
-        table.set_offset_sources([("CH1", "Ch 1"), ("MATH1", "Math 1")])
+        table.set_offset_sources([("CH1", "H-Vge (CH1)"), ("MATH1", "Ic (MATH1)")])
         table.show_offset_measurements(
             [("Ch 1", "Maximum", "V", "全波形", "12.34", "#fff53b")],
             source_count=2,
@@ -221,6 +228,8 @@ class TestResultTableUi(unittest.TestCase):
             self.assertEqual(palette.color(QPalette.ColorRole.Base).name(), "#f2f4f4")
             self.assertEqual(palette.color(QPalette.ColorRole.Text).name(), "#101014")
         self.assertEqual(table.offset_dialog.source_combo.currentData(), "CH1")
+        self.assertEqual(table.offset_dialog.source_combo.itemText(0), "Ch 1")
+        self.assertEqual(table.offset_dialog.source_combo.itemText(1), "Math 1")
         self.assertEqual(table.offset_dialog.range_combo.currentData(), "screen")
         max_button = next(
             button

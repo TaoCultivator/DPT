@@ -14,7 +14,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from dpt_extractor.models.results import ExtractResult
 from dpt_extractor.utils.filename import parse_setpoints_from_filename
 
-# 列号（1-based，A–AK 共 37 列）
+# 列号（1-based，A–AN 共 40 列）
 COL_PHASE = 1
 COL_TEMP = 2
 COL_CONDITION = 3
@@ -32,37 +32,40 @@ COL_OFF = {
     "td_off": 13,
     "tf": 14,
     "crosstalk": 15,
-    "eoff": 16,
+    "pdmax": 16,
+    "eoff": 17,
 }
 
 COL_ON = {
-    "delta_vce": 17,
-    "ic_on_max": 18,
-    "vce_on_max": 19,
-    "turn_on_current": 20,
-    "dvdt": 21,
-    "didt": 22,
-    "ls_on": 23,
-    "ton": 24,
-    "td_on": 25,
-    "tr": 26,
-    "crosstalk": 27,
-    "eon": 28,
+    "delta_vce": 18,
+    "ic_on_max": 19,
+    "vce_on_max": 20,
+    "turn_on_current": 21,
+    "dvdt": 22,
+    "didt": 23,
+    "ls_on": 24,
+    "ton": 25,
+    "td_on": 26,
+    "tr": 27,
+    "crosstalk": 28,
+    "pdmax": 29,
+    "eon": 30,
 }
 
 COL_RR = {
-    "irr": 29,
-    "trr": 30,
-    "vrr": 31,
-    "dvdt": 32,
-    "didt": 33,
-    "err": 34,
+    "irr": 31,
+    "trr": 32,
+    "vrr": 33,
+    "dvdt": 34,
+    "didt": 35,
+    "pdmax": 36,
+    "err": 37,
 }
 
 COL_TAIL = {
-    "deadtime": 35,
-    "etotal": 36,
-    "picture": 37,
+    "deadtime": 38,
+    "etotal": 39,
+    "picture": 40,
 }
 
 LAST_COL = COL_TAIL["picture"]
@@ -70,9 +73,9 @@ SHEET_ZOOM_PERCENT = 55
 
 # 第 1 行大分区合并（按粗边界分区）
 MERGE_INFO = (1, 1, 2, 5)          # A1:E2  信息
-MERGE_OFF = (1, 6, 2, 16)          # F1:P2  关断过程
-MERGE_ON_PROCESS = (1, 17, 1, 34)  # Q1:AH1 开通过程（含反向恢复）
-MERGE_SUMMARY = (1, 35, 2, 37)     # AI1:AK2 汇总
+MERGE_OFF = (1, 6, 2, 17)          # F1:Q2  关断过程
+MERGE_ON_PROCESS = (1, 18, 1, 37)  # R1:AK1 开通过程（含反向恢复）
+MERGE_SUMMARY = (1, 38, 2, 40)     # AL1:AN2 汇总
 
 HEADER_NAME_ROW = 3
 HEADER_UNIT_ROW = 4
@@ -102,7 +105,7 @@ COLUMNS: list[tuple[int, str, str, PatternFill]] = [
     (COL_CONDITION, "测试条件", "", FILL_INFO_HDR),
     (COL_VOLTAGE, "Recorded Voltage", "V", FILL_INFO_HDR),
     (COL_CURRENT, "Recorded Current", "A", FILL_INFO_HDR),
-    (COL_OFF["delta_vce"], "ΔVce", "V", FILL_OFF_HDR),
+    (COL_OFF["delta_vce"], "△Vce", "V", FILL_OFF_HDR),
     (COL_OFF["ic_off_max"], "Ic_off_max", "A", FILL_OFF_HDR),
     (COL_OFF["vce_off_max"], "Vce_off_max", "V", FILL_OFF_HDR),
     (COL_OFF["dvdt"], "dv/dt", "V/ns", FILL_OFF_HDR),
@@ -112,8 +115,9 @@ COLUMNS: list[tuple[int, str, str, PatternFill]] = [
     (COL_OFF["td_off"], "Td_off", "ns", FILL_OFF_HDR),
     (COL_OFF["tf"], "Tf", "ns", FILL_OFF_HDR),
     (COL_OFF["crosstalk"], "串扰电压", "V", FILL_OFF_HDR),
+    (COL_OFF["pdmax"], "Pdmax", "KW", FILL_ENERGY),
     (COL_OFF["eoff"], "Eoff", "mJ", FILL_ENERGY),
-    (COL_ON["delta_vce"], "ΔVce", "V", FILL_ON_HDR),
+    (COL_ON["delta_vce"], "△Vce", "V", FILL_ON_HDR),
     (COL_ON["ic_on_max"], "Ic_on_max", "A", FILL_ON_HDR),
     (COL_ON["vce_on_max"], "Vce_on_max", "V", FILL_ON_HDR),
     (COL_ON["turn_on_current"], "开通电流", "A", FILL_ON_HDR),
@@ -124,16 +128,18 @@ COLUMNS: list[tuple[int, str, str, PatternFill]] = [
     (COL_ON["td_on"], "Td_on", "ns", FILL_ON_HDR),
     (COL_ON["tr"], "Tr", "ns", FILL_ON_HDR),
     (COL_ON["crosstalk"], "串扰电压", "V", FILL_ON_HDR),
+    (COL_ON["pdmax"], "Pdmax", "KW", FILL_ENERGY),
     (COL_ON["eon"], "Eon", "mJ", FILL_ENERGY),
     (COL_RR["irr"], "Irr", "A", FILL_RR_HDR),
     (COL_RR["trr"], "Trr", "ns", FILL_RR_HDR),
     (COL_RR["vrr"], "Vrr", "V", FILL_RR_HDR),
     (COL_RR["dvdt"], "Dvdt_max", "V/ns", FILL_RR_HDR),
     (COL_RR["didt"], "Didt_Irr", "A/ns", FILL_RR_HDR),
+    (COL_RR["pdmax"], "Pdmax", "KW", FILL_ENERGY),
     (COL_RR["err"], "Err", "mJ", FILL_ENERGY),
     (COL_TAIL["deadtime"], "Deadtime", "ns", FILL_TAIL),
     (COL_TAIL["etotal"], "Etotal（all）", "mJ", FILL_ENERGY),
-    (COL_TAIL["picture"], "Waveform", "Picture number", FILL_TAIL),
+    (COL_TAIL["picture"], "Uaveform", "Picture number", FILL_TAIL),
 ]
 
 
@@ -273,10 +279,10 @@ def build_mcu2506_workbook(result: ExtractResult | None = None) -> WorkbookType:
     _merge_and_label(ws, *MERGE_SUMMARY, "汇总", fill=FILL_SUMMARY_HDR, font_color="FFFFFF")
 
     # 第 2 行：开通 / 反向恢复
-    ws.merge_cells(start_row=2, start_column=17, end_row=2, end_column=28)
-    ws.merge_cells(start_row=2, start_column=29, end_row=2, end_column=34)
-    _style_cell(ws, 2, 17, "开通", fill=FILL_ON, bold=True)
-    _style_cell(ws, 2, 29, "反向恢复", fill=FILL_RR, bold=True)
+    ws.merge_cells(start_row=2, start_column=18, end_row=2, end_column=30)
+    ws.merge_cells(start_row=2, start_column=31, end_row=2, end_column=37)
+    _style_cell(ws, 2, 18, "开通", fill=FILL_ON, bold=True)
+    _style_cell(ws, 2, 31, "反向恢复", fill=FILL_RR, bold=True)
 
     # 第 3–4 行：列名 + 单位
     for col, name, unit, fill in COLUMNS:
@@ -285,7 +291,7 @@ def build_mcu2506_workbook(result: ExtractResult | None = None) -> WorkbookType:
 
     for letter, w in (("A", 8), ("B", 8), ("C", 22), ("D", 11), ("E", 11)):
         ws.column_dimensions[letter].width = w
-    for col in range(6, 38):
+    for col in range(6, LAST_COL + 1):
         ws.column_dimensions[get_column_letter(col)].width = 10
     ws.row_dimensions[HEADER_NAME_ROW].height = 36
     ws.row_dimensions[HEADER_UNIT_ROW].height = 22
@@ -329,6 +335,7 @@ def fill_data_row(ws: Worksheet, row: int, result: ExtractResult) -> None:
         "串扰电压",
         _crosstalk_str(off.crosstalk_vmax, off.crosstalk_vmin),
     )
+    _set_metric_value(ws, row, COL_OFF["pdmax"], result, "关断过程", "Pdmax", _num(off.pdmax, 3))
     _set_metric_value(ws, row, COL_OFF["eoff"], result, "关断过程", "Eoff", _num(off.eoff, 3))
 
     _set_metric_value(ws, row, COL_ON["delta_vce"], result, "开通", "ΔVce", _num(on.delta_vce))
@@ -352,6 +359,7 @@ def fill_data_row(ws: Worksheet, row: int, result: ExtractResult) -> None:
         "串扰电压",
         _crosstalk_str(on.crosstalk_vmax, on.crosstalk_vmin),
     )
+    _set_metric_value(ws, row, COL_ON["pdmax"], result, "开通", "Pdmax", _num(on.pdmax, 3))
     _set_metric_value(ws, row, COL_ON["eon"], result, "开通", "Eon", _num(on.eon, 3))
 
     _set_metric_value(ws, row, COL_RR["irr"], result, "反向恢复", "Irr", _num(rr.irr))
@@ -359,6 +367,7 @@ def fill_data_row(ws: Worksheet, row: int, result: ExtractResult) -> None:
     _set_metric_value(ws, row, COL_RR["vrr"], result, "反向恢复", "Vrr", _num(rr.vrr))
     _set_metric_value(ws, row, COL_RR["dvdt"], result, "反向恢复", "dv/dt", _num(rr.dvdt_max))
     _set_metric_value(ws, row, COL_RR["didt"], result, "反向恢复", "di/dt", _num(rr.didt_irr))
+    _set_metric_value(ws, row, COL_RR["pdmax"], result, "反向恢复", "Pdmax", _num(rr.pdmax, 3))
     _set_metric_value(ws, row, COL_RR["err"], result, "反向恢复", "Err", _num(rr.err, 3))
 
     etotal = off.eoff + on.eon + rr.err

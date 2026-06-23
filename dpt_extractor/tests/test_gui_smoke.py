@@ -47,6 +47,17 @@ SMC_RT_UL_806 = (
     / "tss"
     / "UL_750V_806A_000.tss"
 )
+SMC_RT_UL_403 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UL_600V_403A_000.tss"
+)
 
 
 class TestWaveformImportAutoCenter(unittest.TestCase):
@@ -546,6 +557,89 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             win._on_offset_measurement_delete_all_requested()
             self.assertEqual(win._offset_measurements, [])
             self.assertEqual(win.result_table.table.rowCount(), 0)
+            win.close()
+            self.app.processEvents()
+        finally:
+            if old_value is None:
+                settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
+            else:
+                settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
+
+    def test_offset_measurement_uses_live_math_and_inverted_waveform(self):
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import MainWindow, _WaveformLoadOutcome
+        from dpt_extractor.gui.main_window import NONCOMMERCIAL_NOTICE_SETTINGS_KEY
+        from dpt_extractor.metrics.offset_measurement import (
+            auto_offset_measurement_unit,
+            convert_offset_measurement_value,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+
+        bundle, profile = self._make_synthetic_bundle()
+        settings = QSettings("DPT", "DPTExtractor")
+        old_value = settings.value(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, None)
+        settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+        try:
+            win = MainWindow()
+            self.app.processEvents()
+            win.cfg.test_mode.mode = TestMode.OFFSET_MEASUREMENT.value
+            win._apply_test_mode_ui()
+            win._apply_loaded_waveform(
+                _WaveformLoadOutcome(
+                    path="/fake/offset_live_math.tss",
+                    bundle=bundle,
+                    guessed=profile,
+                    profile=profile,
+                    inferred=None,
+                    inferred_source="",
+                    mapping_custom=False,
+                    result=None,
+                    short_circuit_not_ready=False,
+                    extraction_error="",
+                    load_ms=1.0,
+                    extract_ms=0.0,
+                )
+            )
+
+            win.wave_plot._set_math_formula("MATH2", "CH2 * CH3")
+            self.assertIn("MATH2", dict(win._offset_source_options()))
+            win._on_offset_measurement_add_requested("MATH2", "maximum", "full")
+            self.app.processEvents()
+
+            def _assert_math2_max_matches_current_display() -> None:
+                raw = win.wave_plot.current_display_raw("MATH2")
+                self.assertIsNotNone(raw)
+                assert raw is not None
+                expected = float(raw.max())
+                self.assertGreater(abs(expected), 1000.0)
+                unit = auto_offset_measurement_unit(expected, "W")
+                expected_display = convert_offset_measurement_value(
+                    expected,
+                    "W",
+                    unit,
+                )
+                self.assertEqual(win.result_table.table.item(0, 0).text(), "Math 2")
+                self.assertEqual(win.result_table.table.item(0, 1).text(), "Maximum")
+                self.assertEqual(win.result_table.table.item(0, 2).text(), unit)
+                self.assertEqual(
+                    win.result_table.table.item(0, 4).text(),
+                    win._offset_value_text(expected_display),
+                )
+                aux_point = win.wave_plot._cursor_auxiliary_point()
+                self.assertIsNotNone(aux_point)
+                assert aux_point is not None
+                self.assertEqual(aux_point[0], "MATH2")
+                self.assertAlmostEqual(aux_point[2], expected, places=6)
+
+            _assert_math2_max_matches_current_display()
+            self.assertIn(win.result_table.table.item(0, 2).text(), {"KW", "MW"})
+            self.assertNotEqual(win.result_table.table.item(0, 4).text(), "0.1872")
+
+            win.wave_plot.set_channel_inversion_enabled("MATH2", True)
+            win._refresh_offset_measurement_table(update_auxiliary=True)
+            self.app.processEvents()
+            _assert_math2_max_matches_current_display()
             win.close()
             self.app.processEvents()
         finally:
@@ -2029,7 +2123,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
     def test_math_channel_settings_panel_has_delete_action(self):
         from PyQt6.QtCore import QPoint
-        from PyQt6.QtWidgets import QPushButton
+        from PyQt6.QtWidgets import QLineEdit, QPushButton
 
         from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
 
@@ -2037,7 +2131,14 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot._set_math_formula("MATH2", "CH3 + CH4")
 
         panel = ChannelSettingsPanel(plot, "MATH2", QPoint(0, 0), parent=plot)
+        formula_value = panel.findChild(QLineEdit, "chFormulaValue")
+        formula_btn = panel.findChild(QPushButton, "chFormulaBtn")
         delete_btn = panel.findChild(QPushButton, "chDeleteBtn")
+        self.assertIsNotNone(formula_value)
+        self.assertEqual(formula_value.text(), "CH3 + CH4")
+        self.assertTrue(formula_value.isReadOnly())
+        self.assertIsNotNone(formula_btn)
+        self.assertEqual(formula_btn.text(), "编辑")
         self.assertIsNotNone(delete_btn)
         self.assertEqual(delete_btn.text(), "删除 Math 通道")
         delete_btn.click()
@@ -2516,7 +2617,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertLessEqual(panel._unit_toggle.width(), 80)
         self.assertLessEqual(panel._unit_edit.width(), 60)
         self.assertLessEqual(panel._vdiv_spin.width(), 80)
-        self.assertLessEqual(panel._vdiv_unit_combo.width(), 62)
+        self.assertLessEqual(panel._vdiv_unit_combo.width(), 82)
         self.assertLessEqual(panel._pos_spin.width(), 96)
         self.assertLessEqual(panel._label_edit.width(), 190)
         self.assertLessEqual(panel._mapping_combo.width(), 180)
@@ -3220,8 +3321,73 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(plot._axis_channel(), "CH5")
         self.assertEqual(plot._axis_last_signature[0], "CH5")
         self.assertEqual(plot._format_axis_value(1200.0, "V"), "1.2 kV")
+        self.assertEqual(plot._format_axis_value(1000.0, "W"), "1 KW")
+        self.assertEqual(plot._format_axis_value(1_000_000.0, "W"), "1 MW")
+        self.assertEqual(plot._format_axis_value(0.5, "W"), "500 mW")
+        self.assertEqual(plot._format_axis_value(0.0005, "W"), "500 µW")
+        self.assertEqual(plot._format_axis_value(1500.0, "KW"), "1.5 MW")
         self.assertIn("background:#151722", plot._channel_boxes["CH5"].styleSheet())
         self.assertNotIn("background:#181b26", plot._channel_boxes["CH5"].styleSheet())
+
+    def test_power_peak_focus_does_not_highlight_or_select_channel(self):
+        plot = self._make_synthetic_plot()
+        plot._set_math_formula("MATH2", "CH2 * CH3")
+        self.assertEqual(plot._unit_for_channel("MATH2"), "W")
+        plot._on_legend_clicked("CH5")
+        active_before = plot._active_channel
+        raised_before = plot._raised_key
+        highlighted_before = plot._highlighted_key
+
+        matched = plot.focus_power_peak_in_window(0.2, 0.8)
+
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched[0], "MATH2")
+        self.assertEqual(plot._active_channel, active_before)
+        self.assertEqual(plot._raised_key, raised_before)
+        self.assertEqual(plot._highlighted_key, highlighted_before)
+        aux_point = plot._cursor_auxiliary_point()
+        self.assertIsNotNone(aux_point)
+        self.assertEqual(aux_point[0], "MATH2")
+
+    def test_vdiv_unit_combo_fits_prefixed_units(self):
+        from PyQt6.QtCore import QPoint
+
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
+        plot = self._make_synthetic_plot()
+        plot._set_channel_scale("CH2", 200_000.0)
+        plot._set_math_formula("MATH2", "CH2 * CH3")
+        plot._set_channel_scale("MATH2", 200_000.0)
+
+        for key, expected_unit in (("CH2", "kV"), ("MATH2", "kW")):
+            panel = ChannelSettingsPanel(plot, key, QPoint(0, 0), parent=plot)
+            self.app.processEvents()
+            combo = panel._vdiv_unit_combo
+            self.assertEqual(combo.currentData(), expected_unit)
+            text_width = combo.fontMetrics().horizontalAdvance(expected_unit)
+            self.assertGreater(combo.width(), 58)
+            self.assertGreaterEqual(combo.width() - 48, text_width)
+            self.assertGreaterEqual(
+                panel._vdiv_input.width(),
+                76 + combo.width() + 46,
+            )
+            panel.close()
+
+    def test_reverse_recovery_power_uses_200kw_default_vdiv(self):
+        plot = self._make_synthetic_plot()
+        vce_key = plot._display_key_for_channel("vce")
+        ic_key = plot._display_key_for_channel("ic")
+        vd_key = plot._display_key_for_channel("v_diode")
+        irr_key = plot._display_key_for_channel("irr")
+
+        plot._set_math_formula("MATH2", f"{vce_key} * {ic_key}")
+        plot._set_math_formula("MATH3", f"{vd_key} * {irr_key}")
+
+        self.assertEqual(plot._unit_for_channel("MATH2"), "W")
+        self.assertEqual(plot._unit_for_channel("MATH3"), "W")
+        self.assertEqual(plot._disp_scale["MATH2"], 500_000.0)
+        self.assertEqual(plot._disp_scale["MATH3"], 200_000.0)
+        self.assertEqual(plot._vdiv_text("MATH3"), "200 kW/div")
 
     def test_y_axis_ticks_anchor_to_channel_zero_and_vdiv(self):
         plot = self._make_synthetic_plot()
@@ -3962,6 +4128,45 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertEqual(_pick_vdiv_ladder(0.05, "MATH2"), 0.05)
         self.assertEqual(_auto_vdiv_for_channel("MATH2", np.array([0.0, 240.0])), 50.0)
         self.assertEqual(_auto_vdiv_for_channel("MATH3", np.array([-1.7, 2.3])), 0.5)
+        self.assertEqual(
+            _auto_vdiv_for_channel("MATH1", np.array([0.0, 1.2e6]), "W"),
+            500_000.0,
+        )
+        self.assertEqual(
+            _auto_vdiv_for_channel(
+                "MATH1",
+                np.array([0.0, 1.2e6]),
+                "W",
+                reverse_recovery_power=True,
+            ),
+            200_000.0,
+        )
+        self.assertEqual(
+            _auto_vdiv_for_channel("MATH1", np.array([0.0, 1200.0]), "KW"),
+            500.0,
+        )
+        self.assertEqual(
+            _auto_vdiv_for_channel(
+                "MATH1",
+                np.array([0.0, 1200.0]),
+                "KW",
+                reverse_recovery_power=True,
+            ),
+            200.0,
+        )
+        self.assertEqual(
+            _auto_vdiv_for_channel("MATH1", np.array([0.0, 1.2]), "MW"),
+            0.5,
+        )
+        self.assertEqual(
+            _auto_vdiv_for_channel(
+                "MATH1",
+                np.array([0.0, 1.2]),
+                "MW",
+                reverse_recovery_power=True,
+            ),
+            0.2,
+        )
 
         plot, _, _, _ = self._load_and_plot(WH)
         max_half = DISP_HALF_DIV * (1.0 - VERT_VIEW_MARGIN) + 0.05
@@ -4388,6 +4593,92 @@ class TestMainWindowSmoke(unittest.TestCase):
         # 至少 result 仍是有限数值
         self.assertIsNotNone(win.result.turn_off.eoff)
         self.assertFalse(win.result.turn_off.eoff != win.result.turn_off.eoff)  # 不是 NaN
+        win.close()
+
+    def test_pdmax_click_uses_power_peak_interval_not_energy_loss(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._load_file(str(WH))
+        self.assertIsNotNone(win.result)
+        self.assertIsNotNone(win.result.segments)
+        vce_key = win.wave_plot._display_key_for_channel("vce")
+        ic_key = win.wave_plot._display_key_for_channel("ic")
+        win.wave_plot._set_math_formula("MATH9", f"{vce_key} * {ic_key}")
+        interval = win._parameter_interval_us("关断过程", "Pdmax")
+        self.assertIsNotNone(interval)
+        assert interval is not None
+
+        win._on_value_clicked("关断过程", "Pdmax")
+        plot = win.wave_plot
+
+        self.assertEqual(plot._interactive_mode, "power_peak")
+        self.assertTrue(plot._interval_max_hline_enabled)
+        self.assertNotEqual(plot._interactive_mode, "energy_loss")
+        self.assertAlmostEqual(float(plot._cursor_a.value()), interval[0], places=6)
+        self.assertAlmostEqual(float(plot._cursor_b.value()), interval[1], places=6)
+        aux_point = plot._cursor_auxiliary_point()
+        self.assertIsNotNone(aux_point)
+        assert aux_point is not None
+        channel, peak_t_us, peak_value = aux_point
+        self.assertEqual(channel, "MATH9")
+        self.assertGreaterEqual(peak_t_us, min(interval))
+        self.assertLessEqual(peak_t_us, max(interval))
+        self.assertAlmostEqual(
+            plot._from_disp(channel, float(plot._h_cursor_a.value())),
+            peak_value,
+            delta=max(abs(peak_value) * 1e-9, 1e-6),
+        )
+        win.close()
+
+    @unittest.skipUnless(SMC_RT_UL_403.exists(), "UL 403A sample missing")
+    def test_reverse_recovery_pdmax_displays_absolute_power_peak(self):
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import _is_power_unit
+
+        win = MainWindow()
+        win._load_file(str(SMC_RT_UL_403))
+        self.assertIsNotNone(win.result)
+        self.assertIsNotNone(win.result.segments)
+        plot = win.wave_plot
+        vd_key = plot._display_key_for_channel("v_diode")
+        irr_key = plot._display_key_for_channel("irr")
+        plot._set_math_formula("MATH9", f"-ABS({vd_key}) * ABS({irr_key})")
+        self.assertEqual(plot._unit_for_channel("MATH9"), "W")
+        for key in list(plot._trace_items):
+            if key != "MATH9" and _is_power_unit(plot._unit_for_channel(key)):
+                plot._hidden_channels.add(key)
+        plot._hidden_channels.discard("MATH9")
+
+        interval = win._parameter_interval_us("反向恢复", "Pdmax")
+        self.assertIsNotNone(interval)
+        assert interval is not None
+        win._on_value_clicked("反向恢复", "Pdmax")
+
+        self.assertEqual(plot._interactive_mode, "power_peak")
+        aux_point = plot._cursor_auxiliary_point()
+        self.assertIsNotNone(aux_point)
+        assert aux_point is not None
+        channel, peak_t_us, peak_value = aux_point
+        self.assertEqual(channel, "MATH9")
+        self.assertGreaterEqual(peak_t_us, min(interval))
+        self.assertLessEqual(peak_t_us, max(interval))
+        self.assertGreater(peak_value, 0.0)
+        self.assertIsNotNone(plot._h_cursor_a)
+        assert plot._h_cursor_a is not None
+        ha_value = plot._from_disp(channel, float(plot._h_cursor_a.value()))
+        self.assertGreater(ha_value, 0.0)
+        self.assertAlmostEqual(
+            ha_value,
+            peak_value,
+            delta=max(abs(peak_value) * 1e-9, 1e-6),
+        )
+        self.assertGreater(win.result.reverse_recovery.pdmax, 0.0)
+        self.assertAlmostEqual(
+            win.result.reverse_recovery.pdmax,
+            peak_value / 1000.0,
+            delta=max(abs(peak_value) / 1000.0 * 1e-9, 1e-6),
+        )
         win.close()
 
     def test_uh_eoff_cursor_uses_main_rise_not_pulse_off(self):

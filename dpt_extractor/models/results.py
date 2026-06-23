@@ -30,6 +30,7 @@ class TurnOffResult:
     crosstalk_v: float = 0.0
     crosstalk_vmax: float = 0.0
     crosstalk_vmin: float = 0.0
+    pdmax: float = 0.0
     eoff: float = 0.0
     eoff_range: str = ""
     eoff_check: float = 0.0
@@ -53,6 +54,7 @@ class TurnOnResult:
     crosstalk_v: float = 0.0
     crosstalk_vmax: float = 0.0
     crosstalk_vmin: float = 0.0
+    pdmax: float = 0.0
     eon: float = 0.0
     eon_check: float = 0.0
     energy_warn: bool = False
@@ -67,6 +69,7 @@ class ReverseRecoveryResult:
     didt_irr: float = 0.0
     dvdt_range: str = ""
     didt_range: str = ""
+    pdmax: float = 0.0
     err: float = 0.0
     err_check: float = 0.0
     energy_warn: bool = False

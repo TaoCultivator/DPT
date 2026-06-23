@@ -43,6 +43,33 @@ def integrate_vi(
     return float(np.sum(p_mid * dt_arr)) * 1e3
 
 
+def peak_power_kw(
+    v: np.ndarray,
+    i: np.ndarray,
+    win: IntegrationWindow,
+    *,
+    absolute: bool = False,
+) -> float:
+    """Peak V*I in the same half-open integration window, returned in kW."""
+    v_arr = np.asarray(v, dtype=np.float64)
+    i_arr = np.asarray(i, dtype=np.float64)
+    n = min(v_arr.size, i_arr.size)
+    if n == 0:
+        return 0.0
+    i0 = max(0, min(int(win.i_start), n - 1))
+    i1 = max(i0 + 1, min(int(win.i_end), n))
+    if i1 <= i0:
+        return 0.0
+    if absolute:
+        power = np.abs(v_arr[i0:i1]) * np.abs(i_arr[i0:i1])
+    else:
+        power = v_arr[i0:i1] * i_arr[i0:i1]
+    finite = power[np.isfinite(power)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.max(finite)) / 1000.0
+
+
 def switch_energy(
     t: np.ndarray,
     v: np.ndarray,

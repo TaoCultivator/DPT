@@ -293,6 +293,139 @@ class TestReportTemplateWriter(unittest.TestCase):
         self.assertEqual(ws.cell(DATA_ROW, COL_RR["err"]).value, 30)
         self.assertIsNone(ws.cell(DATA_ROW, COL_TAIL["etotal"]).value)
 
+    def test_dpt_old_template_is_upgraded_with_pdmax_columns(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_OFF,
+            COL_ON,
+            COL_RR,
+            DATA_ROW,
+        )
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import (
+            ExtractResult,
+            ReverseRecoveryResult,
+            TurnOffResult,
+            TurnOnResult,
+        )
+
+        old_headers = [
+            "测试相",
+            "Temp",
+            "测试条件",
+            "Recorded Voltage",
+            "Recorded Current",
+            "△Vce",
+            "Ic_off_max",
+            "Vce_off_max",
+            "dv/dt",
+            "di/dt",
+            "Ls_off",
+            "Toff",
+            "Td_off",
+            "Tf",
+            "串扰电压",
+            "Eoff",
+            "△Vce",
+            "Ic_on_max",
+            "Vce_on_max",
+            "开通电流",
+            "dv/dt",
+            "di/dt",
+            "Ls_on",
+            "Ton",
+            "Td_on",
+            "Tr",
+            "串扰电压",
+            "Eon",
+            "Irr",
+            "Trr",
+            "Vrr",
+            "Dvdt_max",
+            "Didt_Irr",
+            "Err",
+            "Deadtime",
+            "Etotal（all）",
+            "Uaveform",
+        ]
+        old_units = [
+            "",
+            "°C",
+            "",
+            "V",
+            "A",
+            "V",
+            "A",
+            "V",
+            "V/ns",
+            "A/ns",
+            "nH",
+            "ns",
+            "ns",
+            "ns",
+            "V",
+            "mJ",
+            "V",
+            "A",
+            "V",
+            "A",
+            "V/ns",
+            "A/ns",
+            "nH",
+            "ns",
+            "ns",
+            "ns",
+            "V",
+            "mJ",
+            "A",
+            "ns",
+            "V",
+            "V/ns",
+            "A/ns",
+            "mJ",
+            "ns",
+            "mJ",
+            "Picture number",
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "old_report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            for col, (header, unit) in enumerate(zip(old_headers, old_units), start=1):
+                ws.cell(3, col, header)
+                ws.cell(4, col, unit)
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            ws.cell(DATA_ROW, 4, 750)
+            ws.cell(DATA_ROW, 5, 1050)
+            wb.save(report)
+
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
+                    profile_code="UH",
+                    turn_off=TurnOffResult(pdmax=801.25, eoff=10.0),
+                    turn_on=TurnOnResult(pdmax=650.5, eon=20.0),
+                    reverse_recovery=ReverseRecoveryResult(pdmax=120.75, err=30.0),
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(saved.cell(3, COL_OFF["pdmax"]).value, "Pdmax")
+            self.assertEqual(saved.cell(4, COL_OFF["pdmax"]).value, "KW")
+            self.assertEqual(saved.cell(3, COL_ON["pdmax"]).value, "Pdmax")
+            self.assertEqual(saved.cell(3, COL_RR["pdmax"]).value, "Pdmax")
+            self.assertEqual(saved.cell(DATA_ROW, COL_OFF["pdmax"]).value, 801.25)
+            self.assertEqual(saved.cell(DATA_ROW, COL_OFF["eoff"]).value, 10)
+            self.assertEqual(saved.cell(DATA_ROW, COL_ON["pdmax"]).value, 650.5)
+            self.assertEqual(saved.cell(DATA_ROW, COL_ON["eon"]).value, 20)
+            self.assertEqual(saved.cell(DATA_ROW, COL_RR["pdmax"]).value, 120.75)
+            self.assertEqual(saved.cell(DATA_ROW, COL_RR["err"]).value, 30)
+
     def test_short_template_leaves_unavailable_metric_cells_blank(self):
         from dpt_extractor.export.short_circuit_layout import COL_ESC_OTHER, COL_VPEAK_OTHER
         from dpt_extractor.export.report_template import write_report_template

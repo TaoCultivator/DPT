@@ -108,6 +108,17 @@ SSS_RT_UL_805 = (
     / "tss"
     / "UL_750V_805A_000.tss"
 )
+SSS_LT_UH_1050 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+    / "SSS"
+    / "LT"
+    / "tss"
+    / "UH-750V-1050A_000.tss"
+)
 
 
 def _assert_crossing(
@@ -361,7 +372,7 @@ class TestEoffWindow(unittest.TestCase):
         t_b_us = mk.t_end * 1e6
         self.assertGreater(t_b_us, t_a_us + 0.15)
         self.assertGreater(t_b_us, 22.92)
-        self.assertLess(t_b_us, 23.05)
+        self.assertLess(t_b_us, 23.08)
         self.assertNotAlmostEqual(t_b_us, t_a_us + 0.218, delta=0.02)
         _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
 
@@ -392,7 +403,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(t0_us, 18.38)
         self.assertLess(t0_us, 18.44)
         self.assertGreater(t1_us, 18.65)
-        self.assertLess(t1_us, 18.80)
+        self.assertLess(t1_us, 18.88)
         _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
         w = mk.as_integration_window()
         e = integrate_vi_window(t, vce, ic, w)
@@ -455,7 +466,7 @@ class TestEoffWindow(unittest.TestCase):
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
 
     @unittest.skipUnless(SSS_RT_UL_1050.exists(), "SSS RT UL 1050A sample missing")
-    def test_ul_rt_err_a_uses_negative_base_first_cross_after_peak(self):
+    def test_ul_rt_err_a_uses_negative_base_three_cycle_cross_after_peak(self):
         bundle = load_waveform(SSS_RT_UL_1050)
         profile = guess_profile_from_path(str(SSS_RT_UL_1050))
         result = extract_all(bundle, profile, load_config())
@@ -475,8 +486,8 @@ class TestEoffWindow(unittest.TestCase):
         ta_us = mk.t_start * 1e6
         tb_us = mk.t_end * 1e6
         self.assertLess(mk.ha_v, 0.0)
-        self.assertAlmostEqual(mk.ha_v, -38.56250, places=6)
-        self.assertAlmostEqual(ta_us, 19.609181, places=5)
+        self.assertAlmostEqual(mk.ha_v, -36.453125, places=6)
+        self.assertAlmostEqual(ta_us, 19.937852, places=5)
         self.assertGreater(ta_us, t_pk_us)
         self.assertLess(ta_us, float(t[segs.turn_on[1]]) * 1e6)
         self.assertGreater(tb_us, t_pk_us - 0.05)
@@ -485,7 +496,7 @@ class TestEoffWindow(unittest.TestCase):
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
         e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
         self.assertAlmostEqual(result.reverse_recovery.err, e, places=9)
-        self.assertAlmostEqual(e, 0.596078, places=5)
+        self.assertAlmostEqual(e, 11.698808, places=5)
 
     @unittest.skipUnless(SSS_RT_UL_805.exists(), "SSS RT UL 805A sample missing")
     def test_ul_rt_805_err_ha_keeps_meaningful_negative_tail_signed(self):
@@ -508,12 +519,12 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(base.level, -20.0)
         self.assertLess(mk.ha_v, 0.0)
         self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.01)
-        self.assertAlmostEqual(mk.t_start * 1e6, 15.687356, places=5)
+        self.assertAlmostEqual(mk.t_start * 1e6, 16.042907, places=5)
         self.assertAlmostEqual(mk.t_end * 1e6, 15.651653, places=5)
         _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
         e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
-        self.assertAlmostEqual(result.reverse_recovery.err, 0.585462, places=5)
+        self.assertAlmostEqual(result.reverse_recovery.err, 10.727791, places=5)
         self.assertAlmostEqual(result.reverse_recovery.err, e, places=9)
 
     def test_rt_right_cursor_manual_screenshot_regressions(self):
@@ -528,19 +539,22 @@ class TestEoffWindow(unittest.TestCase):
             / "tss"
         )
         cases = [
-            ("UL_600V_285A_000.tss", "eoff", 4.936, 5.082, 8.419, 0.015),
-            ("UL_600V_285A_000.tss", "eon", 8.814, 8.973, 9.397, 0.015),
-            ("UL_600V_285A_000.tss", "err", 8.931, 8.901, 0.406, 0.015),
-            ("UH_750V_1050A_000.tss", "eon", 18.434, 18.769, 68.325, 0.015),
-            ("UL_750V_805A_000.tss", "err", 15.687, 15.652, 0.585, 0.015),
-            ("UL_750V_50A_000.tss", "err", 10.588, 10.552, 0.303, 0.020),
+            ("UL_600V_285A_000.tss", "eoff", 4.936, 5.301, 8.137, 0.015),
+            ("UL_600V_285A_000.tss", "eon", 8.814, 8.982, 9.411, 0.015),
+            ("UL_600V_285A_000.tss", "err", 9.489, 8.901, 5.675, 0.015),
+            ("UH_750V_1050A_000.tss", "eon", 18.434, 18.770, 68.330, 0.015),
+            ("UL_750V_805A_000.tss", "eoff", 11.582, 11.959, 45.503, 0.015),
+            ("UL_750V_805A_000.tss", "err", 16.043, 15.652, 10.728, 0.015),
+            ("UL_750V_50A_000.tss", "err", 10.780, 10.552, 1.723, 0.020),
             ("WH_750V_50A_000.tss", "eoff", 6.293, 6.510, 1.741, 0.015),
-            ("WH_750V_50A_000.tss", "err", 10.104, 10.069, 0.168, 0.015),
-            ("WL_750V_50A_000.tss", "eoff", 6.704, 6.882, 1.281, 0.015),
-            ("WL_750V_50A_000.tss", "err", 10.590, 10.551, 0.378, 0.015),
-            ("VH_600V_285A_000.tss", "eoff", 4.633, 4.812, 11.518, 0.015),
-            ("VH_600V_285A_000.tss", "eon", 8.430, 8.634, 12.627, 0.015),
-            ("VH_600V_285A_000.tss", "err", 8.654, 8.515, 1.885, 0.015),
+            ("WH_750V_50A_000.tss", "err", 10.202, 10.069, 0.768, 0.015),
+            ("WL_750V_50A_000.tss", "eoff", 6.704, 7.303, 1.006, 0.015),
+            ("WL_750V_50A_000.tss", "err", 10.937, 10.551, 2.686, 0.015),
+            ("WL_750V_805A_000.tss", "eoff", 11.884, 12.396, 42.902, 0.015),
+            ("WL_750V_805A_000.tss", "err", 16.367, 15.957, 13.280, 0.015),
+            ("VH_600V_285A_000.tss", "eoff", 4.633, 4.953, 12.561, 0.015),
+            ("VH_600V_285A_000.tss", "eon", 8.430, 8.679, 12.745, 0.015),
+            ("VH_600V_285A_000.tss", "err", 8.946, 8.515, 3.635, 0.015),
         ]
         cfg = load_config()
         cache = {}
@@ -600,6 +614,55 @@ class TestEoffWindow(unittest.TestCase):
                 self.assertAlmostEqual(mk.t_start * 1e6, ta_us, delta=time_tol_us)
                 self.assertAlmostEqual(mk.t_end * 1e6, tb_us, delta=time_tol_us)
                 self.assertAlmostEqual(energy, energy_mj, delta=max(0.02, energy_mj * 0.02))
+
+    @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
+    def test_smc_rt_uh_1048_err_waits_for_late_settlement(self):
+        bundle = load_waveform(SMC_RT_UH)
+        profile = guess_profile_from_path(str(SMC_RT_UH))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        mk = err_energy_markers(
+            t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+        )
+        ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
+        base = _err_recovery_settled_base(irr, ipk, bundle.dt, segs.turn_on[1])
+        self.assertAlmostEqual(mk.t_start * 1e6, 19.293, delta=0.020)
+        self.assertGreater(mk.t_start * 1e6, 19.25)
+        self.assertAlmostEqual(mk.t_end * 1e6, 18.809, delta=0.020)
+        self.assertGreater(2.0 * base.amp, 40.0)
+        _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "any")
+
+    @unittest.skipUnless(SSS_LT_UH_1050.exists(), "SSS LT UH 1050A sample missing")
+    def test_lt_uh_1050_smooth_eon_b_does_not_chase_tail(self):
+        bundle = load_waveform(SSS_LT_UH_1050)
+        profile = guess_profile_from_path(str(SSS_LT_UH_1050))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+        mk = eon_energy_markers(
+            t,
+            ic,
+            vce,
+            segs.turn_on[0],
+            segs.turn_on[1],
+            segs.pulse2_on,
+            bundle.dt,
+            pulse1_off=segs.pulse1_off,
+        )
+        energy = integrate_vi_window(t, vce, ic, mk.as_integration_window())
+        self.assertAlmostEqual(mk.t_start * 1e6, 15.951, delta=0.020)
+        self.assertAlmostEqual(mk.t_end * 1e6, 16.359, delta=0.020)
+        self.assertLess(mk.t_end * 1e6, 16.45)
+        self.assertAlmostEqual(energy, 89.058, delta=0.05)
+        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_rr_dvdt_ha_post_ring_plateau(self):

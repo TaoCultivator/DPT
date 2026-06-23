@@ -189,8 +189,8 @@ QComboBox QAbstractItemView::item:disabled {
     color: #747a7d;
 }
 QFrame#vdivInputGroup {
-    min-width: 180px;
-    max-width: 180px;
+    min-width: 190px;
+    max-width: 220px;
     min-height: 42px;
     max-height: 42px;
     background-color: #f1f3f2;
@@ -256,7 +256,7 @@ QLabel#vdivDivLabel {
     font-weight: bold;
     padding: 0 7px;
 }
-QLineEdit#chTagValue, QLineEdit#chUnitEdit {
+QLineEdit#chTagValue, QLineEdit#chUnitEdit, QLineEdit#chFormulaValue {
     min-height: 40px;
     max-height: 40px;
     background-color: rgba(241, 241, 241, 250);
@@ -269,6 +269,11 @@ QLineEdit#chTagValue, QLineEdit#chUnitEdit {
 QLineEdit#chUnitEdit:disabled {
     background-color: rgba(222, 224, 221, 210);
     color: #606663;
+}
+QLineEdit#chFormulaValue {
+    color: #182226;
+    background-color: rgba(245, 247, 246, 250);
+    selection-background-color: #28bce8;
 }
 QPushButton#chApplyBtn {
     min-height: 40px;
@@ -286,7 +291,7 @@ QPushButton#chApplyBtn:hover { background-color: #44d4ff; }
 QPushButton#chFormulaBtn {
     min-height: 40px;
     max-height: 40px;
-    padding: 0 12px;
+    padding: 0 10px;
     border: 1px solid #6f6f6f;
     border-radius: 3px;
     background-color: rgba(238, 238, 238, 245);
@@ -318,6 +323,11 @@ _MAPPING_OPTIONS = (
     ("v_diode", "V_二极管"),
     ("vge_other", "对管Vge"),
 )
+
+_VDIV_VALUE_WIDTH = 76
+_VDIV_UNIT_MIN_WIDTH = 80
+_VDIV_UNIT_MAX_WIDTH = 96
+_VDIV_DIV_WIDTH = 46
 
 
 def _vdiv_display_decimals(value: float) -> int:
@@ -611,33 +621,35 @@ class ChannelSettingsPanel(QDialog):
         self._vdiv_spin = QDoubleSpinBox()
         self._vdiv_spin.setObjectName("vdivValueSpin")
         self._vdiv_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
-        self._vdiv_spin.setFixedWidth(76)
+        self._vdiv_spin.setFixedWidth(_VDIV_VALUE_WIDTH)
         self._vdiv_spin.setRange(1e-99, 1e99)
         self._vdiv_unit_combo = QComboBox()
         self._vdiv_unit_combo.setObjectName("vdivUnitCombo")
-        self._vdiv_unit_combo.setFixedWidth(58)
+        self._vdiv_unit_combo.setFixedWidth(_VDIV_UNIT_MIN_WIDTH)
         self._vdiv_unit_combo.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
         )
         apply_combo_popup_style(self._vdiv_unit_combo, light=True)
-        self._sync_vdiv_spin_from_scale(current_scale)
-        self._vdiv_spin.valueChanged.connect(self._on_vdiv_changed)
-        self._vdiv_unit_combo.currentIndexChanged.connect(self._on_vdiv_unit_changed)
         div_label = QLabel("/div")
         div_label.setObjectName("vdivDivLabel")
         div_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        div_label.setFixedWidth(46)
-        vdiv_input = QFrame()
-        vdiv_input.setObjectName("vdivInputGroup")
-        vdiv_input.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        vdiv_input.setFixedWidth(180)
-        vdiv_input_lay = QHBoxLayout(vdiv_input)
+        div_label.setFixedWidth(_VDIV_DIV_WIDTH)
+        self._vdiv_input = QFrame()
+        self._vdiv_input.setObjectName("vdivInputGroup")
+        self._vdiv_input.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._vdiv_input.setFixedWidth(
+            _VDIV_VALUE_WIDTH + _VDIV_UNIT_MIN_WIDTH + _VDIV_DIV_WIDTH
+        )
+        vdiv_input_lay = QHBoxLayout(self._vdiv_input)
         vdiv_input_lay.setContentsMargins(0, 0, 0, 0)
         vdiv_input_lay.setSpacing(0)
         vdiv_input_lay.addWidget(self._vdiv_spin)
         vdiv_input_lay.addWidget(self._vdiv_unit_combo)
         vdiv_input_lay.addWidget(div_label)
+        self._sync_vdiv_spin_from_scale(current_scale)
+        self._vdiv_spin.valueChanged.connect(self._on_vdiv_changed)
+        self._vdiv_unit_combo.currentIndexChanged.connect(self._on_vdiv_unit_changed)
         btn_up = QPushButton("▲")
         btn_dn = QPushButton("▼")
         for b in (btn_up, btn_dn):
@@ -645,7 +657,7 @@ class ChannelSettingsPanel(QDialog):
             b.setFixedSize(42, 40)
         btn_up.clicked.connect(lambda: self._step_vdiv(+1))
         btn_dn.clicked.connect(lambda: self._step_vdiv(-1))
-        vdiv_row.addWidget(vdiv_input, stretch=0)
+        vdiv_row.addWidget(self._vdiv_input, stretch=0)
         vdiv_row.addWidget(btn_up, stretch=0)
         vdiv_row.addWidget(btn_dn, stretch=0)
         vdiv_row.addStretch(1)
@@ -728,15 +740,25 @@ class ChannelSettingsPanel(QDialog):
             math_row = QHBoxLayout()
             math_row.setContentsMargins(0, 0, 0, 0)
             math_row.setSpacing(8)
-            formula_btn = QPushButton("编辑公式")
+            formula_text = plot._math_formulas.get(key.upper(), "")
+            self._formula_value = QLineEdit(formula_text)
+            self._formula_value.setObjectName("chFormulaValue")
+            self._formula_value.setReadOnly(True)
+            self._formula_value.setCursorPosition(0)
+            self._formula_value.setFixedWidth(160)
+            formula_btn = QPushButton("编辑")
             formula_btn.setObjectName("chFormulaBtn")
+            formula_btn.setFixedSize(58, 40)
             formula_btn.clicked.connect(self._on_formula_edit)
+            math_row.addWidget(self._formula_value)
             math_row.addWidget(formula_btn)
             if plot._can_delete_channel(key):
                 delete_btn = QPushButton("删除 Math 通道")
                 delete_btn.setObjectName("chDeleteBtn")
+                delete_btn.setFixedSize(128, 40)
                 delete_btn.clicked.connect(self._on_delete_math)
                 math_row.addWidget(delete_btn)
+            math_row.addStretch(1)
             math_w = QWidget()
             math_w.setObjectName("chPanelRow")
             math_w.setLayout(math_row)
@@ -888,11 +910,27 @@ class ChannelSettingsPanel(QDialog):
             self._vdiv_unit_combo.clear()
             for option in units:
                 self._vdiv_unit_combo.addItem(option, option)
+            self._resize_vdiv_unit_combo(units)
             idx = self._vdiv_unit_combo.findData(display_unit)
             if idx >= 0:
                 self._vdiv_unit_combo.setCurrentIndex(idx)
         finally:
             self._syncing_vdiv = False
+
+    def _resize_vdiv_unit_combo(self, units: list[str]) -> None:
+        text_width = max(
+            (
+                self._vdiv_unit_combo.fontMetrics().horizontalAdvance(str(unit))
+                for unit in units
+            ),
+            default=0,
+        )
+        width = max(
+            _VDIV_UNIT_MIN_WIDTH,
+            min(_VDIV_UNIT_MAX_WIDTH, text_width + 48),
+        )
+        self._vdiv_unit_combo.setFixedWidth(width)
+        self._vdiv_input.setFixedWidth(_VDIV_VALUE_WIDTH + width + _VDIV_DIV_WIDTH)
 
     def sync_from_plot(self) -> None:
         """外部改刻度/位置后刷新控件。"""

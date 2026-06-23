@@ -44,6 +44,7 @@ _UNIT_PREFIX_FACTORS = {
     "u": 1e-6,
     "m": 1e-3,
     "k": 1e3,
+    "K": 1e3,
     "M": 1e6,
 }
 
@@ -51,7 +52,7 @@ _UNIT_PREFIXES_BY_BASE = {
     "V": ("", "m", "k"),
     "A": ("", "m", "k"),
     "J": ("", "m", "u", "k"),
-    "W": ("", "m", "k"),
+    "W": ("", "m", "K", "M"),
     "s": ("", "m", "u", "n"),
 }
 
@@ -151,13 +152,26 @@ def auto_offset_measurement_unit(value: float, default_unit: str) -> str:
         magnitude = abs(float(value))
     except (TypeError, ValueError):
         return unit
-    if not np.isfinite(magnitude) or magnitude == 0 or magnitude >= 1:
+    if not np.isfinite(magnitude):
         return unit
 
     split = _split_prefixed_unit(unit)
     if split is None:
         return unit
     prefix, base, suffix = split
+    if base == "W" and suffix == "":
+        magnitude_w = magnitude * _UNIT_PREFIX_FACTORS.get(prefix, 1.0)
+        if magnitude_w == 0:
+            return "KW"
+        if magnitude_w < 1000.0:
+            return "W"
+        if magnitude_w >= 1_000_000.0:
+            return "MW"
+        return "KW"
+    if magnitude == 0:
+        return unit
+    if magnitude >= 1:
+        return unit
     current_factor = _UNIT_PREFIX_FACTORS[prefix]
     lower_prefixes = sorted(
         (

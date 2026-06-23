@@ -8,6 +8,7 @@ import re
 from typing import Callable, Mapping
 
 from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, TwoCellAnchor
 from openpyxl.styles import Alignment
@@ -26,9 +27,12 @@ from dpt_extractor.export.mcu2506_layout import (
     COL_RR,
     COL_TAIL,
     LAST_COL,
+    COLUMNS,
     _crosstalk_str,
     _match_setpoints,
     _num,
+    HEADER_NAME_ROW,
+    HEADER_UNIT_ROW,
 )
 from dpt_extractor.models.results import ExtractResult
 from dpt_extractor.utils.filename import parse_setpoints_from_filename
@@ -908,78 +912,257 @@ def _set_metric_value(
     _set_value(ws, row, col, value)
 
 
+_DPT_COLUMN_BOUNDS = {
+    "关断过程": (6, 17),
+    "开通": (18, 30),
+    "反向恢复": (31, 37),
+    "汇总": (38, 40),
+}
+
+
+def _dpt_header_row_has_values(ws: Worksheet) -> bool:
+    for col in range(1, min(ws.max_column, 40) + 1):
+        if str(ws.cell(HEADER_NAME_ROW, col).value or "").strip():
+            return True
+    return False
+
+
+def _dpt_header_col(
+    ws: Worksheet,
+    section: str,
+    headers: tuple[str, ...],
+) -> int | None:
+    lo, hi = _DPT_COLUMN_BOUNDS.get(section, (1, min(ws.max_column, 40)))
+    hi = min(hi, max(ws.max_column, hi))
+    normalized_headers = tuple(_normalized(header) for header in headers)
+    for col in range(lo, hi + 1):
+        text = _normalized(ws.cell(HEADER_NAME_ROW, col).value)
+        if not text:
+            continue
+        if any(text == header or text.startswith(header) for header in normalized_headers if header):
+            return col
+    return None
+
+
+def _dpt_metric_col(
+    ws: Worksheet,
+    section: str,
+    fallback_col: int,
+    *headers: str,
+    require_header: bool = False,
+) -> int | None:
+    found = _dpt_header_col(ws, section, tuple(headers))
+    if found is not None:
+        return found
+    if require_header and _dpt_header_row_has_values(ws):
+        return None
+    return fallback_col
+
+
+def _set_dpt_metric_value(
+    ws: Worksheet,
+    row: int,
+    col: int | None,
+    result: ExtractResult,
+    section: str,
+    name: str,
+    value,
+) -> None:
+    if col is None:
+        return
+    _set_metric_value(ws, row, col, result, section, name, value)
+
+
+def _copy_column_style(ws: Worksheet, source_col: int, target_col: int) -> None:
+    max_row = max(ws.max_row, HEADER_UNIT_ROW)
+    source_letter = get_column_letter(source_col)
+    target_letter = get_column_letter(target_col)
+    ws.column_dimensions[target_letter].width = ws.column_dimensions[source_letter].width
+    for row in range(1, max_row + 1):
+        src = ws.cell(row, source_col)
+        dst = ws.cell(row, target_col)
+        dst._style = copy(src._style)
+        if src.has_style:
+            dst.font = copy(src.font)
+            dst.fill = copy(src.fill)
+            dst.border = copy(src.border)
+            dst.alignment = copy(src.alignment)
+            dst.number_format = src.number_format
+            dst.protection = copy(src.protection)
+
+
+def _unmerge_dpt_header_rows(ws: Worksheet) -> None:
+    for rng in list(ws.merged_cells.ranges):
+        if rng.min_row <= 2 and rng.max_row <= 2 and rng.min_col >= 1:
+            ws.unmerge_cells(str(rng))
+
+
+def _merge_dpt_data_headers_like_template(ws: Worksheet) -> None:
+    for spec in ("A1:E2", "F1:Q2", "R1:AK1", "R2:AD2", "AE2:AK2"):
+        try:
+            ws.merge_cells(spec)
+        except ValueError:
+            pass
+    ws.cell(1, 1).value = ws.cell(1, 1).value or "信息"
+    ws.cell(1, 6).value = "关断过程"
+    ws.cell(1, 18).value = "开通过程"
+    ws.cell(2, 18).value = "开通"
+    ws.cell(2, 31).value = "反向恢复"
+
+
+def _rewrite_dpt_header_row(ws: Worksheet) -> None:
+    for col, name, unit, _fill in COLUMNS:
+        ws.cell(HEADER_NAME_ROW, col).value = name
+        unit_cell = ws.cell(HEADER_UNIT_ROW, col)
+        if not isinstance(unit_cell, MergedCell):
+            unit_cell.value = unit
+
+
+def _ensure_dpt_data_power_columns(ws: Worksheet) -> bool:
+    """Upgrade old A:AK DPT data sheets to the Pdmax A:AN layout in-place."""
+    present = {
+        section: _dpt_header_col(ws, section, ("Pdmax",)) is not None
+        for section in ("关断过程", "开通", "反向恢复")
+    }
+    if all(present.values()):
+        return False
+
+    _unmerge_dpt_header_rows(ws)
+    insertion_plan = [
+        ("反向恢复", "Err"),
+        ("开通", "Eon"),
+        ("关断过程", "Eoff"),
+    ]
+    for section, loss_header in insertion_plan:
+        if present.get(section):
+            continue
+        loss_col = _dpt_header_col(ws, section, (loss_header,))
+        if loss_col is None:
+            continue
+        ws.insert_cols(loss_col)
+        _copy_column_style(ws, loss_col + 1, loss_col)
+        ws.cell(HEADER_NAME_ROW, loss_col).value = "Pdmax"
+        ws.cell(HEADER_UNIT_ROW, loss_col).value = "KW"
+        for row in range(DATA_ROW, ws.max_row + 1):
+            ws.cell(row, loss_col).value = None
+
+    _merge_dpt_data_headers_like_template(ws)
+    _rewrite_dpt_header_row(ws)
+    return True
+
+
 def _write_dpt_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
     off = result.turn_off
     on = result.turn_on
     rr = result.reverse_recovery
     vdc, idc = _match_setpoints(result)
 
+    def col(section: str, fallback_col: int, *headers: str, require_header: bool = False) -> int | None:
+        return _dpt_metric_col(
+            ws,
+            section,
+            fallback_col,
+            *headers,
+            require_header=require_header,
+        )
+
     _set_value(ws, row, 4, _num(vdc, 1))
     _set_value(ws, row, 5, _num(idc, 1))
-    _set_metric_value(
-        ws, row, COL_OFF["delta_vce"], result, "关断过程", "ΔVce", _num(off.delta_vce),
-    )
-    _set_metric_value(
-        ws, row, COL_OFF["ic_off_max"], result, "关断过程", "Ic_off_max", _num(off.ic_off_max),
-    )
-    _set_metric_value(
-        ws, row, COL_OFF["vce_off_max"], result, "关断过程", "Vce_off_max", _num(off.vce_off_max),
-    )
-    _set_metric_value(ws, row, COL_OFF["dvdt"], result, "关断过程", "dv/dt", _num(off.dvdt))
-    _set_metric_value(ws, row, COL_OFF["didt"], result, "关断过程", "di/dt", _num(off.didt))
-    _set_metric_value(ws, row, COL_OFF["ls_off"], result, "关断过程", "Ls_off", _num(off.ls_off))
-    _set_metric_value(ws, row, COL_OFF["toff"], result, "关断过程", "Toff", _num(off.toff))
-    _set_metric_value(ws, row, COL_OFF["td_off"], result, "关断过程", "Td_off", _num(off.td_off))
-    _set_metric_value(ws, row, COL_OFF["tf"], result, "关断过程", "Tf", _num(off.tf))
-    _set_metric_value(
+    _set_dpt_metric_value(
         ws,
         row,
-        COL_OFF["crosstalk"],
+        col("关断过程", COL_OFF["delta_vce"], "ΔVce"),
+        result,
+        "关断过程",
+        "ΔVce",
+        _num(off.delta_vce),
+    )
+    _set_dpt_metric_value(
+        ws,
+        row,
+        col("关断过程", COL_OFF["ic_off_max"], "Ic_off_max"),
+        result,
+        "关断过程",
+        "Ic_off_max",
+        _num(off.ic_off_max),
+    )
+    _set_dpt_metric_value(
+        ws,
+        row,
+        col("关断过程", COL_OFF["vce_off_max"], "Vce_off_max"),
+        result,
+        "关断过程",
+        "Vce_off_max",
+        _num(off.vce_off_max),
+    )
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["dvdt"], "dv/dt"), result, "关断过程", "dv/dt", _num(off.dvdt))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["didt"], "di/dt"), result, "关断过程", "di/dt", _num(off.didt))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["ls_off"], "Ls_off"), result, "关断过程", "Ls_off", _num(off.ls_off))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["toff"], "Toff"), result, "关断过程", "Toff", _num(off.toff))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["td_off"], "Td_off"), result, "关断过程", "Td_off", _num(off.td_off))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["tf"], "Tf"), result, "关断过程", "Tf", _num(off.tf))
+    _set_dpt_metric_value(
+        ws,
+        row,
+        col("关断过程", COL_OFF["crosstalk"], "串扰电压"),
         result,
         "关断过程",
         "串扰电压",
         _crosstalk_str(off.crosstalk_vmax, off.crosstalk_vmin),
     )
-    _set_metric_value(ws, row, COL_OFF["eoff"], result, "关断过程", "Eoff", _num(off.eoff, 3))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["pdmax"], "Pdmax", require_header=True), result, "关断过程", "Pdmax", _num(off.pdmax, 3))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["eoff"], "Eoff"), result, "关断过程", "Eoff", _num(off.eoff, 3))
 
-    _set_metric_value(ws, row, COL_ON["delta_vce"], result, "开通", "ΔVce", _num(on.delta_vce))
-    _set_metric_value(ws, row, COL_ON["ic_on_max"], result, "开通", "Ic_on_max", _num(on.ic_on_max))
-    _set_metric_value(ws, row, COL_ON["vce_on_max"], result, "开通", "Vce_on_max", _num(on.vce_on_max))
-    _set_metric_value(
-        ws, row, COL_ON["turn_on_current"], result, "开通", "开通电流", _num(on.turn_on_current),
-    )
-    _set_metric_value(ws, row, COL_ON["dvdt"], result, "开通", "dv/dt", _num(on.dvdt))
-    _set_metric_value(ws, row, COL_ON["didt"], result, "开通", "di/dt", _num(on.didt))
-    _set_metric_value(ws, row, COL_ON["ls_on"], result, "开通", "Ls_on", _num(on.ls_on))
-    _set_metric_value(ws, row, COL_ON["ton"], result, "开通", "Ton", _num(on.ton))
-    _set_metric_value(ws, row, COL_ON["td_on"], result, "开通", "Td_on", _num(on.td_on))
-    _set_metric_value(ws, row, COL_ON["tr"], result, "开通", "Tr", _num(on.tr))
-    _set_metric_value(
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["delta_vce"], "ΔVce"), result, "开通", "ΔVce", _num(on.delta_vce))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["ic_on_max"], "Ic_on_max"), result, "开通", "Ic_on_max", _num(on.ic_on_max))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["vce_on_max"], "Vce_on_max"), result, "开通", "Vce_on_max", _num(on.vce_on_max))
+    _set_dpt_metric_value(
         ws,
         row,
-        COL_ON["crosstalk"],
+        col("开通", COL_ON["turn_on_current"], "开通电流"),
+        result,
+        "开通",
+        "开通电流",
+        _num(on.turn_on_current),
+    )
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["dvdt"], "dv/dt"), result, "开通", "dv/dt", _num(on.dvdt))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["didt"], "di/dt"), result, "开通", "di/dt", _num(on.didt))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["ls_on"], "Ls_on"), result, "开通", "Ls_on", _num(on.ls_on))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["ton"], "Ton"), result, "开通", "Ton", _num(on.ton))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["td_on"], "Td_on"), result, "开通", "Td_on", _num(on.td_on))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["tr"], "Tr"), result, "开通", "Tr", _num(on.tr))
+    _set_dpt_metric_value(
+        ws,
+        row,
+        col("开通", COL_ON["crosstalk"], "串扰电压"),
         result,
         "开通",
         "串扰电压",
         _crosstalk_str(on.crosstalk_vmax, on.crosstalk_vmin),
     )
-    _set_metric_value(ws, row, COL_ON["eon"], result, "开通", "Eon", _num(on.eon, 3))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["pdmax"], "Pdmax", require_header=True), result, "开通", "Pdmax", _num(on.pdmax, 3))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["eon"], "Eon"), result, "开通", "Eon", _num(on.eon, 3))
 
-    _set_metric_value(ws, row, COL_RR["irr"], result, "反向恢复", "Irr", _num(rr.irr))
-    _set_metric_value(ws, row, COL_RR["trr"], result, "反向恢复", "Trr", _num(rr.trr))
-    _set_metric_value(ws, row, COL_RR["vrr"], result, "反向恢复", "Vrr", _num(rr.vrr))
-    _set_metric_value(ws, row, COL_RR["dvdt"], result, "反向恢复", "dv/dt", _num(rr.dvdt_max))
-    _set_metric_value(ws, row, COL_RR["didt"], result, "反向恢复", "di/dt", _num(rr.didt_irr))
-    _set_metric_value(ws, row, COL_RR["err"], result, "反向恢复", "Err", _num(rr.err, 3))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["irr"], "Irr"), result, "反向恢复", "Irr", _num(rr.irr))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["trr"], "Trr"), result, "反向恢复", "Trr", _num(rr.trr))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["vrr"], "Vrr"), result, "反向恢复", "Vrr", _num(rr.vrr))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["dvdt"], "Dvdt_max", "dv/dt"), result, "反向恢复", "dv/dt", _num(rr.dvdt_max))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["didt"], "Didt_Irr", "di/dt"), result, "反向恢复", "di/dt", _num(rr.didt_irr))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["pdmax"], "Pdmax", require_header=True), result, "反向恢复", "Pdmax", _num(rr.pdmax, 3))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["err"], "Err"), result, "反向恢复", "Err", _num(rr.err, 3))
 
     etotal = off.eoff + on.eon + rr.err
     if any(
         result.is_metric_unavailable(*key)
         for key in (("关断过程", "Eoff"), ("开通", "Eon"), ("反向恢复", "Err"))
     ):
-        ws.cell(row, COL_TAIL["etotal"]).value = None
+        tail_col = col("汇总", COL_TAIL["etotal"], "Etotal（all）", "Etotal")
+        if tail_col is not None:
+            ws.cell(row, tail_col).value = None
     else:
-        _set_value(ws, row, COL_TAIL["etotal"], _num(etotal, 3) if etotal > 0 else None)
+        tail_col = col("汇总", COL_TAIL["etotal"], "Etotal（all）", "Etotal")
+        if tail_col is not None:
+            _set_value(ws, row, tail_col, _num(etotal, 3) if etotal > 0 else None)
 
 
 def _normalized(text: object) -> str:
@@ -1973,6 +2156,7 @@ def write_report_template(
     if data_sheet not in wb.sheetnames:
         raise ValueError(f"报告模板缺少工作表：{data_sheet}")
     data_ws = wb[data_sheet]
+    _ensure_dpt_data_power_columns(data_ws)
     waveform_ws = wb[waveform_sheet] if waveform_sheet in wb.sheetnames else None
     target = _find_dpt_data_target(
         result0,

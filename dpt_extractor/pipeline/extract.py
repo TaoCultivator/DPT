@@ -26,13 +26,13 @@ from dpt_extractor.metrics.iec_timings import (
 from dpt_extractor.metrics.iec_windows import (
     eoff_window_scope_example,
     eon_window_scope_example,
-    err_window_scope_example,
     err_energy_markers,
     energy_window_power,
     integrate_err_recovery,
     integrate_vi_window,
     rr_slope_window_indices,
 )
+from dpt_extractor.metrics.energy import peak_power_kw
 from dpt_extractor.metrics.irr_measure import irr_parameter_peak_value
 from dpt_extractor.metrics.slopes import (
     didt_diode_recovery,
@@ -63,6 +63,7 @@ _REVERSE_RECOVERY_CURRENT_METRICS: set[MetricKey] = {
     ("反向恢复", "Irr"),
     ("反向恢复", "Trr"),
     ("反向恢复", "di/dt"),
+    ("反向恢复", "Pdmax"),
     ("反向恢复", "Err"),
 }
 
@@ -402,6 +403,7 @@ def extract_all(
             {
                 ("反向恢复", "Vrr"),
                 ("反向恢复", "dv/dt"),
+                ("反向恢复", "Pdmax"),
                 ("反向恢复", "Err"),
             }
         )
@@ -542,6 +544,7 @@ def extract_all(
         pulse1_on=edges.pulse1_on,
     )
     eoff_scope = integrate_vi_window(t, vce, ic, win_off_scope)
+    pdmax_off = peak_power_kw(vce, ic, win_off_scope)
     # 按用户提供的示波器示例定义：t1=Vce离开base，t2=Ic回落到base。
     eoff = eoff_scope
     eoff_math = 0.0
@@ -567,6 +570,7 @@ def extract_all(
         crosstalk_v=off_vmax,
         crosstalk_vmax=off_vmax,
         crosstalk_vmin=off_vmin,
+        pdmax=pdmax_off,
         eoff=eoff,
         eoff_range="V↑~Ic平稳",
         eoff_check=eoff_math,
@@ -683,6 +687,7 @@ def extract_all(
     )
     # 开通损耗按用户口径：窗口精确到“电流base刚结束 -> 电压base刚回落”，积分用原始 V*I
     eon = integrate_vi_window(t, vce, ic, win_on_scope)
+    pdmax_on = peak_power_kw(vce, ic, win_on_scope)
     eon_math = 0.0
     eon_warn = False
 
@@ -707,6 +712,7 @@ def extract_all(
         crosstalk_v=on_vmax,
         crosstalk_vmax=on_vmax,
         crosstalk_vmin=on_vmin,
+        pdmax=pdmax_on,
         eon=eon,
         eon_check=eon_math,
         energy_warn=eon_warn,
@@ -765,8 +771,10 @@ def extract_all(
             t, irr, v_diode, rr0, rr1, dt, i_search_end=on1
         ).as_integration_window()
         err = integrate_err_recovery(t, v_diode, irr, win_rr_scope)
+        pdmax_rr = peak_power_kw(v_diode, irr, win_rr_scope, absolute=True)
     else:
         err = 0.0
+        pdmax_rr = 0.0
     err_math = 0.0
     err_warn = False
 
@@ -778,6 +786,7 @@ def extract_all(
         didt_irr=didt_rr,
         dvdt_range=rr_dv.label(),
         didt_range=rr_di.label(),
+        pdmax=pdmax_rr,
         err=err,
         err_check=err_math,
         energy_warn=err_warn,

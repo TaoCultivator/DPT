@@ -39,6 +39,7 @@ class TestOffsetMeasurement(unittest.TestCase):
         self.assertEqual(offset_measurement_unit("maximum", "V"), "V")
         self.assertEqual(offset_measurement_unit("positive_overshoot", "V"), "%")
         self.assertEqual(offset_measurement_unit("area", "A"), "A*s")
+        self.assertIn("KW", offset_measurement_unit_candidates("maximum", "W"))
         self.assertIn("mJ", offset_measurement_unit_candidates("maximum", "J"))
         self.assertAlmostEqual(
             convert_offset_measurement_value(0.125, "J", "mJ"),
@@ -47,6 +48,10 @@ class TestOffsetMeasurement(unittest.TestCase):
         self.assertAlmostEqual(
             convert_offset_measurement_value(0.002, "A*s", "mA*s"),
             2.0,
+        )
+        self.assertAlmostEqual(
+            convert_offset_measurement_value(500_000.0, "W", "KW"),
+            500.0,
         )
 
     def test_auto_units_drop_below_one(self) -> None:
@@ -58,6 +63,15 @@ class TestOffsetMeasurement(unittest.TestCase):
         self.assertEqual(auto_offset_measurement_unit(2.0, "V"), "V")
         self.assertEqual(auto_offset_measurement_unit(0.0, "J"), "J")
         self.assertEqual(auto_offset_measurement_unit(0.5, "%"), "%")
+
+    def test_power_units_default_to_kw(self) -> None:
+        self.assertEqual(auto_offset_measurement_unit(0.0, "W"), "KW")
+        self.assertEqual(auto_offset_measurement_unit(999.0, "W"), "W")
+        self.assertEqual(auto_offset_measurement_unit(1000.0, "W"), "KW")
+        self.assertEqual(auto_offset_measurement_unit(999_999.0, "W"), "KW")
+        self.assertEqual(auto_offset_measurement_unit(1_000_000.0, "W"), "MW")
+        self.assertEqual(auto_offset_measurement_unit(0.5, "KW"), "W")
+        self.assertEqual(auto_offset_measurement_unit(2000.0, "KW"), "MW")
 
     def test_top_base_and_overshoot_follow_scope_definitions(self) -> None:
         t = np.arange(10, dtype=np.float64)

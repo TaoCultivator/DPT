@@ -101,10 +101,10 @@ from dpt_extractor.metrics.iec_windows import (
     eon_energy_markers,
     eon_window_scope_example,
     err_energy_markers,
-    err_window_scope_example,
     integrate_err_recovery,
     integrate_vi_window,
 )
+from dpt_extractor.metrics.energy import peak_power_kw
 from dpt_extractor.metrics.offset_measurement import (
     OFFSET_MEASUREMENT_BY_KEY,
     OFFSET_RANGE_LABELS,
@@ -2339,18 +2339,33 @@ class MainWindow(QMainWindow):
         if self.bundle is None:
             return []
         out: list[tuple[str, str]] = []
-        for key in self.bundle.channels:
-            label = self.bundle.meta.channel_labels.get(key, "")
+        trace_items = getattr(self.wave_plot, "_trace_items", {})
+        keys = list(trace_items) if trace_items else list(self.bundle.channels)
+        for key in keys:
+            key = normalize_channel_reference(key)
+            label = getattr(self.wave_plot, "_trace_legend", {}).get(
+                key,
+                self.bundle.meta.channel_labels.get(key, ""),
+            )
             out.append((key, self._offset_source_label(key, label)))
         return out
+
+    def _offset_source_available(self, source_key: str) -> bool:
+        source = normalize_channel_reference(source_key)
+        if not source:
+            return False
+        trace_items = getattr(self.wave_plot, "_trace_items", {})
+        if trace_items:
+            return source in trace_items
+        return bool(self.bundle is not None and source in self.bundle.channels)
 
     def _default_offset_measurements_for_bundle(self) -> list[tuple[str, str, str]]:
         if self.bundle is None:
             return []
-        available = set(self.bundle.channels)
+        available = {key for key, _label in self._offset_source_options()}
         out: list[tuple[str, str, str]] = []
         for source_key, metric_key, range_key in self.bundle.meta.offset_measurements:
-            source = str(source_key).upper()
+            source = normalize_channel_reference(source_key)
             metric = str(metric_key)
             if source not in available or metric not in OFFSET_MEASUREMENT_BY_KEY:
                 continue
@@ -2422,11 +2437,20 @@ class MainWindow(QMainWindow):
     ) -> tuple[np.ndarray, np.ndarray]:
         if self.bundle is None:
             return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
-        channel = self.bundle.maybe_get(source_key)
-        if channel is None:
-            return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
-        t = np.asarray(self.bundle.t, dtype=np.float64)
-        y = np.asarray(channel, dtype=np.float64)
+        source = normalize_channel_reference(source_key)
+        t_us = getattr(self.wave_plot, "_trace_t_us", None)
+        y_current = self.wave_plot.current_display_raw(source)
+        if t_us is not None and y_current is not None:
+            t = np.asarray(t_us, dtype=np.float64) * 1e-6
+            y = np.asarray(y_current, dtype=np.float64)
+            if t.size != y.size:
+                return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+        else:
+            channel = self.bundle.maybe_get(source)
+            if channel is None:
+                return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+            t = np.asarray(self.bundle.t, dtype=np.float64)
+            y = np.asarray(channel, dtype=np.float64)
         window = self._offset_range_window_s(range_key)
         if window is None:
             return t, y
@@ -2444,7 +2468,7 @@ class MainWindow(QMainWindow):
     ]:
         if self.bundle is None:
             return [], []
-        available = set(self.bundle.channels)
+        available = {key for key, _label in self._offset_source_options()}
         rows: list[tuple[str, str, str, str, str, str]] = []
         row_specs: list[tuple[str, str, str]] = []
         for source_key, metric_key, range_key in self._offset_measurements:
@@ -2545,8 +2569,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.bundle is None:
             return
-        source_key = str(source_key).upper()
-        if source_key not in self.bundle.channels:
+        source_key = normalize_channel_reference(source_key)
+        if not self._offset_source_available(source_key):
             return
         if metric_key not in OFFSET_MEASUREMENT_BY_KEY:
             return
@@ -2555,10 +2579,7 @@ class MainWindow(QMainWindow):
         if pair not in self._offset_measurements:
             self._offset_measurements.append(pair)
         self._refresh_offset_measurement_table(update_auxiliary=True)
-        label = self._offset_source_label(
-            source_key,
-            self.bundle.meta.channel_labels.get(source_key, ""),
-        )
+        label = self._offset_source_display_name(source_key)
         metric = OFFSET_MEASUREMENT_BY_KEY[metric_key].label.replace("\n", " ")
         self.statusBar().showMessage(
             f"已添加偏移测量: {label} · {metric} · {self._offset_range_label(range_key)}"
@@ -2581,8 +2602,8 @@ class MainWindow(QMainWindow):
         value = str(value)
 
         if field == "source":
-            new_source = value.upper()
-            if new_source not in self.bundle.channels:
+            new_source = normalize_channel_reference(value)
+            if not self._offset_source_available(new_source):
                 return
             source_key = new_source
         elif field == "metric":
@@ -2798,6 +2819,9 @@ class MainWindow(QMainWindow):
             return
         if name == "di/dt":
             self._enable_didt_interaction(section)
+            return
+        if name == "Pdmax":
+            self._enable_power_interaction(section)
             return
         if name in {"Eoff", "Eon", "Err"}:
             self._enable_energy_interaction(section, name)
@@ -3860,6 +3884,110 @@ class MainWindow(QMainWindow):
             return
         self._enable_eoff_eon_energy_interaction(section, name)
 
+    def _enable_power_interaction(self, section: str) -> None:
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return
+        if {
+            "关断过程": "Eoff",
+            "开通": "Eon",
+            "反向恢复": "Err",
+        }.get(section) is None:
+            self._enable_generic_parameter_interaction(section, "Pdmax")
+            return
+        interval = self._parameter_interval_us(section, "Pdmax")
+        if interval is None:
+            return
+
+        restored = self._manual_intervals.get((section, "Pdmax"))
+        t0_us, t1_us = restored if restored is not None else interval
+        t0_us, t1_us = min(t0_us, t1_us), max(t0_us, t1_us)
+
+        def _target_w() -> float | None:
+            target_kw = self._stored_param_value(section, "Pdmax")
+            try:
+                if target_kw is not None:
+                    return float(target_kw) * 1000.0
+            except (TypeError, ValueError):
+                return None
+            return None
+
+        def _power_peak(t0: float, t1: float):
+            return self.wave_plot.power_peak_in_window(
+                min(t0, t1),
+                max(t0, t1),
+                target_w=_target_w(),
+                prefer_abs=section == "反向恢复",
+            )
+
+        def _store_pdmax(value_kw: float) -> None:
+            if section == "关断过程":
+                self.result.turn_off.pdmax = value_kw
+            elif section == "开通":
+                self.result.turn_on.pdmax = value_kw
+            elif section == "反向恢复":
+                self.result.reverse_recovery.pdmax = value_kw
+            self.result_table.set_metric_value(section, "Pdmax", value_kw)
+
+        def _apply_power_peak(t0: float, t1: float, *, remember: bool) -> bool:
+            lo, hi = min(t0, t1), max(t0, t1)
+            matched = _power_peak(lo, hi)
+            if matched is None:
+                self.statusBar().showMessage(
+                    f"{section}-Pdmax: 未显示功率波形，仅定位功率取值窗口 "
+                    f"{lo:.3f}~{hi:.3f}µs"
+                )
+                return False
+            channel, peak_w, peak_value, _peak_t_us = matched
+            self.wave_plot.set_interval_peak_horizontal(
+                float(peak_value),
+                channel=channel,
+                t0_us=lo,
+                t1_us=hi,
+                use_abs_peak=section == "反向恢复",
+                display_abs_peak=section == "反向恢复",
+            )
+            peak_kw = float(peak_w) / 1000.0
+            _store_pdmax(peak_kw)
+            if remember:
+                self._touch_manual_waveform_source()
+                self._manual_intervals[(section, "Pdmax")] = (lo, hi)
+            self.statusBar().showMessage(
+                f"{section}-Pdmax: {peak_kw:.3f} kW "
+                f"({channel}, {lo:.3f}~{hi:.3f}µs，A/B 为取值窗口)"
+            )
+            return True
+
+        matched = _power_peak(t0_us, t1_us)
+        self.wave_plot.focus_interval_us(t0_us, t1_us)
+        self.wave_plot.enable_interval_interaction(
+            start_t_us=t0_us,
+            end_t_us=t1_us,
+            on_change=lambda ta, tb: _apply_power_peak(ta, tb, remember=True),
+            show_horizontal_peak=matched is not None,
+            mode="power_peak",
+        )
+        if matched is None:
+            self.statusBar().showMessage(
+                f"{section}-Pdmax: 未显示功率波形，仅定位功率取值窗口 "
+                f"{t0_us:.3f}~{t1_us:.3f}µs"
+            )
+            return
+        channel, peak_w, peak_value, _peak_t_us = matched
+        self.wave_plot.set_interval_peak_horizontal(
+            float(peak_value),
+            channel=channel,
+            t0_us=t0_us,
+            t1_us=t1_us,
+            use_abs_peak=section == "反向恢复",
+            display_abs_peak=section == "反向恢复",
+        )
+        if restored is not None:
+            _store_pdmax(float(peak_w) / 1000.0)
+        self.statusBar().showMessage(
+            f"{section}-Pdmax: {float(peak_w) / 1000.0:.3f} kW "
+            f"({channel}, {t0_us:.3f}~{t1_us:.3f}µs，拖动 A/B 后重算)"
+        )
+
     def _enable_err_energy_interaction(self) -> None:
         """Err：Ha=Irr 平台、Hb=V_二极管 基线，A/B 交点 + 四光标围成积分区（同 Eon）。"""
         self._active_slope_param = None
@@ -3907,11 +4035,14 @@ class MainWindow(QMainWindow):
             )
             win = IntegrationWindow(i0w, i1w, float(t[i0w]), float(t[i1w]))
             val = float(integrate_err_recovery(t, v_diode, irr, win))
+            pdmax = float(peak_power_kw(v_diode, irr, win, absolute=True))
             self.result.reverse_recovery.err = val
+            self.result.reverse_recovery.pdmax = pdmax
+            self.result_table.set_metric_value("反向恢复", "Pdmax", pdmax)
             self.result_table.set_metric_value("反向恢复", "Err", val)
             self.statusBar().showMessage(
                 f"反向恢复-Err: Ha(Irr)={ha_a:.2f}A Hb(Vd)={hb_v:.2f}V "
-                f"A={ta_us:.3f}µs B={tb_us:.3f}µs, Err={val:.3f} mJ"
+                f"A={ta_us:.3f}µs B={tb_us:.3f}µs, Pdmax={pdmax:.3f} kW, Err={val:.3f} mJ"
             )
 
         legacy = self._manual_intervals.get(("反向恢复", "Err"))
@@ -3972,7 +4103,7 @@ class MainWindow(QMainWindow):
         ic = bundle_total_current(self.bundle, self.profile)
         vce = self.bundle.get(self.profile.vce)
 
-        if section == "关断过程" and name == "Eoff":
+        if section == "关断过程" and name in {"Eoff", "Pdmax"}:
             markers = eoff_energy_markers(
                 t,
                 ic,
@@ -4043,11 +4174,16 @@ class MainWindow(QMainWindow):
             )
             win = IntegrationWindow(i0, i1, float(t[i0]), float(t[i1]))
             val = float(integrate_vi_window(t, vce, ic, win))
+            pdmax = float(peak_power_kw(vce, ic, win))
             if section == "关断过程":
                 self.result.turn_off.eoff = val
+                self.result.turn_off.pdmax = pdmax
+                self.result_table.set_metric_value("关断过程", "Pdmax", pdmax)
                 self.result_table.set_metric_value("关断过程", "Eoff", val)
             else:
                 self.result.turn_on.eon = val
+                self.result.turn_on.pdmax = pdmax
+                self.result_table.set_metric_value("开通", "Pdmax", pdmax)
                 self.result_table.set_metric_value("开通", "Eon", val)
             if section == "开通":
                 ha_txt = f"Ha(Ic)={ha_v:.2f}A"
@@ -4057,13 +4193,13 @@ class MainWindow(QMainWindow):
                 hb_txt = f"Hb(Ic)={hb_a:.2f}A"
             self.statusBar().showMessage(
                 f"{section}-{name}: {ha_txt} {hb_txt} "
-                f"A={ta_us:.3f}µs B={tb_us:.3f}µs, {name}={val:.3f} mJ"
+                f"A={ta_us:.3f}µs B={tb_us:.3f}µs, Pdmax={pdmax:.3f} kW, {name}={val:.3f} mJ"
             )
 
         key = (section, name)
         restored = self._manual_energy.get(key)
         # 关断 Eoff：每次进入均用算法光标，避免会话内旧手动位置（如 14.37µs）被恢复
-        if section == "关断过程" and name == "Eoff":
+        if section == "关断过程" and name in {"Eoff", "Pdmax"}:
             restored = None
         elif restored is not None:
             ta_r, tb_r, _, _ = restored
@@ -4902,6 +5038,7 @@ class MainWindow(QMainWindow):
                 "Toff": off.toff,
                 "Td_off": off.td_off,
                 "Tf": off.tf,
+                "Pdmax": off.pdmax,
                 "Eoff": off.eoff,
             }
             if name == "串扰电压":
@@ -4919,6 +5056,7 @@ class MainWindow(QMainWindow):
                 "Ton": on.ton,
                 "Td_on": on.td_on,
                 "Tr": on.tr,
+                "Pdmax": on.pdmax,
                 "Eon": on.eon,
             }
             if name == "串扰电压":
@@ -4931,6 +5069,7 @@ class MainWindow(QMainWindow):
                 "Vrr": rr.vrr,
                 "dv/dt": rr.dvdt_max,
                 "di/dt": rr.didt_irr,
+                "Pdmax": rr.pdmax,
                 "Err": rr.err,
             }
             return m.get(name)
@@ -5598,7 +5737,7 @@ class MainWindow(QMainWindow):
             return iec_interval
 
         # 直接窗口型参数
-        if section == "关断过程" and name == "Eoff":
+        if section == "关断过程" and name in {"Eoff", "Pdmax"}:
             from dpt_extractor.models.waveform import bundle_total_current
 
             vce = self.bundle.get(self.profile.vce)
@@ -5615,27 +5754,36 @@ class MainWindow(QMainWindow):
                 pulse1_on=segs.pulse1_on,
             )
             return w.t_start * 1e6, w.t_end * 1e6
-        if section == "开通" and name == "Eon":
+        if section == "开通" and name in {"Eon", "Pdmax"}:
             from dpt_extractor.models.waveform import bundle_total_current
 
             vce = self.bundle.get(self.profile.vce)
             i = bundle_total_current(self.bundle, self.profile)
             w = eon_window_scope_example(
-                t, i, vce, segs.turn_on[0], segs.turn_on[1], segs.pulse2_on, self.bundle.dt
+                t,
+                i,
+                vce,
+                segs.turn_on[0],
+                segs.turn_on[1],
+                segs.pulse2_on,
+                self.bundle.dt,
+                pulse1_off=segs.pulse1_off,
             )
             return w.t_start * 1e6, w.t_end * 1e6
-        if section == "反向恢复" and name == "Err":
+        if section == "反向恢复" and name in {"Err", "Pdmax"}:
             from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 
             irr_sig = bundle_reverse_recovery_current(self.bundle, self.profile)
-            w = err_window_scope_example(
+            markers = err_energy_markers(
                 t,
                 irr_sig,
                 self.bundle.get(self.profile.v_diode),
-                segs.turn_on[0],
-                segs.turn_on[1],
+                segs.reverse_recovery[0],
+                segs.reverse_recovery[1],
                 self.bundle.dt,
+                i_search_end=segs.turn_on[1],
             )
+            w = markers.as_integration_window()
             return w.t_start * 1e6, w.t_end * 1e6
 
         max_interval = self._parameter_max_interval_indices(section, name)

@@ -240,6 +240,226 @@ def _level_crossing_time(
     return float(t_seg[ix] + frac * (t_seg[ix + 1] - t_seg[ix]))
 
 
+@dataclass(frozen=True)
+class _ThreeCycleSettleRegion:
+    level: float
+    start_idx: int
+    end_idx: int
+    pp_amp: float
+    rate_cv: float
+    period_cv: float
+    strict: bool = False
+
+
+def _edge_smoothed(y: np.ndarray, points: int) -> np.ndarray:
+    arr = np.asarray(y, dtype=np.float64)
+    if points <= 1 or len(arr) < 3:
+        return arr.copy()
+    k = min(int(points), len(arr) if len(arr) % 2 == 1 else len(arr) - 1)
+    if k < 3:
+        return arr.copy()
+    if k % 2 == 0:
+        k -= 1
+    pad = k // 2
+    kernel = np.ones(k, dtype=np.float64) / float(k)
+    return np.convolve(np.pad(arr, (pad, pad), mode="edge"), kernel, mode="valid")
+
+
+def _local_extrema_indices(
+    y: np.ndarray,
+    start_idx: int,
+    end_idx: int,
+    dt: float,
+    *,
+    min_gap_ns: float = 6.0,
+) -> list[int]:
+    yy = np.asarray(y, dtype=np.float64)
+    if len(yy) < 5:
+        return []
+    lo = max(0, min(int(start_idx), len(yy) - 2))
+    hi = max(lo + 2, min(int(end_idx), len(yy) - 1))
+    seg = yy[lo : hi + 1]
+    if len(seg) < 5:
+        return []
+    dy = np.diff(seg)
+    signs = np.sign(dy)
+    last = 0.0
+    for idx, sign in enumerate(signs):
+        if sign == 0.0:
+            signs[idx] = last
+        else:
+            last = float(sign)
+    last = 0.0
+    for idx in range(len(signs) - 1, -1, -1):
+        if signs[idx] == 0.0:
+            signs[idx] = last
+        else:
+            last = float(signs[idx])
+    raw = [lo + idx + 1 for idx in range(len(signs) - 1) if signs[idx] * signs[idx + 1] < 0.0]
+    if not raw:
+        return []
+    min_gap = max(1, int(round(min_gap_ns * 1e-9 / max(float(dt), 1e-15))))
+    out: list[int] = []
+    for idx in raw:
+        if not out or idx - out[-1] >= min_gap:
+            out.append(int(idx))
+            continue
+        prev = out[-1]
+        win_lo = max(0, min(prev, idx) - min_gap)
+        win_hi = min(len(yy), max(prev, idx) + min_gap + 1)
+        med = float(np.nanmedian(yy[win_lo:win_hi]))
+        if abs(float(yy[idx]) - med) > abs(float(yy[prev]) - med):
+            out[-1] = int(idx)
+    return out
+
+
+def _three_cycle_thresholds(
+    settle_profile: str,
+    span: float,
+    tail_floor: float = 0.0,
+) -> list[tuple[bool, float, float, float]]:
+    s = max(float(span), 1.0)
+    if settle_profile == "err_current":
+        if s < 120.0:
+            return [
+                (True, max(16.0, 0.149 * s), 0.22, 0.22),
+                (False, max(18.0, 0.220 * s), 0.28, 0.28),
+            ]
+        return [
+            (True, max(12.0, 0.100 * s), 0.18, 0.20),
+            (False, max(14.0, 0.130 * s), 0.22, 0.24),
+        ]
+    if settle_profile == "current_fall":
+        strict = max(10.0, min(18.0, 0.080 * s))
+        loose = max(12.0, min(28.0, 0.120 * s))
+        return [(True, strict, 0.24, 0.24), (False, loose, 0.30, 0.30)]
+    if settle_profile == "voltage_fall":
+        if s >= 700.0:
+            strict = max(7.0, min(22.0, 0.024 * s))
+            loose = max(10.0, min(35.0, 0.040 * s))
+        else:
+            strict = max(7.0, min(14.0, max(0.030 * s, 2.2 * tail_floor)))
+            loose = max(9.0, min(22.0, max(0.050 * s, 3.0 * tail_floor)))
+        return [(True, strict, 0.24, 0.24), (False, loose, 0.32, 0.32)]
+    cap = max(5.0, min(22.0, 0.035 * s))
+    return [(True, cap, 0.25, 0.25), (False, 1.5 * cap, 0.32, 0.32)]
+
+
+def _first_crossing_in_region(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    level: float,
+    start_idx: int,
+    end_idx: int,
+    dt: float,
+) -> tuple[int, float] | None:
+    lo = max(0, min(int(start_idx), len(y_seg) - 2))
+    hi_extra = max(2, int(round(30e-9 / max(float(dt), 1e-15))))
+    hi = max(lo + 1, min(int(end_idx) + hi_extra, len(y_seg) - 2))
+    crosses = _crossing_pair_indices(y_seg, float(level), lo, hi, direction=None)
+    if not crosses:
+        return None
+    ix = int(crosses[0])
+    return ix, _level_crossing_time(t_seg, y_seg, ix, float(level))
+
+
+def _three_full_cycle_settle_region(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    *,
+    level_hint: float | None,
+    start_idx: int,
+    end_idx: int,
+    dt: float,
+    span: float,
+    settle_profile: str,
+    tail_floor: float = 0.0,
+    seed_start_extremum: bool = False,
+) -> _ThreeCycleSettleRegion | None:
+    """First low-amplitude region where three complete adjacent cycles agree.
+
+    The selected group is based on 7 consecutive extrema:
+    high-low-high-low-high-low-high or the inverse. Smoothing is used only for
+    extrema/rate detection; the returned level and all cursor crossings stay on
+    the raw waveform.
+    """
+    yy = np.asarray(y_seg, dtype=np.float64)
+    tt = np.asarray(t_seg, dtype=np.float64)
+    if len(yy) < 12 or len(tt) != len(yy):
+        return None
+    k0 = max(0, min(int(start_idx), len(yy) - 2))
+    k_end = max(k0 + 2, min(int(end_idx), len(yy) - 1))
+    if k_end <= k0 + 8:
+        return None
+    smooth_n = max(3, int(round(4e-9 / max(float(dt), 1e-15))))
+    smooth_y = _edge_smoothed(yy, smooth_n)
+    search_lo = min(k_end - 2, k0 + max(1, int(round(5e-9 / max(float(dt), 1e-15)))))
+    extrema = _local_extrema_indices(smooth_y, search_lo, k_end, dt)
+    if seed_start_extremum and (not extrema or extrema[0] - k0 > 2):
+        extrema = [k0] + [idx for idx in extrema if idx > k0]
+    if len(extrema) < 7:
+        return None
+
+    min_period = 10e-9
+    max_period = 320e-9
+    for strict, amp_ceiling, rate_cv_limit, period_cv_limit in _three_cycle_thresholds(
+        settle_profile, span, tail_floor
+    ):
+        for pos in range(0, len(extrema) - 6):
+            pts = extrema[pos : pos + 7]
+            cycle_amps: list[float] = []
+            cycle_periods: list[float] = []
+            for offset in (0, 2, 4):
+                a = int(pts[offset])
+                b = int(pts[offset + 2])
+                if b <= a:
+                    break
+                block = smooth_y[a : b + 1]
+                cycle_amps.append(float(np.nanmax(block) - np.nanmin(block)))
+                cycle_periods.append(float(tt[b] - tt[a]))
+            if len(cycle_amps) != 3 or len(cycle_periods) != 3:
+                continue
+            periods = np.asarray(cycle_periods, dtype=np.float64)
+            if np.any(periods < min_period) or np.any(periods > max_period):
+                continue
+            amps = np.asarray(cycle_amps, dtype=np.float64)
+            rates = amps / np.maximum(periods, 1e-30)
+            mean_rate = float(np.nanmean(rates))
+            mean_period = float(np.nanmean(periods))
+            if mean_rate <= 0.0 or mean_period <= 0.0:
+                continue
+            rate_cv = float(np.nanstd(rates) / mean_rate)
+            period_cv = float(np.nanstd(periods) / mean_period)
+            pp_amp = float(np.nanmax(amps))
+            if pp_amp > amp_ceiling or rate_cv > rate_cv_limit or period_cv > period_cv_limit:
+                continue
+            g0 = int(pts[0])
+            g1 = int(pts[-1])
+            raw = yy[g0 : g1 + 1]
+            if len(raw) < 4:
+                continue
+            region_level = (
+                float(level_hint)
+                if level_hint is not None
+                else 0.5 * (float(np.nanmax(raw)) + float(np.nanmin(raw)))
+            )
+            if level_hint is not None:
+                center = 0.5 * (float(np.nanmax(raw)) + float(np.nanmin(raw)))
+                near_limit = max(1.7 * amp_ceiling, 0.060 * max(float(span), 1.0), 10.0)
+                if abs(center - float(level_hint)) > near_limit:
+                    continue
+            return _ThreeCycleSettleRegion(
+                float(region_level),
+                g0,
+                g1,
+                pp_amp,
+                rate_cv,
+                period_cv,
+                strict=strict,
+            )
+    return None
+
+
 def _settled_level_crossing_after_main_edge(
     t_seg: np.ndarray,
     y_seg: np.ndarray,
@@ -375,6 +595,37 @@ def _settled_level_crossing_after_main_edge(
     chosen_t = _level_crossing_time(tt, yy, chosen, lvl)
     if chosen_t < float(first_t):
         return first_ix, float(first_t)
+
+    cycle_region = _three_full_cycle_settle_region(
+        tt,
+        yy,
+        level_hint=lvl,
+        start_idx=first_ix,
+        end_idx=end_ix + 1,
+        dt=dt,
+        span=span,
+        settle_profile=settle_profile,
+        tail_floor=tail_floor,
+    )
+    if cycle_region is not None:
+        cycle_cross = _first_crossing_in_region(
+            tt,
+            yy,
+            lvl,
+            cycle_region.start_idx,
+            cycle_region.end_idx,
+            dt,
+        )
+        if cycle_cross is not None and cycle_cross[1] >= float(first_t):
+            cycle_ix, cycle_t = cycle_cross
+            if settle_profile == "voltage_fall":
+                max_extra_delay = 35e-9
+            elif settle_profile == "current_fall" and span < 180.0:
+                max_extra_delay = 320e-9
+            else:
+                max_extra_delay = 45e-9
+            if cycle_t <= chosen_t + max_extra_delay:
+                return int(cycle_ix), float(cycle_t)
     return chosen, float(chosen_t)
 
 
@@ -625,7 +876,7 @@ def _eoff_ic_fall_crossing_at_main_fall(
     i_top: float,
 ) -> tuple[int, float]:
     """关断 B：Ic 主下降沿与 Hb 的第一个真实交点。"""
-    return _main_edge_level_crossing(
+    first_ix, first_t = _main_edge_level_crossing(
         t_seg,
         i_seg,
         hb,
@@ -636,6 +887,17 @@ def _eoff_ic_fall_crossing_at_main_fall(
         min_trigger=15.0,
         fit_post_ns=300.0,
         raw_window_ns=400.0,
+    )
+    return _settled_level_crossing_after_main_edge(
+        t_seg,
+        i_seg,
+        hb,
+        first_ix,
+        first_t,
+        dt,
+        i_top,
+        direction="falling",
+        settle_profile="current_fall",
     )
 
 
@@ -648,7 +910,7 @@ def _eon_vce_hb_fall_crossing_at_main_fall(
     v_top: float,
 ) -> tuple[int, float]:
     """开通 B：Vce 主下降沿与 Hb 的第一个真实交点。"""
-    return _main_edge_level_crossing(
+    first_ix, first_t = _main_edge_level_crossing(
         t_seg,
         v_seg,
         hb,
@@ -659,6 +921,17 @@ def _eon_vce_hb_fall_crossing_at_main_fall(
         min_trigger=5.0,
         fit_post_ns=300.0,
         raw_window_ns=400.0,
+    )
+    return _settled_level_crossing_after_main_edge(
+        t_seg,
+        v_seg,
+        hb,
+        first_ix,
+        first_t,
+        dt,
+        v_top,
+        direction="falling",
+        settle_profile="voltage_fall",
     )
 
 
@@ -889,68 +1162,6 @@ def eon_window_scope_example(
     ).as_integration_window()
 
 
-def err_window_scope_example(
-    t: np.ndarray,
-    irr: np.ndarray,
-    v_diode: np.ndarray,
-    i0: int,
-    i1: int,
-    dt: float,
-) -> IntegrationWindow:
-    """
-    示波器口径（用户定义）:
-    - t1: 反向恢复电流离开 base
-    - t2: 二极管电压回到 base
-    """
-    n = len(t)
-    w0 = max(0, i0)
-    w1 = min(n - 1, i1)
-    if w1 <= w0 + 10:
-        return IntegrationWindow(w0, w1, float(t[w0]), float(t[w1]))
-
-    i_seg = irr[w0:w1].astype(np.float64)
-    v_seg = v_diode[w0:w1].astype(np.float64)
-    if len(i_seg) < 8:
-        return IntegrationWindow(w0, w1, float(t[w0]), float(t[w1]))
-
-    # 恢复主瓣峰值（通常为正峰），并在其前小窗口找反向谷值作为 t1
-    i_peak = int(np.argmax(i_seg))
-    lb = max(5, int(140e-9 / max(dt, 1e-15)))
-    a = max(0, i_peak - lb)
-    if i_peak > a:
-        i_start_local = a + int(np.argmin(i_seg[a : i_peak + 1]))
-    else:
-        i_start_local = int(np.argmin(i_seg))
-
-    # base 取窗口后段（示波器“归零点”）
-    tail = max(10, int(180e-9 / max(dt, 1e-15)))
-    i_base = float(np.percentile(i_seg[max(0, len(i_seg) - tail) :], 50))
-    v_base = float(np.percentile(v_seg[max(0, len(v_seg) - tail) :], 50))
-
-    i_span = max(float(np.max(np.abs(i_seg - i_base))), 1.0)
-    v_span = max(float(np.max(np.abs(v_seg - v_base))), 1.0)
-    i_tol = max(8.0, 0.02 * i_span)
-    v_tol = max(4.0, 0.01 * v_span)
-    hold = max(5, int(20e-9 / max(dt, 1e-15)))
-
-    # t2：电流与电压同时回到各自 base（并保持短暂稳定）
-    i_end_local = None
-    for j in range(max(i_peak, i_start_local + 1), len(i_seg) - hold):
-        i_ok = float(np.max(np.abs(i_seg[j : j + hold] - i_base))) <= i_tol
-        v_ok = float(np.max(np.abs(v_seg[j : j + hold] - v_base))) <= v_tol
-        if i_ok and v_ok:
-            i_end_local = j
-            break
-    if i_end_local is None:
-        i_end_local = len(i_seg) - 1
-    if i_end_local <= i_start_local + 5:
-        i_end_local = min(len(i_seg) - 1, i_start_local + int(300e-9 / max(dt, 1e-15)))
-
-    i_start = w0 + int(i_start_local)
-    i_end = w0 + int(i_end_local)
-    return IntegrationWindow(i_start, i_end, float(t[i_start]), float(t[i_end]))
-
-
 def _err_recovery_orientation(seg_i: np.ndarray) -> float:
     """恢复过冲方向：正向导通电流为负则取 +1，为正则取 -1。
 
@@ -1027,6 +1238,26 @@ def _err_recovery_settled_base(
         return 0.5 * (mx - mn), 0.5 * (mx + mn)
 
     peak_abs = max(abs(float(y[k0])), 1.0)
+    cycle_region = _three_full_cycle_settle_region(
+        np.arange(n, dtype=np.float64) * float(dt),
+        y,
+        level_hint=None,
+        start_idx=k0,
+        end_idx=k_end,
+        dt=dt,
+        span=peak_abs,
+        settle_profile="err_current",
+        seed_start_extremum=True,
+    )
+    if cycle_region is not None:
+        return _ErrRecoveryBase(
+            float(cycle_region.level),
+            int(cycle_region.start_idx),
+            int(cycle_region.end_idx),
+            0.5 * float(cycle_region.pp_amp),
+            strict=cycle_region.strict,
+        )
+
     lookahead = max(6, int(120e-9 / max(step * dt, 1e-15)))
     best: tuple[int, float, float] | None = None
 
@@ -1056,12 +1287,18 @@ def _err_recovery_settled_base(
             cur += step
         return None
 
-    # 第一口径只吃主恢复大振荡已明显收敛的位置；找不到时再回退旧的宽口径，
-    # 避免无法自然收敛的样例被硬拖到后续长尾。
-    strict = _scan_with_ceiling(max(16.0, 0.149 * peak_abs), strict=True)
+    # 第一口径只吃主恢复大振荡已明显收敛的位置；找不到时再放宽一次，
+    # 但仍拒绝还在肉眼可见大幅衰减的尾段。
+    if peak_abs < 120.0:
+        strict_ceiling = max(16.0, 0.149 * peak_abs)
+        loose_ceiling = max(18.0, 0.220 * peak_abs)
+    else:
+        strict_ceiling = max(14.0, 0.120 * peak_abs)
+        loose_ceiling = max(16.0, 0.180 * peak_abs)
+    strict = _scan_with_ceiling(strict_ceiling, strict=True)
     if strict is not None:
         return strict
-    loose = _scan_with_ceiling(max(18.0, 0.22 * peak_abs), strict=False)
+    loose = _scan_with_ceiling(loose_ceiling, strict=False)
     if loose is not None:
         return loose
 
@@ -1309,6 +1546,7 @@ def _err_irr_fall_cross_ha_t(
     *,
     force_signed: bool = False,
     settle_idx: int | None = None,
+    settle_end_idx: int | None = None,
     settle_strict: bool = False,
 ) -> float:
     """IRM 主峰后恢复沿与 Ha 的第一个真实交点（秒）。
@@ -1331,6 +1569,19 @@ def _err_irr_fall_cross_ha_t(
             crossings.append((k, _err_interp_cross_time(t, y, k, lvl), direction))
 
     if crossings:
+        if settle_idx is not None:
+            settle_lo = max(k0, int(settle_idx) - 1)
+            settle_hi = (
+                min(k1, int(settle_end_idx) + max(2, int(30e-9 / max(dt, 1e-15))))
+                if settle_end_idx is not None
+                else k1
+            )
+            for k, t_cross, _direction in crossings:
+                if settle_lo <= int(k) <= settle_hi:
+                    return float(t_cross)
+            for k, t_cross, _direction in crossings:
+                if int(k) >= settle_lo:
+                    return float(t_cross)
         for _k, t_cross, direction in crossings:
             if direction == "falling":
                 return float(t_cross)
@@ -1372,8 +1623,14 @@ def err_energy_markers(
     seg_v = np.abs(np.asarray(v_diode[i0 : i1 + 1], dtype=np.float64))
     t_seg = t[i0 : i1 + 1]
     if len(seg_i) < 12:
-        w = err_window_scope_example(t, irr, v_diode, i0, i1, dt)
-        return EnergyLossMarkers(0.0, 0.0, w.t_start, w.t_end, w.i_start, w.i_end)
+        return EnergyLossMarkers(
+            0.0,
+            0.0,
+            float(t[i0]),
+            float(t[i1]),
+            int(i0),
+            int(i1),
+        )
 
     ipk = err_recovery_peak_index(seg_i, dt)
     ipk_global = i0 + ipk
@@ -1429,14 +1686,14 @@ def err_energy_markers(
         dt,
         force_signed=signed_tail_after_rebound,
         settle_idx=err_base.start_idx,
+        settle_end_idx=err_base.end_idx,
         settle_strict=err_base.strict,
     )
     # B=Vd 主抬升沿与 Hb 的首个上升穿越（带符号 Vd）
     t_b_v = _err_vd_rise_cross_hb_t(t, vd_full, hb_v, ipk_global, i0, dt)
 
     if abs(t_a_irr - t_b_v) < 1e-15:
-        w = err_window_scope_example(t, irr, v_diode, i0, i1, dt)
-        t_a_irr, t_b_v = w.t_start, w.t_end
+        t_a_irr, t_b_v = float(t[i0]), float(t[i1])
 
     # A=Irr 与 Ha 交点；B=Vd 与 Hb 交点（B 往往早于 A）
     t_start = float(t_a_irr)

@@ -664,6 +664,8 @@ GRATICULE_SUBDIVISIONS_PER_DIV = 5
 VDIV_LADDER = (1, 2, 5, 10, 20, 50, 100, 150, 200, 250, 300)
 CURRENT_VDIV_DEFAULT = 200.0  # 电流通道默认刻度（A/格）
 CURRENT_VDIV_MAX = 300.0  # 电流通道可选上限（含 250、300）
+POWER_VDIV_DEFAULT = 500_000.0  # 功率通道默认刻度：500 kW/格
+RR_POWER_VDIV_DEFAULT = 200_000.0  # 反向恢复功率默认刻度：200 kW/格
 _NICE_STEPS = (1.0, 2.0, 2.5, 5.0)
 
 # 参考示波器默认垂直刻度（Ch1 5V/格, Ch2 200V/格, Ch3/4 200A/格, Ch5 200V/格, Ch6 5V/格）
@@ -767,6 +769,68 @@ def _is_math_trace_key(key: str) -> bool:
 
 def _is_source_channel_key(key: str) -> bool:
     return bool(SOURCE_CHANNEL_RE.fullmatch(channel_reference_base_name(key)))
+
+
+_POWER_UNIT_TO_W = {
+    "pW": 1e-12,
+    "nW": 1e-9,
+    "uW": 1e-6,
+    "µW": 1e-6,
+    "mW": 1e-3,
+    "W": 1.0,
+    "KW": 1e3,
+    "kW": 1e3,
+    "MW": 1e6,
+    "GW": 1e9,
+}
+
+
+def _is_power_unit(unit: str) -> bool:
+    return str(unit or "").strip() in _POWER_UNIT_TO_W
+
+
+def _power_vdiv_default_for_unit(
+    unit: str,
+    *,
+    reverse_recovery: bool = False,
+) -> float:
+    text = str(unit or "").strip()
+    default_w = RR_POWER_VDIV_DEFAULT if reverse_recovery else POWER_VDIV_DEFAULT
+    return default_w / _POWER_UNIT_TO_W.get(text, 1.0)
+
+
+def _power_unit_to_w_factor(unit: str) -> float:
+    return float(_POWER_UNIT_TO_W.get(str(unit or "").strip(), 1.0))
+
+
+def _format_power_axis_value(value: float, unit: str) -> str:
+    watts = float(value) * _power_unit_to_w_factor(unit)
+    abs_w = abs(watts)
+    if abs_w < 1e-15:
+        return "0 W"
+    for suffix, factor in (
+        ("GW", 1e9),
+        ("MW", 1e6),
+        ("KW", 1e3),
+        ("W", 1.0),
+        ("mW", 1e-3),
+        ("µW", 1e-6),
+        ("nW", 1e-9),
+        ("pW", 1e-12),
+    ):
+        if abs_w >= factor:
+            disp = watts / factor
+            break
+    else:
+        suffix, factor = "pW", 1e-12
+        disp = watts / factor
+    if abs(disp - round(disp)) < 1e-6:
+        text = f"{int(round(disp))}"
+    elif abs(disp) >= 10.0:
+        text = f"{disp:.1f}".rstrip("0").rstrip(".")
+    else:
+        text = f"{disp:.2f}".rstrip("0").rstrip(".")
+    return f"{text} {suffix}"
 
 
 def _math_color(key: str) -> str:
@@ -1025,8 +1089,19 @@ def _y_fit_limit_div() -> float:
     return DISP_HALF_DIV * (1.0 - VERT_VIEW_MARGIN)
 
 
-def _auto_vdiv_for_channel(key: str, raw: np.ndarray) -> float:
+def _auto_vdiv_for_channel(
+    key: str,
+    raw: np.ndarray,
+    unit: str = "",
+    *,
+    reverse_recovery_power: bool = False,
+) -> float:
     """TSS 没有垂直刻度时，按 10%~90% 波形区自动选取单位/格。"""
+    if _is_power_unit(unit):
+        return _power_vdiv_default_for_unit(
+            unit,
+            reverse_recovery=reverse_recovery_power,
+        )
     if len(raw) == 0:
         return float(_vdiv_ladder_for_channel(key)[0])
     _, _, _, half_span = _raw_value_span(raw)
@@ -1093,7 +1168,12 @@ def _waveform_fits_at_center(raw: np.ndarray, scale: float) -> bool:
 
 
 def _safe_initial_vdiv_for_channel(
-    key: str, raw: np.ndarray, scope_scale: float | None
+    key: str,
+    raw: np.ndarray,
+    scope_scale: float | None,
+    unit: str = "",
+    *,
+    reverse_recovery_power: bool = False,
 ) -> float:
     if (
         scope_scale is not None
@@ -1101,7 +1181,12 @@ def _safe_initial_vdiv_for_channel(
         and float(scope_scale) > 0
     ):
         return float(scope_scale)
-    return _auto_vdiv_for_channel(key, raw)
+    return _auto_vdiv_for_channel(
+        key,
+        raw,
+        unit,
+        reverse_recovery_power=reverse_recovery_power,
+    )
 
 
 def _clamp_offset_div(offset: float) -> float:
@@ -2688,6 +2773,8 @@ class WaveformPlot(QWidget):
 
     @staticmethod
     def _format_axis_value(value: float, unit: str) -> str:
+        if _is_power_unit(unit):
+            return _format_power_axis_value(value, unit)
         abs_v = abs(float(value))
         prefix = ""
         scale = 1.0
@@ -3210,9 +3297,10 @@ class WaveformPlot(QWidget):
         text = expr.upper()
         if "INTG" in text or "INTEG" in text:
             return "J"
-        if re.search(r"\bCH[1-8]\b", text) and "*" in text:
+        source_refs = re.findall(rf"\b{SOURCE_CHANNEL_PATTERN}\b", text)
+        if "*" in text and len(set(ref.upper() for ref in source_refs)) >= 2:
             return "W"
-        for name in re.findall(rf"\b{SOURCE_CHANNEL_PATTERN}\b", text):
+        for name in source_refs:
             unit = (
                 self._lookup_channel_unit(unit_overrides or {}, name)
                 or self._lookup_channel_unit(self._trace_units, name)
@@ -3448,6 +3536,39 @@ class WaveformPlot(QWidget):
                 return logical
         return ""
 
+    def _logical_roles_for_source(self, source_key: str) -> set[str]:
+        source_key = normalize_channel_reference(source_key)
+        roles: set[str] = set()
+        for logical, display_key in self._logical_display_keys.items():
+            if display_key == source_key:
+                roles.add(logical)
+        return roles
+
+    def _is_reverse_recovery_power_formula(self, expr: str | None) -> bool:
+        if not expr:
+            return False
+        text = str(expr).upper()
+        if "*" not in text:
+            return False
+        roles: set[str] = set()
+        for ref in re.findall(rf"\b{SOURCE_CHANNEL_PATTERN}\b", text):
+            roles.update(self._logical_roles_for_source(ref))
+        return "v_diode" in roles and "irr" in roles
+
+    def _auto_vdiv_for_trace(
+        self,
+        key: str,
+        raw: np.ndarray,
+        *,
+        expr: str | None = None,
+    ) -> float:
+        return _auto_vdiv_for_channel(
+            key,
+            raw,
+            self._unit_for_channel(key),
+            reverse_recovery_power=self._is_reverse_recovery_power_formula(expr),
+        )
+
     def request_channel_mapping(self, source_key: str, logical_role: str) -> None:
         self.channelMappingRequested.emit(
             normalize_channel_reference(source_key),
@@ -3643,7 +3764,11 @@ class WaveformPlot(QWidget):
         if key in self._manual_vdiv:
             scale = float(self._manual_vdiv[key])
         else:
-            scale = _auto_vdiv_for_channel(key, fit_raw)
+            scale = self._auto_vdiv_for_trace(
+                key,
+                fit_raw,
+                expr=self._math_formulas.get(key),
+            )
         self._disp_scale[key] = scale
         self._disp_offset[key] = _auto_center_offset_div(fit_raw, scale)
         win = self._current_x_window_for_display()
@@ -3688,7 +3813,7 @@ class WaveformPlot(QWidget):
         if key in self._manual_vdiv:
             scale = float(self._manual_vdiv[key])
         else:
-            scale = _auto_vdiv_for_channel(key, fit_raw)
+            scale = self._auto_vdiv_for_trace(key, fit_raw, expr=expr)
         self._disp_scale[key] = scale
         self._disp_offset[key] = _auto_center_offset_div(fit_raw, scale)
         self._refresh_visible_traces(force=True)
@@ -3935,7 +4060,13 @@ class WaveformPlot(QWidget):
                     key,
                     bundle.meta.channel_vdiv.get(channel_reference_base_name(key)),
                 )
-                scale = _safe_initial_vdiv_for_channel(key, fit_raw, scope_scale)
+                scale = _safe_initial_vdiv_for_channel(
+                    key,
+                    fit_raw,
+                    scope_scale,
+                    self._unit_for_channel(key),
+                    reverse_recovery_power=self._is_reverse_recovery_power_formula(expr),
+                )
             self._disp_scale[key] = scale
             if key in saved_offset:
                 offset = float(saved_offset[key])
@@ -4540,7 +4671,11 @@ class WaveformPlot(QWidget):
         fit_raw = self._fit_raw_for_channel(key, raw)
         if value is None:
             self._manual_vdiv.pop(key, None)
-            scale = _auto_vdiv_for_channel(key, fit_raw)
+            scale = self._auto_vdiv_for_trace(
+                key,
+                fit_raw,
+                expr=self._math_formulas.get(key),
+            )
         else:
             scale = max(float(value), 1e-15)
             self._manual_vdiv[key] = scale
@@ -4591,6 +4726,106 @@ class WaveformPlot(QWidget):
         self._refresh_zero_handle_styles()
         self._update_y_ticks()
         self._update_readout()
+
+    def focus_power_peak_in_window(
+        self,
+        t0_us: float,
+        t1_us: float,
+        *,
+        target_w: float | None = None,
+        prefer_abs: bool = False,
+    ) -> tuple[str, float] | None:
+        """Focus a visible W trace and mark its peak within the requested window."""
+        peak = self.power_peak_in_window(
+            t0_us,
+            t1_us,
+            target_w=target_w,
+            prefer_abs=prefer_abs,
+        )
+        if peak is None:
+            return None
+        key, peak_w, peak_value, peak_t_us = peak
+        lo_us, hi_us = sorted((float(t0_us), float(t1_us)))
+        pad = max(0.04, (hi_us - lo_us) * 0.2)
+        self.focus_interval_us(lo_us - pad, hi_us + pad)
+        self.set_cursor_auxiliary_point(
+            key,
+            peak_t_us,
+            peak_value,
+            show_vertical_guide=True,
+            x_range_us=(lo_us, hi_us),
+        )
+        return key, peak_w
+
+    def power_peak_in_window(
+        self,
+        t0_us: float,
+        t1_us: float,
+        *,
+        target_w: float | None = None,
+        prefer_abs: bool = False,
+    ) -> tuple[str, float, float, float] | None:
+        """Return (channel, peak W, display trace value, t_us) for a visible power trace."""
+        if self._trace_t_us is None or len(self._trace_t_us) == 0:
+            return None
+        lo_us, hi_us = sorted((float(t0_us), float(t1_us)))
+        if not np.isfinite(lo_us) or not np.isfinite(hi_us) or hi_us <= lo_us:
+            return None
+        mask = (self._trace_t_us >= lo_us) & (self._trace_t_us <= hi_us)
+        if not np.any(mask):
+            return None
+        candidates: list[tuple[float, str, float, int]] = []
+        for key in self._trace_items:
+            unit = self._unit_for_channel(key)
+            if key in self._hidden_channels or not _is_power_unit(unit):
+                continue
+            to_w = _power_unit_to_w_factor(unit)
+            raw = self._effective_raw_for_channel(key)
+            if raw is None:
+                continue
+            raw_arr = np.asarray(raw, dtype=np.float64)
+            if raw_arr.size != self._trace_t_us.size:
+                continue
+            seg = raw_arr[mask]
+            if seg.size == 0:
+                continue
+            finite = np.isfinite(seg)
+            if not np.any(finite):
+                continue
+            local_indices = np.nonzero(mask)[0][finite]
+            finite_seg = seg[finite]
+            idx_max_local = int(np.nanargmax(finite_seg))
+            peak_value = float(finite_seg[idx_max_local])
+            peak_idx = int(local_indices[idx_max_local])
+            if prefer_abs:
+                idx_abs_local = int(np.nanargmax(np.abs(finite_seg)))
+                abs_value = float(finite_seg[idx_abs_local])
+                abs_idx = int(local_indices[idx_abs_local])
+                abs_value_w = abs_value * to_w
+                peak_value_w = peak_value * to_w
+                if target_w is None or abs(abs(abs_value_w) - float(target_w)) <= abs(peak_value_w - float(target_w)):
+                    peak_value = abs_value
+                    peak_idx = abs_idx
+            peak_value_w = peak_value * to_w
+            if target_w is None or not np.isfinite(float(target_w)):
+                score = -abs(peak_value_w)
+            else:
+                score = abs(abs(peak_value_w) - float(target_w)) if prefer_abs else abs(peak_value_w - float(target_w))
+            candidates.append((float(score), key, peak_value, peak_idx))
+        if not candidates:
+            return None
+        if target_w is None or not np.isfinite(float(target_w)):
+            _score, key, peak_value, peak_idx = min(candidates, key=lambda item: item[0])
+        else:
+            _score, key, peak_value, peak_idx = min(candidates, key=lambda item: item[0])
+        peak_w = peak_value * _power_unit_to_w_factor(self._unit_for_channel(key))
+        display_value = abs(peak_value) if prefer_abs else peak_value
+        return (
+            key,
+            abs(peak_w) if prefer_abs else peak_w,
+            display_value,
+            float(self._trace_t_us[peak_idx]),
+        )
 
     def _clear_highlight(self) -> None:
         self._highlighted_key = None
@@ -6469,6 +6704,7 @@ class WaveformPlot(QWidget):
                 "irr_peak",
                 "turn_on_current",
                 "crosstalk",
+                "power_peak",
             }
             else "interval"
         )
@@ -6782,6 +7018,7 @@ class WaveformPlot(QWidget):
             self._interactive_dt,
             force_signed=force_signed,
             settle_idx=base.start_idx,
+            settle_end_idx=base.end_idx,
         )
         return float(t_cross) * 1e6
 
@@ -7047,8 +7284,9 @@ class WaveformPlot(QWidget):
         t1_us: float,
         *,
         use_abs: bool = False,
+        display_abs: bool = False,
     ) -> tuple[float, float, float] | None:
-        """A-B 窗口内峰值点: (时间 µs, 原始值, 显示 Y)。"""
+        """A-B 窗口内峰值点: (时间 µs, 显示/读数值, 显示 Y)。"""
         channel = self._display_key_for_channel(channel)
         tt = self._trace_t_us
         raw = self._effective_raw_for_channel(channel)
@@ -7069,6 +7307,8 @@ class WaveformPlot(QWidget):
             return None
         idx = int(idxs[local_idx])
         value = float(np.asarray(raw, dtype=np.float64)[idx])
+        if display_abs:
+            value = abs(value)
         return float(tt[idx]), value, float(self._to_disp(channel, value))
 
     def _min_plot_y_in_window(
@@ -7112,6 +7352,7 @@ class WaveformPlot(QWidget):
         t0_us: float | None = None,
         t1_us: float | None = None,
         use_abs_peak: bool = False,
+        display_abs_peak: bool = False,
     ) -> None:
         """interval-peak 模式下把 Ha 设到 A-B 窗内峰值（与全采样波形对齐）。"""
         if not self._interval_max_hline_enabled or self._interval_peak_on_hb:
@@ -7122,7 +7363,11 @@ class WaveformPlot(QWidget):
         y_disp = self._to_disp(channel, float(y))
         if t0_us is not None and t1_us is not None:
             plot_peak = self._peak_plot_point_in_window(
-                channel, t0_us, t1_us, use_abs=use_abs_peak
+                channel,
+                t0_us,
+                t1_us,
+                use_abs=use_abs_peak,
+                display_abs=display_abs_peak,
             )
             if plot_peak is not None:
                 peak_t_us, peak_value, y_disp = plot_peak
@@ -7601,7 +7846,12 @@ class WaveformPlot(QWidget):
             if self._interactive_mode == "energy_loss":
                 self._emit_energy_loss_changed()
                 return
-            if self._interactive_mode in {"interval", "irr_cross", "crosstalk"}:
+            if self._interactive_mode in {
+                "interval",
+                "irr_cross",
+                "crosstalk",
+                "power_peak",
+            }:
                 t0 = float(self._cursor_a.value())
                 t1 = float(self._cursor_b.value())
                 if self._interactive_on_change is not None:
