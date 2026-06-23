@@ -23,6 +23,7 @@ class FakeAnalogWaveform:
     def __init__(self) -> None:
         self.meta_info = None
         self.source_name = ""
+        self.y_axis_units = ""
         self.x_axis_spacing = 0.0
         self.trigger_index = 0.0
         self.y_axis_values = np.array([], dtype=np.float64)
@@ -53,6 +54,7 @@ class TestTssParser(unittest.TestCase):
         wfm = FakeAnalogWaveform()
         wfm.meta_info = FakeAnalogWaveformMetaInfo(waveform_label=label)
         wfm.source_name = "CH1"
+        wfm.y_axis_units = "V"
         wfm.x_axis_spacing = 8e-11
         wfm.trigger_index = 2.0
         wfm.y_axis_values = np.linspace(-1.0, 1.0, n)
@@ -77,9 +79,11 @@ class TestTssParser(unittest.TestCase):
 
             def fake_read(path: str):
                 if Path(path).stem.upper() == "CH1":
+                    wfm.y_axis_units = "Volts"
                     return wfm
                 other = self._make_wfm(label="H-Vce")
                 other.source_name = "CH2"
+                other.y_axis_units = "A"
                 other.y_axis_values = y + 10.0
                 return other
 
@@ -89,6 +93,7 @@ class TestTssParser(unittest.TestCase):
                     "dpt_extractor.io.tss_parser.read_wfm_vertical_scale_per_div",
                     side_effect=lambda p: 5.0 if Path(p).stem.upper() == "CH1" else 200.0,
                 ),
+                patch("dpt_extractor.io.tss_parser.read_wfm_vertical_unit", return_value=""),
             ):
                 bundle = TssParser().parse(tss_path)
 
@@ -96,6 +101,8 @@ class TestTssParser(unittest.TestCase):
             self.assertEqual(bundle.meta.channel_labels["CH1"], "H-Vge")
             self.assertEqual(bundle.meta.channel_vdiv["CH1"], 5.0)
             self.assertEqual(bundle.meta.channel_vdiv["CH2"], 200.0)
+            self.assertEqual(bundle.meta.channel_units["CH1"], "V")
+            self.assertEqual(bundle.meta.channel_units["CH2"], "A")
             self.assertEqual(bundle.n, 8)
             self.assertAlmostEqual(bundle.dt, 8e-11)
             np.testing.assert_allclose(bundle.t, t)
@@ -117,6 +124,76 @@ class TestTssParser(unittest.TestCase):
 
         np.testing.assert_allclose(bundle.t, wfm.x_axis_values)
         self.assertAlmostEqual(bundle.dt, 2e-9)
+
+    def test_parse_session_channel_invert_as_default_display_state(self):
+        values = {
+            "CH1": np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            "CH2": np.array([10.0, 20.0, 30.0], dtype=np.float64),
+        }
+        setup_text = ":CH1:INVERT 0;:CH2:INVERT 1;"
+        with tempfile.TemporaryDirectory() as tmp:
+            tss_path = Path(tmp) / "UH_invert.tss"
+            with zipfile.ZipFile(tss_path, "w") as zf:
+                zf.writestr("CH1.wfm", b"placeholder")
+                zf.writestr("CH2.wfm", b"placeholder")
+                zf.writestr("UH_invert.set", self._make_setup_zip(setup_text))
+
+            def fake_read(path: str):
+                ch = Path(path).stem.upper()
+                wfm = self._make_wfm(n=3, label=ch)
+                wfm.source_name = ch
+                wfm.x_axis_spacing = 1.0
+                wfm.trigger_index = 0.0
+                wfm.y_axis_values = values[ch]
+                return wfm
+
+            with (
+                patch("dpt_extractor.io.tss_parser.read_file", side_effect=fake_read),
+                patch("dpt_extractor.io.tss_parser.read_wfm_vertical_scale_per_div", return_value=None),
+            ):
+                bundle = TssParser().parse(tss_path)
+
+        self.assertEqual(bundle.meta.source_channel_inversions, {"CH2"})
+        self.assertEqual(bundle.meta.channel_display_inversions, {"CH2"})
+        np.testing.assert_allclose(bundle.channels["CH2"], values["CH2"])
+        np.testing.assert_allclose(bundle.get("CH2"), values["CH2"])
+        bundle.meta.channel_display_inversions.discard("CH2")
+        np.testing.assert_allclose(bundle.get("CH2"), -values["CH2"])
+
+    def test_setup_math_uses_default_display_inversion_sources(self):
+        values = {
+            "CH1": np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            "CH2": np.array([10.0, 20.0, 30.0], dtype=np.float64),
+        }
+        setup_text = (
+            ':MAINWINDOW:SOURCEORDER "1%3Bch1%3Bch2%3Bmath1";'
+            ":CH2:INVERT 1;"
+            ':MATH:MATH1:DEFINE "Ch1%2BCh2";'
+            ":DISPLAY:GLOBAL:MATH1:STATE 1;"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tss_path = Path(tmp) / "UH_math_invert.tss"
+            with zipfile.ZipFile(tss_path, "w") as zf:
+                zf.writestr("CH1.wfm", b"placeholder")
+                zf.writestr("CH2.wfm", b"placeholder")
+                zf.writestr("UH_math_invert.set", self._make_setup_zip(setup_text))
+
+            def fake_read(path: str):
+                ch = Path(path).stem.upper()
+                wfm = self._make_wfm(n=3, label=ch)
+                wfm.source_name = ch
+                wfm.x_axis_spacing = 1.0
+                wfm.trigger_index = 0.0
+                wfm.y_axis_values = values[ch]
+                return wfm
+
+            with (
+                patch("dpt_extractor.io.tss_parser.read_file", side_effect=fake_read),
+                patch("dpt_extractor.io.tss_parser.read_wfm_vertical_scale_per_div", return_value=None),
+            ):
+                bundle = TssParser().parse(tss_path)
+
+        np.testing.assert_allclose(bundle.channels["MATH1"], values["CH1"] + values["CH2"])
 
     def test_parse_session_math_from_setup(self):
         n = 5

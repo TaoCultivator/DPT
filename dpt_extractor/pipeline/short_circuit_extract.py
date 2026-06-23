@@ -382,10 +382,12 @@ def short_circuit_energy_value(
     current_channel = profile.ic or "CH3"
     if math_channel is None:
         math_channel = find_energy_math_channel(bundle, voltage_channel, current_channel)
-    if math_channel and math_channel in bundle.channels:
-        seg = np.asarray(bundle.channels[math_channel][i0 : i1 + 1], dtype=np.float64)
-        if len(seg):
-            return max(0.0, float(seg[-1] - seg[0])), math_channel
+    if math_channel and bundle.has_channel_reference(math_channel):
+        values = bundle.maybe_get(math_channel)
+        if values is not None:
+            seg = np.asarray(values[i0 : i1 + 1], dtype=np.float64)
+            if len(seg):
+                return max(0.0, float(seg[-1] - seg[0])), math_channel
 
     t = np.asarray(bundle.t, dtype=np.float64)
     ic = np.asarray(bundle_total_current(bundle, profile), dtype=np.float64)

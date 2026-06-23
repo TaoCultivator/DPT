@@ -1073,7 +1073,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(plot._vdiv_text("MATH3"), "50 mJ/div")
 
         from PyQt6.QtCore import QPoint
-        from PyQt6.QtWidgets import QLabel
+        from PyQt6.QtWidgets import QApplication, QLabel
         from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
 
         panel = ChannelSettingsPanel(plot, "MATH3", QPoint(0, 0), parent=plot)
@@ -1111,7 +1111,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         unit_right = panel._vdiv_unit_combo.mapTo(panel, panel._vdiv_unit_combo.rect().topRight()).x()
         div_left = div_label.mapTo(panel, div_label.rect().topLeft()).x()
         self.assertLess(spin_right, unit_left)
-        self.assertLess(unit_right, div_left)
+        self.assertLessEqual(unit_right, div_left + 1)
         self.assertIn(
             "V",
             [panel._vdiv_unit_combo.itemText(i) for i in range(panel._vdiv_unit_combo.count())],
@@ -1122,6 +1122,229 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(panel._vdiv_unit_combo.currentText(), "kV")
         self.assertEqual(plot._vdiv_text("MATH4"), "1 kV/div")
         panel.close()
+        plot.close()
+
+    def test_unmapped_channels_keep_last_known_units(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 32
+        t = np.linspace(0.0, 1e-6, n)
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                **{
+                    f"CH{i}": np.linspace(float(i), float(i + 1), n)
+                    for i in range(1, 9)
+                },
+                "MATH1": np.linspace(0.0, 10.0, n),
+                "MATH2": np.linspace(10.0, 20.0, n),
+            },
+            meta=TekMetadata(source_path="/fake/unit-retain.tss"),
+        )
+        mapped = replace(
+            make_profile("U", "upper"),
+            vge="CH8",
+            vce="CH7",
+            v_diode="CH6",
+            irr="MATH1",
+            il="CH5",
+            ic="MATH2",
+            vge_other="CH1",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+        unmapped = replace(
+            mapped,
+            v_diode="",
+            irr="",
+        )
+
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, mapped, None)
+        self.assertEqual(plot._unit_for_channel("CH6"), "V")
+        self.assertEqual(plot._unit_for_channel("MATH1"), "A")
+
+        plot.plot_waveforms(bundle, unmapped, None)
+        self.assertEqual(plot._unit_for_channel("CH6"), "V")
+        self.assertEqual(plot._unit_for_channel("MATH1"), "A")
+        plot.close()
+
+    def test_unmapped_channels_use_tss_units_on_first_plot(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 16
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, n),
+            channels={
+                "CH1": np.zeros(n),
+                "CH2": np.ones(n),
+                "CH6": np.linspace(0.0, 10.0, n),
+                "MATH1": np.linspace(10.0, 20.0, n),
+            },
+            meta=TekMetadata(
+                source_path="/fake/source-units.tss",
+                channel_units={"CH6": "A", "MATH1": "V"},
+            ),
+        )
+        profile = replace(
+            make_profile("U", "upper"),
+            vge="CH1",
+            vce="CH2",
+            ic="",
+            il="",
+            irr="",
+            v_diode="",
+            vge_other="",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+
+        self.assertEqual(plot._unit_for_channel("CH6"), "A")
+        self.assertEqual(plot._unit_for_channel("MATH1"), "V")
+        plot.close()
+
+    def test_manual_mapping_keeps_tss_unit_until_user_override(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 16
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, n),
+            channels={
+                "CH1": np.zeros(n),
+                "CH2": np.ones(n),
+                "CH6": np.linspace(0.0, 10.0, n),
+            },
+            meta=TekMetadata(
+                source_path="/fake/source-units-remap.tss",
+                channel_units={"CH6": "A"},
+            ),
+        )
+        base_profile = replace(
+            make_profile("U", "upper"),
+            vge="CH1",
+            vce="CH2",
+            ic="",
+            il="",
+            irr="",
+            v_diode="",
+            vge_other="",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, base_profile, None)
+        self.assertEqual(plot._unit_for_channel("CH6"), "A")
+
+        plot.plot_waveforms(bundle, replace(base_profile, v_diode="CH6"), None)
+        self.assertEqual(plot._unit_for_channel("CH6"), "A")
+
+        plot.set_channel_unit_override("CH6", "V")
+        bundle.meta.channel_unit_overrides["CH6"] = "V"
+        self.assertEqual(plot._unit_for_channel("CH6"), "V")
+
+        plot.plot_waveforms(bundle, base_profile, None)
+        self.assertEqual(plot._unit_for_channel("CH6"), "V")
+        plot.set_channel_unit_override("CH6", "")
+        bundle.meta.channel_unit_overrides.pop("CH6", None)
+        self.assertEqual(plot._unit_for_channel("CH6"), "A")
+        plot.close()
+
+    def test_user_math_channels_sync_to_bundle_for_direct_mapping(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            bundle_reverse_recovery_current,
+            bundle_total_current,
+        )
+
+        n = 32
+        t = np.linspace(0.0, 1e-6, n)
+        ch4 = np.linspace(1.0, 32.0, n)
+        ch5 = np.linspace(100.0, 200.0, n)
+        channels = {
+            f"CH{i}": np.linspace(float(i), float(i + 1), n)
+            for i in range(1, 9)
+        }
+        channels["CH4"] = ch4
+        channels["CH5"] = ch5
+        bundle = WaveformBundle(
+            t=t,
+            channels=channels,
+            meta=TekMetadata(source_path="/fake/math-sync.tss"),
+        )
+        profile = replace(
+            make_profile("U", "upper"),
+            vge="CH1",
+            vce="CH2",
+            v_diode="CH3",
+            irr="-CH4",
+            il="CH5",
+            ic="",
+            vge_other="CH8",
+            ic_from_sum_irr_il=True,
+            irr_from_ic_minus_il=False,
+        )
+
+        win = MainWindow()
+        try:
+            win.bundle = bundle
+            win.profile = profile
+            win.wave_plot.plot_waveforms(bundle, profile, None)
+            win.wave_plot._set_math_formula("MATH1", "-CH4")
+            win.wave_plot._set_math_formula("MATH2", "CH5 + MATH1")
+            win._sync_plot_math_to_bundle()
+
+            self.assertEqual(bundle.meta.channel_math_formulas["MATH1"], "-CH4")
+            self.assertEqual(
+                bundle.meta.channel_math_formulas["MATH2"],
+                "CH5 + MATH1",
+            )
+            self.assertIn("MATH2", bundle.meta.computed_math_channels)
+            self.assertEqual(bundle.meta.channel_units["MATH1"], "A")
+            self.assertEqual(bundle.meta.channel_units["MATH2"], "A")
+            np.testing.assert_allclose(bundle.channels["MATH1"], -ch4)
+            np.testing.assert_allclose(bundle.channels["MATH2"], ch5 - ch4)
+
+            direct_profile = replace(
+                profile,
+                irr="MATH1",
+                ic="MATH2",
+                ic_from_sum_irr_il=False,
+            )
+            np.testing.assert_allclose(
+                bundle_reverse_recovery_current(bundle, direct_profile),
+                -ch4,
+            )
+            np.testing.assert_allclose(
+                bundle_total_current(bundle, direct_profile),
+                ch5 - ch4,
+            )
+        finally:
+            win.close()
 
     def test_source_channel_colors_follow_scope_palette(self):
         import numpy as np
@@ -1256,6 +1479,46 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             self.assertEqual(win.profile.vge, "CH6")
 
         win.close()
+
+    def test_waveform_mapping_direct_ic_disables_sum_fallback(self):
+        import tempfile
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.channel_mapping import ChannelMappingStore
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        win = MainWindow()
+        try:
+            phase_idx = win.combo_phase.findData("U")
+            bridge_idx = win.combo_bridge.findData("upper")
+            if phase_idx >= 0:
+                win.combo_phase.setCurrentIndex(phase_idx)
+            if bridge_idx >= 0:
+                win.combo_bridge.setCurrentIndex(bridge_idx)
+            with tempfile.TemporaryDirectory() as tmp:
+                win._channel_store = ChannelMappingStore(Path(tmp) / "maps.yaml")
+                win.bundle = WaveformBundle(
+                    t=np.linspace(0.0, 1e-6, 8),
+                    channels={f"CH{i}": np.zeros(8) for i in range(1, 7)}
+                    | {"MATH2": np.zeros(8)},
+                    meta=TekMetadata(),
+                )
+                win.profile = make_profile("U", "upper")
+                win._recalculate = (  # type: ignore[method-assign]
+                    lambda reset_manual=False: None
+                )
+
+                win._on_waveform_channel_mapping_requested("MATH2", "ic")
+
+                stored = win._channel_store.get("U", "upper")
+                self.assertIsNotNone(stored)
+                assert stored is not None
+                self.assertEqual(stored.ic, "MATH2")
+                self.assertFalse(stored.ic_from_sum_irr_il)
+        finally:
+            win.close()
 
     def test_main_window_toolbar_compacts_on_small_width(self):
         from dpt_extractor.gui.main_window import MainWindow
@@ -1662,6 +1925,12 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             self.assertEqual(dlg._combos["v_diode"].currentData(), "CH5")
             self.assertEqual(dlg._combos["vge_other"].currentData(), "CH6")
             self.assertTrue(dlg._ic_sum_cb.isChecked())
+            idx = dlg._combos["ic"].findData("MATH1")
+            self.assertGreaterEqual(idx, 0)
+            dlg._combos["ic"].setCurrentIndex(idx)
+            mapping = dlg._collect_mapping()
+            self.assertEqual(mapping.ic, "MATH1")
+            self.assertFalse(mapping.ic_from_sum_irr_il)
             dlg.close()
 
     def test_mapping_dialog_swaps_conflicting_channel_selection(self):
@@ -1970,6 +2239,327 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn("CH3 Ic", plot._trace_legend["CH3"])
         self.assertIn("CH3 Ic", plot._channel_boxes["CH3"].name_lbl.text())
         panel.close()
+
+    def test_channel_settings_custom_unit_and_invert_controls(self):
+        import numpy as np
+        from PyQt6.QtCore import QPoint
+
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
+        plot = self._make_synthetic_plot()
+        panel = ChannelSettingsPanel(plot, "CH3", QPoint(0, 0), parent=plot)
+
+        self.assertFalse(panel._unit_edit.isEnabled())
+        self.assertEqual(panel._unit_toggle.text(), "关")
+        panel._unit_toggle.click()
+        self.assertTrue(panel._unit_toggle.isChecked())
+        self.assertEqual(panel._unit_toggle.text(), "开")
+        panel._unit_edit.setText("V")
+        panel._on_unit_changed()
+        self.assertEqual(plot._unit_for_channel("CH3"), "V")
+        panel._unit_toggle.click()
+        self.assertFalse(panel._unit_toggle.isChecked())
+        self.assertEqual(panel._unit_toggle.text(), "关")
+        self.assertEqual(plot._unit_for_channel("CH3"), "A")
+
+        panel._invert_toggle.click()
+        self.assertEqual(panel._invert_toggle.text(), "开")
+        self.assertTrue(plot.channel_inversion_enabled("CH3"))
+        self.assertNotIn("-CH3", plot._trace_items)
+        np.testing.assert_allclose(
+            plot.current_display_raw("CH3"),
+            -plot._trace_raw["CH3"],
+        )
+        sample = plot._sample_cursor_channel("CH3", float(plot._trace_t_us[0]))
+        self.assertIsNotNone(sample)
+        assert sample is not None
+        self.assertAlmostEqual(sample[0], -float(plot._trace_raw["CH3"][0]))
+
+        seen: list[tuple[str, str]] = []
+        plot.channelMappingRequested.connect(
+            lambda source, role: seen.append((source, role))
+        )
+        idx = panel._mapping_combo.findData("irr")
+        self.assertGreaterEqual(idx, 0)
+        panel._mapping_combo.setCurrentIndex(idx)
+        panel._on_mapping_apply()
+        self.assertEqual(seen[-1], ("CH3", "irr"))
+        panel.close()
+
+    def test_channel_inversion_survives_replot_as_display_state(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+
+        bundle, profile = self._make_synthetic_bundle()
+        raw = np.asarray(bundle.channels["CH3"], dtype=np.float64).copy()
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+
+        returned = plot.set_channel_inversion_enabled("-CH3", True)
+        bundle.meta.channel_display_inversions.add("CH3")
+        plot.plot_waveforms(bundle, profile, None)
+
+        self.assertEqual(returned, "CH3")
+        self.assertNotIn("-CH3", plot._trace_items)
+        self.assertTrue(plot.channel_inversion_enabled("CH3"))
+        np.testing.assert_allclose(plot.current_display_raw("CH3"), -raw)
+        sample = plot._sample_cursor_channel("CH3", float(plot._trace_t_us[0]))
+        self.assertIsNotNone(sample)
+        assert sample is not None
+        self.assertAlmostEqual(sample[0], -float(raw[0]))
+        plot.close()
+
+    def test_tss_default_inversion_sets_channel_panel_switch(self):
+        import numpy as np
+
+        from PyQt6.QtCore import QPoint
+
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+
+        bundle, profile = self._make_synthetic_bundle()
+        raw = np.asarray(bundle.channels["CH3"], dtype=np.float64).copy()
+        bundle.meta.source_channel_inversions.add("CH3")
+        bundle.meta.channel_display_inversions.add("CH3")
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+        panel = ChannelSettingsPanel(plot, "CH3", QPoint(0, 0), parent=plot)
+
+        self.assertTrue(plot.channel_inversion_enabled("CH3"))
+        self.assertTrue(panel._invert_toggle.isChecked())
+        self.assertEqual(panel._invert_toggle.text(), "开")
+        np.testing.assert_allclose(plot.current_display_raw("CH3"), raw)
+
+        panel._invert_toggle.click()
+        bundle.meta.channel_display_inversions.discard("CH3")
+        plot.plot_waveforms(bundle, profile, None)
+        self.assertFalse(plot.channel_inversion_enabled("CH3"))
+        np.testing.assert_allclose(plot.current_display_raw("CH3"), -raw)
+        panel.close()
+        plot.close()
+
+    def test_user_math_formula_uses_current_display_inversion(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+
+        bundle, profile = self._make_synthetic_bundle()
+        raw = np.asarray(bundle.channels["CH3"], dtype=np.float64).copy()
+        bundle.meta.channel_display_inversions.add("CH3")
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+
+        plot._set_math_formula("MATH2", "CH3")
+        np.testing.assert_allclose(plot._trace_raw["MATH2"], -raw)
+        plot.close()
+
+    def test_channel_settings_panel_control_bounds_are_compact(self):
+        from PyQt6.QtCore import QPoint, QRect
+        from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
+
+        from dpt_extractor.gui.channel_settings_panel import ChannelSettingsPanel
+
+        plot = self._make_synthetic_plot()
+        panel = ChannelSettingsPanel(plot, "CH3", QPoint(0, 0), parent=plot)
+        panel.show()
+        QApplication.processEvents()
+
+        def panel_rect(widget):
+            return QRect(widget.mapTo(panel, widget.rect().topLeft()), widget.size())
+
+        def assert_inside_panel(name, widget):
+            rect = panel_rect(widget)
+            self.assertGreaterEqual(rect.left(), panel.rect().left(), name)
+            self.assertGreaterEqual(rect.top(), panel.rect().top(), name)
+            self.assertLessEqual(rect.right(), panel.rect().right(), name)
+            self.assertLessEqual(rect.bottom(), panel.rect().bottom(), name)
+            return rect
+
+        def assert_no_overlaps(group_name, widgets):
+            rects = [
+                (name, assert_inside_panel(f"{group_name}:{name}", widget))
+                for name, widget in widgets
+                if widget.isVisible()
+            ]
+            for i, (name_a, rect_a) in enumerate(rects):
+                for name_b, rect_b in rects[i + 1 :]:
+                    self.assertFalse(
+                        rect_a.intersects(rect_b),
+                        f"{group_name}: {name_a} overlaps {name_b}: "
+                        f"{rect_a.getRect()} vs {rect_b.getRect()}",
+                    )
+            return rects
+
+        div_label = panel.findChild(QLabel, "vdivDivLabel")
+        self.assertIsNotNone(div_label)
+        scale_buttons = panel.findChildren(QPushButton, "chScaleStepBtn")
+        pos_buttons = panel.findChildren(QPushButton, "chStepBtn")
+        zero_btn = panel.findChild(QPushButton, "chZeroBtn")
+        self.assertEqual(len(scale_buttons), 2)
+        self.assertEqual(len(pos_buttons), 2)
+        self.assertIsNotNone(zero_btn)
+        setting_frames = [
+            ("display_setting", panel._display_setting),
+            ("invert_setting", panel._invert_setting),
+            ("unit_setting", panel._unit_setting),
+            ("vdiv_setting", panel._vdiv_setting),
+            ("position_setting", panel._position_setting),
+            ("label_setting", panel._label_setting),
+            ("mapping_setting", panel._mapping_setting),
+        ]
+        setting_rects = {
+            name: assert_inside_panel(name, frame)
+            for name, frame in setting_frames
+        }
+        self.assertFalse(
+            setting_rects["display_setting"].intersects(setting_rects["invert_setting"])
+        )
+        self.assertFalse(
+            setting_rects["display_setting"].intersects(setting_rects["unit_setting"])
+        )
+        self.assertFalse(
+            setting_rects["invert_setting"].intersects(setting_rects["unit_setting"])
+        )
+
+        row_groups = [
+            (
+                "top_switches",
+                [
+                    ("display_toggle", panel._display_toggle),
+                    ("invert_toggle", panel._invert_toggle),
+                    ("unit_toggle", panel._unit_toggle),
+                    ("unit_edit", panel._unit_edit),
+                ],
+            ),
+            (
+                "vertical_scale",
+                [
+                    ("scale_value", panel._vdiv_spin),
+                    ("scale_unit", panel._vdiv_unit_combo),
+                    ("scale_div", div_label),
+                    ("scale_up", scale_buttons[0]),
+                    ("scale_down", scale_buttons[1]),
+                ],
+            ),
+            (
+                "position",
+                [
+                    ("position_value", panel._pos_spin),
+                    ("position_up", pos_buttons[0]),
+                    ("position_down", pos_buttons[1]),
+                    ("zero", zero_btn),
+                ],
+            ),
+            ("label", [("label_edit", panel._label_edit)]),
+            (
+                "mapping",
+                [
+                    ("mapping_combo", panel._mapping_combo),
+                    ("mapping_apply", panel._mapping_apply),
+                ],
+            ),
+        ]
+
+        row_bounds = []
+        for group_name, widgets in row_groups:
+            rects = assert_no_overlaps(group_name, widgets)
+            left = min(rect.left() for _, rect in rects)
+            top = min(rect.top() for _, rect in rects)
+            right = max(rect.right() for _, rect in rects)
+            bottom = max(rect.bottom() for _, rect in rects)
+            row_bounds.append((group_name, QRect(left, top, right - left + 1, bottom - top + 1)))
+
+        for (name_a, rect_a), (name_b, rect_b) in zip(row_bounds, row_bounds[1:]):
+            self.assertLess(
+                rect_a.bottom(),
+                rect_b.top(),
+                f"{name_a} row overlaps {name_b} row: "
+                f"{rect_a.getRect()} vs {rect_b.getRect()}",
+            )
+
+        def assert_control_in_setting(setting_name, control_name, widget, max_left_gap):
+            setting_rect = setting_rects[setting_name]
+            control_rect = assert_inside_panel(control_name, widget)
+            self.assertLessEqual(setting_rect.left(), control_rect.left(), control_name)
+            self.assertGreaterEqual(setting_rect.right(), control_rect.right(), control_name)
+            self.assertLessEqual(
+                control_rect.left() - setting_rect.left(),
+                max_left_gap,
+                f"{control_name} is too far from {setting_name}: "
+                f"{control_rect.getRect()} vs {setting_rect.getRect()}",
+            )
+
+        assert_control_in_setting(
+            "display_setting", "display_toggle", panel._display_toggle, 82
+        )
+        assert_control_in_setting(
+            "invert_setting", "invert_toggle", panel._invert_toggle, 82
+        )
+        assert_control_in_setting("unit_setting", "unit_toggle", panel._unit_toggle, 110)
+        assert_control_in_setting(
+            "vdiv_setting", "scale_value", panel._vdiv_spin, 110
+        )
+        assert_control_in_setting(
+            "position_setting", "position_value", panel._pos_spin, 110
+        )
+        assert_control_in_setting(
+            "mapping_setting", "mapping_combo", panel._mapping_combo, 110
+        )
+
+        self.assertLessEqual(panel.width(), 430)
+        self.assertLessEqual(panel._display_setting.width(), 96)
+        self.assertLessEqual(panel._invert_setting.width(), 96)
+        self.assertLessEqual(panel._unit_setting.width(), 160)
+        self.assertLessEqual(panel._display_toggle.width(), 80)
+        self.assertLessEqual(panel._invert_toggle.width(), 80)
+        self.assertLessEqual(panel._unit_toggle.width(), 80)
+        self.assertLessEqual(panel._unit_edit.width(), 60)
+        self.assertLessEqual(panel._vdiv_spin.width(), 80)
+        self.assertLessEqual(panel._vdiv_unit_combo.width(), 62)
+        self.assertLessEqual(panel._pos_spin.width(), 96)
+        self.assertLessEqual(panel._label_edit.width(), 190)
+        self.assertLessEqual(panel._mapping_combo.width(), 180)
+        consistent_height_widgets = [
+            panel._display_toggle,
+            panel._invert_toggle,
+            panel._unit_toggle,
+            panel._unit_edit,
+            panel._vdiv_spin,
+            panel._vdiv_unit_combo,
+            panel._pos_spin,
+            *scale_buttons,
+            *pos_buttons,
+            zero_btn,
+            panel._label_edit,
+            panel._mapping_combo,
+            panel._mapping_apply,
+        ]
+        for widget in consistent_height_widgets:
+            self.assertGreaterEqual(widget.height(), 40)
+            self.assertLessEqual(widget.height(), 44)
+
+        panel.close()
+        plot.close()
+
+    def test_main_window_channel_unit_override_updates_bundle_metadata(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        win = MainWindow()
+        win.bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 8),
+            channels={"CH1": np.zeros(8)},
+            meta=TekMetadata(channel_units={"CH1": "V"}),
+        )
+
+        win.wave_plot.set_channel_unit_override("CH1", "A")
+        self.assertEqual(win.bundle.meta.channel_unit_overrides["CH1"], "A")
+        win.wave_plot.set_channel_unit_override("CH1", "")
+        self.assertNotIn("CH1", win.bundle.meta.channel_unit_overrides)
+        win.close()
 
     def test_parameter_max_default_intervals_use_algorithm_windows(self):
         import numpy as np
@@ -3106,6 +3696,59 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             CURSOR_READOUT_LABEL_GUARD_PX,
         )
         self.assertFalse(after_a.intersects(after_b))
+        plot.close()
+
+    def test_close_cursor_line_labels_split_around_lines(self):
+        from dpt_extractor.gui.waveform_plot import CURSOR_LINE_LABEL_GUARD_PX
+
+        plot = self._make_synthetic_plot()
+        plot.resize(900, 520)
+        plot.show()
+        self.app.processEvents()
+
+        assert plot._cursor_a is not None
+        assert plot._cursor_b is not None
+        assert plot._h_cursor_a is not None
+        assert plot._h_cursor_b is not None
+        plot._cursor_a.setPos(0.50)
+        plot._cursor_b.setPos(0.51)
+        plot._h_cursor_a.setPos(0.0)
+        plot._h_cursor_b.setPos(-0.2)
+        plot._set_cursor_type("both")
+        plot._update_readout()
+        self.app.processEvents()
+
+        a_label = getattr(plot._cursor_a, "label", None)
+        b_label = getattr(plot._cursor_b, "label", None)
+        ha_label = getattr(plot._h_cursor_a, "label", None)
+        hb_label = getattr(plot._h_cursor_b, "label", None)
+        self.assertIsNotNone(a_label)
+        self.assertIsNotNone(b_label)
+        self.assertIsNotNone(ha_label)
+        self.assertIsNotNone(hb_label)
+
+        a_rect = plot._padded_scene_rect(
+            plot._cursor_line_label_scene_rect(plot._cursor_a),
+            CURSOR_LINE_LABEL_GUARD_PX,
+        )
+        b_rect = plot._padded_scene_rect(
+            plot._cursor_line_label_scene_rect(plot._cursor_b),
+            CURSOR_LINE_LABEL_GUARD_PX,
+        )
+        ha_rect = plot._padded_scene_rect(
+            plot._cursor_line_label_scene_rect(plot._h_cursor_a),
+            CURSOR_LINE_LABEL_GUARD_PX,
+        )
+        hb_rect = plot._padded_scene_rect(
+            plot._cursor_line_label_scene_rect(plot._h_cursor_b),
+            CURSOR_LINE_LABEL_GUARD_PX,
+        )
+        self.assertFalse(a_rect.intersects(b_rect))
+        self.assertFalse(ha_rect.intersects(hb_rect))
+        self.assertAlmostEqual(float(a_label.anchor.x()), 1.0)
+        self.assertAlmostEqual(float(b_label.anchor.x()), 0.0)
+        self.assertAlmostEqual(float(ha_label.anchor.y()), 1.0)
+        self.assertAlmostEqual(float(hb_label.anchor.y()), 0.0)
         plot.close()
 
     def test_waveform_cursor_markers_survive_replot(self):

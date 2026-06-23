@@ -1,6 +1,7 @@
 """MCU2506 双脉冲数据表：按规范列序生成工作簿并写入单次测试结果。"""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -370,11 +371,22 @@ def fill_data_row(ws: Worksheet, row: int, result: ExtractResult) -> None:
         _set_value(ws, row, COL_TAIL["etotal"], _num(etotal, 3))
 
 
-def export_mcu2506(result: ExtractResult, path: str | Path) -> None:
-    """按规范列序生成工作簿，并将本次测试数据写入第 5 行。"""
-    wb = build_mcu2506_workbook(result)
+def _as_result_rows(result: ExtractResult | Sequence[ExtractResult]) -> list[ExtractResult]:
+    if isinstance(result, ExtractResult):
+        return [result]
+    rows = list(result)
+    if not rows:
+        raise ValueError("没有可导出的双脉冲结果")
+    return rows
+
+
+def export_mcu2506(result: ExtractResult | Sequence[ExtractResult], path: str | Path) -> None:
+    """按规范列序生成工作簿，数据从第 5 行起连续写入。"""
+    rows = _as_result_rows(result)
+    wb = build_mcu2506_workbook(rows[0])
     ws = wb.active
-    fill_data_row(ws, DATA_ROW, result)
-    _apply_range_borders(ws, 1, DATA_ROW, 1, LAST_COL)
+    for offset, row_result in enumerate(rows):
+        fill_data_row(ws, DATA_ROW + offset, row_result)
+    _apply_range_borders(ws, 1, DATA_ROW + len(rows) - 1, 1, LAST_COL)
     _apply_sheet_view(ws)
     wb.save(Path(path))

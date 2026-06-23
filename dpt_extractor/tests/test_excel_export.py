@@ -100,3 +100,41 @@ class TestExcelExport(unittest.TestCase):
             self.assertAlmostEqual(float(ws.cell(DATA_ROW, 4).value), 750.0, delta=5)
             self.assertAlmostEqual(float(ws.cell(DATA_ROW, 5).value), 1050.0, delta=50)
             self.assertIsNotNone(ws.cell(DATA_ROW, 6).value)
+
+    def test_dpt_multi_pulse_export_writes_consecutive_rows(self):
+        from openpyxl import load_workbook
+
+        from dpt_extractor.export.excel_export import export_to_excel
+        from dpt_extractor.export.mcu2506_layout import COL_OFF, COL_ON, DATA_ROW
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult, TurnOnResult
+
+        rows = [
+            ExtractResult(
+                profile_code="UH",
+                source_path=str(UH),
+                detected_pulse_count=3,
+                off_pulse_index=1,
+                on_pulse_index=2,
+                turn_off=TurnOffResult(delta_vce=101.0),
+                turn_on=TurnOnResult(delta_vce=201.0),
+            ),
+            ExtractResult(
+                profile_code="UH",
+                source_path=str(UH),
+                detected_pulse_count=3,
+                off_pulse_index=2,
+                on_pulse_index=3,
+                turn_off=TurnOffResult(delta_vce=102.0),
+                turn_on=TurnOnResult(delta_vce=202.0),
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "multi.xlsx"
+            export_to_excel(rows, out)
+            ws = load_workbook(out, data_only=True).active
+
+            self.assertEqual(ws.cell(DATA_ROW, COL_OFF["delta_vce"]).value, 101.0)
+            self.assertEqual(ws.cell(DATA_ROW, COL_ON["delta_vce"]).value, 201.0)
+            self.assertEqual(ws.cell(DATA_ROW + 1, COL_OFF["delta_vce"]).value, 102.0)
+            self.assertEqual(ws.cell(DATA_ROW + 1, COL_ON["delta_vce"]).value, 202.0)

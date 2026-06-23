@@ -64,6 +64,31 @@ class TestShortCircuitLabelMapping(unittest.TestCase):
         self.assertEqual(mapping.vge_other, "CH6")
         self.assertFalse(mapping.ic_from_sum_irr_il)
 
+    def test_short_circuit_energy_math_channel_uses_display_inversion(self):
+        import numpy as np
+
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+        from dpt_extractor.pipeline.short_circuit_extract import short_circuit_energy_value
+
+        raw_energy = np.array([3.0, 2.0, 1.0], dtype=np.float64)
+        bundle = WaveformBundle(
+            t=np.arange(raw_energy.size, dtype=np.float64),
+            channels={"MATH1": raw_energy},
+            meta=TekMetadata(channel_display_inversions={"MATH1"}),
+        )
+
+        value, source = short_circuit_energy_value(
+            bundle,
+            make_profile("U", "upper"),
+            0,
+            2,
+            math_channel="MATH1",
+        )
+
+        self.assertEqual(source, "MATH1")
+        self.assertAlmostEqual(value, 2.0)
+
 
 @unittest.skipUnless(DL_UH.exists() and DL_UL.exists(), "short-circuit DL samples missing")
 class TestShortCircuitExtract(unittest.TestCase):

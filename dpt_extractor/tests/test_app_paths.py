@@ -83,9 +83,22 @@ class TestAppPaths(unittest.TestCase):
                 with patch(
                     "dpt_extractor.utils.app_paths.user_data_dir",
                     return_value=root,
-                ):
+                ), patch("dpt_extractor.utils.app_paths.is_frozen", return_value=True):
                     cache = configure_numba_cache_dir()
             self.assertEqual(cache, root / "numba_cache")
+            self.assertTrue(cache.is_dir())
+
+    def test_configure_numba_cache_sets_dev_cache_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("NUMBA_CACHE_DIR", None)
+                with patch(
+                    "dpt_extractor.utils.app_paths.bundle_root",
+                    return_value=root,
+                ), patch("dpt_extractor.utils.app_paths.is_frozen", return_value=False):
+                    cache = configure_numba_cache_dir()
+            self.assertEqual(cache, root / ".numba_cache")
             self.assertTrue(cache.is_dir())
 
     def test_configure_numba_cache_refreshes_stale_version_cache(self):
@@ -106,6 +119,9 @@ class TestAppPaths(unittest.TestCase):
                 with patch(
                     "dpt_extractor.utils.app_paths.user_data_dir",
                     return_value=root,
+                ), patch(
+                    "dpt_extractor.utils.app_paths.is_frozen",
+                    return_value=True,
                 ), patch("dpt_extractor.utils.app_paths.__version__", "9.9.9"):
                     cache = configure_numba_cache_dir()
 

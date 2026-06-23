@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -327,8 +328,26 @@ class ChannelMappingStore:
         self._data: dict[str, dict[str, str | bool]] = {}
         self.load()
 
-    def _key(self, phase: str, bridge: str) -> str:
-        return f"{phase.upper()}_{bridge.lower()}"
+    @staticmethod
+    def _source_token(source_path: str | Path | None = None) -> str:
+        if not source_path:
+            return ""
+        try:
+            text = str(Path(source_path).expanduser().resolve(strict=False))
+        except OSError:
+            text = str(source_path)
+        text = text.replace("\\", "/").lower()
+        return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    def _key(
+        self,
+        phase: str,
+        bridge: str,
+        source_path: str | Path | None = None,
+    ) -> str:
+        base = f"{phase.upper()}_{bridge.lower()}"
+        token = self._source_token(source_path)
+        return f"{base}::{token}" if token else base
 
     def load(self) -> None:
         try:
@@ -360,8 +379,13 @@ class ChannelMappingStore:
         except OSError:
             return
 
-    def get(self, phase: str, bridge: str) -> ChannelMapping | None:
-        key = self._key(phase, bridge)
+    def get(
+        self,
+        phase: str,
+        bridge: str,
+        source_path: str | Path | None = None,
+    ) -> ChannelMapping | None:
+        key = self._key(phase, bridge, source_path)
         if key not in self._data:
             return None
         mapping = ChannelMapping.from_dict(self._data[key])
@@ -369,15 +393,31 @@ class ChannelMappingStore:
             return None
         return mapping
 
-    def set(self, phase: str, bridge: str, mapping: ChannelMapping) -> None:
-        self._data[self._key(phase, bridge)] = mapping.to_dict()
+    def set(
+        self,
+        phase: str,
+        bridge: str,
+        mapping: ChannelMapping,
+        source_path: str | Path | None = None,
+    ) -> None:
+        self._data[self._key(phase, bridge, source_path)] = mapping.to_dict()
         self.save()
 
-    def clear(self, phase: str, bridge: str) -> None:
-        key = self._key(phase, bridge)
+    def clear(
+        self,
+        phase: str,
+        bridge: str,
+        source_path: str | Path | None = None,
+    ) -> None:
+        key = self._key(phase, bridge, source_path)
         if key in self._data:
             del self._data[key]
             self.save()
 
-    def has_custom(self, phase: str, bridge: str) -> bool:
-        return self.get(phase, bridge) is not None
+    def has_custom(
+        self,
+        phase: str,
+        bridge: str,
+        source_path: str | Path | None = None,
+    ) -> bool:
+        return self.get(phase, bridge, source_path) is not None

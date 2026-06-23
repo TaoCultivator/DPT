@@ -1335,6 +1335,58 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(summary.waveform_anchor_row, 213)
             self.assertEqual(saved["U相_双脉冲数据"].cell(9, COL_OFF["delta_vce"]).value, 555.0)
 
+    def test_dpt_template_multi_pulse_rows_do_not_overwrite_next_condition(self):
+        from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_ON, COL_VOLTAGE
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult, TurnOnResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "multi_report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A7")
+            ws.merge_cells("B5:B7")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            ws.cell(5, COL_VOLTAGE, 750)
+            ws.cell(5, COL_CURRENT, 1048)
+            ws.cell(6, COL_VOLTAGE, 750)
+            ws.cell(6, COL_CURRENT, 806)
+            wb.save(report)
+
+            rows = [
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1048A_000.tss"),
+                    profile_code="UH",
+                    detected_pulse_count=3,
+                    off_pulse_index=1,
+                    on_pulse_index=2,
+                    turn_off=TurnOffResult(delta_vce=101.0),
+                    turn_on=TurnOnResult(delta_vce=201.0),
+                ),
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1048A_000.tss"),
+                    profile_code="UH",
+                    detected_pulse_count=3,
+                    off_pulse_index=2,
+                    on_pulse_index=3,
+                    turn_off=TurnOffResult(delta_vce=102.0),
+                    turn_on=TurnOnResult(delta_vce=202.0),
+                ),
+            ]
+            summary = write_report_template(rows, report)
+            saved = load_workbook(report)["U相_双脉冲数据"]
+
+            self.assertEqual(summary.data_row, 5)
+            self.assertEqual(summary.data_row_end, 6)
+            self.assertEqual(summary.data_rows_written, 2)
+            self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 101.0)
+            self.assertEqual(saved.cell(5, COL_ON["delta_vce"]).value, 201.0)
+            self.assertEqual(saved.cell(6, COL_OFF["delta_vce"]).value, 102.0)
+            self.assertEqual(saved.cell(6, COL_ON["delta_vce"]).value, 202.0)
+            self.assertEqual(saved.cell(7, COL_CURRENT).value, 806)
+
     def test_short_template_uses_labeled_picture_blocks_not_row_offsets(self):
         from dpt_extractor.export.report_template import write_report_template
         from dpt_extractor.models.results import ExtractResult, ShortCircuitResult

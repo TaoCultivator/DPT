@@ -136,6 +136,7 @@ from dpt_extractor.metrics.iec_timings import (
 from dpt_extractor.metrics.plateau_level import _turn_on_vce_pre_fall_slice
 from dpt_extractor.models.test_mode import MODE_UI_LABELS, TestMode, parse_test_mode
 from dpt_extractor.pipeline.extract import _turn_on_delta_vce_knee_point
+from dpt_extractor.pipeline.pulse_sequence import dpt_export_results
 from dpt_extractor.pipeline.run_extract import run_extraction
 from dpt_extractor.pipeline.short_circuit_extract import (
     ShortCircuitExtractNotReady,
@@ -500,7 +501,11 @@ def _compute_waveform_load_outcome(
 
     guessed = guess_profile_from_path(path)
     base_profile = make_profile(guessed.phase, guessed.bridge)
-    custom_mapping = ChannelMappingStore().get(guessed.phase, guessed.bridge)
+    custom_mapping = ChannelMappingStore().get(
+        guessed.phase,
+        guessed.bridge,
+        source_path=bundle.meta.source_path or path,
+    )
     mapping_custom = custom_mapping is not None
     profile = (
         apply_mapping(base_profile, custom_mapping)
@@ -603,7 +608,7 @@ class _ReportWriteTask(QRunnable):
     def __init__(
         self,
         request_id: int,
-        result: ExtractResult,
+        result: ExtractResult | list[ExtractResult],
         report_path: Path,
         images: dict[tuple[str, str], Path],
         tempdir: tempfile.TemporaryDirectory,
@@ -733,6 +738,12 @@ class MainWindow(QMainWindow):
         )
         self.wave_plot.channelLabelChanged.connect(
             self._on_waveform_channel_label_changed
+        )
+        self.wave_plot.channelUnitChanged.connect(
+            self._on_waveform_channel_unit_changed
+        )
+        self.wave_plot.channelInversionChanged.connect(
+            self._on_waveform_channel_inversion_changed
         )
         self._license_notice_timer.start(0)
 
@@ -1895,7 +1906,12 @@ class MainWindow(QMainWindow):
     def _current_profile(self) -> BridgeProfile:
         phase = self.combo_phase.currentData()
         bridge = self.combo_bridge.currentData()
-        profile, custom = resolve_profile(phase, bridge, self._channel_store)
+        profile, custom = resolve_profile(
+            phase,
+            bridge,
+            self._channel_store,
+            source_path=self._current_mapping_source_path(),
+        )
         mode = parse_test_mode(self.cfg.test_mode.mode)
         if not custom and self.bundle is not None:
             if mode == TestMode.SHORT_CIRCUIT:
@@ -1919,6 +1935,11 @@ class MainWindow(QMainWindow):
         self._mapping_custom = custom
         self._update_map_status_label()
         return profile
+
+    def _current_mapping_source_path(self) -> str:
+        if self.bundle is not None and self.bundle.meta.source_path:
+            return self.bundle.meta.source_path
+        return self._current_path or ""
 
     def _update_map_status_label(self) -> None:
         if self._mapping_custom:
@@ -1978,7 +1999,12 @@ class MainWindow(QMainWindow):
                 + "\n".join(f"- {err}" for err in errors),
             )
             return
-        self._channel_store.set(phase, bridge, mapping)
+        self._channel_store.set(
+            phase,
+            bridge,
+            mapping,
+            source_path=self._current_mapping_source_path(),
+        )
         self.profile = self._current_profile()
         self._mapping_custom = True
         self._update_map_status_label()
@@ -2001,6 +2027,10 @@ class MainWindow(QMainWindow):
                 return
             previous_channel = str(parts.get(logical_role) or "")
             parts[logical_role] = source_key
+            if logical_role == "ic":
+                ic_sum = False
+            elif logical_role == "irr":
+                irr_diff = False
         else:
             for key in LOGICAL_SIGNAL_KEYS:
                 if normalize_channel_reference(parts.get(key)) == source_key:
@@ -2027,7 +2057,12 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._channel_store.set(phase, bridge, mapping)
+        self._channel_store.set(
+            phase,
+            bridge,
+            mapping,
+            source_path=self._current_mapping_source_path(),
+        )
         self.profile = self._current_profile()
         self._mapping_custom = True
         self._update_map_status_label()
@@ -2047,9 +2082,40 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{source_key} 标签已改为 {label}")
         else:
             self.bundle.meta.channel_labels.pop(source_key, None)
+
+    def _on_waveform_channel_unit_changed(self, source_key: str, unit: str) -> None:
+        if self.bundle is None:
+            return
+        source_key = normalize_channel_reference(source_key)
+        base = source_key[1:] if source_key.startswith("-") else source_key
+        unit = str(unit or "").strip()
+        if unit:
+            self.bundle.meta.channel_unit_overrides[base] = unit
+        else:
+            self.bundle.meta.channel_unit_overrides.pop(base, None)
             self.statusBar().showMessage(f"{source_key} 标签已清空")
         if parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT:
             self._refresh_offset_measurement_table()
+
+    def _on_waveform_channel_inversion_changed(
+        self, source_key: str, enabled: bool
+    ) -> None:
+        if self.bundle is None:
+            return
+        source_key = normalize_channel_reference(source_key)
+        base = source_key[1:] if source_key.startswith("-") else source_key
+        if not base:
+            return
+        if enabled:
+            self.bundle.meta.channel_display_inversions.add(base)
+        else:
+            self.bundle.meta.channel_display_inversions.discard(base)
+        if parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT:
+            self._refresh_offset_measurement_table(update_auxiliary=True)
+        else:
+            self._recalculate(reset_manual=False)
+        state = "反相" if enabled else "原始方向"
+        self.statusBar().showMessage(f"{base} 已切换为{state}")
 
     def _set_profile_combos(self, profile: BridgeProfile) -> None:
         pi = self.combo_phase.findData(profile.phase)
@@ -2063,7 +2129,10 @@ class MainWindow(QMainWindow):
             self.combo_bridge.setCurrentIndex(bi)
             self.combo_bridge.blockSignals(False)
         self.profile, self._mapping_custom = resolve_profile(
-            profile.phase, profile.bridge, self._channel_store
+            profile.phase,
+            profile.bridge,
+            self._channel_store,
+            source_path=self._current_mapping_source_path(),
         )
         self.profile = _profile_for_test_mode(self.profile, self.cfg)
         self._update_map_status_label()
@@ -2183,6 +2252,28 @@ class MainWindow(QMainWindow):
         self._active_slope_param = None
         if reset_plot:
             self.wave_plot.reset_interaction_state()
+
+    def _sync_plot_math_to_bundle(self) -> None:
+        if self.bundle is None:
+            return
+        plot_source = str(getattr(self.wave_plot, "_loaded_source_path", "") or "")
+        bundle_source = str(self.bundle.meta.source_path or "")
+        if plot_source and bundle_source and plot_source != bundle_source:
+            return
+        math_channels = self.wave_plot.export_user_math_channels()
+        for key, (raw, expr, scale, offset) in math_channels.items():
+            if len(raw) != self.bundle.n:
+                continue
+            self.bundle.channels[key] = np.asarray(raw, dtype=np.float64).copy()
+            self.bundle.meta.channel_math_formulas[key] = expr
+            self.bundle.meta.computed_math_channels.add(key)
+            unit = self.wave_plot._unit_for_channel(key)
+            if unit:
+                self.bundle.meta.channel_units[key] = unit
+            if scale is not None:
+                self.bundle.meta.channel_vdiv[key] = float(scale)
+            if offset is not None:
+                self.bundle.meta.channel_y_position[key] = float(offset)
 
     def _loaded_status_message(
         self,
@@ -5589,6 +5680,7 @@ class MainWindow(QMainWindow):
         if self.bundle is None:
             QMessageBox.warning(self, "提示", "请先打开波形文件")
             return
+        self._sync_plot_math_to_bundle()
         try:
             self.cfg.slope_ranges = dict(self._slope_ranges)
             if parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT:
@@ -5849,6 +5941,18 @@ class MainWindow(QMainWindow):
             )
         )
 
+    def _results_for_export_or_report(self) -> list[ExtractResult]:
+        if self.result is None:
+            return []
+        if (
+            self.bundle is None
+            or self.result.short_circuit_mode
+            or self.result.single_pulse_mode
+            or self.result.detected_pulse_count <= 2
+        ):
+            return [self.result]
+        return dpt_export_results(self.bundle, self.profile, self.cfg, self.result)
+
     def _current_report_template_source(self) -> Path | None:
         if self._report_template_source_path is not None:
             return self._report_template_source_path
@@ -5942,6 +6046,7 @@ class MainWindow(QMainWindow):
         tempdir = None
         self._set_report_busy(True)
         try:
+            report_results = self._results_for_export_or_report()
             if not self._report_progress_active:
                 self._begin_report_progress(
                     REPORT_PROGRESS_TOTAL,
@@ -5949,7 +6054,7 @@ class MainWindow(QMainWindow):
                 )
             tempdir = tempfile.TemporaryDirectory()
             images = self._capture_report_images(Path(tempdir.name))
-            self._start_report_write_task(tempdir, images)
+            self._start_report_write_task(tempdir, images, report_results)
         except PermissionError as e:
             if tempdir is not None:
                 tempdir.cleanup()
@@ -5974,6 +6079,7 @@ class MainWindow(QMainWindow):
         self,
         tempdir: tempfile.TemporaryDirectory,
         images: dict[tuple[str, str], Path],
+        results: list[ExtractResult],
     ) -> None:
         if self.result is None or self._report_output_path is None:
             tempdir.cleanup()
@@ -5982,7 +6088,7 @@ class MainWindow(QMainWindow):
         request_id = self._report_request_id
         task = _ReportWriteTask(
             request_id,
-            self.result,
+            results if len(results) > 1 else results[0],
             self._report_output_path,
             images,
             tempdir,
@@ -6037,15 +6143,21 @@ class MainWindow(QMainWindow):
         self._update_report_output_tooltip()
         self.statusBar().showMessage(
             f"已写入报告: {summary.report_path.name} | "
-            f"{summary.data_sheet} 第 {summary.data_row} 行 | "
+            f"{summary.data_sheet} 第 {summary.data_row}"
+            f"{'' if summary.data_rows_written == 1 else f'-{summary.data_row_end}'} 行 | "
             f"图片 {summary.images_written} 张 | 保存 {elapsed_ms:.0f} ms",
             6000,
+        )
+        row_text = (
+            f"{summary.data_row} 行"
+            if summary.data_rows_written == 1
+            else f"{summary.data_row}-{summary.data_row_end} 行（{summary.data_rows_written} 行）"
         )
         QMessageBox.information(
             self,
             "写入成功",
             f"已写入:\n{summary.report_path}\n\n"
-            f"数据位置: {summary.data_sheet} 第 {summary.data_row} 行\n"
+            f"数据位置: {summary.data_sheet} 第 {row_text}\n"
             f"图片: {summary.images_written} 张",
         )
 
@@ -6076,8 +6188,10 @@ class MainWindow(QMainWindow):
         if not str(path).lower().endswith(".xlsx"):
             path = str(Path(path).with_suffix(".xlsx"))
         try:
-            export_to_excel(self.result, path)
+            rows = self._results_for_export_or_report()
+            export_to_excel(rows if len(rows) > 1 else rows[0], path)
             set_last_export_path(path)
-            QMessageBox.information(self, "导出成功", f"已保存:\n{path}")
+            suffix = "" if len(rows) == 1 else f"\n\n数据行数: {len(rows)}"
+            QMessageBox.information(self, "导出成功", f"已保存:\n{path}{suffix}")
         except Exception as e:
             QMessageBox.critical(self, "导出失败", str(e))

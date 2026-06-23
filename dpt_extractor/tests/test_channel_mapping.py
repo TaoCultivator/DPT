@@ -17,6 +17,7 @@ from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.tests.sample_paths import sample_tss
 
 WH = sample_tss("WH_480V_800A_000.tss")
+OTHER_360A = Path("示例文件") / "tss格式" / "其他数据" / "360A.tss"
 
 
 class TestChannelMapping(unittest.TestCase):
@@ -65,9 +66,50 @@ class TestChannelMapping(unittest.TestCase):
 
         np.testing.assert_allclose(bundle.get("-CH3"), -raw)
         np.testing.assert_allclose(bundle.get("+CH3"), raw)
+        bundle.meta.channel_display_inversions.add("CH3")
+        np.testing.assert_allclose(bundle.get("CH3"), -raw)
+        np.testing.assert_allclose(bundle.get("-CH3"), -raw)
         self.assertTrue(bundle.has_channel_reference("-CH3"))
         with self.assertRaises(KeyError):
             bundle.get("-CH9")
+
+    def test_display_inversions_feed_default_derived_currents(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            bundle_reverse_recovery_current,
+            try_bundle_total_current,
+        )
+
+        ch2 = np.array([100.0, 200.0, 300.0])
+        ch3 = np.array([1.0, 2.0, 3.0])
+        ch4 = np.array([10.0, 20.0, 30.0])
+        bundle = WaveformBundle(
+            t=np.arange(ch3.size, dtype=np.float64),
+            channels={"CH2": ch2, "CH3": ch3, "CH4": ch4},
+            meta=TekMetadata(),
+        )
+
+        upper = make_profile("U", "upper")
+        lower = make_profile("U", "lower")
+
+        np.testing.assert_allclose(bundle.get("CH2"), ch2)
+        np.testing.assert_allclose(try_bundle_total_current(bundle, upper), ch3 + ch4)
+        np.testing.assert_allclose(
+            bundle_reverse_recovery_current(bundle, lower),
+            ch3 - ch4,
+        )
+
+        bundle.meta.channel_display_inversions.add("CH2")
+        bundle.meta.channel_display_inversions.add("CH4")
+        np.testing.assert_allclose(bundle.get("CH2"), -ch2)
+        np.testing.assert_allclose(try_bundle_total_current(bundle, upper), ch3 - ch4)
+        np.testing.assert_allclose(
+            bundle_reverse_recovery_current(bundle, lower),
+            ch3 + ch4,
+        )
 
     def test_channels_for_mapping_can_include_inverted_refs(self):
         import numpy as np
@@ -336,6 +378,106 @@ class TestChannelMapping(unittest.TestCase):
 
         self.assertTrue(np.array_equal(try_bundle_total_current(bundle, profile), total))
         self.assertIsNone(try_bundle_reverse_recovery_current(bundle, profile, total))
+
+    def test_direct_math_current_roles_use_selected_supported_channels(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            bundle_reverse_recovery_current,
+            try_bundle_total_current,
+        )
+
+        n = 8
+        ch4 = np.linspace(1.0, 8.0, n)
+        irr = -ch4
+        il = np.linspace(10.0, 80.0, n)
+        total = irr + il
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, n),
+            channels={
+                **{f"CH{i}": np.full(n, float(i)) for i in range(1, 9)},
+                "CH4": ch4,
+                "CH5": il,
+                "MATH1": irr,
+                "MATH2": total,
+            },
+            meta=TekMetadata(),
+        )
+        mapping = ChannelMapping(
+            vge="CH8",
+            vce="CH7",
+            v_diode="CH6",
+            irr="MATH1",
+            il="CH5",
+            ic="MATH2",
+            vge_other="CH1",
+            ic_from_sum_irr_il=True,
+            irr_from_ic_minus_il=True,
+        )
+        profile = apply_mapping(make_profile("U", "upper"), mapping)
+
+        self.assertFalse(validate_mapping(mapping, bundle))
+        np.testing.assert_allclose(try_bundle_total_current(bundle, profile), total)
+        np.testing.assert_allclose(
+            bundle_reverse_recovery_current(bundle, profile),
+            irr,
+        )
+
+    def test_waveform_mapping_unit_filters_use_overrides_first(self):
+        import numpy as np
+
+        from dpt_extractor.io.waveform_mapping import _unit_allows
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 4),
+            channels={"CH1": np.zeros(4), "CH2": np.zeros(4), "CH3": np.zeros(4)},
+            meta=TekMetadata(
+                channel_units={"CH1": "V", "CH2": "A", "CH3": "V"},
+                channel_unit_overrides={"CH3": "A"},
+            ),
+        )
+
+        self.assertTrue(_unit_allows(bundle, "CH1", "voltage"))
+        self.assertFalse(_unit_allows(bundle, "CH1", "current"))
+        self.assertTrue(_unit_allows(bundle, "CH2", "current"))
+        self.assertFalse(_unit_allows(bundle, "CH2", "voltage"))
+        self.assertTrue(_unit_allows(bundle, "CH3", "current"))
+        self.assertFalse(_unit_allows(bundle, "CH3", "voltage"))
+
+    @unittest.skipUnless(OTHER_360A.exists(), "360A sample missing")
+    def test_waveform_mapping_uses_math_current_formula_when_labels_missing(self):
+        from dpt_extractor.models.channel_mapping import infer_best_mapping_from_bundle
+
+        bundle = load_waveform(OTHER_360A)
+        mapping, method = infer_best_mapping_from_bundle(bundle, "upper")
+
+        self.assertEqual(method, "trend")
+        self.assertIsNotNone(mapping)
+        self.assertEqual(mapping.vge, "CH1")
+        self.assertEqual(mapping.vce, "CH2")
+        self.assertEqual(mapping.v_diode, "CH3")
+        self.assertEqual(mapping.irr, "MATH1")
+        self.assertEqual(mapping.il, "CH5")
+        self.assertTrue(mapping.ic_from_sum_irr_il)
+        self.assertFalse(validate_mapping(mapping, bundle))
+
+    def test_waveform_mapping_trend_values_use_display_inversion(self):
+        import numpy as np
+
+        from dpt_extractor.io.waveform_mapping import _channel_values
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        raw = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        bundle = WaveformBundle(
+            t=np.arange(raw.size, dtype=np.float64),
+            channels={"CH4": raw},
+            meta=TekMetadata(channel_display_inversions={"CH4"}),
+        )
+
+        np.testing.assert_allclose(_channel_values(bundle, "CH4"), -raw)
 
     def test_validate_irr_ic_minus_il_requires_distinct(self):
         m = ChannelMapping(

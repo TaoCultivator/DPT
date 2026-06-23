@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from dpt_extractor.io.wfm_scope_display import (
     read_wfm_vertical_scale_per_div,
+    read_wfm_vertical_unit,
     scope_vdiv_by_logical,
     scope_y_position_by_logical,
 )
@@ -88,6 +89,30 @@ class TestReadWfmVerticalScale(unittest.TestCase):
             patch("pathlib.Path.open", mock.mock_open()),
         ):
             self.assertIsNone(read_wfm_vertical_scale_per_div("dummy.wfm"))
+
+    def test_reads_vertical_unit(self):
+        exp_dim = MagicMock()
+        exp_dim.first.units = "Ampere"
+        formatted = MagicMock()
+        formatted.explicit_dimensions = exp_dim
+        formatted.explicit_user_view = None
+        endian_key = b"AB"
+        wfm_file = MagicMock()
+        wfm_file._ENDIAN_PREFIX_LOOKUP = {endian_key: MagicMock(struct=">")}
+        string8 = MagicMock()
+        string8.unpack.return_value = "3.0"
+        version_number = MagicMock()
+        wfm_format = MagicMock(return_value=formatted)
+
+        with (
+            patch("dpt_extractor.io.wfm_scope_display.struct.unpack", return_value=(endian_key,)),
+            patch(
+                "dpt_extractor.io.wfm_scope_display._wfm_dependencies",
+                return_value=(wfm_file, wfm_format, string8, version_number),
+            ),
+            patch("pathlib.Path.open", mock.mock_open()),
+        ):
+            self.assertEqual(read_wfm_vertical_unit("dummy.wfm"), "A")
 
 
 if __name__ == "__main__":

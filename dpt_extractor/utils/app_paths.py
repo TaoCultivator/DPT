@@ -94,13 +94,14 @@ def configure_numba_cache_dir() -> Path | None:
     if os.environ.get("NUMBA_CACHE_DIR"):
         return Path(os.environ["NUMBA_CACHE_DIR"])
 
-    candidates: list[Path] = []
-    try:
-        candidates.append(user_data_dir() / "numba_cache")
-    except OSError:
-        pass
     if not is_frozen():
-        candidates.append(bundle_root() / ".numba_cache")
+        candidates: list[Path] = [bundle_root() / ".numba_cache"]
+    else:
+        candidates = []
+        try:
+            candidates.append(user_data_dir() / "numba_cache")
+        except OSError:
+            pass
 
     for cache_dir in candidates:
         try:

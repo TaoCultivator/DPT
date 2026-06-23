@@ -57,6 +57,7 @@ class ChannelMappingDialog(QDialog):
         self._applied = False
         self._syncing_mapping_ui = False
         self._last_combo_values: dict[str, str] = {}
+        self._source_path = bundle.meta.source_path if bundle is not None else ""
 
         self._build_ui()
         self._load_initial_mapping()
@@ -222,7 +223,11 @@ class ChannelMappingDialog(QDialog):
         self._last_combo_values = self._current_combo_values()
 
     def _load_initial_mapping(self) -> None:
-        custom = self._store.get(self._phase, self._bridge)
+        custom = self._store.get(
+            self._phase,
+            self._bridge,
+            source_path=self._source_path,
+        )
         if custom:
             self._apply_mapping_to_ui(custom)
             return
@@ -243,6 +248,10 @@ class ChannelMappingDialog(QDialog):
         parts = {k: str(self._combos[k].currentData() or "") for k in self._combos}
         use_sum = self._ic_sum_cb.isChecked() if self._ic_sum_cb else False
         use_diff = self._irr_diff_cb.isChecked() if self._irr_diff_cb else False
+        if parts.get("ic"):
+            use_sum = False
+        if parts.get("irr"):
+            use_diff = False
         return ChannelMapping(
             **parts,
             ic_from_sum_irr_il=use_sum,
@@ -251,7 +260,11 @@ class ChannelMappingDialog(QDialog):
 
     def _on_reset(self) -> None:
         self._apply_mapping_to_ui(default_mapping_for(self._phase, self._bridge))
-        self._store.clear(self._phase, self._bridge)
+        self._store.clear(
+            self._phase,
+            self._bridge,
+            source_path=self._source_path,
+        )
 
     def _on_apply(self) -> None:
         if not channels_for_mapping(self._bundle):
@@ -270,7 +283,12 @@ class ChannelMappingDialog(QDialog):
                 "请修正以下问题：\n\n" + "\n".join(f"• {e}" for e in errors),
             )
             return
-        self._store.set(self._phase, self._bridge, mapping)
+        self._store.set(
+            self._phase,
+            self._bridge,
+            mapping,
+            source_path=self._source_path,
+        )
         self._mapping_result = mapping
         self._applied = True
         self.accept()
@@ -280,11 +298,12 @@ def resolve_profile(
     phase: str,
     bridge: str,
     store: ChannelMappingStore | None = None,
+    source_path: str | None = None,
 ) -> tuple[BridgeProfile, bool]:
     """Return profile with optional user channel override; bool = is custom."""
     store = store or ChannelMappingStore()
     base = make_profile(phase, bridge)
-    custom = store.get(phase, bridge)
+    custom = store.get(phase, bridge, source_path=source_path)
     if custom is None:
         return base, False
     return apply_mapping(base, custom), True

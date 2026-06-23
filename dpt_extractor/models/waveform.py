@@ -60,6 +60,10 @@ class TekMetadata:
     channel_labels: dict[str, str] = field(default_factory=dict)
     #: CH/MATH -> vertical scale from session (.wfm user view), units per division (V/格, A/格)
     channel_vdiv: dict[str, float] = field(default_factory=dict)
+    #: CH/MATH -> vertical unit recorded by the source WFM/TSS file, such as V or A.
+    channel_units: dict[str, str] = field(default_factory=dict)
+    #: CH/MATH -> user unit override for cases where the oscilloscope unit was wrong.
+    channel_unit_overrides: dict[str, str] = field(default_factory=dict)
     #: CH/MATH -> vertical position from session (divisions, Tek yPosition)
     channel_y_position: dict[str, float] = field(default_factory=dict)
     #: MATH channel -> formula restored from a Tektronix session setup file.
@@ -75,6 +79,12 @@ class TekMetadata:
     #: Scope measurement definitions restored from the session setup:
     #: (source channel, metric key, range key).
     offset_measurements: list[tuple[str, str, str]] = field(default_factory=list)
+    #: CH/MATH channels whose oscilloscope session source had invert enabled.
+    #: WFM values are treated as already matching this source display state.
+    source_channel_inversions: set[str] = field(default_factory=set)
+    #: Active display inversions. Initialized from source_channel_inversions,
+    #: then updated by the channel settings panel for live display/calculation.
+    channel_display_inversions: set[str] = field(default_factory=set)
 
     @property
     def dt(self) -> float:
@@ -111,6 +121,10 @@ class WaveformBundle:
         if channel is None:
             return None
         if sign < 0:
+            return -np.asarray(channel, dtype=np.float64)
+        if (base in self.meta.channel_display_inversions) != (
+            base in self.meta.source_channel_inversions
+        ):
             return -np.asarray(channel, dtype=np.float64)
         return channel
 

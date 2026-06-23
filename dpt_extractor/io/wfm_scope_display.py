@@ -18,6 +18,37 @@ String8 = None
 VersionNumber = None
 
 
+_UNIT_ALIASES = {
+    "V": "V",
+    "VOLT": "V",
+    "VOLTS": "V",
+    "A": "A",
+    "AMP": "A",
+    "AMPS": "A",
+    "AMPERE": "A",
+    "AMPERES": "A",
+    "W": "W",
+    "WATT": "W",
+    "WATTS": "W",
+    "J": "J",
+    "JOULE": "J",
+    "JOULES": "J",
+}
+
+
+def normalize_wfm_unit(unit: object) -> str:
+    """Return a display-ready unit string from Tek WFM metadata."""
+    if isinstance(unit, bytes):
+        text = unit.decode("utf-8", errors="ignore")
+    else:
+        text = str(unit or "")
+    text = text.replace("\x00", "").strip()
+    if not text:
+        return ""
+    compact = text.replace(" ", "").upper()
+    return _UNIT_ALIASES.get(compact, text)
+
+
 def _wfm_dependencies():
     global WFMFile, WfmFormat, String8, VersionNumber
     if all(obj is not None for obj in (WFMFile, WfmFormat, String8, VersionNumber)):
@@ -62,6 +93,34 @@ def read_wfm_vertical_scale_per_div(path: str | Path) -> float | None:
     if dim_scale <= 0 or not (dim_scale < float("inf")):
         return None
     return dim_scale * _TEK_WFM_VERT_SCALE_TO_VDIV
+
+
+def read_wfm_vertical_unit(path: str | Path) -> str:
+    """Return the vertical unit recorded in a .wfm file."""
+    path = Path(path)
+    wfm_file, wfm_format, string8, version_number_type = _wfm_dependencies()
+    try:
+        with path.open("rb") as fd:
+            (byte_order,) = struct.unpack(">2s", fd.read(2))
+            if byte_order not in wfm_file._ENDIAN_PREFIX_LOOKUP:
+                return ""
+            endian_prefix = wfm_file._ENDIAN_PREFIX_LOOKUP[byte_order]
+            version_value = string8.unpack(endian_prefix.struct, fd)
+            version_number = version_number_type(version_value)
+            formatted = wfm_format()
+            formatted.unpack_wfm_file(endian_prefix, version_number, fd)
+    except (OSError, ValueError, struct.error):
+        return ""
+
+    exp_dim = formatted.explicit_dimensions
+    if exp_dim is not None and exp_dim.first is not None:
+        unit = normalize_wfm_unit(getattr(exp_dim.first, "units", ""))
+        if unit:
+            return unit
+    exp_view = formatted.explicit_user_view
+    if exp_view is not None and exp_view.first is not None:
+        return normalize_wfm_unit(getattr(exp_view.first, "units", ""))
+    return ""
 
 
 def scope_vdiv_by_logical(meta: TekMetadata, profile: BridgeProfile) -> dict[str, float]:

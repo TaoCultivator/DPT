@@ -29,6 +29,10 @@ from dpt_extractor.metrics.plateau_level import (
     turn_on_didt_ha_at_turn_on,
 )
 from dpt_extractor.models.bridge_profile import guess_profile_from_path
+from dpt_extractor.models.channel_mapping import (
+    apply_mapping,
+    infer_best_mapping_from_bundle,
+)
 from dpt_extractor.models.test_mode import TestMode
 from dpt_extractor.models.waveform import (
     bundle_reverse_recovery_current,
@@ -187,9 +191,41 @@ def _cursor_on_level(
     return abs(float(np.interp(float(t_cross), t, y)) - float(level)) <= float(tol)
 
 
-def _validate_dpt_sample(path: Path) -> SampleValidation:
+def _mapping_fallback_result(
+    path: Path,
+    bundle,
+    base_profile,
+    *,
+    allow_mapping_fallback: bool,
+) -> SampleValidation | None:
+    if not allow_mapping_fallback:
+        return None
+    inferred_mapping, mapping_method = infer_best_mapping_from_bundle(
+        bundle,
+        base_profile.bridge,
+    )
+    if inferred_mapping is None:
+        return None
+    mapped_profile = apply_mapping(base_profile, inferred_mapping)
+    result = _validate_dpt_sample(
+        path,
+        profile_override=mapped_profile,
+        mapping_method=mapping_method or "inferred",
+        allow_mapping_fallback=False,
+    )
+    return result if not result.warned and not result.failed else None
+
+
+def _validate_dpt_sample(
+    path: Path,
+    *,
+    profile_override=None,
+    mapping_method: str = "default",
+    allow_mapping_fallback: bool = True,
+) -> SampleValidation:
     cfg = load_config()
-    prof = guess_profile_from_path(path)
+    base_prof = guess_profile_from_path(path)
+    prof = profile_override or base_prof
     b = load_waveform(path)
     r = extract_all(b, prof, cfg)
     segs = r.segments
@@ -238,6 +274,7 @@ def _validate_dpt_sample(path: Path) -> SampleValidation:
         status = "WARN" if problems else "OK"
         detail = (
             f"profile={prof.code} "
+            f"map={mapping_method or 'default'} "
             f"pulses={r.detected_pulse_count} "
             f"target={expected_voltage or 0:.0f}V/"
             f"{expected_current or 0:.0f}A "
@@ -250,6 +287,14 @@ def _validate_dpt_sample(path: Path) -> SampleValidation:
         )
         if problems:
             detail += " | " + "; ".join(problems)
+            fallback = _mapping_fallback_result(
+                path,
+                b,
+                base_prof,
+                allow_mapping_fallback=allow_mapping_fallback,
+            )
+            if fallback is not None:
+                return fallback
         return SampleValidation(path=path, kind="DPT-1P", status=status, detail=detail)
 
     on0, on1 = segs.turn_on
@@ -321,6 +366,7 @@ def _validate_dpt_sample(path: Path) -> SampleValidation:
     status = "WARN" if problems else "OK"
     detail = (
         f"profile={prof.code} "
+        f"map={mapping_method or 'default'} "
         f"target={expected_voltage or 0:.0f}V/"
         f"{expected_current or 0:.0f}A "
         f"Vdc={r.vdc:.1f} "
@@ -336,6 +382,14 @@ def _validate_dpt_sample(path: Path) -> SampleValidation:
     )
     if problems:
         detail += " | " + "; ".join(problems)
+        fallback = _mapping_fallback_result(
+            path,
+            b,
+            base_prof,
+            allow_mapping_fallback=allow_mapping_fallback,
+        )
+        if fallback is not None:
+            return fallback
     return SampleValidation(path=path, kind="DPT", status=status, detail=detail)
 
 

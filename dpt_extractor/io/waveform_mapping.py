@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 import numpy as np
 
@@ -9,7 +10,7 @@ from dpt_extractor.models.channel_mapping import (
     sort_channel_names,
     validate_mapping,
 )
-from dpt_extractor.models.waveform import WaveformBundle
+from dpt_extractor.models.waveform import WaveformBundle, channel_reference_base_name
 
 
 @dataclass(frozen=True)
@@ -22,12 +23,103 @@ class _TrendFeatures:
     roughness: float
 
 
+def _unit_kind(unit: str) -> str:
+    text = str(unit or "").replace(" ", "").replace("µ", "U").replace("μ", "U").upper()
+    if not text:
+        return ""
+    if text.endswith("V"):
+        return "voltage"
+    if text.endswith("A") and not text.endswith("VA"):
+        return "current"
+    if text.endswith("J"):
+        return "energy"
+    if text.endswith("W"):
+        return "power"
+    return ""
+
+
+_FORMULA_CHANNEL_RE = re.compile(r"\b(?:CH|MATH)\d+\b", re.IGNORECASE)
+
+
+def _formula_unit_kind(
+    bundle: WaveformBundle,
+    channel: str,
+    seen: set[str],
+) -> str:
+    base = channel_reference_base_name(channel)
+    expr = (bundle.meta.channel_math_formulas or {}).get(base, "")
+    if not expr or "*" in expr or "/" in expr:
+        return ""
+    tokens = [
+        channel_reference_base_name(token)
+        for token in _FORMULA_CHANNEL_RE.findall(expr)
+    ]
+    tokens = [token for token in tokens if token and token != base]
+    if not tokens:
+        return ""
+    kinds = [_channel_unit_kind(bundle, token, seen) for token in tokens]
+    if not all(kinds):
+        return ""
+    first = kinds[0]
+    return first if all(kind == first for kind in kinds) else ""
+
+
+def _channel_unit_kind(
+    bundle: WaveformBundle,
+    channel: str,
+    seen: set[str] | None = None,
+) -> str:
+    base = channel_reference_base_name(channel)
+    unit = (
+        bundle.meta.channel_unit_overrides.get(base)
+        or bundle.meta.channel_units.get(base)
+        or ""
+    )
+    kind = _unit_kind(unit)
+    if kind:
+        return kind
+    if not base.startswith("MATH"):
+        return ""
+    seen = set(seen or set())
+    if base in seen:
+        return ""
+    seen.add(base)
+    return _formula_unit_kind(bundle, base, seen)
+
+
+def _unit_allows(bundle: WaveformBundle, channel: str, expected: str) -> bool:
+    kind = _channel_unit_kind(bundle, channel)
+    return not kind or kind == expected
+
+
 def _raw_scope_channels(bundle: WaveformBundle) -> list[str]:
     return [
         ch
         for ch in sort_channel_names(bundle.channels)
         if ch.upper().startswith("CH") and ch.upper()[2:].isdigit()
     ]
+
+
+def _mapping_candidate_channels(
+    bundle: WaveformBundle,
+    *,
+    include_math: bool,
+) -> list[str]:
+    channels = _raw_scope_channels(bundle)
+    if include_math:
+        channels.extend(
+            ch
+            for ch in sort_channel_names(bundle.channels)
+            if ch.upper().startswith("MATH") and ch.upper()[4:].isdigit()
+        )
+    return sort_channel_names(channels)
+
+
+def _channel_values(bundle: WaveformBundle, channel: str) -> np.ndarray:
+    values = bundle.maybe_get(channel)
+    if values is None:
+        return np.asarray([], dtype=np.float64)
+    return np.asarray(values, dtype=np.float64)
 
 
 def _sample(y: np.ndarray, limit: int = 5000) -> np.ndarray:
@@ -79,10 +171,14 @@ def _vge_level_score(f: _TrendFeatures) -> float:
     return score
 
 
-def _gate_candidates(features: dict[str, _TrendFeatures]) -> list[str]:
+def _gate_candidates(
+    bundle: WaveformBundle,
+    features: dict[str, _TrendFeatures],
+) -> list[str]:
     candidates = [
         ch
         for ch, f in features.items()
+        if _unit_allows(bundle, ch, "voltage")
         if _vge_level_score(f) > 0.0 and f.roughness <= 0.12
     ]
     return sorted(
@@ -92,18 +188,32 @@ def _gate_candidates(features: dict[str, _TrendFeatures]) -> list[str]:
     )
 
 
-def _small_signal_candidates(features: dict[str, _TrendFeatures]) -> list[str]:
+def _small_signal_candidates(
+    bundle: WaveformBundle,
+    features: dict[str, _TrendFeatures],
+    *,
+    expected_unit: str = "",
+) -> list[str]:
     candidates = [
         ch
         for ch, f in features.items()
+        if not expected_unit or _unit_allows(bundle, ch, expected_unit)
         if f.robust_range <= 90.0 and abs(f.median) <= 40.0
     ]
     return sort_channel_names(candidates)
 
 
-def _large_signal_candidates(features: dict[str, _TrendFeatures]) -> list[str]:
+def _large_signal_candidates(
+    bundle: WaveformBundle,
+    features: dict[str, _TrendFeatures],
+    *,
+    expected_unit: str = "",
+) -> list[str]:
     candidates = [
-        ch for ch, f in features.items() if f.robust_range >= 80.0
+        ch
+        for ch, f in features.items()
+        if not expected_unit or _unit_allows(bundle, ch, expected_unit)
+        if f.robust_range >= 80.0
     ]
     return sort_channel_names(candidates)
 
@@ -174,19 +284,20 @@ def _pick_gate_and_voltage(
 ) -> tuple[str, str, float] | None:
     expected_gate = "CH1" if bridge.lower() == "upper" else "CH6"
     expected_vce = "CH2" if bridge.lower() == "upper" else "CH5"
-    gates = _gate_candidates(features)
-    large = _large_signal_candidates(features)
+    gates = _gate_candidates(bundle, features)
+    large = _large_signal_candidates(bundle, features, expected_unit="voltage")
     best: tuple[float, str, str, float] | None = None
     for gate in gates:
-        gate_bin = _binary_gate(bundle.channels[gate])
+        gate_bin = _binary_gate(_channel_values(bundle, gate))
         for ch in large:
             if ch == gate:
                 continue
             f = features[ch]
-            c = _corr(gate_bin, bundle.channels[ch])
+            values = _channel_values(bundle, ch)
+            c = _corr(gate_bin, values)
             if c > -0.45:
                 continue
-            rise_delta, fall_delta = _edge_delta_median(bundle.channels[ch], gate_bin)
+            rise_delta, fall_delta = _edge_delta_median(values, gate_bin)
             vce_edge_score = max(-_norm_delta(rise_delta, f), 0.0) + max(
                 _norm_delta(fall_delta, f),
                 0.0,
@@ -214,11 +325,16 @@ def _pick_positive_voltage(
     used: set[str],
 ) -> str | None:
     expected = "CH5" if bridge.lower() == "upper" else "CH2"
-    gate_bin = _binary_gate(bundle.channels[gate])
-    if expected in features and expected not in used:
-        expected_corr = _corr(gate_bin, bundle.channels[expected])
+    gate_bin = _binary_gate(_channel_values(bundle, gate))
+    if (
+        expected in features
+        and expected not in used
+        and _unit_allows(bundle, expected, "voltage")
+    ):
+        expected_values = _channel_values(bundle, expected)
+        expected_corr = _corr(gate_bin, expected_values)
         rise_delta, fall_delta = _edge_delta_median(
-            bundle.channels[expected],
+            expected_values,
             gate_bin,
         )
         expected_edge_score = max(
@@ -232,14 +348,15 @@ def _pick_positive_voltage(
         ):
             return expected
     best: tuple[float, str] | None = None
-    for ch in _large_signal_candidates(features):
+    for ch in _large_signal_candidates(bundle, features, expected_unit="voltage"):
         if ch in used:
             continue
         f = features[ch]
-        c = _corr(gate_bin, bundle.channels[ch])
+        values = _channel_values(bundle, ch)
+        c = _corr(gate_bin, values)
         if c < 0.25:
             continue
-        rise_delta, fall_delta = _edge_delta_median(bundle.channels[ch], gate_bin)
+        rise_delta, fall_delta = _edge_delta_median(values, gate_bin)
         diode_edge_score = max(_norm_delta(rise_delta, f), 0.0) + max(
             -_norm_delta(fall_delta, f),
             0.0,
@@ -251,20 +368,35 @@ def _pick_positive_voltage(
             best = (score, ch)
     if best is not None:
         return best[1]
-    return expected if expected in features and expected not in used else None
+    return (
+        expected
+        if expected in features
+        and expected not in used
+        and _unit_allows(bundle, expected, "voltage")
+        else None
+    )
 
 
 def _pick_other_gate(
+    bundle: WaveformBundle,
     bridge: str,
     features: dict[str, _TrendFeatures],
     used: set[str],
 ) -> str | None:
     expected = "CH6" if bridge.lower() == "upper" else "CH1"
-    if expected in features and expected not in used:
+    if (
+        expected in features
+        and expected not in used
+        and _unit_allows(bundle, expected, "voltage")
+    ):
         return expected
     candidates = [
         ch
-        for ch in _small_signal_candidates(features)
+        for ch in _small_signal_candidates(
+            bundle,
+            features,
+            expected_unit="voltage",
+        )
         if ch not in used and features[ch].robust_range <= 35.0
     ]
     return candidates[0] if candidates else None
@@ -277,8 +409,9 @@ def _switched_current_score(
     channel: str,
 ) -> float:
     f = features[channel]
-    corr = max(_corr(gate_bin, bundle.channels[channel]), 0.0)
-    rise_delta, fall_delta = _edge_delta_median(bundle.channels[channel], gate_bin)
+    values = _channel_values(bundle, channel)
+    corr = max(_corr(gate_bin, values), 0.0)
+    rise_delta, fall_delta = _edge_delta_median(values, gate_bin)
     turn_on_rise = max(_norm_delta(rise_delta, f), 0.0)
     turn_off_fall = max(-_norm_delta(fall_delta, f), 0.0)
     return corr + turn_on_rise * 0.6 + turn_off_fall * 0.6
@@ -291,17 +424,14 @@ def _pick_current_pair(
     features: dict[str, _TrendFeatures],
     used: set[str],
 ) -> tuple[str, str] | None:
-    remaining = [ch for ch in sort_channel_names(features) if ch not in used]
+    remaining = [
+        ch
+        for ch in sort_channel_names(features)
+        if ch not in used and _unit_allows(bundle, ch, "current")
+    ]
     if len(remaining) < 2:
         return None
-    if len(remaining) > 2:
-        remaining = sorted(
-            remaining,
-            key=lambda ch: features[ch].robust_range,
-            reverse=True,
-        )[:2]
-        remaining = sort_channel_names(remaining)
-    gate_bin = _binary_gate(bundle.channels[gate])
+    gate_bin = _binary_gate(_channel_values(bundle, gate))
     current_scores = {
         ch: _switched_current_score(bundle, gate_bin, features, ch)
         for ch in remaining
@@ -312,16 +442,14 @@ def _pick_current_pair(
     il_candidates = [ch for ch in remaining if ch != current]
     if not il_candidates:
         return None
-    if "CH4" in il_candidates:
-        il = "CH4"
-    else:
-        il = min(
-            il_candidates,
-            key=lambda ch: (
-                current_scores[ch],
-                -features[ch].median,
-            ),
-        )
+    il = min(
+        il_candidates,
+        key=lambda ch: (
+            current_scores[ch],
+            features[ch].roughness,
+            -features[ch].median,
+        ),
+    )
     return (current, il) if bridge.lower() == "upper" else (current, il)
 
 
@@ -342,12 +470,16 @@ def infer_channel_mapping_from_waveform_trends(
     """
     if bundle is None:
         return None
-    channels = _raw_scope_channels(bundle)
-    if len(channels) < 6:
+    raw_channels = _raw_scope_channels(bundle)
+    if len(raw_channels) < 4:
         return None
+    channels = _mapping_candidate_channels(
+        bundle,
+        include_math=len(raw_channels) < 6,
+    )
 
     features = {
-        ch: _features(ch, bundle.channels[ch])
+        ch: _features(ch, _channel_values(bundle, ch))
         for ch in channels
         if ch in bundle.channels
     }
@@ -363,10 +495,9 @@ def infer_channel_mapping_from_waveform_trends(
     if not v_diode:
         return None
     used.add(v_diode)
-    vge_other = _pick_other_gate(bridge, features, used)
-    if not vge_other:
-        return None
-    used.add(vge_other)
+    vge_other = _pick_other_gate(bundle, bridge, features, used)
+    if vge_other:
+        used.add(vge_other)
 
     current_pair = _pick_current_pair(bundle, vge, bridge, features, used)
     if current_pair is None:
@@ -381,7 +512,7 @@ def infer_channel_mapping_from_waveform_trends(
             il=il,
             irr=current,
             v_diode=v_diode,
-            vge_other=vge_other,
+            vge_other=vge_other or "",
             ic_from_sum_irr_il=True,
             irr_from_ic_minus_il=False,
         )
@@ -393,7 +524,7 @@ def infer_channel_mapping_from_waveform_trends(
             il=il,
             irr="",
             v_diode=v_diode,
-            vge_other=vge_other,
+            vge_other=vge_other or "",
             ic_from_sum_irr_il=False,
             irr_from_ic_minus_il=True,
         )

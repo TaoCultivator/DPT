@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 import os
 import re
 
@@ -612,11 +613,10 @@ from dpt_extractor.models.bridge_profile import BridgeProfile
 from dpt_extractor.models.results import ExtractResult, SegmentIndices
 from dpt_extractor.models.waveform import (
     WaveformBundle,
-    bundle_reverse_recovery_current,
-    bundle_total_current,
     channel_reference_base_name,
     channel_reference_sign,
     normalize_channel_reference,
+    split_channel_reference,
 )
 
 MAX_PLOT_POINTS = 8000
@@ -647,6 +647,7 @@ CURSOR_READOUT_MIN_ROW_PX = 22.0
 CURSOR_READOUT_CURSOR_GAP_PX = 4.0
 CURSOR_READOUT_MARKER_GUARD_PX = 14.0
 CURSOR_READOUT_LABEL_GUARD_PX = 4.0
+CURSOR_LINE_LABEL_GUARD_PX = 2.0
 
 # 每通道独立垂直刻度（示波器 V/div 风格）：显示坐标 = 原始值 / (单位每格)
 DISP_HALF_DIV = 5.0  # 纵向显示半高（格），总高 10 格（同示波器）
@@ -1270,6 +1271,8 @@ class WaveformPlot(QWidget):
 
     channelMappingRequested = pyqtSignal(str, str)
     channelLabelChanged = pyqtSignal(str, str)
+    channelUnitChanged = pyqtSignal(str, str)
+    channelInversionChanged = pyqtSignal(str, bool)
     cursorVisibilityChanged = pyqtSignal(bool)
     selectionZoomChanged = pyqtSignal(bool)
 
@@ -1681,6 +1684,9 @@ class WaveformPlot(QWidget):
         self._trace_legend: dict[str, str] = {}
         self._channel_labels: dict[str, str] = {}
         self._trace_units: dict[str, str] = {}
+        self._source_file_units: dict[str, str] = {}
+        self._unit_overrides: dict[str, str] = {}
+        self._role_units: dict[str, str] = {}
         self._raised_key: str | None = None
         self._highlighted_key: str | None = None
         self._hidden_channels: set[str] = set()
@@ -1692,6 +1698,8 @@ class WaveformPlot(QWidget):
         # 用户手动设置的 V/div（覆盖默认/自动）
         self._manual_vdiv: dict[str, float] = {}
         self._loaded_source_path: str | None = None
+        self._manual_inverted_channels: set[str] = set()
+        self._source_inverted_channels: set[str] = set()
         # 全采样波形缓存（光标吸附/峰值定位必须与参数计算使用同一数据源）
         self._trace_t_us: np.ndarray | None = None
         self._trace_raw: dict[str, np.ndarray] = {}
@@ -2070,6 +2078,7 @@ class WaveformPlot(QWidget):
             if item is not None:
                 item.setVisible(show_h)
         self._update_waveform_cursor_markers()
+        self._sync_cursor_line_label_positions()
         self._refresh_cursor_auxiliary_guides()
 
     def _set_cursor_readout_overlay(self, enabled: bool) -> None:
@@ -2793,6 +2802,73 @@ class WaveformPlot(QWidget):
         offset = self._disp_offset.get(channel, 0.0)
         return (float(y_div) - offset) * scale
 
+    def _display_inversion_enabled(self, key: str) -> bool:
+        base = channel_reference_base_name(key)
+        return bool(base and f"-{base}" in self._manual_inverted_channels)
+
+    def _source_inversion_enabled(self, key: str) -> bool:
+        base = channel_reference_base_name(key)
+        return bool(base and f"-{base}" in self._source_inverted_channels)
+
+    def _display_transform_inverted(self, key: str) -> bool:
+        base = channel_reference_base_name(key)
+        return bool(
+            base
+            and self._display_inversion_enabled(base)
+            != self._source_inversion_enabled(base)
+        )
+
+    def _effective_raw_for_channel(
+        self,
+        channel: str | None,
+        *,
+        include_display_inversion: bool = True,
+    ) -> np.ndarray | None:
+        ref = normalize_channel_reference(channel)
+        if not ref:
+            return None
+        sign, base = split_channel_reference(ref)
+        raw = self._trace_raw.get(ref)
+        if raw is None and base:
+            raw = self._trace_raw.get(base)
+        if raw is None:
+            return None
+        arr = np.asarray(raw, dtype=np.float64)
+        if sign < 0:
+            return -arr
+        if include_display_inversion and self._display_transform_inverted(base or ref):
+            return -arr
+        return arr
+
+    def current_display_raw(self, channel: str | None) -> np.ndarray | None:
+        """Return the full-resolution waveform currently shown for a channel."""
+        return self._effective_raw_for_channel(channel, include_display_inversion=True)
+
+    def _effective_reference_for_channel(self, channel: str | None) -> str:
+        ref = normalize_channel_reference(channel)
+        sign, base = split_channel_reference(ref)
+        if not base or sign < 0:
+            return ref
+        if self._display_transform_inverted(base):
+            return f"-{base}"
+        return base
+
+    def effective_profile_for_channel_inversions(
+        self, profile: BridgeProfile
+    ) -> BridgeProfile:
+        """Profile used for calculations when source channels are display-inverted."""
+
+        return replace(
+            profile,
+            vge=self._effective_reference_for_channel(profile.vge),
+            vce=self._effective_reference_for_channel(profile.vce),
+            ic=self._effective_reference_for_channel(profile.ic),
+            il=self._effective_reference_for_channel(profile.il),
+            irr=self._effective_reference_for_channel(profile.irr),
+            v_diode=self._effective_reference_for_channel(profile.v_diode),
+            vge_other=self._effective_reference_for_channel(profile.vge_other),
+        )
+
     def _current_x_window_for_display(self) -> tuple[float, float] | None:
         if self._trace_t_us is None or len(self._trace_t_us) == 0:
             return None
@@ -2817,7 +2893,7 @@ class WaveformPlot(QWidget):
         self._trace_display_updating = True
         try:
             for key, item in self._trace_items.items():
-                raw = self._trace_raw.get(key)
+                raw = self._effective_raw_for_channel(key)
                 if raw is None:
                     continue
                 scale = self._disp_scale.get(key, 1.0) or 1.0
@@ -2835,7 +2911,7 @@ class WaveformPlot(QWidget):
         if self._trace_display_updating or self._trace_t_us is None:
             return
         item = self._trace_items.get(key)
-        raw = self._trace_raw.get(key)
+        raw = self._effective_raw_for_channel(key)
         if item is None or raw is None:
             return
         win = self._current_x_window_for_display()
@@ -2852,7 +2928,7 @@ class WaveformPlot(QWidget):
     def _overview_trace_data(self, key: str) -> tuple[np.ndarray, np.ndarray] | None:
         if self._trace_t_us is None or self._full_x_range is None:
             return None
-        raw = self._trace_raw.get(key)
+        raw = self._effective_raw_for_channel(key)
         if raw is None:
             return None
         f0, f1 = self._full_x_range
@@ -3068,7 +3144,35 @@ class WaveformPlot(QWidget):
 
     def _unit_for_channel(self, key: str) -> str:
         key = self._display_key_for_channel(key)
-        return self._trace_units.get(key, CHANNEL_UNITS.get(key, ""))
+        return self._lookup_channel_unit(
+            self._trace_units,
+            key,
+        ) or self._lookup_channel_unit(CHANNEL_UNITS, key)
+
+    @staticmethod
+    def _lookup_channel_unit(units: dict[str, str], key: str | None) -> str:
+        raw = str(key or "").strip()
+        ref = normalize_channel_reference(key)
+        base = channel_reference_base_name(ref)
+        candidates = (
+            raw,
+            raw.upper(),
+            raw.lower(),
+            ref,
+            base,
+            ref.lower(),
+            base.lower(),
+        )
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate:
+                unit = str(units.get(candidate) or "").strip()
+                if unit:
+                    return unit
+        return ""
 
     def _formula_source_names(self) -> list[str]:
         def _sort_key(name: str) -> tuple[int, int, str]:
@@ -3098,17 +3202,79 @@ class WaveformPlot(QWidget):
     def _logic_float(value) -> np.ndarray:
         return np.asarray(value, dtype=bool).astype(np.float64)
 
-    def _formula_unit(self, expr: str) -> str:
+    def _formula_unit(
+        self,
+        expr: str,
+        unit_overrides: dict[str, str] | None = None,
+    ) -> str:
         text = expr.upper()
         if "INTG" in text or "INTEG" in text:
             return "J"
         if re.search(r"\bCH[1-8]\b", text) and "*" in text:
             return "W"
         for name in re.findall(rf"\b{SOURCE_CHANNEL_PATTERN}\b", text):
-            unit = self._trace_units.get(name) or CHANNEL_UNITS.get(name, "")
+            unit = (
+                self._lookup_channel_unit(unit_overrides or {}, name)
+                or self._lookup_channel_unit(self._trace_units, name)
+                or self._lookup_channel_unit(CHANNEL_UNITS, name)
+            )
             if unit:
                 return unit
         return ""
+
+    def _source_trace_unit(
+        self,
+        key: str,
+        expr: str | None,
+        file_units: dict[str, str],
+        override_units: dict[str, str],
+        role_units: dict[str, str],
+        saved_units: dict[str, str],
+    ) -> str:
+        unit_context = dict(saved_units)
+        unit_context.update(role_units)
+        unit_context.update(file_units)
+        unit_context.update(override_units)
+        override_unit = self._lookup_channel_unit(override_units, key)
+        if override_unit:
+            return override_unit
+        file_unit = self._lookup_channel_unit(file_units, key)
+        if file_unit:
+            return file_unit
+        if expr:
+            formula_unit = self._formula_unit(expr, unit_context)
+            if formula_unit:
+                return formula_unit
+        return (
+            self._lookup_channel_unit(saved_units, key)
+            or self._lookup_channel_unit(role_units, key)
+            or self._lookup_channel_unit(CHANNEL_UNITS, key)
+        )
+
+    @staticmethod
+    def _metadata_channel_units(meta_units: dict[str, str]) -> dict[str, str]:
+        units: dict[str, str] = {}
+        for channel, unit in meta_units.items():
+            ref = normalize_channel_reference(channel)
+            base = channel_reference_base_name(ref)
+            text = str(unit or "").strip()
+            if not text:
+                continue
+            if base:
+                units[base] = text
+            if ref:
+                units[ref] = text
+        return units
+
+    def channel_unit_override(self, key: str) -> str:
+        key = normalize_channel_reference(key)
+        base = channel_reference_base_name(key)
+        return self._lookup_channel_unit(self._unit_overrides, base or key)
+
+    def source_file_unit(self, key: str) -> str:
+        key = normalize_channel_reference(key)
+        base = channel_reference_base_name(key)
+        return self._lookup_channel_unit(self._source_file_units, base or key)
 
     @staticmethod
     def _physical_channel_units(profile: BridgeProfile) -> dict[str, str]:
@@ -3138,6 +3304,11 @@ class WaveformPlot(QWidget):
     @staticmethod
     def _logical_display_key_map(profile: BridgeProfile) -> dict[str, str]:
         mapping: dict[str, str] = {}
+
+        def display_ref(channel: str) -> str:
+            ref = normalize_channel_reference(channel)
+            return channel_reference_base_name(ref) or ref
+
         for logical, channel in (
             ("vge", profile.vge),
             ("vce", profile.vce),
@@ -3148,13 +3319,13 @@ class WaveformPlot(QWidget):
             ("vge_other", profile.vge_other),
         ):
             if channel:
-                mapping[logical] = normalize_channel_reference(channel)
+                mapping[logical] = display_ref(channel)
         if profile.ic_from_sum_irr_il and not profile.ic:
-            mapping["ic"] = normalize_channel_reference(
+            mapping["ic"] = display_ref(
                 profile.irr or profile.il or profile.ic
             )
         if profile.irr_from_ic_minus_il and not profile.irr:
-            mapping["irr"] = normalize_channel_reference(
+            mapping["irr"] = display_ref(
                 profile.irr or profile.ic or profile.il
             )
         return mapping
@@ -3181,7 +3352,7 @@ class WaveformPlot(QWidget):
             for channel in (profile.irr, profile.il):
                 if channel:
                     role_list = roles.setdefault(
-                        normalize_channel_reference(channel),
+                        channel_reference_base_name(channel) or normalize_channel_reference(channel),
                         [],
                     )
                     if "Ic" in role_list:
@@ -3192,7 +3363,7 @@ class WaveformPlot(QWidget):
             for channel in (profile.ic, profile.il):
                 if channel:
                     role_list = roles.setdefault(
-                        normalize_channel_reference(channel),
+                        channel_reference_base_name(channel) or normalize_channel_reference(channel),
                         [],
                     )
                     if "Irr" in role_list:
@@ -3287,7 +3458,11 @@ class WaveformPlot(QWidget):
         ctx: dict[str, np.ndarray | float] = {}
         for name, arr in self._formula_sources.items():
             if name.upper() != target_key.upper():
-                ctx[name.upper()] = arr
+                effective = self._effective_raw_for_channel(name)
+                if effective is not None and np.shape(effective) == np.shape(arr):
+                    ctx[name.upper()] = effective
+                else:
+                    ctx[name.upper()] = arr
         ctx["PI"] = float(np.pi)
         ctx["E"] = float(np.e)
         return ctx
@@ -3461,7 +3636,10 @@ class WaveformPlot(QWidget):
             return
         raw = np.asarray(raw, dtype=np.float64)
         self._trace_raw[key] = raw
-        fit_raw = self._fit_raw_for_channel(key, raw)
+        effective_raw = self._effective_raw_for_channel(key)
+        if effective_raw is None:
+            effective_raw = raw
+        fit_raw = self._fit_raw_for_channel(key, effective_raw)
         if key in self._manual_vdiv:
             scale = float(self._manual_vdiv[key])
         else:
@@ -3471,7 +3649,7 @@ class WaveformPlot(QWidget):
         win = self._current_x_window_for_display()
         if win is None:
             win = (float(self._trace_t_us[0]), float(self._trace_t_us[-1]))
-        tx, raw_disp = _display_curve_data(self._trace_t_us, raw, win[0], win[1])
+        tx, raw_disp = _display_curve_data(self._trace_t_us, effective_raw, win[0], win[1])
         item = self.plot.plot(
             tx,
             raw_disp / scale + self._disp_offset[key],
@@ -3493,11 +3671,12 @@ class WaveformPlot(QWidget):
         expr = self._normalize_formula(expr)
         if self._formula_t_s is None:
             raise ValueError("No waveform time base is loaded.")
+        previous_unit = self._lookup_channel_unit(self._trace_units, key)
         raw = np.asarray(self._evaluate_math_formula(key, expr), dtype=np.float64)
         self._math_formulas[key] = expr
         self._math_source_keys.add(key)
         self._formula_sources[key] = raw
-        self._trace_units[key] = self._formula_unit(expr)
+        self._trace_units[key] = self._formula_unit(expr) or previous_unit
         if key not in self._trace_items:
             color, width = _source_trace_style(key)
             self._add_trace_item(key, raw, key, color, width)
@@ -3517,6 +3696,26 @@ class WaveformPlot(QWidget):
         self._refresh_legend_styles()
         self._update_zero_handle_positions()
         self._update_y_ticks()
+
+    def export_user_math_channels(
+        self,
+    ) -> dict[str, tuple[np.ndarray, str, float | None, float | None]]:
+        """Return GUI-edited Math traces so extraction can use the same sources."""
+        exported: dict[str, tuple[np.ndarray, str, float | None, float | None]] = {}
+        for key in sorted(self._math_source_keys, key=_source_channel_sort_key):
+            expr = self._math_formulas.get(key)
+            raw = self._trace_raw.get(key)
+            if not expr or raw is None:
+                continue
+            scale = self._disp_scale.get(key)
+            offset = self._disp_offset.get(key)
+            exported[key] = (
+                np.asarray(raw, dtype=np.float64).copy(),
+                expr,
+                float(scale) if scale is not None and np.isfinite(scale) else None,
+                float(offset) if offset is not None and np.isfinite(offset) else None,
+            )
+        return exported
 
     def _next_math_key(self) -> str:
         used = {
@@ -3560,6 +3759,7 @@ class WaveformPlot(QWidget):
             self._loaded_source_path = source
             self.reset_interaction_state()
             saved_offset: dict[str, float] = {}
+            saved_units: dict[str, str] = {}
             self._math_formulas.clear()
             self._math_source_keys.clear()
             self._manual_vdiv.clear()
@@ -3577,6 +3777,19 @@ class WaveformPlot(QWidget):
                     self._manual_vdiv[ch_key] = scope_scale
         else:
             saved_offset = dict(self._disp_offset) if self._trace_items else {}
+            saved_units = dict(self._trace_units) if self._trace_items else {}
+        source_inversions: set[str] = set()
+        for ch in bundle.meta.source_channel_inversions:
+            base = channel_reference_base_name(ch) or normalize_channel_reference(ch)
+            if base:
+                source_inversions.add(f"-{base}")
+        self._source_inverted_channels = source_inversions
+        active_inversions: set[str] = set()
+        for ch in bundle.meta.channel_display_inversions:
+            base = channel_reference_base_name(ch) or normalize_channel_reference(ch)
+            if base:
+                active_inversions.add(f"-{base}")
+        self._manual_inverted_channels = active_inversions
         scope_y_position: dict[str, float] = {}
         for ch, pos in bundle.meta.channel_y_position.items():
             ch_key = str(ch or "").upper()
@@ -3592,22 +3805,53 @@ class WaveformPlot(QWidget):
         t = bundle.t
         zero_trace = np.zeros_like(np.asarray(t, dtype=np.float64), dtype=np.float64)
 
+        def effective_bundle_channel(col: str) -> np.ndarray | None:
+            ref = normalize_channel_reference(col)
+            sign, base = split_channel_reference(ref)
+            if not base:
+                return None
+            channel = bundle.channels.get(base)
+            if channel is None:
+                return None
+            arr = np.asarray(channel, dtype=np.float64)
+            if sign < 0:
+                return -arr
+            if self._display_transform_inverted(base or ref):
+                return -arr
+            return arr
+
         def safe_channel(col: str) -> np.ndarray:
-            channel = bundle.maybe_get(col)
+            channel = effective_bundle_channel(col)
             if channel is not None:
-                return np.asarray(channel, dtype=np.float64)
+                return channel
             return zero_trace
 
-        def safe_derived(fn) -> np.ndarray:
-            try:
-                return np.asarray(fn(bundle, profile), dtype=np.float64)
-            except (KeyError, ValueError):
-                return zero_trace
+        def safe_total_current() -> np.ndarray:
+            direct = effective_bundle_channel(profile.ic)
+            if direct is not None:
+                return direct
+            if profile.ic_from_sum_irr_il:
+                irr_source = effective_bundle_channel(profile.irr)
+                il_source = effective_bundle_channel(profile.il)
+                if irr_source is not None and il_source is not None:
+                    return irr_source + il_source
+            return zero_trace
+
+        def safe_reverse_recovery_current() -> np.ndarray:
+            direct = effective_bundle_channel(profile.irr)
+            if direct is not None:
+                return direct
+            if profile.irr_from_ic_minus_il:
+                il_source = effective_bundle_channel(profile.il)
+                if il_source is not None:
+                    ic_source = safe_total_current()
+                    return ic_source - il_source
+            return zero_trace
 
         vge = safe_channel(profile.vge)
         vce = safe_channel(profile.vce)
-        ic = safe_derived(bundle_total_current)
-        irr = safe_derived(bundle_reverse_recovery_current)
+        ic = safe_total_current()
+        irr = safe_reverse_recovery_current()
         v_diode = safe_channel(profile.v_diode)
         vge_other = safe_channel(profile.vge_other)
         self._interactive_vce_t_us = t * 1e6
@@ -3623,23 +3867,6 @@ class WaveformPlot(QWidget):
             for ch, raw in bundle.channels.items()
             if _is_source_channel_key(ch)
         }
-        for channel in (
-            profile.vge,
-            profile.vce,
-            profile.ic,
-            profile.il,
-            profile.irr,
-            profile.v_diode,
-            profile.vge_other,
-        ):
-            ref = normalize_channel_reference(channel)
-            if channel_reference_sign(ref) >= 0:
-                continue
-            if ref in source_item_map:
-                continue
-            signed = bundle.maybe_get(ref)
-            if signed is not None:
-                source_item_map[ref] = np.asarray(signed, dtype=np.float64)
         source_items = list(source_item_map.items())
         source_items.sort(key=lambda item: _source_channel_sort_key(item[0]))
         t_us = np.asarray(t, dtype=np.float64) * 1e6
@@ -3680,15 +3907,25 @@ class WaveformPlot(QWidget):
         self._display_channel_roles = self._build_display_channel_roles(
             profile, self._logical_display_keys
         )
-        source_units = self._physical_channel_units(profile)
+        file_units = self._metadata_channel_units(bundle.meta.channel_units)
+        override_units = self._metadata_channel_units(bundle.meta.channel_unit_overrides)
+        self._source_file_units = dict(file_units)
+        self._unit_overrides = dict(override_units)
+        role_units = self._physical_channel_units(profile)
+        self._role_units = dict(role_units)
         for key, data in source_items:
             color, width = _source_trace_style(key)
             legend = _source_channel_legend(key, self._channel_labels)
             raw = np.asarray(data, dtype=np.float64)
             self._trace_raw[key] = raw
             expr = imported_math_formulas.get(key)
-            self._trace_units[key] = (
-                self._formula_unit(expr) if expr else source_units.get(key, "")
+            self._trace_units[key] = self._source_trace_unit(
+                key,
+                expr,
+                file_units,
+                override_units,
+                role_units,
+                saved_units,
             )
             fit_raw = self._fit_raw_for_channel(key, raw)
             if key in self._manual_vdiv:
@@ -3709,7 +3946,12 @@ class WaveformPlot(QWidget):
             else:
                 offset = _auto_center_offset_div(fit_raw, scale)
             self._disp_offset[key] = _clamp_offset_div(offset)
-            tx, raw_disp = _display_curve_data(t_us, raw, float(t_us[0]), float(t_us[-1]))
+            effective_raw = self._effective_raw_for_channel(key)
+            if effective_raw is None:
+                effective_raw = raw
+            tx, raw_disp = _display_curve_data(
+                t_us, effective_raw, float(t_us[0]), float(t_us[-1])
+            )
             item = self.plot.plot(
                 tx,
                 raw_disp / scale + self._disp_offset[key],
@@ -3731,7 +3973,17 @@ class WaveformPlot(QWidget):
         self._raised_key = None
         self._highlighted_key = None
         for key in list(self._trace_items):
-            self._trace_units.setdefault(key, CHANNEL_UNITS.get(key, ""))
+            self._trace_units.setdefault(
+                key,
+                self._source_trace_unit(
+                    key,
+                    None,
+                    file_units,
+                    override_units,
+                    role_units,
+                    saved_units,
+                ),
+            )
 
         for ch, raw_full in bundle.channels.items():
             ch_key = ch.upper()
@@ -3974,6 +4226,85 @@ class WaveformPlot(QWidget):
         self._sync_channel_bar_width()
         self.channelLabelChanged.emit(key, label)
 
+    def set_channel_unit_override(self, key: str, unit: str) -> None:
+        ref = normalize_channel_reference(key)
+        base = channel_reference_base_name(ref)
+        if not base:
+            return
+        text = str(unit or "").strip()
+        if text:
+            self._unit_overrides[base] = text
+            self._unit_overrides[ref] = text
+        else:
+            for candidate in (base, ref, f"-{base}"):
+                self._unit_overrides.pop(candidate, None)
+        resolved = (
+            text
+            or self._lookup_channel_unit(self._source_file_units, base)
+            or self._lookup_channel_unit(self._role_units, base)
+            or self._lookup_channel_unit(CHANNEL_UNITS, base)
+        )
+        for candidate in (base, ref, f"-{base}"):
+            if candidate in self._trace_items or candidate in self._trace_units:
+                if resolved:
+                    self._trace_units[candidate] = resolved
+                else:
+                    self._trace_units.pop(candidate, None)
+        self._refresh_legend_styles()
+        self._update_y_ticks()
+        self._update_readout()
+        self._update_zero_handle_positions()
+        self.channelUnitChanged.emit(base, text)
+
+    def inverted_reference_for(self, key: str) -> str:
+        ref = normalize_channel_reference(key)
+        base = channel_reference_base_name(ref)
+        return f"-{base}" if base else ""
+
+    def channel_inversion_enabled(self, key: str) -> bool:
+        ref = normalize_channel_reference(key)
+        if ref.startswith("-"):
+            return True
+        return self._display_inversion_enabled(ref)
+
+    def _remove_trace_item_only(self, key: str) -> None:
+        item = self._trace_items.pop(key, None)
+        if item is not None:
+            self.plot.removeItem(item)
+        self._trace_style.pop(key, None)
+        self._trace_yrange.pop(key, None)
+        self._trace_legend.pop(key, None)
+        self._trace_units.pop(key, None)
+        self._trace_raw.pop(key, None)
+        self._formula_sources.pop(key, None)
+        self._disp_scale.pop(key, None)
+        self._disp_offset.pop(key, None)
+        self._manual_vdiv.pop(key, None)
+        self._hidden_channels.discard(key)
+
+    def set_channel_inversion_enabled(self, key: str, enabled: bool) -> str:
+        ref = normalize_channel_reference(key)
+        base = channel_reference_base_name(ref)
+        inverted = f"-{base}" if base else ""
+        if not inverted:
+            return ref
+        changed = self._display_inversion_enabled(base) != bool(enabled)
+        if enabled:
+            self._manual_inverted_channels.add(inverted)
+        else:
+            self._manual_inverted_channels.discard(inverted)
+        self._trace_view_signature = None
+        self._refresh_visible_trace(base)
+        self._refresh_visible_traces(force=True)
+        self._refresh_overview_traces()
+        self._update_readout()
+        self._update_waveform_cursor_markers()
+        self._update_y_ticks()
+        self._update_zero_handle_positions()
+        if changed:
+            self.channelInversionChanged.emit(base, bool(enabled))
+        return base
+
     def _delete_math_channel(self, key: str) -> None:
         key = key.upper()
         if key not in self._trace_items or not self._can_delete_channel(key):
@@ -4046,7 +4377,7 @@ class WaveformPlot(QWidget):
     # ------------------------------------------------------------------ 每通道垂直位置 ----
     def _auto_center_channel(self, key: str) -> None:
         """按当前刻度将通道波形中点对齐 0 格。"""
-        raw = self._trace_raw.get(key)
+        raw = self._effective_raw_for_channel(key)
         scale = self._disp_scale.get(key, 1.0)
         if raw is None:
             return
@@ -4203,7 +4534,7 @@ class WaveformPlot(QWidget):
         """设置某通道 V/div；value=None 表示恢复自动。"""
         if key not in self._trace_items or self._trace_t_us is None:
             return
-        raw = self._trace_raw.get(key)
+        raw = self._effective_raw_for_channel(key)
         if raw is None:
             return
         fit_raw = self._fit_raw_for_channel(key, raw)
@@ -4474,7 +4805,7 @@ class WaveformPlot(QWidget):
     ) -> tuple[float, float] | None:
         if channel is None or self._trace_t_us is None:
             return None
-        raw = self._trace_raw.get(channel)
+        raw = self._effective_raw_for_channel(channel)
         if raw is None or len(raw) == 0:
             return None
         tt = self._trace_t_us
@@ -4934,6 +5265,96 @@ class WaveformPlot(QWidget):
             float(rect.width()) + padding * 2.0,
             float(rect.height()) + padding * 2.0,
         )
+
+    @staticmethod
+    def _cursor_line_label(line: pg.InfiniteLine | None):
+        if line is None:
+            return None
+        return getattr(line, "label", None)
+
+    @staticmethod
+    def _set_cursor_line_label_anchors(
+        line: pg.InfiniteLine | None,
+        anchors: tuple[tuple[float, float], tuple[float, float]],
+    ) -> None:
+        label = WaveformPlot._cursor_line_label(line)
+        if label is None:
+            return
+        label.anchors = [tuple(anchors[0]), tuple(anchors[1])]
+        try:
+            label.updatePosition()
+        except Exception:
+            pass
+
+    def _cursor_line_label_scene_rect(
+        self, line: pg.InfiniteLine | None
+    ) -> QRectF | None:
+        label = self._cursor_line_label(line)
+        if label is None or not label.isVisible():
+            return None
+        try:
+            rect = label.mapRectToScene(label.boundingRect())
+        except Exception:
+            return None
+        if float(rect.width()) <= 0.0 or float(rect.height()) <= 0.0:
+            return None
+        return rect
+
+    def _cursor_line_labels_intersect(
+        self, first: QRectF | None, second: QRectF | None
+    ) -> bool:
+        if first is None or second is None:
+            return False
+        return self._padded_scene_rect(
+            first,
+            CURSOR_LINE_LABEL_GUARD_PX,
+        ).intersects(
+            self._padded_scene_rect(
+                second,
+                CURSOR_LINE_LABEL_GUARD_PX,
+            )
+        )
+
+    def _sync_cursor_line_label_positions(self) -> None:
+        vertical_default = ((0.0, 0.5), (1.0, 0.5))
+        horizontal_default = ((0.5, 0.0), (0.5, 1.0))
+        for line in (self._cursor_a, self._cursor_b):
+            self._set_cursor_line_label_anchors(line, vertical_default)
+        for line in (self._h_cursor_a, self._h_cursor_b):
+            self._set_cursor_line_label_anchors(line, horizontal_default)
+
+        a_rect = self._cursor_line_label_scene_rect(self._cursor_a)
+        b_rect = self._cursor_line_label_scene_rect(self._cursor_b)
+        if self._cursor_line_labels_intersect(a_rect, b_rect):
+            a_x = self._cursor_readout_scene_x(float(self._cursor_a.value()))
+            b_x = self._cursor_readout_scene_x(float(self._cursor_b.value()))
+            if a_x <= b_x:
+                a_anchor, b_anchor = (1.0, 0.5), (0.0, 0.5)
+            else:
+                a_anchor, b_anchor = (0.0, 0.5), (1.0, 0.5)
+            self._set_cursor_line_label_anchors(self._cursor_a, (a_anchor, a_anchor))
+            self._set_cursor_line_label_anchors(self._cursor_b, (b_anchor, b_anchor))
+
+        ha_rect = self._cursor_line_label_scene_rect(self._h_cursor_a)
+        hb_rect = self._cursor_line_label_scene_rect(self._h_cursor_b)
+        if self._cursor_line_labels_intersect(ha_rect, hb_rect):
+            vb = self.plot.getPlotItem().getViewBox()
+            ha_y = float(
+                vb.mapViewToScene(
+                    QPointF(0.0, float(self._h_cursor_a.value()))
+                ).y()
+            )
+            hb_y = float(
+                vb.mapViewToScene(
+                    QPointF(0.0, float(self._h_cursor_b.value()))
+                ).y()
+            )
+            if ha_y <= hb_y:
+                ha_anchor, hb_anchor = (0.5, 1.0), (0.5, 0.0)
+            else:
+                ha_anchor, hb_anchor = (0.5, 0.0), (0.5, 1.0)
+            self._set_cursor_line_label_anchors(self._h_cursor_a, (ha_anchor, ha_anchor))
+            self._set_cursor_line_label_anchors(self._h_cursor_b, (hb_anchor, hb_anchor))
 
     def _visible_cursor_readout_items(self) -> list[pg.TextItem]:
         items: list[pg.TextItem] = []
@@ -5427,6 +5848,7 @@ class WaveformPlot(QWidget):
         self._sync_x_tick_labels_from_axis()
         self._update_zero_handle_positions()
         self._refresh_auxiliary_dash_lines()
+        self._sync_cursor_line_label_positions()
         self._refresh_cursor_auxiliary_guides()
 
     def _on_view_range_changed(self) -> None:
@@ -5441,6 +5863,7 @@ class WaveformPlot(QWidget):
         self._update_y_ticks()
         self._sync_x_tick_labels_from_axis()
         self._refresh_auxiliary_dash_lines()
+        self._sync_cursor_line_label_positions()
         self._refresh_cursor_auxiliary_guides()
         if self._view_range_callback is not None:
             try:
@@ -5459,6 +5882,7 @@ class WaveformPlot(QWidget):
                 float(self._h_cursor_a.value()),
                 float(self._h_cursor_b.value()),
             )
+        self._sync_cursor_line_label_positions()
         self._avoid_cursor_label_overlaps()
         self._apply_cursor_visibility()
 
@@ -5616,6 +6040,7 @@ class WaveformPlot(QWidget):
         self._update_y_ticks()
         self._update_v_cursor_plot_labels(a, b)
         self._update_h_cursor_plot_labels(a, b, ha_div, hb_div, dt_us)
+        self._sync_cursor_line_label_positions()
         self._avoid_cursor_label_overlaps()
         self._refresh_cursor_auxiliary_guides()
         if abs(dt_us) > 1e-9:
@@ -5807,7 +6232,7 @@ class WaveformPlot(QWidget):
         if channel == "ic":
             return self._interactive_ic_t_us, self._interactive_ic
         if channel == "v_diode" and self._trace_t_us is not None:
-            raw = self._trace_raw.get(self._display_key_for_channel("v_diode"))
+            raw = self._effective_raw_for_channel(self._display_key_for_channel("v_diode"))
             if raw is not None:
                 return self._trace_t_us, raw
         return None, None
@@ -6626,7 +7051,7 @@ class WaveformPlot(QWidget):
         """A-B 窗口内峰值点: (时间 µs, 原始值, 显示 Y)。"""
         channel = self._display_key_for_channel(channel)
         tt = self._trace_t_us
-        raw = self._trace_raw.get(channel)
+        raw = self._effective_raw_for_channel(channel)
         if tt is None or raw is None or len(tt) == 0:
             return None
         t_lo, t_hi = (min(t0_us, t1_us), max(t0_us, t1_us))
@@ -6662,7 +7087,7 @@ class WaveformPlot(QWidget):
         """A-B 窗口内谷值点: (时间 µs, 原始值, 显示 Y)。"""
         channel = self._display_key_for_channel(channel)
         tt = self._trace_t_us
-        raw = self._trace_raw.get(channel)
+        raw = self._effective_raw_for_channel(channel)
         if tt is None or raw is None or len(tt) == 0:
             return None
         t_lo, t_hi = (min(t0_us, t1_us), max(t0_us, t1_us))
@@ -6856,16 +7281,6 @@ class WaveformPlot(QWidget):
         i1 = int(np.searchsorted(tt, max(t0, t1)))
         i0 = max(0, min(i0, len(tt) - 2))
         i1 = max(i0 + 1, min(i1, len(tt) - 1))
-        # B 需在开通段后段（~19µs）搜平稳交汇，段窗止于 turn_on 末时需向后延伸
-        if len(tt) > i0 + 8:
-            seg = ic_abs[i0 : i1 + 1]
-            dt_s = self._turn_on_ic_dt_s()
-            from dpt_extractor.metrics.plateau_level import _turn_on_rise_index
-
-            rise = _turn_on_rise_index(seg, dt_s)
-            t_rise = float(t_s[i0 + rise])
-            i_ext = int(np.searchsorted(t_s, t_rise + 1.35e-6))
-            i1 = max(i1, min(len(tt) - 1, i_ext))
         return t_s, ic_abs, i0, i1
 
     def _turn_on_ab_cross_us(self, hb: float, ha: float) -> tuple[float, float]:

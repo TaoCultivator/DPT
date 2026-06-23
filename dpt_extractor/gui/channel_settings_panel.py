@@ -1,7 +1,7 @@
 """示波器风格通道垂直设置浮窗（双击底部通道盒弹出）。
 
-布局参考 Tektronix 垂直设置面板：标题色条 + 「显示 / 垂直刻度 / 位置」分块，
-每个控件采用「标题在上、控件在下」的示波器排版。
+布局参考示波器垂直设置面板：深色标题、浅色分节、半透明灰底，
+字段名贴近控件，弱边界分组避免视觉归属断裂。
 """
 
 from __future__ import annotations
@@ -9,14 +9,13 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QPoint, QRect, Qt
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt
+from PyQt6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,21 +42,21 @@ QDialog#ChannelSettingsPanel {
     border: none;
 }
 QFrame#chPanelFrame {
-    background-color: rgba(118, 120, 118, 238);
-    border: 3px solid rgba(255, 73, 88, 235);
+    background-color: rgba(92, 95, 92, 238);
+    border: 1px solid rgba(20, 28, 30, 220);
     border-radius: 2px;
 }
 QFrame#chPanelBody {
-    background-color: rgba(153, 156, 151, 244);
+    background-color: rgba(134, 138, 132, 232);
 }
-QWidget#chPanelCell, QWidget#chPanelRow {
+QWidget#chPanelRow {
     background-color: transparent;
     color: #101010;
 }
 QDialog#ChannelSettingsPanel QLabel { color: #101010; }
 QLabel#chPanelHeader {
     color: #f4f4f4;
-    background-color: rgba(55, 55, 58, 225);
+    background-color: rgba(58, 59, 61, 235);
     font-size: 14px;
     font-weight: bold;
     padding: 9px 12px;
@@ -65,73 +64,75 @@ QLabel#chPanelHeader {
 }
 QLabel#chPanelSection {
     color: #080808;
-    background-color: rgba(225, 225, 225, 232);
+    background-color: rgba(226, 226, 226, 235);
     border-top: 1px solid rgba(255, 255, 255, 185);
     border-bottom: 1px solid rgba(82, 82, 82, 140);
     font-size: 14px;
     font-weight: bold;
     padding: 10px 12px;
 }
-QLabel#chCellCaption {
+QFrame#chSettingRow {
+    background-color: rgba(121, 126, 121, 34);
+    border: 1px solid rgba(44, 52, 52, 45);
+    border-radius: 4px;
+}
+QLabel#chSettingCaption {
     color: #050505;
     background-color: transparent;
     font-size: 14px;
     font-weight: bold;
-    padding: 0 0 2px 2px;
+    padding: 0 0 1px 0;
 }
-QPushButton#chToggleOn, QPushButton#chToggleOff {
-    min-width: 58px;
-    min-height: 34px;
-    border: 1px solid rgba(95, 95, 95, 210);
-    border-radius: 4px;
-    background-color: rgba(232, 232, 232, 235);
+QPushButton#chSwitchButton {
+    min-width: 72px;
+    max-width: 72px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0;
+    border: none;
+    background: transparent;
     color: #1a1a1a;
     font-size: 14px;
-}
-QPushButton#chToggleOn:checked {
-    background-color: #28bce8;
-    color: #101010;
-    border-color: #5de6ff;
-}
-QPushButton#chToggleOff:checked {
-    background-color: #28bce8;
-    color: #101010;
-    border-color: #5de6ff;
 }
 QPushButton#chStepBtn {
     min-width: 42px;
     max-width: 42px;
-    min-height: 34px;
+    min-height: 40px;
+    max-height: 40px;
     padding: 0;
     border: 1px solid rgba(95, 95, 95, 210);
-    border-radius: 3px;
-    background-color: rgba(238, 238, 238, 240);
+    border-radius: 5px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #f2f2f2, stop:1 #c9cece);
     color: #1a1a1a;
     font-size: 14px;
 }
 QPushButton#chStepBtn:hover { background-color: #eaeaea; }
 QPushButton#chStepBtn:pressed { background-color: #cccccc; }
 QPushButton#chScaleStepBtn {
-    min-width: 32px;
-    max-width: 32px;
-    min-height: 17px;
-    max-height: 17px;
+    min-width: 42px;
+    max-width: 42px;
+    min-height: 40px;
+    max-height: 40px;
     padding: 0;
     border: 1px solid rgba(82, 91, 94, 225);
-    border-radius: 3px;
-    background-color: #f4f7f7;
+    border-radius: 5px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #f2f2f2, stop:1 #c9cece);
     color: #071014;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: bold;
 }
 QPushButton#chScaleStepBtn:hover { background-color: #ffffff; }
 QPushButton#chScaleStepBtn:pressed { background-color: #d3dddd; }
 QPushButton#chZeroBtn {
-    min-height: 34px;
-    padding: 4px 14px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0 14px;
     border: 1px solid rgba(95, 95, 95, 210);
-    border-radius: 3px;
-    background-color: rgba(238, 238, 238, 240);
+    border-radius: 5px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #f2f2f2, stop:1 #c9cece);
     color: #1a1a1a;
     font-size: 13px;
 }
@@ -149,12 +150,13 @@ QPushButton#chLinkBtn {
 }
 QPushButton#chLinkBtn:hover { color: #001f2e; text-decoration: underline; }
 QDoubleSpinBox, QComboBox {
-    min-height: 34px;
-    background-color: rgba(246, 246, 246, 250);
+    min-height: 40px;
+    max-height: 40px;
+    background-color: rgba(241, 241, 241, 250);
     color: #050505;
     border: 1px solid rgba(95, 95, 95, 210);
     border-radius: 3px;
-    padding: 2px 8px;
+    padding: 0 8px;
     font-size: 13px;
 }
 QComboBox::drop-down {
@@ -187,32 +189,34 @@ QComboBox QAbstractItemView::item:disabled {
     color: #747a7d;
 }
 QFrame#vdivInputGroup {
-    min-height: 38px;
-    max-height: 38px;
-    background-color: #f8faf9;
+    min-width: 180px;
+    max-width: 180px;
+    min-height: 42px;
+    max-height: 42px;
+    background-color: #f1f3f2;
     border: 1px solid #566367;
     border-radius: 4px;
 }
 QDoubleSpinBox#vdivValueSpin {
-    min-height: 34px;
-    max-height: 34px;
+    min-height: 40px;
+    max-height: 40px;
     background-color: transparent;
     color: #050505;
     border: none;
     border-right: 1px solid #c5cdcd;
     border-radius: 0;
-    padding: 2px 7px;
+    padding: 0 7px;
     font-size: 13px;
 }
 QComboBox#vdivUnitCombo {
-    min-height: 34px;
-    max-height: 34px;
+    min-height: 40px;
+    max-height: 40px;
     background-color: #ffffff;
     color: #071014;
     border: none;
     border-right: 1px solid #c5cdcd;
     border-radius: 0;
-    padding: 2px 18px 2px 7px;
+    padding: 0 18px 0 7px;
     font-size: 13px;
     font-weight: bold;
 }
@@ -244,37 +248,45 @@ QComboBox#vdivUnitCombo QAbstractItemView::item:selected {
     color: #061014;
 }
 QLabel#vdivDivLabel {
-    min-height: 34px;
-    max-height: 34px;
+    min-height: 40px;
+    max-height: 40px;
     background-color: #edf2f1;
     color: #263438;
     font-size: 12px;
     font-weight: bold;
     padding: 0 7px;
 }
-QLineEdit#chTagValue {
-    min-height: 34px;
-    background-color: rgba(246, 246, 246, 250);
+QLineEdit#chTagValue, QLineEdit#chUnitEdit {
+    min-height: 40px;
+    max-height: 40px;
+    background-color: rgba(241, 241, 241, 250);
     border: 1px solid rgba(95, 95, 95, 210);
     border-radius: 3px;
-    padding: 2px 10px;
+    padding: 0 10px;
     font-size: 13px;
     color: #050505;
 }
+QLineEdit#chUnitEdit:disabled {
+    background-color: rgba(222, 224, 221, 210);
+    color: #606663;
+}
 QPushButton#chApplyBtn {
-    min-height: 34px;
-    padding: 4px 12px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0 12px;
     border: 1px solid #1599c7;
-    border-radius: 3px;
-    background-color: #28bce8;
+    border-radius: 5px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #35d3f4, stop:1 #20afd8);
     color: #101010;
     font-size: 13px;
     font-weight: bold;
 }
 QPushButton#chApplyBtn:hover { background-color: #44d4ff; }
 QPushButton#chFormulaBtn {
-    min-height: 34px;
-    padding: 4px 12px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0 12px;
     border: 1px solid #6f6f6f;
     border-radius: 3px;
     background-color: rgba(238, 238, 238, 245);
@@ -283,8 +295,9 @@ QPushButton#chFormulaBtn {
 }
 QPushButton#chFormulaBtn:hover { background-color: #ffffff; }
 QPushButton#chDeleteBtn {
-    min-height: 34px;
-    padding: 4px 12px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0 12px;
     border: 1px solid #9f4b4b;
     border-radius: 3px;
     background-color: rgba(245, 225, 225, 245);
@@ -344,18 +357,128 @@ def _vdiv_neighbor(cur: float, up: bool) -> float:
     return cur / 10.0
 
 
-def _cell(caption: str, widget: QWidget) -> QWidget:
-    """示波器风格单元：标题在上、控件在下。"""
-    box = QWidget()
-    box.setObjectName("chPanelCell")
-    lay = QVBoxLayout(box)
-    lay.setContentsMargins(0, 0, 0, 0)
-    lay.setSpacing(2)
-    cap = QLabel(caption)
-    cap.setObjectName("chCellCaption")
-    lay.addWidget(cap)
-    lay.addWidget(widget)
-    return box
+class _ScopeSwitchButton(QPushButton):
+    """示波器菜单风格滑块开关：文字固定，滑块随状态左右移动。"""
+
+    _WIDTH = 72
+    _HEIGHT = 40
+    _KNOB_WIDTH = 24
+    _RADIUS = 5
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setFixedSize(self._WIDTH, self._HEIGHT)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._WIDTH, self._HEIGHT)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        track = QRectF(1.0, 1.0, self.width() - 2.0, self.height() - 2.0)
+        checked = self.isChecked()
+        knob_x = track.right() - self._KNOB_WIDTH if checked else track.left()
+        knob = QRectF(
+            knob_x,
+            track.top(),
+            float(self._KNOB_WIDTH),
+            track.height(),
+        )
+
+        body_grad = QLinearGradient(0.0, track.top(), 0.0, track.bottom())
+        body_grad.setColorAt(0.0, QColor("#f1f1f1"))
+        body_grad.setColorAt(1.0, QColor("#c9cece"))
+        painter.setPen(QPen(QColor(92, 99, 101, 210), 1.0))
+        painter.setBrush(body_grad)
+        painter.drawRoundedRect(track, self._RADIUS, self._RADIUS)
+
+        if checked:
+            state_rect = QRectF(
+                track.left(),
+                track.top(),
+                track.width() - self._KNOB_WIDTH + 1.0,
+                track.height(),
+            )
+            state_text = "开"
+        else:
+            state_rect = QRectF(
+                track.left() + self._KNOB_WIDTH - 1.0,
+                track.top(),
+                track.width() - self._KNOB_WIDTH + 1.0,
+                track.height(),
+            )
+            state_text = "关"
+        if checked:
+            active_grad = QLinearGradient(0.0, state_rect.top(), 0.0, state_rect.bottom())
+            active_grad.setColorAt(0.0, QColor("#35d3f4"))
+            active_grad.setColorAt(1.0, QColor("#20afd8"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(active_grad)
+            painter.drawRoundedRect(state_rect, self._RADIUS, self._RADIUS)
+            painter.fillRect(
+                QRectF(
+                    state_rect.right() - self._RADIUS,
+                    state_rect.top(),
+                    float(self._RADIUS),
+                    state_rect.height(),
+                ),
+                QColor("#20afd8"),
+            )
+
+        painter.setPen(QColor("#101010"))
+        font = painter.font()
+        font.setPointSize(12)
+        font.setBold(False)
+        painter.setFont(font)
+        painter.drawText(state_rect, Qt.AlignmentFlag.AlignCenter, state_text)
+
+        seam_x = knob.left() if checked else knob.right()
+        painter.setPen(QPen(QColor(82, 91, 94, 135), 1.0))
+        painter.drawLine(
+            int(seam_x),
+            int(track.top() + 6),
+            int(seam_x),
+            int(track.bottom() - 6),
+        )
+
+        knob_grad = QLinearGradient(0.0, knob.top(), 0.0, knob.bottom())
+        if self.isDown():
+            knob_grad.setColorAt(0.0, QColor("#d7dddd"))
+            knob_grad.setColorAt(1.0, QColor("#c5cccc"))
+        else:
+            knob_grad.setColorAt(0.0, QColor("#f7f7f7"))
+            knob_grad.setColorAt(1.0, QColor("#d5dddd"))
+        painter.setPen(QPen(QColor(122, 128, 128, 210), 1.0))
+        painter.setBrush(knob_grad)
+        painter.drawRoundedRect(
+            knob.adjusted(0.0, 0.0, -0.5, -0.5), self._RADIUS, self._RADIUS
+        )
+
+
+def _setting_row(caption: str, widget: QWidget, *, label_width: int = 0) -> QFrame:
+    row = QFrame()
+    row.setObjectName("chSettingRow")
+    row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    lay = QVBoxLayout(row)
+    lay.setContentsMargins(8, 4, 8, 5)
+    lay.setSpacing(3)
+    label = QLabel(caption)
+    label.setObjectName("chSettingCaption")
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    if label_width > 0:
+        label.setFixedWidth(label_width)
+    lay.addWidget(label)
+    lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignLeft)
+    lay.addStretch(1)
+    return row
+
+
+def _sync_switch_button(button: QPushButton, checked: bool) -> None:
+    button.setChecked(bool(checked))
+    button.setText("开" if checked else "关")
 
 
 class ChannelSettingsPanel(QDialog):
@@ -377,7 +500,7 @@ class ChannelSettingsPanel(QDialog):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(_PANEL_STYLE)
-        self.setFixedWidth(450)
+        self.setFixedWidth(420)
 
         ch_idx = list(plot._trace_items.keys()).index(key) + 1
         hidden = key in plot._hidden_channels
@@ -404,39 +527,78 @@ class ChannelSettingsPanel(QDialog):
         body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         body_lay = QVBoxLayout(body)
         body_lay.setContentsMargins(12, 0, 12, 12)
-        body_lay.setSpacing(6)
+        body_lay.setSpacing(5)
 
         sec = QLabel("垂直设置")
         sec.setObjectName("chPanelSection")
         sec.setContentsMargins(0, 0, 0, 0)
         body_lay.addWidget(sec)
 
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
+        top_settings = QHBoxLayout()
+        top_settings.setContentsMargins(0, 0, 0, 0)
+        top_settings.setSpacing(8)
 
         # --- 显示开关 ---
         disp_row = QHBoxLayout()
         disp_row.setContentsMargins(0, 0, 0, 0)
         disp_row.setSpacing(0)
-        self._btn_on = QPushButton("开")
-        self._btn_on.setObjectName("chToggleOn")
-        self._btn_off = QPushButton("关")
-        self._btn_off.setObjectName("chToggleOff")
-        for btn in (self._btn_on, self._btn_off):
-            btn.setCheckable(True)
-            btn.setAutoExclusive(True)
-        self._btn_on.setChecked(not hidden)
-        self._btn_off.setChecked(hidden)
-        self._btn_on.clicked.connect(lambda: self._set_display(True))
-        self._btn_off.clicked.connect(lambda: self._set_display(False))
-        disp_row.addWidget(self._btn_on)
-        disp_row.addWidget(self._btn_off)
+        self._display_toggle = _ScopeSwitchButton()
+        self._display_toggle.setObjectName("chSwitchButton")
+        _sync_switch_button(self._display_toggle, not hidden)
+        self._display_toggle.toggled.connect(self._set_display)
+        disp_row.addWidget(self._display_toggle)
         disp_w = QWidget()
         disp_w.setObjectName("chPanelRow")
+        disp_w.setFixedWidth(72)
         disp_w.setLayout(disp_row)
-        grid.addWidget(_cell("显示", disp_w), 0, 0)
+        self._display_setting = _setting_row("显示", disp_w, label_width=42)
+        self._display_setting.setFixedWidth(90)
+        top_settings.addWidget(self._display_setting, stretch=0)
+
+        # --- 反相开关 ---
+        inv_row = QHBoxLayout()
+        inv_row.setContentsMargins(0, 0, 0, 0)
+        inv_row.setSpacing(0)
+        self._invert_toggle = _ScopeSwitchButton()
+        self._invert_toggle.setObjectName("chSwitchButton")
+        inverted = plot.channel_inversion_enabled(key)
+        _sync_switch_button(self._invert_toggle, inverted)
+        self._invert_toggle.toggled.connect(self._set_inverted)
+        inv_row.addWidget(self._invert_toggle)
+        inv_w = QWidget()
+        inv_w.setObjectName("chPanelRow")
+        inv_w.setFixedWidth(72)
+        inv_w.setLayout(inv_row)
+        self._invert_setting = _setting_row("反相", inv_w, label_width=42)
+        self._invert_setting.setFixedWidth(90)
+        top_settings.addWidget(self._invert_setting, stretch=0)
+
+        # --- 自定义单位 ---
+        unit_row = QHBoxLayout()
+        unit_row.setContentsMargins(0, 0, 0, 0)
+        unit_row.setSpacing(6)
+        self._unit_toggle = _ScopeSwitchButton()
+        self._unit_toggle.setObjectName("chSwitchButton")
+        unit_override = plot.channel_unit_override(key)
+        _sync_switch_button(self._unit_toggle, bool(unit_override))
+        self._unit_edit = QLineEdit(unit_override or plot._unit_for_channel(key))
+        self._unit_edit.setObjectName("chUnitEdit")
+        self._unit_edit.setFixedWidth(54)
+        self._unit_edit.setEnabled(bool(unit_override))
+        self._unit_toggle.toggled.connect(self._set_unit_override)
+        self._unit_edit.editingFinished.connect(self._on_unit_changed)
+        unit_row.addWidget(self._unit_toggle)
+        unit_row.addWidget(self._unit_edit)
+        unit_row.addStretch(1)
+        unit_w = QWidget()
+        unit_w.setObjectName("chPanelRow")
+        unit_w.setFixedWidth(132)
+        unit_w.setLayout(unit_row)
+        self._unit_setting = _setting_row("自定义单位", unit_w)
+        self._unit_setting.setFixedWidth(150)
+        top_settings.addWidget(self._unit_setting, stretch=0)
+        top_settings.addStretch(1)
+        body_lay.addLayout(top_settings)
 
         # --- 垂直刻度 ---
         vdiv_row = QHBoxLayout()
@@ -449,11 +611,11 @@ class ChannelSettingsPanel(QDialog):
         self._vdiv_spin = QDoubleSpinBox()
         self._vdiv_spin.setObjectName("vdivValueSpin")
         self._vdiv_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
-        self._vdiv_spin.setFixedWidth(60)
+        self._vdiv_spin.setFixedWidth(76)
         self._vdiv_spin.setRange(1e-99, 1e99)
         self._vdiv_unit_combo = QComboBox()
         self._vdiv_unit_combo.setObjectName("vdivUnitCombo")
-        self._vdiv_unit_combo.setFixedWidth(62)
+        self._vdiv_unit_combo.setFixedWidth(58)
         self._vdiv_unit_combo.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
@@ -465,11 +627,11 @@ class ChannelSettingsPanel(QDialog):
         div_label = QLabel("/div")
         div_label.setObjectName("vdivDivLabel")
         div_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        div_label.setFixedWidth(42)
+        div_label.setFixedWidth(46)
         vdiv_input = QFrame()
         vdiv_input.setObjectName("vdivInputGroup")
         vdiv_input.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        vdiv_input.setFixedWidth(164)
+        vdiv_input.setFixedWidth(180)
         vdiv_input_lay = QHBoxLayout(vdiv_input)
         vdiv_input_lay.setContentsMargins(0, 0, 0, 0)
         vdiv_input_lay.setSpacing(0)
@@ -480,44 +642,42 @@ class ChannelSettingsPanel(QDialog):
         btn_dn = QPushButton("▼")
         for b in (btn_up, btn_dn):
             b.setObjectName("chScaleStepBtn")
+            b.setFixedSize(42, 40)
         btn_up.clicked.connect(lambda: self._step_vdiv(+1))
         btn_dn.clicked.connect(lambda: self._step_vdiv(-1))
-        vdiv_step_stack = QWidget()
-        vdiv_step_stack.setObjectName("chPanelRow")
-        vdiv_step_lay = QVBoxLayout(vdiv_step_stack)
-        vdiv_step_lay.setContentsMargins(0, 0, 0, 0)
-        vdiv_step_lay.setSpacing(2)
-        vdiv_step_lay.addWidget(btn_up)
-        vdiv_step_lay.addWidget(btn_dn)
         vdiv_row.addWidget(vdiv_input, stretch=0)
-        vdiv_row.addWidget(vdiv_step_stack, stretch=0)
+        vdiv_row.addWidget(btn_up, stretch=0)
+        vdiv_row.addWidget(btn_dn, stretch=0)
         vdiv_row.addStretch(1)
         vdiv_w = QWidget()
         vdiv_w.setObjectName("chPanelRow")
         vdiv_w.setLayout(vdiv_row)
-        grid.addWidget(_cell("垂直刻度", vdiv_w), 0, 1)
+        self._vdiv_setting = _setting_row("垂直刻度", vdiv_w)
+        body_lay.addWidget(self._vdiv_setting)
 
         # --- 位置 ---
         pos_row = QHBoxLayout()
         pos_row.setContentsMargins(0, 0, 0, 0)
-        pos_row.setSpacing(6)
+        pos_row.setSpacing(10)
         self._pos_spin = QDoubleSpinBox()
         self._pos_spin.setDecimals(2)
         self._pos_spin.setRange(-DISP_HALF_DIV, DISP_HALF_DIV)
         self._pos_spin.setSuffix(" divs")
         self._pos_spin.setSingleStep(0.1)
         self._pos_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
-        self._pos_spin.setFixedWidth(170)
+        self._pos_spin.setFixedWidth(92)
         self._pos_spin.setValue(plot._disp_offset.get(key, 0.0))
         self._pos_spin.valueChanged.connect(self._on_pos_changed)
         pos_up = QPushButton("▲")
         pos_dn = QPushButton("▼")
         for b in (pos_up, pos_dn):
             b.setObjectName("chStepBtn")
+            b.setFixedSize(42, 40)
         pos_up.clicked.connect(lambda: self._step_position(+1))
         pos_dn.clicked.connect(lambda: self._step_position(-1))
         btn_zero = QPushButton("设为 0")
         btn_zero.setObjectName("chZeroBtn")
+        btn_zero.setFixedSize(86, 40)
         btn_zero.clicked.connect(self._on_pos_zero)
         pos_row.addWidget(self._pos_spin, stretch=0)
         pos_row.addWidget(pos_up)
@@ -527,16 +687,17 @@ class ChannelSettingsPanel(QDialog):
         pos_w = QWidget()
         pos_w.setObjectName("chPanelRow")
         pos_w.setLayout(pos_row)
-        grid.addWidget(_cell("位置", pos_w), 1, 0, 1, 2)
-
-        body_lay.addLayout(grid)
+        self._position_setting = _setting_row("位置", pos_w)
+        body_lay.addWidget(self._position_setting)
 
         # --- 标签（只编辑 TSS 标签；源通道名 CH/MATH 保持原始值）---
         self._label_edit = QLineEdit(plot._channel_labels.get(key.upper(), ""))
         self._label_edit.setObjectName("chTagValue")
         self._label_edit.setPlaceholderText(key.upper())
+        self._label_edit.setFixedWidth(180)
         self._label_edit.editingFinished.connect(self._on_label_changed)
-        body_lay.addWidget(_cell("标签", self._label_edit))
+        self._label_setting = _setting_row("标签", self._label_edit)
+        body_lay.addWidget(self._label_setting)
 
         mapping_row = QHBoxLayout()
         mapping_row.setContentsMargins(0, 0, 0, 0)
@@ -551,13 +712,17 @@ class ChannelSettingsPanel(QDialog):
             self._mapping_combo.setCurrentIndex(idx)
         self._mapping_apply = QPushButton("应用映射")
         self._mapping_apply.setObjectName("chApplyBtn")
+        self._mapping_apply.setFixedSize(104, 40)
         self._mapping_apply.clicked.connect(self._on_mapping_apply)
-        mapping_row.addWidget(self._mapping_combo, stretch=1)
+        self._mapping_combo.setFixedWidth(170)
+        mapping_row.addWidget(self._mapping_combo, stretch=0)
         mapping_row.addWidget(self._mapping_apply)
+        mapping_row.addStretch(1)
         mapping_w = QWidget()
         mapping_w.setObjectName("chPanelRow")
         mapping_w.setLayout(mapping_row)
-        body_lay.addWidget(_cell("DPT 映射", mapping_w))
+        self._mapping_setting = _setting_row("DPT 映射", mapping_w)
+        body_lay.addWidget(self._mapping_setting)
 
         if key.upper().startswith("MATH"):
             math_row = QHBoxLayout()
@@ -575,7 +740,8 @@ class ChannelSettingsPanel(QDialog):
             math_w = QWidget()
             math_w.setObjectName("chPanelRow")
             math_w.setLayout(math_row)
-            body_lay.addWidget(_cell("数学通道", math_w))
+            self._math_setting = _setting_row("数学通道", math_w)
+            body_lay.addWidget(self._math_setting)
 
         # --- 快捷动作 ---
         links = QHBoxLayout()
@@ -617,8 +783,35 @@ class ChannelSettingsPanel(QDialog):
             self._plot._toggle_channel_visibility(self._key)
         elif not on and not hidden:
             self._plot._toggle_channel_visibility(self._key)
-        self._btn_on.setChecked(on)
-        self._btn_off.setChecked(not on)
+        _sync_switch_button(self._display_toggle, on)
+
+    def _set_inverted(self, enabled: bool) -> None:
+        self._key = self._plot.set_channel_inversion_enabled(self._key, enabled)
+        _sync_switch_button(self._invert_toggle, enabled)
+        self._vdiv_base_unit = self._plot._unit_for_channel(self._key)
+        self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, 1.0))
+
+    def _set_unit_override(self, enabled: bool) -> None:
+        self._unit_edit.setEnabled(enabled)
+        _sync_switch_button(self._unit_toggle, enabled)
+        if enabled:
+            if not self._unit_edit.text().strip():
+                self._unit_edit.setText(self._plot._unit_for_channel(self._key))
+            self._on_unit_changed()
+        else:
+            self._plot.set_channel_unit_override(self._key, "")
+            restored = self._plot._unit_for_channel(self._key)
+            self._unit_edit.setText(restored)
+            self._vdiv_base_unit = restored
+            self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, 1.0))
+
+    def _on_unit_changed(self) -> None:
+        if not self._unit_edit.isEnabled():
+            return
+        unit = self._unit_edit.text().strip()
+        self._plot.set_channel_unit_override(self._key, unit)
+        self._vdiv_base_unit = self._plot._unit_for_channel(self._key)
+        self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, 1.0))
 
     def _on_vdiv_changed(self, value: float) -> None:
         if self._syncing_vdiv:
@@ -707,6 +900,5 @@ class ChannelSettingsPanel(QDialog):
         self._sync_vdiv_spin_from_scale(self._plot._disp_scale.get(self._key, 1.0))
         self._pos_spin.setValue(self._plot._disp_offset.get(self._key, 0.0))
         hidden = self._key in self._plot._hidden_channels
-        self._btn_on.setChecked(not hidden)
-        self._btn_off.setChecked(hidden)
+        _sync_switch_button(self._display_toggle, not hidden)
         self._pos_spin.blockSignals(False)

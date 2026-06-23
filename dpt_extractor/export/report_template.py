@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +127,8 @@ class ReportWriteSummary:
     report_path: Path
     data_sheet: str
     data_row: int
+    data_row_end: int | None = None
+    data_rows_written: int = 1
     waveform_sheet: str | None = None
     waveform_anchor_row: int | None = None
     images_written: int = 0
@@ -567,6 +570,37 @@ def _next_dpt_data_row(
         if not _data_row_has_payload(data_ws, row):
             return row, False
     return _insert_dpt_data_row(data_ws, start_row, end_row_exclusive), True
+
+
+def _dpt_group_containing(data_ws: Worksheet, group_start_row: int) -> _DptDataGroup | None:
+    for group in _dpt_data_groups(data_ws):
+        if group.start_row == group_start_row:
+            return group
+        if group.start_row < group_start_row < group.end_row:
+            return group
+    return None
+
+
+def _prepare_dpt_data_rows(
+    data_ws: Worksheet,
+    target: _DptDataTarget,
+    results: Sequence[ExtractResult],
+) -> list[int]:
+    """Reserve consecutive report rows without overwriting unrelated conditions."""
+    if not results:
+        return []
+    vdc, idc = _match_setpoints(results[0])
+    rows = [target.row]
+    for offset in range(1, len(results)):
+        row = target.row + offset
+        group = _dpt_group_containing(data_ws, target.group_start_row)
+        needs_insert = group is None or row >= group.end_row
+        if not needs_insert and _data_row_has_payload(data_ws, row):
+            needs_insert = not _data_row_matches_setpoints(data_ws, row, vdc, idc)
+        if needs_insert:
+            row = _insert_dpt_data_row(data_ws, target.group_start_row, row)
+        rows.append(row)
+    return rows
 
 
 def _find_dpt_data_target(
@@ -1843,8 +1877,20 @@ def _write_short_images(
     return written
 
 
+def _as_report_results(result: ExtractResult | Sequence[ExtractResult]) -> list[ExtractResult]:
+    if isinstance(result, ExtractResult):
+        return [result]
+    rows = list(result)
+    if not rows:
+        raise ValueError("没有可写入报告的结果")
+    first_mode = rows[0].short_circuit_mode
+    if any(row.short_circuit_mode != first_mode for row in rows):
+        raise ValueError("不能混合写入双脉冲和短路测试结果")
+    return rows
+
+
 def write_report_template(
-    result: ExtractResult,
+    result: ExtractResult | Sequence[ExtractResult],
     report_path: str | Path,
     *,
     images: ImageMap | None = None,
@@ -1853,6 +1899,8 @@ def write_report_template(
     temperature_labels: TemperatureLabels | None = None,
 ) -> ReportWriteSummary:
     path = Path(report_path)
+    results = _as_report_results(result)
+    result0 = results[0]
     progress_total = max(6, 6 + len(images or {}))
 
     def emit(step: int, label: str) -> None:
@@ -1867,10 +1915,13 @@ def write_report_template(
     wb = load_workbook(path)
     emit(1, "读取报告模板")
     image_map: ImageMap = images or {}
-    phase_code = _infer_phase_code(result.source_path, result)
-    temp_code = _infer_temp_code(result.source_path)
+    phase_code = _infer_phase_code(result0.source_path, result0)
+    temp_code = _infer_temp_code(result0.source_path)
 
-    if result.short_circuit_mode:
+    if result0.short_circuit_mode:
+        if len(results) != 1:
+            raise ValueError("短路测试报告不支持多行结果")
+        result = result0
         data_sheet = "短路测试"
         picture_sheet = "短路测试图片"
         if data_sheet not in wb.sheetnames:
@@ -1924,17 +1975,19 @@ def write_report_template(
     data_ws = wb[data_sheet]
     waveform_ws = wb[waveform_sheet] if waveform_sheet in wb.sheetnames else None
     target = _find_dpt_data_target(
-        result,
+        result0,
         data_ws,
         phase_code,
         temp_code,
         temperature_labels,
     )
-    data_row = target.row
-    _write_dpt_data(data_ws, data_row, result)
+    data_rows = _prepare_dpt_data_rows(data_ws, target, results)
+    data_row = data_rows[0]
+    for row, row_result in zip(data_rows, results):
+        _write_dpt_data(data_ws, row, row_result)
     _normalize_dpt_data_temperature_cells(data_ws, temperature_labels)
     emit(2, "写入报告数据")
-    vdc, idc = _match_setpoints(result)
+    vdc, idc = _match_setpoints(result0)
     waveform_anchor_row = (
         _ensure_dpt_waveform_anchor(
             waveform_ws,
@@ -1964,7 +2017,7 @@ def write_report_template(
             waveform_ws,
             waveform_anchor_row,
             image_map,
-            result,
+            result0,
             progress_callback=lambda done, _total, label: emit(2 + done, label),
             temperature_labels=temperature_labels,
         )
@@ -1979,6 +2032,8 @@ def write_report_template(
         report_path=path,
         data_sheet=data_sheet,
         data_row=data_row,
+        data_row_end=data_rows[-1],
+        data_rows_written=len(data_rows),
         waveform_sheet=waveform_sheet if waveform_ws is not None else None,
         waveform_anchor_row=waveform_anchor_row,
         images_written=images_written,

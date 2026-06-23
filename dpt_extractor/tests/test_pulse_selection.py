@@ -4,6 +4,7 @@ import numpy as np
 
 from dpt_extractor.config.loader import AppConfig, PulseSelectionConfig
 from dpt_extractor.detect.pulse_detector import PulseDetector
+from dpt_extractor.pipeline.pulse_sequence import dpt_export_pulse_pairs
 
 
 class TestPulseSelection(unittest.TestCase):
@@ -49,6 +50,10 @@ class TestPulseSelection(unittest.TestCase):
         self.assertGreater(edges.pulse1_off, edges.pulse1_on)
         self.assertEqual(edges.off_pulse_number, 2)
         self.assertEqual(edges.on_pulse_number, 2)
+
+    def test_export_pairs_skip_first_turn_on_and_slide_forward(self):
+        self.assertEqual(dpt_export_pulse_pairs(2), [(1, 2)])
+        self.assertEqual(dpt_export_pulse_pairs(4), [(1, 2), (2, 3), (3, 4)])
 
 
 if __name__ == "__main__":

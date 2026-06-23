@@ -57,6 +57,29 @@ def read_wfm_vertical_scale_per_div(path: str | Path) -> float | None:
     return _read_wfm_vertical_scale_per_div(path)
 
 
+def read_wfm_vertical_unit(path: str | Path) -> str:
+    from dpt_extractor.io.wfm_scope_display import (
+        read_wfm_vertical_unit as _read_wfm_vertical_unit,
+    )
+
+    return _read_wfm_vertical_unit(path)
+
+
+def _waveform_vertical_unit(wfm) -> str:
+    from dpt_extractor.io.wfm_scope_display import normalize_wfm_unit
+
+    for attr in (
+        "y_axis_units",
+        "vertical_units",
+        "y_units",
+        "units",
+    ):
+        unit = normalize_wfm_unit(getattr(wfm, attr, ""))
+        if unit:
+            return unit
+    return ""
+
+
 def _channel_from_waveform(wfm) -> str | None:
     if wfm.source_name:
         token = wfm.source_name.split(",", 1)[0].strip()
@@ -104,6 +127,7 @@ class _MathSetup:
     horizontal_position_percent: float | None = None
     horizontal_delay: float | None = None
     offset_measurements: list[tuple[str, str, str]] = field(default_factory=list)
+    channel_inversions: set[str] = field(default_factory=set)
 
 
 def _strip_setup_value(value: str) -> str:
@@ -111,6 +135,11 @@ def _strip_setup_value(value: str) -> str:
     if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
         value = value[1:-1]
     return unquote(value)
+
+
+def _setup_bool_enabled(value: str) -> bool:
+    text = str(value or "").strip().upper()
+    return text not in {"", "0", "OFF", "FALSE", "NONE"}
 
 
 def _normalise_formula(expr: str) -> str:
@@ -218,6 +247,24 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
                 setup.labels[label_key] = value
             continue
 
+        invert_match = re.fullmatch(r":(CH[1-8]):INVERT", key_u)
+        if invert_match:
+            channel_key = _normalize_channel(invert_match.group(1))
+            if _setup_bool_enabled(value):
+                setup.channel_inversions.add(channel_key)
+            else:
+                setup.channel_inversions.discard(channel_key)
+            continue
+
+        math_invert_match = re.fullmatch(r":MATH:(MATH\d+):INVERT", key_u)
+        if math_invert_match:
+            channel_key = _normalize_channel(math_invert_match.group(1))
+            if _setup_bool_enabled(value):
+                setup.channel_inversions.add(channel_key)
+            else:
+                setup.channel_inversions.discard(channel_key)
+            continue
+
         scale_match = re.fullmatch(r":DISPLAY:WAVEVIEW\d+:MATH:(MATH\d+):VERTICAL:SCALE", key_u)
         if scale_match:
             try:
@@ -275,7 +322,7 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
             or data.get("ENABLED")
             or "1"
         )
-        if state_text.strip().upper() in {"0", "OFF", "FALSE", "NONE"}:
+        if not _setup_bool_enabled(state_text):
             continue
         raw_source = (
             data.get("SOURCE1")
@@ -461,6 +508,7 @@ class TssParser:
         channels: dict[str, np.ndarray] = {}
         labels: dict[str, str] = {}
         vdiv: dict[str, float] = {}
+        channel_units: dict[str, str] = {}
         y_position: dict[str, float] = {}
         meta = TekMetadata()
         t_ref: np.ndarray | None = None
@@ -520,6 +568,9 @@ class TssParser:
                     scale = read_wfm_vertical_scale_per_div(local)
                     if scale is not None:
                         vdiv[channel] = scale
+                    unit = _waveform_vertical_unit(wfm) or read_wfm_vertical_unit(local)
+                    if unit:
+                        channel_units[channel] = unit
                     if wfm.meta_info is not None and wfm.meta_info.y_position is not None:
                         y_position[channel] = float(wfm.meta_info.y_position)
 
@@ -533,13 +584,18 @@ class TssParser:
 
         if math_setup.formulas:
             math_order = math_setup.order or sorted(math_setup.formulas, key=_math_sort_key)
+            formula_sources = {
+                channel: np.asarray(values, dtype=np.float64)
+                for channel, values in channels.items()
+            }
             for math_key in math_order:
                 if math_key in channels or math_key not in math_setup.formulas:
                     continue
                 try:
-                    channels[math_key] = _FormulaEvaluator(t_ref, channels).evaluate(
+                    channels[math_key] = _FormulaEvaluator(t_ref, formula_sources).evaluate(
                         math_setup.formulas[math_key]
                     )
+                    formula_sources[math_key] = channels[math_key]
                     computed_math_channels.add(math_key)
                 except (SyntaxError, ValueError, ZeroDivisionError, FloatingPointError):
                     continue
@@ -547,9 +603,10 @@ class TssParser:
                 if math_key in channels:
                     continue
                 try:
-                    channels[math_key] = _FormulaEvaluator(t_ref, channels).evaluate(
+                    channels[math_key] = _FormulaEvaluator(t_ref, formula_sources).evaluate(
                         math_setup.formulas[math_key]
                     )
+                    formula_sources[math_key] = channels[math_key]
                     computed_math_channels.add(math_key)
                 except (SyntaxError, ValueError, ZeroDivisionError, FloatingPointError):
                     continue
@@ -559,12 +616,20 @@ class TssParser:
         meta.channel_labels.update(math_setup.labels)
         meta.channel_vdiv = vdiv
         meta.channel_vdiv.update(math_setup.vdiv)
+        meta.channel_units = channel_units
         meta.channel_y_position = y_position
         meta.channel_y_position.update(math_setup.y_position)
         meta.channel_math_formulas = {
             key: expr for key, expr in math_setup.formulas.items() if key in channels
         }
         meta.computed_math_channels = computed_math_channels
+        source_inversions = {
+            channel
+            for channel in math_setup.channel_inversions
+            if channel in channels
+        }
+        meta.source_channel_inversions = set(source_inversions)
+        meta.channel_display_inversions = set(source_inversions)
         meta.horizontal_scale_per_div = math_setup.horizontal_scale_per_div
         meta.horizontal_position_percent = math_setup.horizontal_position_percent
         meta.horizontal_delay = math_setup.horizontal_delay
