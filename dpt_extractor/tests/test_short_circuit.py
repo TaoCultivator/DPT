@@ -64,6 +64,41 @@ class TestShortCircuitLabelMapping(unittest.TestCase):
         self.assertEqual(mapping.vge_other, "CH6")
         self.assertFalse(mapping.ic_from_sum_irr_il)
 
+    def test_short_circuit_mapping_allows_missing_other_channels(self):
+        import numpy as np
+
+        from dpt_extractor.models.channel_mapping import infer_short_circuit_mapping_from_bundle
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        meta = TekMetadata(
+            channel_labels={
+                "CH4": "H-Vge",
+                "CH5": "H-Vce",
+                "CH2": "Ic",
+            }
+        )
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 8),
+            channels={
+                "CH2": np.zeros(8),
+                "CH4": np.zeros(8),
+                "CH5": np.zeros(8),
+            },
+            meta=meta,
+        )
+
+        mapping = infer_short_circuit_mapping_from_bundle(bundle, "upper")
+
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.vge, "CH4")
+        self.assertEqual(mapping.vce, "CH5")
+        self.assertEqual(mapping.ic, "CH2")
+        self.assertEqual(mapping.v_diode, "")
+        self.assertEqual(mapping.vge_other, "")
+        self.assertEqual(mapping.vdesat, "")
+        self.assertFalse(mapping.ic_from_sum_irr_il)
+
     def test_short_circuit_energy_math_channel_uses_display_inversion(self):
         import numpy as np
 
@@ -204,6 +239,99 @@ class TestShortCircuitExtract(unittest.TestCase):
         self.assertAlmostEqual(sc.esc_other, esc_other_expected, delta=1e-6)
         self.assertAlmostEqual(sc.vpeak_dut, dut_vce_cursors.ha_a, delta=1e-6)
         self.assertAlmostEqual(sc.vpeak_other, other_vce_cursors.ha_a, delta=1e-6)
+
+    def test_non_default_mapping_without_other_channels_keeps_dut_metrics(self):
+        from openpyxl import load_workbook
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.export.short_circuit_layout import (
+            COL_DESAT,
+            COL_ESC_DUT,
+            COL_ESC_OTHER,
+            COL_ICMAX,
+            COL_PHASE,
+            COL_TEMP,
+            COL_VPEAK_DUT,
+            COL_VPEAK_OTHER,
+            DATA_START_ROW,
+            export_short_circuit,
+        )
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import (
+            as_short_circuit_profile,
+            guess_profile_from_path,
+        )
+        from dpt_extractor.models.channel_mapping import (
+            apply_mapping,
+            infer_short_circuit_mapping_from_bundle,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+        from dpt_extractor.pipeline.run_extract import run_extraction
+
+        source = load_waveform(DL_UH)
+        labels = {
+            "CH4": "H-Vge",
+            "CH5": "H-Vce",
+            "CH2": "Ic",
+        }
+        bundle = WaveformBundle(
+            t=source.t,
+            channels={
+                "CH4": source.get("CH1").copy(),
+                "CH5": source.get("CH2").copy(),
+                "CH2": source.get("CH3").copy(),
+            },
+            meta=TekMetadata(
+                sample_interval=source.meta.sample_interval,
+                record_length=source.meta.record_length,
+                zero_index=source.meta.zero_index,
+                source_path=str(DL_UH),
+                channel_labels=labels,
+            ),
+        )
+        mapping = infer_short_circuit_mapping_from_bundle(bundle, "upper")
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        profile = apply_mapping(
+            as_short_circuit_profile(guess_profile_from_path(DL_UH)),
+            mapping,
+        )
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+
+        result = run_extraction(bundle, profile, cfg)
+        sc = result.short_circuit
+
+        self.assertTrue(result.short_circuit_mode)
+        self.assertGreater(sc.ic_max, 3000.0)
+        self.assertGreater(sc.tsc, 1.0)
+        self.assertGreater(sc.esc_dut, 1.0)
+        self.assertGreater(sc.vpeak_dut, 500.0)
+        self.assertFalse(result.is_metric_unavailable("短路过程", "短路电流Imax"))
+        self.assertFalse(result.is_metric_unavailable("短路过程", "短路时间Tsc"))
+        self.assertFalse(result.is_metric_unavailable("短路过程", "短路能量Esc_本管"))
+        self.assertFalse(result.is_metric_unavailable("短路过程", "应力Vpeak_本管"))
+        self.assertTrue(result.is_metric_unavailable("短路过程", "短路能量Esc_对管"))
+        self.assertTrue(result.is_metric_unavailable("短路过程", "应力Vpeak_对管"))
+        self.assertTrue(result.is_metric_unavailable("短路过程", "Desat动作时间"))
+
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "short_missing_other.xlsx"
+            export_short_circuit(result, out)
+            ws = load_workbook(out).active
+            target_row = next(
+                row
+                for row in range(DATA_START_ROW, ws.max_row + 1)
+                if ws.cell(row, COL_TEMP).value == "-40℃"
+                and ws.cell(row, COL_PHASE).value == "UH"
+            )
+            self.assertIsNotNone(ws.cell(target_row, COL_ICMAX).value)
+            self.assertIsNotNone(ws.cell(target_row, COL_ESC_DUT).value)
+            self.assertIsNotNone(ws.cell(target_row, COL_VPEAK_DUT).value)
+            self.assertIsNone(ws.cell(target_row, COL_ESC_OTHER).value)
+            self.assertIsNone(ws.cell(target_row, COL_VPEAK_OTHER).value)
+            self.assertIsNone(ws.cell(target_row, COL_DESAT).value)
 
     def test_short_circuit_tsc_can_use_10_percent_current_range(self):
         from dpt_extractor.config.loader import load_config

@@ -364,8 +364,8 @@ def infer_short_circuit_mapping(
     """
     根据示波器 Label 推断短路测试映射。
 
-    短路模式只需要 DUT Vge/Vce、短路电流 Ic、对管 Vce/Vge；不使用双脉冲
-    IL/Irr 的组合电流逻辑。
+    短路模式只强制需要 DUT Vge/Vce 和短路电流 Ic；对管 Vce/Vge
+    是可选波形，缺失时只影响依赖对管的短路参数。
     """
     if not labels:
         return None
@@ -410,9 +410,23 @@ def infer_short_circuit_mapping(
         vdiode_p = _LOWER_VDIODE_PATTERNS
         vge_other_p = _LOWER_VGE_OTHER_PATTERNS
 
+    optional_defaults = {
+        "v_diode": m.v_diode,
+        "vge_other": m.vge_other,
+    }
+    m.v_diode = ""
+    m.vge_other = ""
+
     for attr, patterns in (
         ("vge", vge_p),
         ("vce", vce_p),
+    ):
+        ch = _pick_channel(labeled, patterns, used)
+        if ch:
+            setattr(m, attr, ch)
+            used.add(ch)
+
+    for attr, patterns in (
         ("v_diode", vdiode_p),
         ("vge_other", vge_other_p),
     ):
@@ -420,6 +434,11 @@ def infer_short_circuit_mapping(
         if ch:
             setattr(m, attr, ch)
             used.add(ch)
+            continue
+        fallback = optional_defaults[attr]
+        if fallback and fallback.upper() in avail and fallback.upper() not in used:
+            setattr(m, attr, fallback)
+            used.add(fallback.upper())
     vdesat = _pick_channel(labeled, _VDESAT_PATTERNS, used)
     if vdesat:
         m.vdesat = vdesat
@@ -437,7 +456,7 @@ def infer_short_circuit_mapping(
         m.ic = current
         used.add(current)
 
-    required = (m.vge, m.vce, m.ic, m.v_diode, m.vge_other)
+    required = (m.vge, m.vce, m.ic)
     if not all(ch and ch.upper() in avail for ch in required):
         return None
     return m

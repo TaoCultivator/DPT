@@ -1,6 +1,9 @@
 build/
 dist/
 .tmp/
+.codex/
+AGENTS.md
+docs/
 示例文件/
 *.spec.bak
 __pycache__/
