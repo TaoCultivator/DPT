@@ -2,9 +2,10 @@
 """PyInstaller 规格：Windows 单文件 GUI 可执行程序。"""
 import re
 import os
+import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH)
 os.environ.setdefault("NUMBA_CACHE_DIR", str(ROOT / ".numba_cache"))
@@ -42,11 +43,11 @@ hiddenimports = collect_submodules("tm_data_types") + collect_submodules("PIL") 
 ]
 
 binaries = []
-for pkg in ("PyQt6", "pyqtgraph"):
-    tmp = collect_all(pkg)
-    datas += tmp[0]
-    binaries += tmp[1]
-    hiddenimports += tmp[2]
+python_library_bin = Path(sys.base_prefix) / "Library" / "bin"
+if python_library_bin.is_dir():
+    os.environ["PATH"] = str(python_library_bin) + os.pathsep + os.environ.get("PATH", "")
+    for dll in python_library_bin.glob("tbb*.dll"):
+        binaries.append((str(dll), "."))
 
 a = Analysis(
     [str(ROOT / "main.py")],

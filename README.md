@@ -91,6 +91,11 @@
 - 修复短路测试缺少对管波形时的自动通道映射：仅本管 `Vge`、本管 `Vce` 和 `Ic` 为必需项，`V_二极管`、对管 `Vge`、`Vdesat` 缺失时只影响对应参数。
 - 非默认短路接线缺少对管波形时，本管短路参数继续提取，对管能量、对管应力电压和 Desat 在界面显示为 `-`，导出和报告写入保持空单元格。
 
+## v2.0.18 更新
+
+- 补齐 Windows 打包环境中的 PyQt/pyqtgraph 可选插件依赖，并将构建依赖写入 `requirements-build.txt`。
+- 调整 PyInstaller 收集策略，只打包 DPT 实际使用的 Qt/pyqtgraph 组件，避免把无关示例、数据库驱动、QML 设计时插件和 WebView 组件打入发布包。
+
 ## 功能
 
 - 解析 Tektronix TSS 会话文件（自动识别 CH1–CH6、MATH1… 等通道）

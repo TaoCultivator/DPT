@@ -1,3 +1,9 @@
 -r requirements.txt
 pyinstaller>=6.0
 pytest>=8.0
+PyOpenGL>=3.1.10
+PyOpenGL-accelerate>=3.1.10
+PyQt6-3D>=6.11.0
+PyQt6-WebEngine>=6.11.0
+jupyter_rfb>=1.0.2
+tbb>=2023.0.0
