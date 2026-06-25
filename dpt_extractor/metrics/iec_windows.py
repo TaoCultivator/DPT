@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from dpt_extractor.metrics.offset_measurement import scope_top_base
 from dpt_extractor.utils.signal import crossing_index
 from dpt_extractor.utils.timing_adapt import scope_turn_off_bases, scope_turn_on_bases
 
@@ -57,6 +58,37 @@ def _plateau_mean_vce_before_off(
     return float(np.median(pre_v))
 
 
+def _quiet_local_platform_level(values: np.ndarray, dt: float, *, min_ns: float = 200.0) -> float:
+    """Median of the quietest local platform window, using about 200 ns as base."""
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) < 8:
+        return float(np.mean(vals)) if len(vals) else 0.0
+    win_n = _samples_for_seconds(dt, min_ns * 1e-9, minimum=16)
+    if len(vals) <= win_n:
+        return float(np.median(vals))
+
+    step = max(1, win_n // 8)
+    starts = list(range(0, len(vals) - win_n + 1, step))
+    if starts[-1] != len(vals) - win_n:
+        starts.append(len(vals) - win_n)
+    tail_ref = float(np.median(vals[-win_n:]))
+    best_start = starts[0]
+    best_score = float("inf")
+    for start in starts:
+        block = vals[start : start + win_n]
+        if len(block) < win_n:
+            continue
+        p05, p50, p95 = (float(np.nanpercentile(block, p)) for p in (5, 50, 95))
+        pp = p95 - p05
+        slope = abs(float(block[-1]) - float(block[0]))
+        score = pp + 0.15 * abs(p50 - tail_ref) + 0.05 * slope
+        if score < best_score:
+            best_score = score
+            best_start = start
+    return float(np.median(vals[best_start : best_start + win_n]))
+
+
 def _plateau_mean_ic_after_off(
     ic: np.ndarray, off_idx: int, w1: int, dt: float
 ) -> float:
@@ -77,6 +109,7 @@ def _plateau_mean_ic_after_off(
         if len(post) >= early_len
         else float(np.mean(post))
     )
+    local_platform = _quiet_local_platform_level(post, dt)
     tail = (
         float(np.mean(post[-settle_len:]))
         if len(post) > settle_len
@@ -94,7 +127,18 @@ def _plateau_mean_ic_after_off(
         and abs(early) - abs(tail) > 0.3 * i_on
     )
     if triggered:
-        return tail
+        return local_platform
+    # 示波器式平台线必须来自本次关断后的局部窗口。早窗若仍被主下降后的
+    # 阻尼振荡顶高，则用同一局部窗口的平台中值，避免 Hb 卡在非 base 位置。
+    local_delta = abs(early - local_platform)
+    local_gate = max(5.0, 0.02 * i_on)
+    post_span = float(np.percentile(post, 95) - np.percentile(post, 5))
+    if (
+        len(post) >= max(24, settle_len)
+        and post_span > max(8.0, 0.04 * i_on)
+        and local_delta > local_gate
+    ):
+        return local_platform
     return early
 
 
@@ -106,14 +150,19 @@ def _plateau_mean_vce_after_on(
     post_i = np.abs(ic[on_idx : w1 + 1])
     if len(post_v) < 8:
         return float(np.mean(post_v)) if len(post_v) else 0.0
+    local_platform = _quiet_local_platform_level(post_v, dt)
     i_top = float(np.percentile(post_i, 95))
     cond_thr = max(0.5 * i_top, 20.0)
     cond = post_i >= cond_thr
     if int(np.count_nonzero(cond)) >= 8:
-        return float(np.percentile(post_v[cond], 20))
+        cond_level = float(np.percentile(post_v[cond], 20))
+        spread = float(np.nanpercentile(post_v, 95) - np.nanpercentile(post_v, 5))
+        if abs(cond_level - local_platform) > max(3.0, 0.025 * max(spread, 1.0)):
+            return local_platform
+        return cond_level
     settle_len = max(12, int(80e-9 / dt))
     if len(post_v) > settle_len:
-        return float(np.mean(post_v[-settle_len:]))
+        return local_platform
     return float(np.mean(post_v))
 
 
@@ -372,6 +421,17 @@ class _EnvelopeGate:
     significant_count: int
 
 
+@dataclass(frozen=True)
+class _LossCursorEventGate:
+    start_idx: int
+    end_idx: int
+    cap_idx: int
+    threshold: float
+    last_extremum_idx: int
+    significant_count: int
+    classification: str
+
+
 def _use_legacy_loss_cursor_mode() -> bool:
     mode = os.environ.get("DPT_LOSS_CURSOR_MODE", "").strip().lower()
     return mode in {"legacy", "old", "current", "off", "0"}
@@ -405,6 +465,94 @@ def _loss_envelope_threshold(
     if settle_profile == "voltage_fall":
         return max(7.0, min(10.0, 0.012 * s), noise_hint)
     return max(5.0, min(18.0, 0.020 * s), noise_hint)
+
+
+def _loss_cursor_event_gate_after_main_edge(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    level: float,
+    first_ix: int,
+    end_ix: int,
+    legacy_t: float,
+    dt: float,
+    span: float,
+    tail_floor: float,
+    settle_profile: str,
+) -> _LossCursorEventGate:
+    """Gate Eoff/Eon right-cursor judgment to a visible local event window.
+
+    The gate starts at the main-edge platform crossing, is never intentionally
+    shorter than about 200 ns when enough samples exist, expands to include the
+    local ringing packet, and then stops at a bounded event cap so long LC tails
+    cannot keep dragging the B cursor.
+    """
+    yy = np.asarray(y_seg, dtype=np.float64)
+    tt = np.asarray(t_seg, dtype=np.float64)
+    n = min(len(yy), len(tt))
+    if n < 2:
+        return _LossCursorEventGate(0, 0, 0, 0.0, 0, 0, "unknown")
+
+    lo = max(0, min(int(first_ix), n - 2))
+    hi_limit = max(lo + 1, min(int(end_ix), n - 2))
+    base_n = _samples_for_seconds(dt, 200e-9, minimum=16)
+    guard_n = _samples_for_seconds(
+        dt,
+        (45e-9 if settle_profile == "current_fall" else 35e-9),
+        minimum=2,
+    )
+    # Eoff current ringing can legitimately be wider than Eon Vce fall, but both
+    # need an upper bound so a later low-energy tail is not treated as the same
+    # switching event.
+    cap_ns = 850.0 if settle_profile == "current_fall" else 680.0
+    cap_n = _samples_for_seconds(dt, cap_ns * 1e-9, minimum=base_n)
+    cap_idx = min(hi_limit, lo + cap_n)
+    min_end = min(cap_idx, lo + base_n)
+
+    legacy_idx = int(np.searchsorted(tt[:n], float(legacy_t), side="left"))
+    legacy_idx = max(lo, min(legacy_idx, cap_idx))
+    event_end = max(min_end, min(cap_idx, legacy_idx + guard_n))
+
+    threshold = _loss_envelope_threshold(settle_profile, span, tail_floor)
+    last_extremum = lo
+    significant_count = 0
+    classification = "smooth"
+
+    if cap_idx > lo + _samples_for_seconds(dt, 40e-9, minimum=8):
+        smooth_n = _samples_for_seconds(dt, 4e-9, minimum=3)
+        smooth_y = _edge_smoothed(yy[:n], smooth_n)
+        extrema_lo = min(cap_idx - 1, lo + _samples_for_seconds(dt, 4e-9, minimum=1))
+        extrema = _local_extrema_indices(
+            smooth_y, extrema_lo, cap_idx + 1, dt, min_gap_ns=5.0
+        )
+        significant = [
+            int(idx)
+            for idx in extrema
+            if abs(float(smooth_y[int(idx)]) - float(level)) >= threshold
+        ]
+        significant_count = len(significant)
+        if significant:
+            last_extremum = int(significant[-1])
+            event_end = max(event_end, min(cap_idx, last_extremum + guard_n))
+        view = smooth_y[lo : event_end + 1]
+        local_pp = (
+            float(np.nanmax(view) - np.nanmin(view))
+            if len(view) >= 4
+            else 0.0
+        )
+        if significant_count >= (4 if settle_profile == "current_fall" else 5):
+            classification = "ringing"
+        elif significant_count >= 2 or local_pp > max(2.2 * threshold, 0.040 * max(float(span), 1.0)):
+            classification = "damped"
+
+    return _LossCursorEventGate(
+        int(lo),
+        int(max(lo + 1, min(event_end, cap_idx))),
+        int(cap_idx),
+        float(threshold),
+        int(last_extremum),
+        int(significant_count),
+        classification,
+    )
 
 
 def _loss_envelope_gate_after_main_edge(
@@ -483,6 +631,46 @@ def _first_crossing_after_gate(
     return None
 
 
+def _first_sustained_rise_crossing(
+    y_seg: np.ndarray,
+    level: float,
+    raw_lo: int,
+    raw_hi: int,
+    k_trigger: int,
+    dt: float,
+    span: float,
+) -> int | None:
+    """First raw level crossing that belongs to the main rising edge."""
+    yy = np.asarray(y_seg, dtype=np.float64)
+    if len(yy) < 2:
+        return None
+    lo = max(0, min(int(raw_lo), len(yy) - 2))
+    hi = max(lo, min(int(raw_hi), int(k_trigger), len(yy) - 2))
+    candidates: list[int] = []
+    lvl = float(level)
+    for kk in range(lo, hi + 1):
+        y0, y1 = float(yy[kk]), float(yy[kk + 1])
+        if y0 <= lvl < y1 and y1 > y0:
+            candidates.append(int(kk))
+    if not candidates:
+        return None
+
+    hold_n = _samples_for_seconds(dt, 18e-9, minimum=4)
+    rise_n = _samples_for_seconds(dt, 70e-9, minimum=8)
+    min_sustained = lvl - max(1.0, 0.006 * max(float(span), 1.0))
+    min_rise = max(4.0, min(35.0, 0.045 * max(float(span), 1.0)))
+    for kk in candidates:
+        hold = yy[kk + 1 : min(len(yy), kk + 1 + hold_n)]
+        rise = yy[kk + 1 : min(len(yy), kk + 1 + rise_n)]
+        if len(hold) < 3 or len(rise) < 3:
+            continue
+        sustained = float(np.nanpercentile(hold, 60)) >= min_sustained
+        local_rise = float(np.nanmax(rise)) - max(float(yy[kk]), lvl)
+        if sustained and local_rise >= min_rise:
+            return int(kk)
+    return int(candidates[-1])
+
+
 def _smooth_early_crossing_after_main_edge(
     t_seg: np.ndarray,
     y_seg: np.ndarray,
@@ -493,6 +681,7 @@ def _smooth_early_crossing_after_main_edge(
     dt: float,
     span: float,
     settle_profile: str,
+    event_gate: _LossCursorEventGate | None = None,
 ) -> tuple[int, float] | None:
     """Early exit for large, already-flat Eoff current falls."""
     if settle_profile != "current_fall" or len(crosses) == 0:
@@ -511,10 +700,13 @@ def _smooth_early_crossing_after_main_edge(
     if candidate_t > float(first_t) + 25e-9:
         return None
 
-    fwd_n = _samples_for_seconds(dt, 120e-9, minimum=12)
-    future_n = _samples_for_seconds(dt, 260e-9, minimum=fwd_n)
-    local = yy[ix : min(len(yy), ix + fwd_n)]
-    future = yy[ix : min(len(yy), ix + future_n)]
+    fwd_n = _samples_for_seconds(dt, 200e-9, minimum=16)
+    future_n = _samples_for_seconds(dt, 360e-9, minimum=fwd_n)
+    event_end = len(yy)
+    if event_gate is not None:
+        event_end = max(ix + fwd_n, min(len(yy), int(event_gate.end_idx) + 1))
+    local = yy[ix : min(event_end, ix + fwd_n)]
+    future = yy[ix : min(event_end, ix + future_n)]
     if len(local) < 12 or len(future) < len(local):
         return None
     local_dev = np.abs(local - float(level))
@@ -856,7 +1048,20 @@ def _settled_level_crossing_after_main_edge(
     if len(dev) < 8:
         return legacy_ix, legacy_t
     tail_floor = _robust_tail_floor(dev)
-    crosses = _crossing_pair_indices(yy, lvl, first_ix, end_ix, direction=None)
+    event_gate = _loss_cursor_event_gate_after_main_edge(
+        tt,
+        yy,
+        lvl,
+        first_ix,
+        end_ix,
+        legacy_t,
+        dt,
+        span,
+        tail_floor,
+        settle_profile,
+    )
+    event_end_ix = max(first_ix + 1, min(int(event_gate.end_idx), end_ix))
+    crosses = _crossing_pair_indices(yy, lvl, first_ix, event_end_ix, direction=None)
     if not crosses:
         return legacy_ix, legacy_t
 
@@ -870,6 +1075,7 @@ def _settled_level_crossing_after_main_edge(
         dt,
         span,
         settle_profile,
+        event_gate,
     )
     if early is not None:
         return early
@@ -878,7 +1084,7 @@ def _settled_level_crossing_after_main_edge(
         yy,
         lvl,
         first_ix,
-        end_ix,
+        event_end_ix,
         dt,
         span,
         tail_floor,
@@ -892,12 +1098,12 @@ def _settled_level_crossing_after_main_edge(
         return legacy_ix, legacy_t
     candidate_ix, candidate_t = candidate
 
-    min_extra_delay = 15e-9 if settle_profile == "current_fall" else 20e-9
-    max_extra_delay = 260e-9 if settle_profile == "current_fall" else 90e-9
     if candidate_t < float(first_t):
         return legacy_ix, legacy_t
-    if candidate_t <= float(legacy_t) + min_extra_delay:
+    event_end_t = float(tt[event_end_ix])
+    if candidate_t > event_end_t + max(float(dt), 1e-15):
         return legacy_ix, legacy_t
+    max_extra_delay = 260e-9 if settle_profile == "current_fall" else 90e-9
     if candidate_t > float(legacy_t) + max_extra_delay:
         return legacy_ix, legacy_t
     return int(candidate_ix), float(candidate_t)
@@ -920,6 +1126,7 @@ def _main_edge_level_crossing(
     min_trigger: float = 30.0,
     prefer_raw_crossing: bool = True,
     raw_window_ns: float = 80.0,
+    first_sustained_rise: bool = False,
 ) -> tuple[int, float]:
     """主上升/下降沿进入平台电平的交点。
 
@@ -976,11 +1183,22 @@ def _main_edge_level_crossing(
         if direction == "rising":
             raw_lo = max(anchor, int(np.searchsorted(tt, float(tt[k_trigger]) - raw_window, side="left")))
             raw_hi = min(k_trigger, len(yy) - 2)
-            raw_ix = None
-            for kk in range(raw_lo, raw_hi + 1):
-                y0, y1 = float(yy[kk]), float(yy[kk + 1])
-                if y0 <= lvl < y1 and y1 > y0:
-                    raw_ix = kk
+            if first_sustained_rise and not _use_legacy_loss_cursor_mode():
+                raw_ix = _first_sustained_rise_crossing(
+                    yy,
+                    lvl,
+                    raw_lo,
+                    raw_hi,
+                    k_trigger,
+                    dt,
+                    span,
+                )
+            else:
+                raw_ix = None
+                for kk in range(raw_lo, raw_hi + 1):
+                    y0, y1 = float(yy[kk]), float(yy[kk + 1])
+                    if y0 <= lvl < y1 and y1 > y0:
+                        raw_ix = kk
             if raw_ix is not None:
                 return int(raw_ix), _eoff_crossing_time_us(
                     tt, yy, int(raw_ix), lvl, direction
@@ -1073,6 +1291,7 @@ def _eoff_vce_ha_crossing_at_main_rise(
         fit_pre_ns=pre_rise_span_ns,
         min_trigger=30.0,
         raw_window_ns=pre_rise_span_ns,
+        first_sustained_rise=True,
     )
 
 
@@ -1138,6 +1357,7 @@ def _eon_ic_rise_crossing_at_main_rise(
         dt,
         min_trigger=15.0,
         raw_window_ns=200.0,
+        first_sustained_rise=True,
     )
 
 
@@ -1467,6 +1687,71 @@ class _ErrRecoveryBase:
     end_idx: int
     amp: float
     strict: bool = False
+
+
+def _scope_top_in_time_window(
+    t: np.ndarray,
+    y: np.ndarray,
+    t_lo_s: float,
+    t_hi_s: float,
+) -> float | None:
+    """Top value using the same range-local algorithm as offset measurement."""
+    if len(t) == 0 or len(y) == 0:
+        return None
+    lo = min(float(t_lo_s), float(t_hi_s))
+    hi = max(float(t_lo_s), float(t_hi_s))
+    i0 = int(np.searchsorted(t, lo, side="left"))
+    i1 = int(np.searchsorted(t, hi, side="right"))
+    i0 = max(0, min(i0, len(y) - 1))
+    i1 = max(i0 + 1, min(i1, len(y)))
+    block = np.asarray(y[i0:i1], dtype=np.float64)
+    if len(block) < 8:
+        return None
+    top, _base = scope_top_base(block)
+    if not np.isfinite(top):
+        return None
+    return float(top)
+
+
+def _err_ha_top_from_offset_window(
+    t: np.ndarray,
+    irr: np.ndarray,
+    t_b_v: float,
+    err_base: _ErrRecoveryBase,
+    dt: float,
+) -> float | None:
+    """Err Ha uses the same Top definition as offset measurement.
+
+    The default GUI loads a parameter-local Err view at roughly 200 ns/div.
+    Recreate that deterministic 2 us screen-like window around the Err cursors
+    so automatic extraction, cursor display, and offset-measurement Top agree.
+    """
+    if len(t) == 0 or len(irr) == 0:
+        return None
+    i_a_hint = max(0, min(int(err_base.start_idx), len(t) - 1))
+    t_a_hint = float(t[i_a_hint])
+    raw_lo = min(float(t_b_v), t_a_hint) - 150e-9
+    raw_hi = max(float(t_b_v), t_a_hint) + 150e-9
+    center = 0.5 * (raw_lo + raw_hi)
+    half_width = max(1.0e-6, 0.5 * (raw_hi - raw_lo))
+    full_lo = float(t[0])
+    full_hi = float(t[-1])
+    if center - half_width < full_lo:
+        center = full_lo + half_width
+    if center + half_width > full_hi:
+        center = full_hi - half_width
+    top = _scope_top_in_time_window(t, irr, center - half_width, center + half_width)
+    if top is not None:
+        return top
+
+    # Fallback to the settled window only when the deterministic local view
+    # cannot provide enough samples.
+    lo = max(0, min(int(err_base.start_idx), len(t) - 1))
+    hi = max(lo + 1, min(int(err_base.end_idx) + 1, len(t)))
+    min_len = _samples_for_seconds(dt, 40e-9, minimum=8)
+    if hi - lo < min_len:
+        return None
+    return _scope_top_in_time_window(t, irr, float(t[lo]), float(t[hi - 1]))
 
 
 def _legacy_err_recovery_settled_base(
@@ -2147,12 +2432,23 @@ def err_energy_markers(
     irr_full = np.asarray(irr, dtype=np.float64)
     vd_full = np.asarray(v_diode, dtype=np.float64)
     tpk = float(t[ipk_global])
-    # Ha=恢复后稳定 Irr 平台；稳定窗由本次反向恢复右侧的局部振荡收敛决定，
-    # 不再使用峰后固定 400~800ns 尾窗。新包络口径会在 helper 内额外右看一小段，
-    # 但 legacy 参照仍使用原始 i_search_end，且不改变 Err 的 Vd-B 主沿口径。
+    # legacy 先找主 IRM 后的恢复稳定入口；新口径只把它作为 Err 本地
+    # Top/Base 窗口的事件锚点，不能继续把 (max+min)/2 当成 Ha Top。
     err_base = _err_recovery_settled_base(irr_full, ipk_global, dt, i_search_end)
     ha_tail = float(err_base.level)
     peak = float(irr_full[ipk_global])
+    # Hb=第二脉冲开通过程中，对管电压 Vd 主上升沿前的本地 base。
+    # B 必须贴同一段 Vd 与该横线的真实交点，不能取全局或关断过程 base。
+    hb_hint = _err_window_mid(vd_full, t, tpk - 600e-9, tpk - 200e-9)
+    hb_v = _err_vd_base_before_main_rise(t, vd_full, hb_hint, ipk_global, dt)
+    # B=Vd 主抬升沿与 Hb 的首个上升穿越（带符号 Vd）。Err 的
+    # Ha(Irr) 需要按点击参数后的局部放大窗口 Top 定义取值，所以先确定 B，
+    # 再用 B 与 Irr 稳定入口组成局部窗口；不得用全波形 Top/Base。
+    t_b_v = _err_vd_rise_cross_hb_t(t, vd_full, hb_v, ipk_global, i0, dt)
+    if not _use_legacy_loss_cursor_mode():
+        ha_top = _err_ha_top_from_offset_window(t, irr_full, t_b_v, err_base, dt)
+        if ha_top is not None:
+            ha_tail = float(ha_top)
     signed_tail_after_rebound = peak > 0.0 and float(ha_tail) < 0.0 and (
         abs(float(ha_tail)) >= max(3.0, 0.03 * abs(float(peak)))
         or _err_has_dominant_opposite_rebound(irr_full, ipk_global, i_search_end, peak, dt)
@@ -2170,10 +2466,6 @@ def err_energy_markers(
         if signed_tail_after_rebound
         else (abs(float(ha_tail)) if use_irr_mag else float(ha_tail))
     )
-    # Hb=第二脉冲开通过程中，对管电压 Vd 主上升沿前的本地 base。
-    # B 必须贴同一段 Vd 与该横线的真实交点，不能取全局或关断过程 base。
-    hb_hint = _err_window_mid(vd_full, t, tpk - 600e-9, tpk - 200e-9)
-    hb_v = _err_vd_base_before_main_rise(t, vd_full, hb_hint, ipk_global, dt)
     i_fall_end = max(
         ipk_global + 2,
         min(
@@ -2193,9 +2485,6 @@ def err_energy_markers(
         settle_end_idx=err_base.end_idx,
         settle_strict=err_base.strict,
     )
-    # B=Vd 主抬升沿与 Hb 的首个上升穿越（带符号 Vd）
-    t_b_v = _err_vd_rise_cross_hb_t(t, vd_full, hb_v, ipk_global, i0, dt)
-
     if abs(t_a_irr - t_b_v) < 1e-15:
         t_a_irr, t_b_v = float(t[i0]), float(t[i1])
 

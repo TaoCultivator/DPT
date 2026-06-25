@@ -2271,6 +2271,7 @@ class MainWindow(QMainWindow):
     def _clear_manual_adjustments(self, *, reset_plot: bool = True) -> None:
         self._manual_intervals.clear()
         self._manual_turn_on_current = None
+        self._manual_energy.clear()
         self._manual_delta_vce.clear()
         self._manual_dvdt.clear()
         self._manual_didt.clear()
@@ -4071,6 +4072,9 @@ class MainWindow(QMainWindow):
                 float(ha_a),
                 float(hb_v),
             )
+            lo, hi = min(float(ta_us), float(tb_us)), max(float(ta_us), float(tb_us))
+            self._manual_intervals[("反向恢复", "Err")] = (lo, hi)
+            self._manual_intervals[("反向恢复", "Pdmax")] = (lo, hi)
             win = IntegrationWindow(i0w, i1w, float(t[i0w]), float(t[i1w]))
             val = float(integrate_err_recovery(t, v_diode, irr, win))
             pdmax = float(peak_power_kw(v_diode, irr, win, absolute=True))
@@ -4084,13 +4088,11 @@ class MainWindow(QMainWindow):
             )
 
         legacy = self._manual_intervals.get(("反向恢复", "Err"))
-        restored = self._manual_energy.get(("反向恢复", "Err"))
-        if restored is not None:
-            ta_r, tb_r, _, _ = restored
-            ta_m = float(markers.t_start * 1e6)
-            tb_m = float(markers.t_end * 1e6)
-            if abs(ta_r - ta_m) > 0.08 or abs(tb_r - tb_m) > 0.08:
-                restored = None
+        restored = (
+            self._manual_energy.get(("反向恢复", "Err"))
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
         if restored is not None:
             ta_us, tb_us, ha_a, hb_v = restored
         elif legacy is not None:
@@ -4211,6 +4213,9 @@ class MainWindow(QMainWindow):
                 float(ha_v),
                 float(hb_a),
             )
+            lo, hi = min(float(ta_us), float(tb_us)), max(float(ta_us), float(tb_us))
+            self._manual_intervals[(section, name)] = (lo, hi)
+            self._manual_intervals[(section, power_name)] = (lo, hi)
             win = IntegrationWindow(i0, i1, float(t[i0]), float(t[i1]))
             val = float(integrate_vi_window(t, vce, ic, win))
             pmax = float(peak_power_kw(vce, ic, win))
@@ -4236,16 +4241,11 @@ class MainWindow(QMainWindow):
             )
 
         key = (section, name)
-        restored = self._manual_energy.get(key)
-        # 关断 Eoff：每次进入均用算法光标，避免会话内旧手动位置（如 14.37µs）被恢复
-        if section == "关断过程" and name in {"Eoff", power_name, "Pdmax"}:
-            restored = None
-        elif restored is not None:
-            ta_r, tb_r, _, _ = restored
-            ta_m = float(markers.t_start * 1e6)
-            tb_m = float(markers.t_end * 1e6)
-            if abs(ta_r - ta_m) > 0.15 or abs(tb_r - tb_m) > 0.15:
-                restored = None
+        restored = (
+            self._manual_energy.get(key)
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
         if restored is not None:
             ta_us, tb_us, ha_v, hb_v = restored
             self.wave_plot.focus_interval_us(min(ta_us, tb_us), max(ta_us, tb_us))

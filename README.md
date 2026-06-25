@@ -103,6 +103,12 @@
 - Err 支持正向和负向 `Irr` 尾平台的包络收敛后移；候选稳定窗必须明显低于 legacy 尾窗振幅，防止低峰值样例被误拖后。
 - 保留 `DPT_LOSS_CURSOR_MODE=legacy` 回退开关，方便发布后与旧损耗光标口径对照验证。
 
+## v2.0.20 更新
+
+- 修复 Err 损耗 `Ha` 横向光标口径：默认使用 Err 参数局部放大窗口内的偏移测量 `Irr Top`，不再把主峰 peak、全波形 Top 或旧稳定窗中心当成 `Ha`。
+- 统一项目 `Top/Base` 开发规范，新增 `scope_top_base()` 作为偏移测量与局部参数 Top/Base 的复用入口。
+- 补齐损耗手动光标持久化、参数重算稳定性和全量 TSS 兼容性验证，继续保留 `DPT_LOSS_CURSOR_MODE=legacy` 回退开关。
+
 ## 功能
 
 - 解析 Tektronix TSS 会话文件（自动识别 CH1–CH6、MATH1… 等通道）

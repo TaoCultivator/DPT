@@ -7112,22 +7112,132 @@ class WaveformPlot(QWidget):
             "vce", hb_v, t_lo_us, t_hi_us, after_us, use_fall_index=True
         )
 
-    def _link_energy_loss_h_from_v(self, end: str) -> None:
-        """拖动 A/B：Ha/Hb 跟随该时刻波形幅值（纵向→横向）。"""
-        if end == "a" and self._cursor_a is not None and self._h_cursor_a is not None:
-            t_us = float(self._cursor_a.value())
-            ch = self._energy_ha_channel
-            v = self._interp_channel(ch, t_us)
-            if ch == "irr" and self._energy_fall_a_mode != "err_irr":
-                v = abs(v)
-            self._h_cursor_a.setPos(self._to_disp(ch, float(v)))
-        elif end == "b" and self._cursor_b is not None and self._h_cursor_b is not None:
-            t_us = float(self._cursor_b.value())
-            ch = self._energy_hb_channel
-            v = self._interp_channel(ch, t_us)
-            if ch == "irr":
-                v = abs(v)
-            self._h_cursor_b.setPos(self._to_disp(ch, float(v)))
+    def _energy_irr_a_uses_magnitude(self, ha_a: float) -> bool:
+        """Err 正向软恢复时，A 用 |Irr| 与 |Ha| 的交点。"""
+        if self._energy_fall_a_mode != "err_irr" or self._energy_a_channel != "irr":
+            return False
+        tt, vv = self._series_for_channel("irr")
+        if tt is None or vv is None or len(tt) == 0:
+            return False
+        if self._energy_a_anchor_us is not None:
+            idx = int(np.searchsorted(tt, float(self._energy_a_anchor_us), side="left"))
+            idx = max(0, min(idx, len(vv) - 1))
+        else:
+            idx = int(np.argmax(np.abs(vv)))
+        peak = float(vv[idx])
+        return peak > 0.0 and float(ha_a) > 0.0
+
+    def _nearest_energy_level_crossing_us(
+        self,
+        channel: str,
+        level: float,
+        ref_t_us: float,
+        *,
+        use_abs: bool = False,
+        min_t_us: float | None = None,
+    ) -> float | None:
+        """找最靠近拖拽位置的原始波形-横线插值交点。"""
+        tt, vv = self._series_for_channel(channel)
+        if tt is None or vv is None or len(tt) < 2:
+            return None
+        t_lo = float(self._interactive_search_t0_us or float(tt[0]))
+        t_hi = float(self._interactive_search_t1_us or float(tt[-1]))
+        lo, hi = (min(t_lo, t_hi), max(t_lo, t_hi))
+        i0 = int(np.searchsorted(tt, lo, side="left"))
+        i1 = int(np.searchsorted(tt, hi, side="right")) - 1
+        i0 = max(0, min(i0, len(tt) - 2))
+        i1 = max(i0 + 1, min(i1, len(tt) - 1))
+        yy = np.abs(np.asarray(vv, dtype=np.float64)) if use_abs else np.asarray(vv, dtype=np.float64)
+        lvl = abs(float(level)) if use_abs else float(level)
+        all_hits: list[float] = []
+        filtered_hits: list[float] = []
+        for k in range(i0, i1):
+            y0 = float(yy[k])
+            y1 = float(yy[k + 1])
+            dy = y1 - y0
+            if abs(dy) < 1e-30:
+                continue
+            if min(y0, y1) <= lvl <= max(y0, y1):
+                frac = float(np.clip((lvl - y0) / dy, 0.0, 1.0))
+                t_cross = float(tt[k] + frac * (tt[k + 1] - tt[k]))
+                all_hits.append(t_cross)
+                if min_t_us is None or t_cross >= float(min_t_us) - 1e-9:
+                    filtered_hits.append(t_cross)
+        hits = filtered_hits or all_hits
+        if not hits:
+            return None
+        ref = float(ref_t_us)
+        return min(hits, key=lambda t: abs(float(t) - ref))
+
+    def _snap_energy_loss_v_to_h(self, end: str) -> float | None:
+        """拖动 A/B：保持 Ha/Hb 不变，A/B 吸附到对应横线与波形的交点。"""
+        if end == "a":
+            if self._cursor_a is None or self._h_cursor_a is None:
+                return None
+            ref_t = float(self._cursor_a.value())
+            level_ch = self._energy_ha_channel
+            marker_ch = self._energy_a_channel
+            level = float(self._from_disp(level_ch, float(self._h_cursor_a.value())))
+            use_abs = marker_ch == "irr" and (
+                self._energy_fall_a_mode != "err_irr"
+                or self._energy_irr_a_uses_magnitude(level)
+            )
+            min_t = self._energy_a_anchor_us if self._energy_fall_a_mode == "err_irr" else None
+            target = self._nearest_energy_level_crossing_us(
+                marker_ch,
+                level,
+                ref_t,
+                use_abs=use_abs,
+                min_t_us=min_t,
+            )
+            if target is not None:
+                self._cursor_a.setPos(float(target))
+            return target
+        if end == "b":
+            if self._cursor_b is None or self._h_cursor_b is None:
+                return None
+            ref_t = float(self._cursor_b.value())
+            if self._energy_b_level_vce is not None:
+                marker_ch = "vce"
+                level = float(self._energy_b_level_vce)
+            else:
+                marker_ch = self._energy_b_channel
+                level_ch = self._energy_hb_channel
+                level = float(self._from_disp(level_ch, float(self._h_cursor_b.value())))
+            min_t = None
+            if (
+                self._energy_rise_b_mode != "err_vd"
+                and self._cursor_a is not None
+            ):
+                min_t = float(self._cursor_a.value())
+            use_abs = marker_ch == "irr"
+            target = self._nearest_energy_level_crossing_us(
+                marker_ch,
+                level,
+                ref_t,
+                use_abs=use_abs,
+                min_t_us=min_t,
+            )
+            if target is not None:
+                self._cursor_b.setPos(float(target))
+            return target
+        return None
+
+    def _handle_energy_loss_vertical_moved(self) -> None:
+        sender = self.sender()
+        self._interactive_syncing = True
+        try:
+            if sender is self._cursor_a:
+                self._snap_energy_loss_v_to_h("a")
+            elif sender is self._cursor_b:
+                self._snap_energy_loss_v_to_h("b")
+            else:
+                self._snap_energy_loss_v_to_h("a")
+                self._snap_energy_loss_v_to_h("b")
+        finally:
+            self._interactive_syncing = False
+        self._emit_energy_loss_changed()
+        self._update_readout()
 
     def _sync_energy_a_from_ha(self) -> float | None:
         """拖动 Ha：A 跟随与 Ha 的穿越点（横向→纵向）。返回 A 时刻 µs。"""
@@ -8017,7 +8127,7 @@ class WaveformPlot(QWidget):
                 self._emit_trr_measure_changed()
                 return
             if self._interactive_mode == "energy_loss":
-                self._emit_energy_loss_changed()
+                self._handle_energy_loss_vertical_moved()
                 return
             if self._interactive_mode in {
                 "interval",
@@ -8098,17 +8208,7 @@ class WaveformPlot(QWidget):
             self._emit_trr_measure_changed()
             return
         if self._interactive_mode == "energy_loss":
-            sender = self.sender()
-            self._interactive_syncing = True
-            try:
-                if sender is self._cursor_a:
-                    self._link_energy_loss_h_from_v("a")
-                elif sender is self._cursor_b:
-                    self._link_energy_loss_h_from_v("b")
-            finally:
-                self._interactive_syncing = False
-            self._emit_energy_loss_changed()
-            self._update_readout()
+            self._handle_energy_loss_vertical_moved()
             return
         if self._interactive_mode in {"interval", "irr_cross", "crosstalk"}:
             t0 = float(self._cursor_a.value())

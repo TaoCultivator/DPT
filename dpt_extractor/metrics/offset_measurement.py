@@ -221,7 +221,13 @@ def _modal_level(values: np.ndarray) -> float:
     return float(np.mean(bucket if bucket.size else arr))
 
 
-def _top_base(values: np.ndarray) -> tuple[float, float]:
+def scope_top_base(values: np.ndarray) -> tuple[float, float]:
+    """Scope-style Top/Base for the current measurement range.
+
+    This is the project-wide Tek-style approximation used by offset
+    measurement: split the current range by its local midpoint, then take the
+    modal level of the upper and lower halves.
+    """
     arr = _finite_values(values)
     if arr.size == 0:
         return float("nan"), float("nan")
@@ -232,6 +238,10 @@ def _top_base(values: np.ndarray) -> tuple[float, float]:
     top_arr = arr[arr >= midpoint]
     base_arr = arr[arr <= midpoint]
     return _modal_level(top_arr), _modal_level(base_arr)
+
+
+def _top_base(values: np.ndarray) -> tuple[float, float]:
+    return scope_top_base(values)
 
 
 def _finite_series(t_s: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
