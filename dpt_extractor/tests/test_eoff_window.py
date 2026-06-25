@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 
@@ -53,6 +54,17 @@ SMC_RT_UH = (
     / "tss"
     / "UH_750V_1048A_000.tss"
 )
+SMC_RT_UH_403 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UH_600V_403A_000.tss"
+)
 SMC_RT_UL_806 = (
     ROOT
     / "示例文件"
@@ -63,6 +75,50 @@ SMC_RT_UL_806 = (
     / "RT"
     / "tss"
     / "UL_750V_806A_000.tss"
+)
+SMC_RT_VH_806 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "VH_750V_806A_000.tss"
+)
+SMC_RT_VL_806 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "VL_750V_806A_000.tss"
+)
+SMC_RT_VL_1048 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "VL_750V_1048A_000.tss"
+)
+SMC_RT_VH_403 = (
+    ROOT
+    / "示例文件"
+    / "tss格式"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "VH_600V_403A_000.tss"
 )
 LOW_CURRENT_WH = (
     ROOT
@@ -318,6 +374,58 @@ class TestEoffWindow(unittest.TestCase):
         self.assertAlmostEqual(v_at_a, mk.ha_v, delta=0.5)
         _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
         self.assertGreater(v_after, mk.ha_v + 0.3 * swing)
+
+    @unittest.skipUnless(SMC_RT_VH_806.exists(), "SMC RT VH 806A sample missing")
+    def test_smc_rt_vh_806_smooth_eoff_b_uses_early_settled_crossing(self):
+        bundle = load_waveform(SMC_RT_VH_806)
+        profile = guess_profile_from_path(str(SMC_RT_VH_806))
+        cfg = load_config()
+        result = extract_all(bundle, profile, cfg)
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+        mk = eoff_energy_markers(
+            t,
+            ic,
+            vce,
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_off,
+            bundle.dt,
+            pre_ns=cfg.energy.eoff_pre_ns,
+            pulse1_on=segs.pulse1_on,
+        )
+        self.assertAlmostEqual(mk.t_end * 1e6, 11.410, delta=0.020)
+        self.assertLess(mk.t_end * 1e6, 11.46)
+        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
+
+    @unittest.skipUnless(SMC_RT_VL_806.exists(), "SMC RT VL 806A sample missing")
+    def test_smc_rt_vl_806_noisy_eoff_b_rejects_smooth_early_crossing(self):
+        bundle = load_waveform(SMC_RT_VL_806)
+        profile = guess_profile_from_path(str(SMC_RT_VL_806))
+        cfg = load_config()
+        result = extract_all(bundle, profile, cfg)
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+        mk = eoff_energy_markers(
+            t,
+            ic,
+            vce,
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_off,
+            bundle.dt,
+            pre_ns=cfg.energy.eoff_pre_ns,
+            pulse1_on=segs.pulse1_on,
+        )
+        self.assertAlmostEqual(mk.t_end * 1e6, 11.993, delta=0.020)
+        self.assertGreater(mk.t_end * 1e6, 11.90)
+        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
 
     @unittest.skipUnless(LOW_CURRENT_WH.exists(), "low-current WH sample missing")
     def test_low_current_eoff_ha_uses_vce_base_not_foot(self):
@@ -631,11 +739,92 @@ class TestEoffWindow(unittest.TestCase):
         )
         ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
         base = _err_recovery_settled_base(irr, ipk, bundle.dt, segs.turn_on[1])
-        self.assertAlmostEqual(mk.t_start * 1e6, 19.293, delta=0.020)
-        self.assertGreater(mk.t_start * 1e6, 19.25)
+        self.assertAlmostEqual(mk.t_start * 1e6, 19.412, delta=0.020)
+        self.assertGreater(mk.t_start * 1e6, 19.35)
         self.assertAlmostEqual(mk.t_end * 1e6, 18.809, delta=0.020)
         self.assertGreater(2.0 * base.amp, 40.0)
         _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "any")
+
+    @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
+    def test_loss_cursor_legacy_mode_restores_previous_err_a(self):
+        bundle = load_waveform(SMC_RT_UH)
+        profile = guess_profile_from_path(str(SMC_RT_UH))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        old_mode = os.environ.get("DPT_LOSS_CURSOR_MODE")
+        os.environ["DPT_LOSS_CURSOR_MODE"] = "legacy"
+        try:
+            mk = err_energy_markers(
+                t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+            )
+        finally:
+            if old_mode is None:
+                os.environ.pop("DPT_LOSS_CURSOR_MODE", None)
+            else:
+                os.environ["DPT_LOSS_CURSOR_MODE"] = old_mode
+        self.assertAlmostEqual(mk.t_start * 1e6, 19.293, delta=0.020)
+        self.assertAlmostEqual(mk.t_end * 1e6, 18.809, delta=0.020)
+
+    def _assert_err_a_uses_expected_raw_crossing(
+        self,
+        path: Path,
+        *,
+        expected_a_us: float,
+    ) -> None:
+        bundle = load_waveform(path)
+        profile = guess_profile_from_path(str(path))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        mk = err_energy_markers(
+            t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+        )
+        self.assertAlmostEqual(mk.t_start * 1e6, expected_a_us, delta=0.030)
+        _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "any")
+
+    @unittest.skipUnless(SMC_RT_UH_403.exists(), "SMC RT UH 403A sample missing")
+    def test_smc_rt_uh_403_err_waits_for_low_amplitude_tail(self):
+        self._assert_err_a_uses_expected_raw_crossing(
+            SMC_RT_UH_403,
+            expected_a_us=11.519,
+        )
+
+    @unittest.skipUnless(SMC_RT_VH_403.exists(), "SMC RT VH 403A sample missing")
+    def test_smc_rt_vh_403_err_waits_for_low_amplitude_tail(self):
+        self._assert_err_a_uses_expected_raw_crossing(
+            SMC_RT_VH_403,
+            expected_a_us=11.419,
+        )
+
+    @unittest.skipUnless(SMC_RT_VH_806.exists(), "SMC RT VH 806A sample missing")
+    def test_smc_rt_vh_806_err_uses_quieter_late_envelope(self):
+        self._assert_err_a_uses_expected_raw_crossing(
+            SMC_RT_VH_806,
+            expected_a_us=15.779,
+        )
+
+    @unittest.skipUnless(SMC_RT_VL_806.exists(), "SMC RT VL 806A sample missing")
+    def test_smc_rt_vl_806_err_signed_tail_uses_quieter_late_envelope(self):
+        self._assert_err_a_uses_expected_raw_crossing(
+            SMC_RT_VL_806,
+            expected_a_us=16.347,
+        )
+
+    @unittest.skipUnless(SMC_RT_VL_1048.exists(), "SMC RT VL 1048A sample missing")
+    def test_smc_rt_vl_1048_err_signed_tail_uses_quieter_late_envelope(self):
+        self._assert_err_a_uses_expected_raw_crossing(
+            SMC_RT_VL_1048,
+            expected_a_us=20.269,
+        )
 
     @unittest.skipUnless(SSS_LT_UH_1050.exists(), "SSS LT UH 1050A sample missing")
     def test_lt_uh_1050_smooth_eon_b_does_not_chase_tail(self):

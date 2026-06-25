@@ -96,6 +96,13 @@
 - 补齐 Windows 打包环境中的 PyQt/pyqtgraph 可选插件依赖，并将构建依赖写入 `requirements-build.txt`。
 - 调整 PyInstaller 收集策略，只打包 DPT 实际使用的 Qt/pyqtgraph 组件，避免把无关示例、数据库驱动、QML 设计时插件和 WebView 组件打入发布包。
 
+## v2.0.19 更新
+
+- 优化 Eoff/Eon/Err 损耗右侧光标稳定判定：先识别本次开关过程的振荡包络收敛状态，再把光标落在原始波形与本地平台线的真实插值交点。
+- 平滑 Eoff 波形允许更早结束，但增加未来反弹和局部峰峰值约束，避免仍有可见尾振的波形被过早截断。
+- Err 支持正向和负向 `Irr` 尾平台的包络收敛后移；候选稳定窗必须明显低于 legacy 尾窗振幅，防止低峰值样例被误拖后。
+- 保留 `DPT_LOSS_CURSOR_MODE=legacy` 回退开关，方便发布后与旧损耗光标口径对照验证。
+
 ## 功能
 
 - 解析 Tektronix TSS 会话文件（自动识别 CH1–CH6、MATH1… 等通道）
