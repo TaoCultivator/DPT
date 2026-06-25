@@ -7127,7 +7127,36 @@ class WaveformPlot(QWidget):
         peak = float(vv[idx])
         return peak > 0.0 and float(ha_a) > 0.0
 
-    def _nearest_energy_level_crossing_us(
+    def _energy_snap_window_us(self) -> tuple[float, float] | None:
+        t0 = self._interactive_search_t0_us
+        t1 = self._interactive_search_t1_us
+        t_lo = float(t0) if t0 is not None else 0.0
+        t_hi = float(t1) if t1 is not None else t_lo
+        if t_hi <= t_lo:
+            t_hi = t_lo + 1.0
+        search_lo, search_hi = min(t_lo, t_hi), max(t_lo, t_hi)
+        view = self.current_x_range_us()
+        if view is not None:
+            view_lo, view_hi = view
+            lo = max(search_lo, view_lo)
+            hi = min(search_hi, view_hi)
+            if hi > lo:
+                return lo, hi
+        if search_hi > search_lo:
+            return search_lo, search_hi
+        return None
+
+    @staticmethod
+    def _energy_crossing_edge_matches(
+        y0: float, y1: float, level: float, edge: str
+    ) -> bool:
+        if edge == "rising":
+            return y0 <= level and y1 > level
+        if edge == "falling":
+            return y0 >= level and y1 < level
+        return min(y0, y1) <= level <= max(y0, y1)
+
+    def _first_energy_level_crossing_us(
         self,
         channel: str,
         level: float,
@@ -7135,39 +7164,57 @@ class WaveformPlot(QWidget):
         *,
         use_abs: bool = False,
         min_t_us: float | None = None,
+        edge: str = "any",
     ) -> float | None:
-        """找最靠近拖拽位置的原始波形-横线插值交点。"""
+        """找当前局部放大窗口内第一个原始波形-横线插值交点。"""
+        _ = ref_t_us
         tt, vv = self._series_for_channel(channel)
         if tt is None or vv is None or len(tt) < 2:
             return None
-        t_lo = float(self._interactive_search_t0_us or float(tt[0]))
-        t_hi = float(self._interactive_search_t1_us or float(tt[-1]))
-        lo, hi = (min(t_lo, t_hi), max(t_lo, t_hi))
+        window = self._energy_snap_window_us()
+        if window is None:
+            lo, hi = float(tt[0]), float(tt[-1])
+        else:
+            lo, hi = window
         i0 = int(np.searchsorted(tt, lo, side="left"))
         i1 = int(np.searchsorted(tt, hi, side="right")) - 1
         i0 = max(0, min(i0, len(tt) - 2))
         i1 = max(i0 + 1, min(i1, len(tt) - 1))
-        yy = np.abs(np.asarray(vv, dtype=np.float64)) if use_abs else np.asarray(vv, dtype=np.float64)
+        raw = np.asarray(vv, dtype=np.float64)
+        yy = np.abs(raw) if use_abs else raw
         lvl = abs(float(level)) if use_abs else float(level)
-        all_hits: list[float] = []
-        filtered_hits: list[float] = []
+        edge = edge if edge in {"rising", "falling"} else "any"
         for k in range(i0, i1):
             y0 = float(yy[k])
             y1 = float(yy[k + 1])
             dy = y1 - y0
             if abs(dy) < 1e-30:
                 continue
-            if min(y0, y1) <= lvl <= max(y0, y1):
-                frac = float(np.clip((lvl - y0) / dy, 0.0, 1.0))
-                t_cross = float(tt[k] + frac * (tt[k + 1] - tt[k]))
-                all_hits.append(t_cross)
-                if min_t_us is None or t_cross >= float(min_t_us) - 1e-9:
-                    filtered_hits.append(t_cross)
-        hits = filtered_hits or all_hits
-        if not hits:
-            return None
-        ref = float(ref_t_us)
-        return min(hits, key=lambda t: abs(float(t) - ref))
+            if not self._energy_crossing_edge_matches(y0, y1, lvl, edge):
+                continue
+            frac = float(np.clip((lvl - y0) / dy, 0.0, 1.0))
+            t_cross = float(tt[k] + frac * (tt[k + 1] - tt[k]))
+            if min_t_us is not None and t_cross < float(min_t_us) - 1e-9:
+                continue
+            return t_cross
+        return None
+
+    def _energy_manual_snap_edge(self, end: str) -> str:
+        if end == "a":
+            if self._energy_fall_a_mode == "err_irr":
+                return "falling"
+            if self._energy_rise_a_mode in {"eoff_vce", "eon_ic", "err_irr"}:
+                return "rising"
+            if self._energy_edge_a in {"rising", "falling"}:
+                return self._energy_edge_a
+            return "any"
+        if self._energy_rise_b_mode == "err_vd":
+            return "rising"
+        if self._energy_fall_b_mode in {"eoff_ic_fall", "eon_vce_fall"}:
+            return "falling"
+        if self._energy_edge_b in {"rising", "falling"}:
+            return self._energy_edge_b
+        return "any"
 
     def _snap_energy_loss_v_to_h(self, end: str) -> float | None:
         """拖动 A/B：保持 Ha/Hb 不变，A/B 吸附到对应横线与波形的交点。"""
@@ -7183,12 +7230,13 @@ class WaveformPlot(QWidget):
                 or self._energy_irr_a_uses_magnitude(level)
             )
             min_t = self._energy_a_anchor_us if self._energy_fall_a_mode == "err_irr" else None
-            target = self._nearest_energy_level_crossing_us(
+            target = self._first_energy_level_crossing_us(
                 marker_ch,
                 level,
                 ref_t,
                 use_abs=use_abs,
                 min_t_us=min_t,
+                edge=self._energy_manual_snap_edge("a"),
             )
             if target is not None:
                 self._cursor_a.setPos(float(target))
@@ -7211,12 +7259,13 @@ class WaveformPlot(QWidget):
             ):
                 min_t = float(self._cursor_a.value())
             use_abs = marker_ch == "irr"
-            target = self._nearest_energy_level_crossing_us(
+            target = self._first_energy_level_crossing_us(
                 marker_ch,
                 level,
                 ref_t,
                 use_abs=use_abs,
                 min_t_us=min_t,
+                edge=self._energy_manual_snap_edge("b"),
             )
             if target is not None:
                 self._cursor_b.setPos(float(target))

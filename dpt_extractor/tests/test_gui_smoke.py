@@ -4789,7 +4789,7 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertAlmostEqual(
             float(np.interp(tb * 1e-6, win.bundle.t, ic)), hb_a, delta=0.5
         )
-        self.assertGreater(ta, 14.70)
+        self.assertGreater(ta, 14.68)
         self.assertLess(ta, 14.74)
         self.assertAlmostEqual(ha_v, 12.34375, delta=0.5)
         win.close()

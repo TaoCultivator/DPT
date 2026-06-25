@@ -5,10 +5,13 @@ import os
 import sys
 import unittest
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.gui.main_window import MainWindow
+from dpt_extractor.gui.waveform_plot import WaveformPlot
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.models.bridge_profile import guess_profile_from_path
 from dpt_extractor.models.results import power_metric_name
@@ -136,7 +139,7 @@ class TestEnergyManualPersist(unittest.TestCase):
         b0 = float(plot._cursor_b.value())
 
         a_ref = a0 + 0.035
-        expected_a = plot._nearest_energy_level_crossing_us(
+        expected_a = plot._first_energy_level_crossing_us(
             plot._energy_a_channel,
             plot._from_disp(plot._energy_ha_channel, ha_y0),
             a_ref,
@@ -150,6 +153,7 @@ class TestEnergyManualPersist(unittest.TestCase):
             min_t_us=plot._energy_a_anchor_us
             if plot._energy_fall_a_mode == "err_irr"
             else None,
+            edge=plot._energy_manual_snap_edge("a"),
         )
         self.assertIsNotNone(expected_a)
         plot._cursor_a.setPos(a_ref)
@@ -165,7 +169,7 @@ class TestEnergyManualPersist(unittest.TestCase):
         else:
             b_channel = plot._energy_b_channel
             b_level = plot._from_disp(plot._energy_hb_channel, hb_y0)
-        expected_b = plot._nearest_energy_level_crossing_us(
+        expected_b = plot._first_energy_level_crossing_us(
             b_channel,
             b_level,
             b_ref,
@@ -173,6 +177,7 @@ class TestEnergyManualPersist(unittest.TestCase):
             min_t_us=None
             if plot._energy_rise_b_mode == "err_vd"
             else float(plot._cursor_a.value()),
+            edge=plot._energy_manual_snap_edge("b"),
         )
         self.assertIsNotNone(expected_b)
         plot._cursor_b.setPos(b_ref)
@@ -189,6 +194,34 @@ class TestEnergyManualPersist(unittest.TestCase):
         ):
             with self.subTest(section=section, name=name):
                 self._assert_vertical_drag_keeps_levels_and_snaps(section, name)
+
+    def test_energy_snap_uses_first_edge_crossing_in_visible_window(self) -> None:
+        plot = WaveformPlot()
+        plot._interactive_search_t0_us = 0.0
+        plot._interactive_search_t1_us = 1.0
+        plot.current_x_range_us = lambda: (0.05, 0.75)  # type: ignore[method-assign]
+
+        t = np.array([0.0, 0.1, 0.2, 0.4, 0.5, 0.6, 0.8], dtype=float)
+        rising = np.array([-1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0], dtype=float)
+        plot._series_for_channel = lambda channel: (t, rising)  # type: ignore[method-assign]
+
+        first_rise = plot._first_energy_level_crossing_us(
+            "ic", 0.0, 0.58, edge="rising"
+        )
+        self.assertAlmostEqual(float(first_rise), 0.15, places=9)
+
+        falling = np.array([1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0], dtype=float)
+        plot._series_for_channel = lambda channel: (t, falling)  # type: ignore[method-assign]
+
+        first_fall = plot._first_energy_level_crossing_us(
+            "ic", 0.0, 0.58, edge="falling"
+        )
+        self.assertAlmostEqual(float(first_fall), 0.15, places=9)
+
+        gated_fall = plot._first_energy_level_crossing_us(
+            "ic", 0.0, 0.58, edge="falling", min_t_us=0.3
+        )
+        self.assertAlmostEqual(float(gated_fall), 0.55, places=9)
 
 
 if __name__ == "__main__":
