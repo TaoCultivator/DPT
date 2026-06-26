@@ -2017,16 +2017,163 @@ def _err_base_after_envelope_gate(
     found = _scan(loose_ceiling, strict=False)
     if found is not None:
         return found
-    if best is not None and best[1] <= 1.25 * loose_ceiling:
-        start = int(best[0])
-        return _ErrRecoveryBase(
-            float(best[2]),
-            start,
-            min(n - 1, start + base_len - 1),
-            float(best[1]),
-            strict=False,
-        )
     return None
+
+
+def _err_first_stable_entry_after_main_recovery(
+    irr: np.ndarray,
+    ipk_global: int,
+    dt: float,
+    search_end: int,
+    rebound_check_end: int,
+    peak_abs: float,
+) -> _ErrRecoveryBase | None:
+    """First low-amplitude entry after the main reverse-recovery ringing packet.
+
+    This is intentionally different from "the quietest/latest tail": it waits
+    until the main visible ringing extrema have passed, then scans left-to-right
+    for the first local window with low peak-to-peak, center near the local
+    platform, and no obvious rebound shortly after it.
+    """
+    y = np.asarray(irr, dtype=np.float64)
+    n = len(y)
+    if n < 24:
+        return None
+    k0 = max(0, min(int(ipk_global), n - 2))
+    k_end = max(k0 + 2, min(int(search_end), n - 1))
+    rebound_end = max(k_end, min(int(rebound_check_end), n - 1))
+    base_len = _samples_for_seconds(dt, 60e-9, minimum=16)
+    if k_end <= k0 + base_len + 4:
+        return None
+
+    p = max(float(peak_abs), 1.0)
+    if p < 80.0:
+        return None
+
+    platform_block = y[k0 : k_end + 1]
+    if len(platform_block) < base_len:
+        return None
+    platform = _quiet_local_platform_level(platform_block, dt, min_ns=200.0)
+
+    smooth_n = _samples_for_seconds(dt, 4e-9, minimum=3)
+    smooth_y = _edge_smoothed(y, smooth_n)
+    extrema_lo = min(k_end - 1, k0 + _samples_for_seconds(dt, 5e-9, minimum=1))
+    extrema = _local_extrema_indices(
+        smooth_y, extrema_lo, k_end, dt, min_gap_ns=5.0
+    )
+    if not extrema:
+        return None
+
+    if p < 120.0:
+        major_threshold = max(16.0, min(24.0, 0.170 * p))
+        pp_limit = max(16.0, min(28.0, 0.190 * p))
+        min_sig_count = 4
+    else:
+        major_threshold = max(18.0, min(42.0, 0.170 * p))
+        pp_limit = max(28.0, min(64.0, 0.380 * p))
+        min_sig_count = 5
+
+    significant = [
+        int(idx)
+        for idx in extrema
+        if abs(float(smooth_y[int(idx)]) - float(platform)) >= major_threshold
+    ]
+    if len(significant) < min_sig_count:
+        return None
+    first_sig = significant[0]
+    last_sig = significant[-1]
+    if (last_sig - first_sig) * max(float(dt), 1e-15) < 60e-9:
+        return None
+
+    step = _samples_for_seconds(dt, 5e-9, minimum=1)
+    scan_lo = max(
+        last_sig + _samples_for_seconds(dt, 8e-9, minimum=1),
+        k0 + _samples_for_seconds(dt, 80e-9, minimum=4),
+    )
+    scan_hi = k_end - base_len
+    if scan_hi < scan_lo:
+        return None
+
+    center_limit = max(8.0, min(30.0, 0.100 * p), 0.65 * pp_limit)
+    lookahead = max(4, int(round(160e-9 / max(step * float(dt), 1e-15))))
+
+    def _stats(start: int) -> tuple[float, float, float]:
+        block = y[start : start + base_len]
+        if len(block) < 3:
+            v = float(block[0]) if len(block) else float(y[k0])
+            return 0.0, v, v
+        mn = float(np.min(block))
+        mx = float(np.max(block))
+        return mx - mn, 0.5 * (mx + mn), float(np.median(block))
+
+    cur = scan_lo
+    while cur <= scan_hi:
+        pp, mid, med = _stats(cur)
+        center_dev = abs(float(mid) - float(platform))
+        median_dev = abs(float(med) - float(platform))
+        if (
+            pp <= pp_limit
+            and center_dev <= center_limit
+            and median_dev <= 1.25 * center_limit
+        ):
+            future_pp = [pp]
+            future_dev = [center_dev]
+            fut = cur + step
+            for _ in range(lookahead - 1):
+                if fut > min(rebound_end - base_len, scan_hi + lookahead * step):
+                    break
+                fpp, fmid, _fmed = _stats(fut)
+                future_pp.append(fpp)
+                future_dev.append(abs(float(fmid) - float(platform)))
+                fut += step
+            max_future_pp = max(future_pp)
+            max_future_dev = max(future_dev)
+            no_rebound = (
+                max_future_pp
+                <= max(1.55 * pp, pp + max(8.0, 0.055 * p), 1.20 * pp_limit)
+                and max_future_dev
+                <= max(
+                    major_threshold,
+                    center_dev + max(8.0, 0.060 * p),
+                    1.15 * center_limit,
+                )
+            )
+            if no_rebound:
+                strict = pp <= 0.85 * pp_limit and center_dev <= 0.70 * center_limit
+                return _ErrRecoveryBase(
+                    float(mid),
+                    int(cur),
+                    min(n - 1, int(cur) + base_len - 1),
+                    0.5 * float(pp),
+                    strict=bool(strict),
+                )
+        cur += step
+    return None
+
+
+def _prefer_first_err_stable_entry(
+    first_stable: _ErrRecoveryBase | None,
+    current: _ErrRecoveryBase,
+    legacy: _ErrRecoveryBase,
+    dt: float,
+) -> _ErrRecoveryBase:
+    if first_stable is None:
+        return current
+    margin = _samples_for_seconds(dt, 18e-9, minimum=1)
+    if int(first_stable.start_idx) < int(current.start_idx) - margin:
+        if bool(first_stable.strict) or float(first_stable.amp) <= max(
+            1.20 * float(current.amp),
+            float(current.amp) + 8.0,
+        ):
+            return first_stable
+    legacy_shift = _samples_for_seconds(dt, 25e-9, minimum=1)
+    if (
+        int(current.start_idx) <= int(legacy.start_idx) + margin
+        and int(first_stable.start_idx) > int(legacy.start_idx) + legacy_shift
+        and float(first_stable.amp) <= 1.10 * max(float(legacy.amp), 1e-9)
+    ):
+        return first_stable
+    return current
 
 
 def _err_recovery_settled_base(
@@ -2051,6 +2198,14 @@ def _err_recovery_settled_base(
         len(y) - 1,
         int(search_end) + _samples_for_seconds(dt, 180e-9, minimum=1),
     )
+    first_stable = _err_first_stable_entry_after_main_recovery(
+        y,
+        k0,
+        dt,
+        int(envelope_search_end),
+        envelope_search_end,
+        peak_abs,
+    )
     gate = _err_envelope_gate_after_peak(
         y,
         float(legacy.level),
@@ -2060,7 +2215,7 @@ def _err_recovery_settled_base(
         peak_abs,
     )
     if gate is None:
-        return legacy
+        return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
 
     min_shift = _samples_for_seconds(
         dt,
@@ -2068,11 +2223,11 @@ def _err_recovery_settled_base(
         minimum=1,
     )
     if gate.start_idx <= int(legacy.start_idx) + min_shift:
-        return legacy
+        return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
     max_shift_ns = 320e-9 if peak_abs < 120.0 else 230e-9
     max_shift = _samples_for_seconds(dt, max_shift_ns, minimum=1)
     if gate.start_idx > int(legacy.start_idx) + max_shift:
-        return legacy
+        return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
 
     candidate = _err_base_after_envelope_gate(
         y,
@@ -2083,21 +2238,21 @@ def _err_recovery_settled_base(
         peak_abs,
     )
     if candidate is None:
-        return legacy
+        return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
     legacy_amp = max(float(legacy.amp), 1e-9)
     candidate_amp = float(candidate.amp)
     if peak_abs < 120.0 and candidate_amp > 1.10 * legacy_amp:
-        return legacy
+        return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
     if peak_abs >= 120.0 and candidate_amp > 0.85 * legacy_amp:
-        return legacy
+        return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
     if peak_abs >= 120.0 and candidate_amp > 0.80 * legacy_amp:
         max_shift_ns = 170e-9
     max_shift = _samples_for_seconds(dt, max_shift_ns, minimum=1)
     if candidate.start_idx <= int(legacy.start_idx) + min_shift:
-        return legacy
+        return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
     if candidate.start_idx > int(legacy.start_idx) + max_shift:
-        return legacy
-    return candidate
+        return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
+    return _prefer_first_err_stable_entry(first_stable, candidate, legacy, dt)
 
 
 def _err_hb_v_before_rise(

@@ -124,6 +124,18 @@ SMC_RT_VH_403 = (
     / "tss"
     / "VH_600V_403A_000.tss"
 )
+SONG_SMC_RT = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+)
+SONG_SMC_RT_UH_1048 = SONG_SMC_RT / "UH_750V_1048A_000.tss"
+SONG_SMC_RT_VL_806 = SONG_SMC_RT / "VL_750V_806A_000.tss"
+SONG_SMC_RT_VL_1048 = SONG_SMC_RT / "VL_750V_1048A_000.tss"
 GCU_LT_UH_500 = (
     ROOT
     / "示例文件"
@@ -679,6 +691,82 @@ class TestEoffWindow(unittest.TestCase):
         assert local_top is not None
         self.assertAlmostEqual(mk.ha_v, local_top, delta=1e-6)
         self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.02)
+
+    def _assert_err_first_stable_entry_not_tail(
+        self,
+        path: Path,
+        *,
+        expected_a_us: float,
+        tail_guard_us: float,
+        expected_err_mj: float,
+        min_a_us: float | None = None,
+    ) -> None:
+        bundle = load_waveform(path)
+        profile = guess_profile_from_path(str(path))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        mk = err_energy_markers(
+            t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+        )
+        ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
+        base = _err_recovery_settled_base(irr, ipk, bundle.dt, segs.turn_on[1])
+        ta_us = mk.t_start * 1e6
+        tb_us = mk.t_end * 1e6
+        peak_us = float(t[ipk]) * 1e6
+        base_start_us = float(t[base.start_idx]) * 1e6
+        self.assertGreater(ta_us, tb_us)
+        self.assertGreater(ta_us, peak_us)
+        if min_a_us is not None:
+            self.assertGreater(ta_us, min_a_us)
+        self.assertLess(ta_us, tail_guard_us)
+        self.assertLess(base_start_us, tail_guard_us)
+        self.assertAlmostEqual(ta_us, expected_a_us, delta=0.025)
+        self.assertAlmostEqual(
+            float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.05
+        )
+        _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
+        e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+        self.assertAlmostEqual(e, expected_err_mj, delta=0.25)
+        self.assertAlmostEqual(result.reverse_recovery.err, e, places=9)
+
+    @unittest.skipUnless(
+        SONG_SMC_RT_VL_806.exists(), "songzhenxi SMC RT VL 806A sample missing"
+    )
+    def test_smc_rt_vl_806_err_uses_first_stable_entry_not_tail(self):
+        self._assert_err_first_stable_entry_not_tail(
+            SONG_SMC_RT_VL_806,
+            expected_a_us=16.254416,
+            tail_guard_us=16.33,
+            expected_err_mj=13.543679,
+        )
+
+    @unittest.skipUnless(
+        SONG_SMC_RT_VL_1048.exists(), "songzhenxi SMC RT VL 1048A sample missing"
+    )
+    def test_smc_rt_vl_1048_err_uses_first_stable_entry_not_tail(self):
+        self._assert_err_first_stable_entry_not_tail(
+            SONG_SMC_RT_VL_1048,
+            expected_a_us=20.172930,
+            tail_guard_us=20.24,
+            expected_err_mj=16.262180,
+        )
+
+    @unittest.skipUnless(
+        SONG_SMC_RT_UH_1048.exists(), "songzhenxi SMC RT UH 1048A sample missing"
+    )
+    def test_smc_rt_uh_1048_err_keeps_lower_pp_candidate_near_user_mark(self):
+        self._assert_err_first_stable_entry_not_tail(
+            SONG_SMC_RT_UH_1048,
+            expected_a_us=19.408277,
+            min_a_us=19.36,
+            tail_guard_us=19.45,
+            expected_err_mj=13.980974,
+        )
 
     @unittest.skipUnless(GCU_LT_UH_500.exists(), "GCU LT UH 500A sample missing")
     def test_gcu_lt_uh_500_err_ha_uses_local_offset_top_not_mid(self):
