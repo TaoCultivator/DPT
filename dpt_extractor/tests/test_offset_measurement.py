@@ -13,6 +13,7 @@ from dpt_extractor.metrics.offset_measurement import (
     offset_measurement_marker,
     offset_measurement_unit_candidates,
     offset_measurement_unit,
+    scope_top_base,
 )
 
 
@@ -87,6 +88,31 @@ class TestOffsetMeasurement(unittest.TestCase):
         self.assertAlmostEqual(
             calculate_offset_measurement(t, y, "negative_overshoot"),
             20.0,
+        )
+
+    def test_top_base_use_local_range_modal_levels_not_global_extrema(self) -> None:
+        y = np.array(
+            [-120.0, -110.0, 0.0, 0.0, 0.1, 9.9, 10.0, 10.0, 40.0, 45.0],
+            dtype=np.float64,
+        )
+
+        top, base = scope_top_base(y[2:8])
+
+        self.assertAlmostEqual(top, 10.0)
+        self.assertAlmostEqual(base, 0.0)
+
+    def test_area_rms_and_ac_rms_stay_inside_selected_range(self) -> None:
+        t = np.array([10.0, 11.0, 12.0, 13.0], dtype=np.float64)
+        y = np.array([-2.0, 0.0, 2.0, 4.0], dtype=np.float64)
+
+        self.assertAlmostEqual(calculate_offset_measurement(t, y, "area"), 3.0)
+        self.assertAlmostEqual(
+            calculate_offset_measurement(t, y, "rms"),
+            float(np.sqrt(np.mean(y * y))),
+        )
+        self.assertAlmostEqual(
+            calculate_offset_measurement(t, y, "ac_rms"),
+            float(np.sqrt(np.mean((y - np.mean(y)) ** 2))),
         )
 
     def test_metric_aliases_and_marker_points(self) -> None:

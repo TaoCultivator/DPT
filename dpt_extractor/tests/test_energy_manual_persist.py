@@ -5,13 +5,10 @@ import os
 import sys
 import unittest
 
-import numpy as np
-
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.gui.main_window import MainWindow
-from dpt_extractor.gui.waveform_plot import WaveformPlot
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.models.bridge_profile import guess_profile_from_path
 from dpt_extractor.models.results import power_metric_name
@@ -120,7 +117,7 @@ class TestEnergyManualPersist(unittest.TestCase):
         win._clear_manual_adjustments(reset_plot=False)
         self.assertNotIn(("开通", "Eon"), win._manual_energy)
 
-    def _assert_vertical_drag_keeps_levels_and_snaps(
+    def _assert_vertical_drag_keeps_levels_and_custom_time(
         self,
         section: str,
         name: str,
@@ -138,90 +135,64 @@ class TestEnergyManualPersist(unittest.TestCase):
         a0 = float(plot._cursor_a.value())
         b0 = float(plot._cursor_b.value())
 
-        a_ref = a0 + 0.035
-        expected_a = plot._first_energy_level_crossing_us(
-            plot._energy_a_channel,
-            plot._from_disp(plot._energy_ha_channel, ha_y0),
-            a_ref,
-            use_abs=plot._energy_a_channel == "irr"
-            and (
-                plot._energy_fall_a_mode != "err_irr"
-                or plot._energy_irr_a_uses_magnitude(
-                    plot._from_disp(plot._energy_ha_channel, ha_y0)
-                )
-            ),
-            min_t_us=plot._energy_a_anchor_us
-            if plot._energy_fall_a_mode == "err_irr"
-            else None,
-            edge=plot._energy_manual_snap_edge("a"),
-        )
-        self.assertIsNotNone(expected_a)
+        a_ref = a0 + 0.037
         plot._cursor_a.setPos(a_ref)
 
         self.assertAlmostEqual(float(plot._h_cursor_a.value()), ha_y0, places=9)
         self.assertAlmostEqual(float(plot._h_cursor_b.value()), hb_y0, places=9)
-        self.assertAlmostEqual(float(plot._cursor_a.value()), float(expected_a), places=6)
+        self.assertAlmostEqual(float(plot._cursor_a.value()), a_ref, places=6)
 
-        b_ref = b0 + 0.035
-        if plot._energy_b_level_vce is not None:
-            b_channel = "vce"
-            b_level = plot._energy_b_level_vce
-        else:
-            b_channel = plot._energy_b_channel
-            b_level = plot._from_disp(plot._energy_hb_channel, hb_y0)
-        expected_b = plot._first_energy_level_crossing_us(
-            b_channel,
-            b_level,
-            b_ref,
-            use_abs=b_channel == "irr",
-            min_t_us=None
-            if plot._energy_rise_b_mode == "err_vd"
-            else float(plot._cursor_a.value()),
-            edge=plot._energy_manual_snap_edge("b"),
-        )
-        self.assertIsNotNone(expected_b)
+        b_ref = b0 + 0.063
         plot._cursor_b.setPos(b_ref)
 
         self.assertAlmostEqual(float(plot._h_cursor_a.value()), ha_y0, places=9)
         self.assertAlmostEqual(float(plot._h_cursor_b.value()), hb_y0, places=9)
-        self.assertAlmostEqual(float(plot._cursor_b.value()), float(expected_b), places=6)
+        self.assertAlmostEqual(float(plot._cursor_b.value()), b_ref, places=6)
 
-    def test_vertical_drag_keeps_energy_levels_and_snaps_to_crossing(self) -> None:
+        stored = win._manual_energy.get((section, name))
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertAlmostEqual(stored[0], a_ref, places=6)
+        self.assertAlmostEqual(stored[1], b_ref, places=6)
+
+    def test_vertical_drag_keeps_energy_levels_and_custom_time(self) -> None:
         for section, name in (
             ("关断过程", "Eoff"),
             ("开通", "Eon"),
             ("反向恢复", "Err"),
         ):
             with self.subTest(section=section, name=name):
-                self._assert_vertical_drag_keeps_levels_and_snaps(section, name)
+                self._assert_vertical_drag_keeps_levels_and_custom_time(section, name)
 
-    def test_energy_snap_uses_first_edge_crossing_in_visible_window(self) -> None:
-        plot = WaveformPlot()
-        plot._interactive_search_t0_us = 0.0
-        plot._interactive_search_t1_us = 1.0
-        plot.current_x_range_us = lambda: (0.05, 0.75)  # type: ignore[method-assign]
+    def test_horizontal_drag_keeps_energy_vertical_cursors(self) -> None:
+        win = self._window()
+        section, name = "关断过程", "Eoff"
+        win._on_value_clicked(section, name)
+        plot = win.wave_plot
+        assert plot._cursor_a is not None
+        assert plot._cursor_b is not None
+        assert plot._h_cursor_a is not None
+        assert plot._h_cursor_b is not None
 
-        t = np.array([0.0, 0.1, 0.2, 0.4, 0.5, 0.6, 0.8], dtype=float)
-        rising = np.array([-1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0], dtype=float)
-        plot._series_for_channel = lambda channel: (t, rising)  # type: ignore[method-assign]
+        plot._set_cursor_link_mode(linked=True)
+        a0 = float(plot._cursor_a.value())
+        b0 = float(plot._cursor_b.value())
+        ha_y = float(plot._h_cursor_a.value()) + 0.125
+        hb_y = float(plot._h_cursor_b.value()) - 0.125
 
-        first_rise = plot._first_energy_level_crossing_us(
-            "ic", 0.0, 0.58, edge="rising"
-        )
-        self.assertAlmostEqual(float(first_rise), 0.15, places=9)
+        plot._h_cursor_a.setPos(ha_y)
+        plot._h_cursor_b.setPos(hb_y)
 
-        falling = np.array([1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0], dtype=float)
-        plot._series_for_channel = lambda channel: (t, falling)  # type: ignore[method-assign]
+        self.assertAlmostEqual(float(plot._cursor_a.value()), a0, places=6)
+        self.assertAlmostEqual(float(plot._cursor_b.value()), b0, places=6)
 
-        first_fall = plot._first_energy_level_crossing_us(
-            "ic", 0.0, 0.58, edge="falling"
-        )
-        self.assertAlmostEqual(float(first_fall), 0.15, places=9)
-
-        gated_fall = plot._first_energy_level_crossing_us(
-            "ic", 0.0, 0.58, edge="falling", min_t_us=0.3
-        )
-        self.assertAlmostEqual(float(gated_fall), 0.55, places=9)
+        stored = win._manual_energy.get((section, name))
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        expected_ha = plot._from_disp(plot._energy_ha_channel, ha_y)
+        expected_hb = plot._from_disp(plot._energy_hb_channel, hb_y)
+        self.assertAlmostEqual(stored[2], expected_ha, places=6)
+        self.assertAlmostEqual(stored[3], expected_hb, places=6)
 
 
 if __name__ == "__main__":
