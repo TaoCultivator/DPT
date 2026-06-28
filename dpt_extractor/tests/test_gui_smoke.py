@@ -1730,6 +1730,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         win = MainWindow()
         win._begin_report_progress(5, "准备报告截图...")
         self.assertFalse(win.report_progress.isHidden())
+        self.assertEqual(win.report_progress.stage_text(), "报告写入")
         self.assertEqual(win.report_progress.maximum(), 5)
         self.assertEqual(win.report_progress.value(), 0)
         self.assertEqual(win.report_progress.percent_text(), "0.000%")
@@ -1751,6 +1752,26 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(win.report_progress.value(), 100)
         self.assertEqual(win.report_progress.percent_text(), "100.000%")
         self.assertEqual(win.report_progress.detail_text(), "完成")
+        win.close()
+
+    def test_load_progress_bar_updates(self):
+        from dpt_extractor.gui.main_window import MainWindow, TASK_PROGRESS_TOTAL
+
+        win = MainWindow()
+        win._load_request_id = 7
+        win._begin_task_progress("数据导入", TASK_PROGRESS_TOTAL, "准备读取原始数据...")
+        self.assertEqual(win.report_progress.stage_text(), "数据导入")
+        self.assertEqual(win.report_progress.detail_text(), "准备读取")
+
+        win._on_background_load_progress(7, 35000, TASK_PROGRESS_TOTAL, "解析波形数据...")
+        self.assertEqual(win.report_progress.value(), 35000)
+        self.assertEqual(win.report_progress.percent_text(), "35.000%")
+        self.assertEqual(win.report_progress.detail_text(), "解析波形")
+
+        win._finish_task_progress("导入完成 100%", ok=True, stage="数据导入")
+        self.assertEqual(win.report_progress.value(), 100)
+        self.assertEqual(win.report_progress.percent_text(), "100.000%")
+        self.assertEqual(win.report_progress.detail_text(), "导入完成")
         win.close()
 
     def test_report_write_progress_caps_until_finished(self):

@@ -58,21 +58,47 @@ def _plateau_mean_vce_before_off(
     return float(np.median(pre_v))
 
 
+def _local_band_center(values: np.ndarray) -> float:
+    """Signed center of a local waveform band, robust to isolated spikes."""
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) < 8:
+        return float(np.mean(vals)) if len(vals) else 0.0
+    p05, p95 = (float(np.nanpercentile(vals, p)) for p in (5, 95))
+    return 0.5 * (p05 + p95)
+
+
+def _scope_band_center(values: np.ndarray) -> float:
+    """Center of a local visible waveform band using the offset Top/Base logic."""
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) < 8:
+        return float(np.mean(vals)) if len(vals) else 0.0
+    top, base = scope_top_base(vals)
+    if np.isfinite(top) and np.isfinite(base):
+        center = 0.5 * (float(top) + float(base))
+        p01, p99 = (float(np.nanpercentile(vals, p)) for p in (1, 99))
+        margin = max(1e-9, 0.05 * (p99 - p01))
+        if p01 - margin <= center <= p99 + margin:
+            return float(center)
+    return _local_band_center(vals)
+
+
 def _quiet_local_platform_level(values: np.ndarray, dt: float, *, min_ns: float = 200.0) -> float:
-    """Median of the quietest local platform window, using about 200 ns as base."""
+    """Signed center of the quietest local platform band, using about 200 ns."""
     vals = np.asarray(values, dtype=np.float64)
     vals = vals[np.isfinite(vals)]
     if len(vals) < 8:
         return float(np.mean(vals)) if len(vals) else 0.0
     win_n = _samples_for_seconds(dt, min_ns * 1e-9, minimum=16)
     if len(vals) <= win_n:
-        return float(np.median(vals))
+        return _local_band_center(vals)
 
     step = max(1, win_n // 8)
     starts = list(range(0, len(vals) - win_n + 1, step))
     if starts[-1] != len(vals) - win_n:
         starts.append(len(vals) - win_n)
-    tail_ref = float(np.median(vals[-win_n:]))
+    tail_ref = _local_band_center(vals[-win_n:])
     best_start = starts[0]
     best_score = float("inf")
     for start in starts:
@@ -82,11 +108,96 @@ def _quiet_local_platform_level(values: np.ndarray, dt: float, *, min_ns: float 
         p05, p50, p95 = (float(np.nanpercentile(block, p)) for p in (5, 50, 95))
         pp = p95 - p05
         slope = abs(float(block[-1]) - float(block[0]))
-        score = pp + 0.15 * abs(p50 - tail_ref) + 0.05 * slope
+        center = 0.5 * (p05 + p95)
+        score = pp + 0.15 * abs(center - tail_ref) + 0.05 * slope + 0.02 * abs(p50 - center)
         if score < best_score:
             best_score = score
             best_start = start
-    return float(np.median(vals[best_start : best_start + win_n]))
+    return _local_band_center(vals[best_start : best_start + win_n])
+
+
+def _platform_center_rejecting_rise_tail(
+    values: np.ndarray,
+    dt: float,
+    *,
+    min_ns: float = 120.0,
+) -> float:
+    """Local platform center with protection against a nearby rising-edge tail."""
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) < 8:
+        return float(np.mean(vals)) if len(vals) else 0.0
+
+    level = _quiet_local_platform_level(vals, dt, min_ns=min_ns)
+    p05, p10, p50, p70, p80, p90, p95 = (
+        float(np.nanpercentile(vals, p)) for p in (5, 10, 50, 70, 80, 90, 95)
+    )
+    low_band = max(p50 - p10, p70 - p50, p50 - p05, 0.25)
+    high_tail = p90 - p50
+    if high_tail <= max(4.0, 4.0 * low_band):
+        return float(level)
+
+    cutoff = min(p80, p50 + max(2.5, 3.0 * low_band))
+    core = vals[vals <= cutoff]
+    if len(core) >= max(8, len(vals) // 3):
+        top, base = scope_top_base(core)
+        if np.isfinite(top) and np.isfinite(base):
+            spread = abs(float(top) - float(base))
+            if spread <= max(5.0, 5.0 * low_band):
+                return 0.5 * (float(top) + float(base))
+        return _quiet_local_platform_level(core, dt, min_ns=min_ns)
+
+    top, base = scope_top_base(vals)
+    if np.isfinite(top) and np.isfinite(base):
+        spread = abs(float(top) - float(base))
+        if spread <= max(5.0, 5.0 * low_band):
+            return 0.5 * (float(top) + float(base))
+    return float(level)
+
+
+def _refine_eoff_vce_base_before_rise(
+    vce: np.ndarray,
+    rise_idx: int,
+    sw0: int,
+    dt: float,
+    current_level: float,
+    span: float,
+) -> float:
+    """Refine Eoff Ha in the local stable Vce band just before the main rise."""
+    guard = _samples_for_seconds(dt, 20e-9, minimum=2)
+    win = _samples_for_seconds(dt, 220e-9, minimum=16)
+    hi = max(int(sw0) + 8, int(rise_idx) - guard)
+    lo = max(int(sw0), hi - win)
+    hi = max(lo + 1, min(hi, len(vce)))
+    seg = np.asarray(vce[lo:hi], dtype=np.float64)
+    if len(seg) < 8:
+        return float(current_level)
+    candidate = _scope_band_center(seg)
+    if abs(candidate - float(current_level)) <= max(5.0, 0.030 * max(float(span), 1.0)):
+        return float(candidate)
+    return float(current_level)
+
+
+def _refine_eoff_ic_base_after_fall(
+    ic: np.ndarray,
+    fall_idx: int,
+    w1: int,
+    dt: float,
+    current_level: float,
+    span: float,
+) -> float:
+    """Refine Eoff Hb in the local stable Ic band just after the main fall."""
+    guard = _samples_for_seconds(dt, 20e-9, minimum=2)
+    win = _samples_for_seconds(dt, 220e-9, minimum=16)
+    lo = min(max(0, int(w1) - 8), int(fall_idx) + guard)
+    hi = min(len(ic), int(w1) + 1, lo + win)
+    if hi <= lo + 7:
+        return float(current_level)
+    seg = np.asarray(ic[lo:hi], dtype=np.float64)
+    candidate = _scope_band_center(seg)
+    if abs(candidate - float(current_level)) <= max(8.0, 0.035 * max(float(span), 1.0)):
+        return float(candidate)
+    return float(current_level)
 
 
 def _plateau_mean_ic_after_off(
@@ -151,6 +262,8 @@ def _plateau_mean_vce_after_on(
     if len(post_v) < 8:
         return float(np.mean(post_v)) if len(post_v) else 0.0
     local_platform = _quiet_local_platform_level(post_v, dt)
+    if not _use_legacy_loss_platform_mode():
+        return local_platform
     i_top = float(np.percentile(post_i, 95))
     cond_thr = max(0.5 * i_top, 20.0)
     cond = post_i >= cond_thr
@@ -437,6 +550,13 @@ def _use_legacy_loss_cursor_mode() -> bool:
     return mode in {"legacy", "old", "current", "off", "0"}
 
 
+def _use_legacy_loss_platform_mode() -> bool:
+    mode = os.environ.get("DPT_LOSS_PLATFORM_MODE", "").strip().lower()
+    if mode in {"legacy", "old", "current", "off", "0"}:
+        return True
+    return _use_legacy_loss_cursor_mode()
+
+
 def _samples_for_seconds(dt: float, seconds: float, *, minimum: int = 1) -> int:
     return max(int(minimum), int(round(float(seconds) / max(float(dt), 1e-15))))
 
@@ -631,6 +751,43 @@ def _first_crossing_after_gate(
     return None
 
 
+def _voltage_fall_ringing_candidate_is_stable(
+    y_seg: np.ndarray,
+    level: float,
+    candidate_ix: int,
+    dt: float,
+    span: float,
+) -> bool:
+    """Audit an Eon Vce candidate before allowing it to exceed legacy timing."""
+    yy = np.asarray(y_seg, dtype=np.float64)
+    if len(yy) < 12:
+        return False
+    ix = max(0, min(int(candidate_ix), len(yy) - 2))
+    local_n = _samples_for_seconds(dt, 200e-9, minimum=16)
+    future_n = _samples_for_seconds(dt, 320e-9, minimum=local_n)
+    local = yy[ix : min(len(yy), ix + local_n)]
+    future = yy[ix : min(len(yy), ix + future_n)]
+    if len(local) < 12 or len(future) < len(local):
+        return False
+    local_dev = np.abs(local - float(level))
+    future_dev = np.abs(future - float(level))
+    local_pp = float(np.nanmax(local) - np.nanmin(local))
+    p85 = float(np.nanpercentile(local_dev, 85))
+    p95 = float(np.nanpercentile(local_dev, 95))
+    future_max = float(np.nanmax(future_dev))
+    s = max(float(span), 1.0)
+    pp_limit = max(18.0, min(34.0, 0.045 * s))
+    p85_limit = max(5.0, min(8.0, 0.012 * s))
+    p95_limit = max(6.0, min(10.0, 0.014 * s))
+    rebound_limit = max(14.0, min(24.0, 0.032 * s), 2.8 * max(p95, 1.0))
+    return (
+        local_pp <= pp_limit
+        and p85 <= p85_limit
+        and p95 <= p95_limit
+        and future_max <= rebound_limit
+    )
+
+
 def _first_sustained_rise_crossing(
     y_seg: np.ndarray,
     level: float,
@@ -654,6 +811,42 @@ def _first_sustained_rise_crossing(
             candidates.append(int(kk))
     if not candidates:
         return None
+
+    edge_gate: int | None = None
+    edge_hi = max(lo + 2, min(len(yy) - 1, int(k_trigger) + _samples_for_seconds(dt, 90e-9, minimum=8)))
+    edge_seg = yy[lo : edge_hi + 1]
+    if len(edge_seg) >= 12:
+        smooth_n = _samples_for_seconds(dt, 8e-9, minimum=5)
+        smooth = _edge_smoothed(edge_seg, smooth_n)
+        deriv = np.gradient(smooth, max(float(dt), 1e-15)) / 1e9
+        pos = deriv[np.isfinite(deriv) & (deriv > 0.0)]
+        if len(pos):
+            peak_der = float(np.nanmax(pos))
+            der_gate = max(
+                0.14 * peak_der,
+                min(2.0, max(0.12, 0.0015 * max(float(span), 1.0))),
+            )
+            peak_rel = int(np.nanargmax(deriv))
+            scan_hi = max(0, min(peak_rel, int(k_trigger) - lo))
+            hold_n = _samples_for_seconds(dt, 10e-9, minimum=3)
+            rise_n = _samples_for_seconds(dt, 70e-9, minimum=8)
+            min_future_rise = max(4.0, min(35.0, 0.035 * max(float(span), 1.0)))
+            for rel in range(0, scan_hi + 1):
+                hold = deriv[rel : min(len(deriv), rel + hold_n)]
+                future = smooth[rel : min(len(smooth), rel + rise_n)]
+                if len(hold) < 3 or len(future) < 3:
+                    continue
+                if float(np.nanpercentile(hold, 60)) < der_gate:
+                    continue
+                if float(np.nanmax(future)) - float(smooth[rel]) < min_future_rise:
+                    continue
+                edge_gate = lo + rel
+                break
+    if edge_gate is not None:
+        margin = _samples_for_seconds(dt, 8e-9, minimum=1)
+        gated = [kk for kk in candidates if kk >= max(lo, edge_gate - margin)]
+        if gated:
+            candidates = gated
 
     hold_n = _samples_for_seconds(dt, 18e-9, minimum=4)
     rise_n = _samples_for_seconds(dt, 70e-9, minimum=8)
@@ -1104,6 +1297,19 @@ def _settled_level_crossing_after_main_edge(
     if candidate_t > event_end_t + max(float(dt), 1e-15):
         return legacy_ix, legacy_t
     max_extra_delay = 260e-9 if settle_profile == "current_fall" else 90e-9
+    if (
+        settle_profile == "voltage_fall"
+        and event_gate.classification == "ringing"
+        and event_gate.significant_count >= 6
+        and _voltage_fall_ringing_candidate_is_stable(
+            yy,
+            lvl,
+            candidate_ix,
+            dt,
+            span,
+        )
+    ):
+        max_extra_delay = 260e-9
     if candidate_t > float(legacy_t) + max_extra_delay:
         return legacy_ix, legacy_t
     return int(candidate_ix), float(candidate_t)
@@ -1467,6 +1673,14 @@ def _plateau_mean_ic_before_on(
     pre = ic[w0:pre_end].astype(np.float64)
     if len(pre) < 8:
         return float(np.mean(pre)) if len(pre) else 0.0
+    if not _use_legacy_loss_platform_mode():
+        pre_margin = _samples_for_seconds(dt, 40e-9, minimum=1)
+        pre_span = _samples_for_seconds(dt, 600e-9, minimum=16)
+        local_hi = max(w0 + 1, int(on_idx) - pre_margin)
+        local_lo = max(int(w0), local_hi - pre_span)
+        local = ic[local_lo:local_hi].astype(np.float64)
+        if len(local) >= 8:
+            return _quiet_local_platform_level(local, dt)
     from dpt_extractor.metrics.plateau_level import turn_on_current_baseline_and_plateau
 
     hb, _ = turn_on_current_baseline_and_plateau(pre, dt)
@@ -1538,11 +1752,44 @@ def eoff_energy_markers(
         float(v_top),
         pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
     )
+    if not _use_legacy_loss_platform_mode():
+        refined_ha = _refine_eoff_vce_base_before_rise(
+            vce,
+            sw0 + i_start_local,
+            sw0,
+            dt,
+            ha_v,
+            abs(float(v_top) - float(ha_v)),
+        )
+        if abs(refined_ha - ha_v) > 1e-12:
+            ha_v = refined_ha
+            i_start_local, t_start = _eoff_vce_ha_crossing_at_main_rise(
+                t_sw,
+                v_seg,
+                ha_v,
+                dt,
+                float(v_top),
+                pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
+            )
 
     fall_anchor = max(i_start_local + 1, int(np.searchsorted(t_sw, t_start, side="left")))
     i_end_local, t_end = _eoff_ic_fall_crossing_at_main_fall(
         t_sw, i_seg, hb_a, fall_anchor, dt, float(i_top)
     )
+    if not _use_legacy_loss_platform_mode():
+        refined_hb = _refine_eoff_ic_base_after_fall(
+            ic,
+            sw0 + i_end_local,
+            w1,
+            dt,
+            hb_a,
+            float(i_top),
+        )
+        if abs(refined_hb - hb_a) > 1e-12:
+            hb_a = refined_hb
+            i_end_local, t_end = _eoff_ic_fall_crossing_at_main_fall(
+                t_sw, i_seg, hb_a, fall_anchor, dt, float(i_top)
+            )
 
     i_start = int(np.searchsorted(t, t_start, side="left"))
     i_end = int(np.searchsorted(t, t_end, side="left"))
@@ -2414,14 +2661,14 @@ def _err_vd_base_before_main_rise(
     )
     if k_trigger is None:
         return float(hb_hint)
-    pre_hi = int(np.searchsorted(t, float(t[k_trigger]) - 20e-9, side="left"))
-    pre_lo = int(np.searchsorted(t, float(t[k_trigger]) - 120e-9, side="left"))
+    pre_hi = int(np.searchsorted(t, float(t[k_trigger]) - 35e-9, side="left"))
+    pre_lo = int(np.searchsorted(t, float(t[k_trigger]) - 155e-9, side="left"))
     pre_lo = max(0, min(pre_lo, len(vd) - 1))
     pre_hi = max(pre_lo + 1, min(pre_hi, len(vd)))
     seg = np.asarray(vd[pre_lo:pre_hi], dtype=np.float64)
     if len(seg) < 8:
         return float(hb_hint)
-    return float(np.median(seg))
+    return float(_platform_center_rejecting_rise_tail(seg, dt, min_ns=120.0))
 
 
 def _err_vd_rise_cross_hb_t(

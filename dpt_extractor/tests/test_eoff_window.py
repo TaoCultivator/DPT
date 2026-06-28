@@ -133,9 +133,21 @@ SONG_SMC_RT = (
     / "SMC"
     / "RT"
 )
+SONG_SMC_HT = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "HT"
+)
 SONG_SMC_RT_UH_1048 = SONG_SMC_RT / "UH_750V_1048A_000.tss"
 SONG_SMC_RT_VL_806 = SONG_SMC_RT / "VL_750V_806A_000.tss"
 SONG_SMC_RT_VL_1048 = SONG_SMC_RT / "VL_750V_1048A_000.tss"
+SONG_SMC_HT_UH_1048 = SONG_SMC_HT / "UH_750V_1048A_000.tss"
+SONG_SMC_HT_WH_1048 = SONG_SMC_HT / "WH_750V_1048A_000.tss"
+SONG_SMC_HT_WL_1048 = SONG_SMC_HT / "WL_750V_1048A_000.tss"
 GCU_LT_UH_500 = (
     ROOT
     / "示例文件"
@@ -422,6 +434,37 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(mk.ha_v, 15.0)
         self.assertGreater(mk.t_start * 1e6, 14.68)
         self.assertLess(mk.t_start * 1e6, 14.74)
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_WL_1048.exists(), "songzhenxi SMC HT WL 1048A sample missing"
+    )
+    def test_smc_ht_wl_eoff_horizontal_cursors_use_local_band_center(self):
+        bundle = load_waveform(SONG_SMC_HT_WL_1048)
+        profile = guess_profile_from_path(str(SONG_SMC_HT_WL_1048))
+        cfg = load_config()
+        result = extract_all(bundle, profile, cfg)
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+        mk = eoff_energy_markers(
+            t,
+            ic,
+            vce,
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_off,
+            bundle.dt,
+            pre_ns=cfg.energy.eoff_pre_ns,
+            pulse1_on=segs.pulse1_on,
+        )
+        self.assertAlmostEqual(mk.ha_v, 3.929, delta=0.20)
+        self.assertAlmostEqual(mk.hb_a, -8.281, delta=0.45)
+        self.assertAlmostEqual(mk.t_start * 1e6, 15.378, delta=0.025)
+        self.assertAlmostEqual(mk.t_end * 1e6, 15.680, delta=0.035)
+        _assert_crossing(self, t, vce, mk.t_start, mk.ha_v, "rising")
+        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "falling")
 
     @unittest.skipUnless(SMC_RT_UL_806.exists(), "SMC RT UL 806A sample missing")
     def test_smc_rt_ul_806_eoff_a_uses_main_rise_ha_crossing(self):
@@ -1082,6 +1125,133 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(mk.t_end * 1e6, 16.45)
         self.assertAlmostEqual(energy, 91.225, delta=0.05)
         _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
+
+    def _assert_eon_platform_uses_local_stable_center(
+        self,
+        path: Path,
+        *,
+        expected_ha: float,
+        expected_hb: float,
+        expected_a_us: float,
+        expected_b_us: float,
+    ) -> None:
+        bundle = load_waveform(path)
+        profile = guess_profile_from_path(str(path))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+        mk = eon_energy_markers(
+            t,
+            ic,
+            vce,
+            segs.turn_on[0],
+            segs.turn_on[1],
+            segs.pulse2_on,
+            bundle.dt,
+            pulse1_off=segs.pulse1_off,
+        )
+        self.assertAlmostEqual(mk.ha_v, expected_ha, delta=0.30)
+        self.assertAlmostEqual(mk.hb_a, expected_hb, delta=0.35)
+        self.assertAlmostEqual(mk.t_start * 1e6, expected_a_us, delta=0.025)
+        self.assertAlmostEqual(mk.t_end * 1e6, expected_b_us, delta=0.035)
+        _assert_crossing(self, t, ic, mk.t_start, mk.ha_v, "any")
+        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_UH_1048.exists()
+        and SONG_SMC_HT_WH_1048.exists()
+        and SONG_SMC_HT_WL_1048.exists(),
+        "songzhenxi SMC HT 1048A Eon samples missing",
+    )
+    def test_smc_ht_eon_platforms_use_local_stable_center(self):
+        self._assert_eon_platform_uses_local_stable_center(
+            SONG_SMC_HT_UH_1048,
+            expected_ha=47.90625,
+            expected_hb=8.03125,
+            expected_a_us=18.458,
+            expected_b_us=18.966,
+        )
+        self._assert_eon_platform_uses_local_stable_center(
+            SONG_SMC_HT_WH_1048,
+            expected_ha=-0.671875,
+            expected_hb=7.984375,
+            expected_a_us=19.133,
+            expected_b_us=19.620,
+        )
+        self._assert_eon_platform_uses_local_stable_center(
+            SONG_SMC_HT_WL_1048,
+            expected_ha=-8.265625,
+            expected_hb=4.40625,
+            expected_a_us=19.295,
+            expected_b_us=19.735,
+        )
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_WL_1048.exists(), "songzhenxi SMC HT WL 1048A sample missing"
+    )
+    def test_smc_ht_wl_err_vd_hb_rejects_rise_tail_contamination(self):
+        bundle = load_waveform(SONG_SMC_HT_WL_1048)
+        profile = guess_profile_from_path(str(SONG_SMC_HT_WL_1048))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        mk = err_energy_markers(
+            t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+        )
+        self.assertAlmostEqual(mk.hb_a, 4.0, delta=0.10)
+        self.assertAlmostEqual(mk.t_end * 1e6, 19.4491, delta=0.020)
+        _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
+        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+
+    @unittest.skipUnless(SONG_SMC_HT_WH_1048.exists(), "songzhenxi SMC HT WH 1048A sample missing")
+    def test_eon_platform_legacy_mode_restores_previous_level_selection(self):
+        old_mode = os.environ.get("DPT_LOSS_PLATFORM_MODE")
+        os.environ["DPT_LOSS_PLATFORM_MODE"] = "legacy"
+        try:
+            bundle = load_waveform(SONG_SMC_HT_WH_1048)
+            profile = guess_profile_from_path(str(SONG_SMC_HT_WH_1048))
+            result = extract_all(bundle, profile, load_config())
+            segs = result.segments
+            assert segs is not None
+            ic = bundle_total_current(bundle, profile)
+            vce = bundle.get(profile.vce)
+            mk = eon_energy_markers(
+                bundle.t,
+                ic,
+                vce,
+                segs.turn_on[0],
+                segs.turn_on[1],
+                segs.pulse2_on,
+                bundle.dt,
+                pulse1_off=segs.pulse1_off,
+            )
+        finally:
+            if old_mode is None:
+                os.environ.pop("DPT_LOSS_PLATFORM_MODE", None)
+            else:
+                os.environ["DPT_LOSS_PLATFORM_MODE"] = old_mode
+        self.assertAlmostEqual(mk.ha_v, -4.390625, delta=0.001)
+        self.assertAlmostEqual(mk.hb_a, 3.9375, delta=0.001)
+        self.assertAlmostEqual(mk.t_start * 1e6, 19.129, delta=0.025)
+        self.assertAlmostEqual(mk.t_end * 1e6, 19.516, delta=0.035)
+
+    def test_quiet_platform_level_uses_signed_band_center_not_abs_value(self):
+        y = np.concatenate(
+            [
+                np.linspace(-13.0, -9.0, 120),
+                np.array([-40.0, 20.0], dtype=np.float64),
+            ]
+        )
+        level = _quiet_local_platform_level(y, 2e-9)
+        self.assertAlmostEqual(level, -11.0, delta=0.30)
+        self.assertLess(level, 0.0)
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_rr_dvdt_ha_post_ring_plateau(self):
