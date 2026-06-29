@@ -901,6 +901,59 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(saved_wave.cell(230, 1).value, "750V_200A")
             self.assertEqual(saved_wave.cell(266, 1).value, "UL_25℃")
 
+    def test_dpt_report_written_values_normalize_font_and_alignment(self):
+        from openpyxl.styles import Alignment, Font
+
+        from dpt_extractor.export.mcu2506_layout import COL_ON
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOnResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "W相_双脉冲数据"
+            ws.merge_cells("A25:A28")
+            ws.merge_cells("B25:B28")
+            ws.merge_cells("C25:C28")
+            ws["A25"] = "WL"
+            ws["B25"] = "-40℃"
+            ws["C25"] = "Rg_on = 3.624ohm\nRg_off = 3.586 ohm\nCg = 10 nf"
+
+            stale_style_cols = (
+                COL_ON["ls_on"],
+                COL_ON["tr"],
+                COL_ON["crosstalk"],
+            )
+            for col in stale_style_cols:
+                cell = ws.cell(25, col)
+                cell.font = Font(size=11)
+                cell.alignment = Alignment(horizontal=None, vertical="center")
+            wb.save(report)
+
+            summary = write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "LT" / "WL_750V_1048A_000.tss"),
+                    profile_code="WL",
+                    turn_on=TurnOnResult(
+                        ls_on=32.518,
+                        tr=111.27,
+                        crosstalk_vmax=2.42,
+                        crosstalk_vmin=-5.45,
+                    ),
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)["W相_双脉冲数据"]
+            self.assertEqual(summary.data_row, 25)
+            for col in stale_style_cols:
+                cell = saved.cell(25, col)
+                self.assertIsNotNone(cell.value)
+                self.assertEqual(cell.font.sz, 12)
+                self.assertEqual(cell.alignment.horizontal, "center")
+                self.assertEqual(cell.alignment.vertical, "center")
+
     def test_dpt_template_appends_waveform_block_with_two_separator_rows(self):
         from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_VOLTAGE
         from dpt_extractor.export.report_template import write_report_template

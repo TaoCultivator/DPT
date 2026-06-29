@@ -120,6 +120,7 @@ _WAVEFORM_HEADER_ROW_HEIGHT_PX = 26
 _WAVEFORM_HEADER_FONT_SIZE = 10
 _WAVEFORM_LEFT_LABEL_FONT_SIZE = 20
 _WAVEFORM_STATE_FONT_SIZE = 11
+_DPT_REPORT_DATA_FONT_SIZE = 12
 _REPORT_VIEW_DEFAULT_SCREEN_WIDTH_PX = 1920
 _REPORT_VIEW_HORIZONTAL_MARGIN_PX = 160
 _REPORT_VIEW_MIN_ZOOM = 55
@@ -897,6 +898,20 @@ def _set_value(ws: Worksheet, row: int, col: int, value) -> None:
     ws.cell(row, col, value)
 
 
+def _normalize_dpt_written_data_row_style(ws: Worksheet, row: int) -> None:
+    """Keep DPT report value cells visually consistent even on older templates."""
+    max_col = max(ws.max_column, LAST_COL)
+    for col in range(COL_VOLTAGE, min(max_col, LAST_COL) + 1):
+        cell = ws.cell(row, col)
+        font = copy(cell.font)
+        font.sz = _DPT_REPORT_DATA_FONT_SIZE
+        cell.font = font
+        alignment = copy(cell.alignment)
+        alignment.horizontal = "center"
+        alignment.vertical = "center"
+        cell.alignment = alignment
+
+
 def _set_metric_value(
     ws: Worksheet,
     row: int,
@@ -1174,6 +1189,7 @@ def _write_dpt_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
         tail_col = col("汇总", COL_TAIL["etotal"], "Etotal（all）", "Etotal")
         if tail_col is not None:
             _set_value(ws, row, tail_col, _num(etotal, 3) if etotal > 0 else None)
+    _normalize_dpt_written_data_row_style(ws, row)
 
 
 def _normalized(text: object) -> str:
