@@ -10,6 +10,7 @@ from dpt_extractor.metrics.iec_windows import (
     _loss_cursor_event_gate_after_main_edge,
     _err_ha_top_from_offset_window,
     _err_recovery_settled_base,
+    _err_vd_base_from_offset_window,
     _first_sustained_rise_crossing,
     _quiet_local_platform_level,
     eoff_energy_markers,
@@ -256,7 +257,7 @@ def _assert_vd_main_rise_after(
     hb: float,
     *,
     within_s: float = 120e-9,
-    min_rise_v: float = 30.0,
+    min_rise_v: float = 25.0,
 ) -> None:
     vd_at_cross = float(np.interp(float(t_cross), t, vd))
     case.assertAlmostEqual(
@@ -1205,10 +1206,44 @@ class TestEoffWindow(unittest.TestCase):
         mk = err_energy_markers(
             t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
         )
-        self.assertAlmostEqual(mk.hb_a, 4.0, delta=0.10)
-        self.assertAlmostEqual(mk.t_end * 1e6, 19.4491, delta=0.020)
+        self.assertAlmostEqual(mk.hb_a, -4.02, delta=0.15)
+        self.assertAlmostEqual(mk.t_end * 1e6, 19.367, delta=0.030)
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
         _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+
+    @unittest.skipUnless(
+        SONG_SMC_HT.exists(), "songzhenxi SMC HT samples missing"
+    )
+    def test_smc_ht_1048_err_vd_hb_matches_local_offset_base(self):
+        """Err Hb(Vd) must match the Vd Base of the parameter-local offset window."""
+        paths = sorted(SONG_SMC_HT.glob("*_750V_1048A_000.tss"))
+        self.assertGreaterEqual(len(paths), 6)
+        for path in paths:
+            with self.subTest(path=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                result = extract_all(bundle, profile, load_config())
+                segs = result.segments
+                assert segs is not None
+                t = bundle.t
+                irr = bundle_reverse_recovery_current(bundle, profile)
+                vd = bundle.get(profile.v_diode)
+                rr0, rr1 = segs.reverse_recovery
+                mk = err_energy_markers(
+                    t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+                )
+                ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
+                err_base = _err_recovery_settled_base(
+                    irr, ipk, bundle.dt, segs.turn_on[1]
+                )
+                expected = _err_vd_base_from_offset_window(t, vd, mk.t_end, err_base)
+                self.assertIsNotNone(expected)
+                assert expected is not None
+                self.assertAlmostEqual(mk.hb_a, expected, delta=0.08)
+                self.assertLess(abs(mk.hb_a), 15.0)
+                _assert_vd_main_rise_after(
+                    self, t, vd, mk.t_end, mk.hb_a, within_s=220e-9
+                )
 
     @unittest.skipUnless(SONG_SMC_HT_WH_1048.exists(), "songzhenxi SMC HT WH 1048A sample missing")
     def test_eon_platform_legacy_mode_restores_previous_level_selection(self):

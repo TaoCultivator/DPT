@@ -1943,6 +1943,20 @@ def _scope_top_in_time_window(
     t_hi_s: float,
 ) -> float | None:
     """Top value using the same range-local algorithm as offset measurement."""
+    top_base = _scope_top_base_in_time_window(t, y, t_lo_s, t_hi_s)
+    if top_base is None:
+        return None
+    top, _base = top_base
+    return float(top)
+
+
+def _scope_top_base_in_time_window(
+    t: np.ndarray,
+    y: np.ndarray,
+    t_lo_s: float,
+    t_hi_s: float,
+) -> tuple[float, float] | None:
+    """Top/Base values using the same range-local algorithm as offset measurement."""
     if len(t) == 0 or len(y) == 0:
         return None
     lo = min(float(t_lo_s), float(t_hi_s))
@@ -1955,9 +1969,9 @@ def _scope_top_in_time_window(
     if len(block) < 8:
         return None
     top, _base = scope_top_base(block)
-    if not np.isfinite(top):
+    if not np.isfinite(top) or not np.isfinite(_base):
         return None
-    return float(top)
+    return float(top), float(_base)
 
 
 def _err_ha_top_from_offset_window(
@@ -1999,6 +2013,36 @@ def _err_ha_top_from_offset_window(
     if hi - lo < min_len:
         return None
     return _scope_top_in_time_window(t, irr, float(t[lo]), float(t[hi - 1]))
+
+
+def _err_vd_base_from_offset_window(
+    t: np.ndarray,
+    vd: np.ndarray,
+    t_b_v: float,
+    err_base: _ErrRecoveryBase,
+) -> float | None:
+    """Err Hb(Vd) Base using the same local screen range as offset measurement."""
+    if len(t) == 0 or len(vd) == 0:
+        return None
+    i_a_hint = max(0, min(int(err_base.start_idx), len(t) - 1))
+    t_a_hint = float(t[i_a_hint])
+    raw_lo = min(float(t_b_v), t_a_hint) - 150e-9
+    raw_hi = max(float(t_b_v), t_a_hint) + 150e-9
+    center = 0.5 * (raw_lo + raw_hi)
+    half_width = max(1.0e-6, 0.5 * (raw_hi - raw_lo))
+    full_lo = float(t[0])
+    full_hi = float(t[-1])
+    if center - half_width < full_lo:
+        center = full_lo + half_width
+    if center + half_width > full_hi:
+        center = full_hi - half_width
+    top_base = _scope_top_base_in_time_window(
+        t, vd, center - half_width, center + half_width
+    )
+    if top_base is None:
+        return None
+    _top, base = top_base
+    return float(base)
 
 
 def _legacy_err_recovery_settled_base(
@@ -2685,6 +2729,17 @@ def _err_vd_rise_cross_hb_t(
     )
     if hi <= lo + 1:
         return float(t[min(ipk_global, len(t) - 1)])
+    lookahead = _samples_for_seconds(dt, 120e-9, minimum=2)
+    min_rise = 30.0
+    for k in range(lo, hi):
+        y0 = float(vd[k])
+        y1 = float(vd[k + 1])
+        if not (y0 <= float(hb) <= y1 and y1 > y0 and abs(y1 - y0) > 1e-30):
+            continue
+        k_hi = min(hi + 1, k + lookahead + 1)
+        if float(np.max(vd[k : k_hi + 1])) - float(hb) < min_rise:
+            continue
+        return float(_err_interp_cross_time(t, vd, k, float(hb)))
     _, t_cross = _main_edge_level_crossing(
         t[lo : hi + 1],
         vd[lo : hi + 1],
@@ -2847,6 +2902,11 @@ def err_energy_markers(
     # Ha(Irr) 需要按点击参数后的局部放大窗口 Top 定义取值，所以先确定 B，
     # 再用 B 与 Irr 稳定入口组成局部窗口；不得用全波形 Top/Base。
     t_b_v = _err_vd_rise_cross_hb_t(t, vd_full, hb_v, ipk_global, i0, dt)
+    if not _use_legacy_loss_platform_mode():
+        hb_from_offset = _err_vd_base_from_offset_window(t, vd_full, t_b_v, err_base)
+        if hb_from_offset is not None:
+            hb_v = float(hb_from_offset)
+            t_b_v = _err_vd_rise_cross_hb_t(t, vd_full, hb_v, ipk_global, i0, dt)
     if not _use_legacy_loss_cursor_mode():
         ha_top = _err_ha_top_from_offset_window(t, irr_full, t_b_v, err_base, dt)
         if ha_top is not None:

@@ -8340,3 +8340,23 @@ class WaveformPlot(QWidget):
                 center_us - scale_us * HORIZONTAL_DIV_COUNT * 0.5,
                 center_us + scale_us * HORIZONTAL_DIV_COUNT * 0.5,
             )
+
+    def focus_anchor_left_divs_us(
+        self, anchor_us: float, *, left_divs: float = 2.0
+    ) -> None:
+        """局部放大时把事件锚点放在左侧若干格，给右侧振荡留观察空间。"""
+        scale_us = self._param_focus_x_scale_us()
+        left_divs = float(np.clip(float(left_divs), 0.0, HORIZONTAL_DIV_COUNT))
+        center_us = float(anchor_us) + (HORIZONTAL_DIV_COUNT * 0.5 - left_divs) * scale_us
+        self._apply_x_us_per_div(scale_us, center_us=center_us)
+        self._apply_disp_yrange()
+        vb = self.plot.getPlotItem().getViewBox()
+        try:
+            xr = vb.viewRange()[0]
+            self._last_x_window = (float(xr[0]), float(xr[1]))
+        except Exception:
+            span = scale_us * HORIZONTAL_DIV_COUNT
+            self._last_x_window = (
+                center_us - span * 0.5,
+                center_us + span * 0.5,
+            )

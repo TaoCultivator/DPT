@@ -58,6 +58,16 @@ SMC_RT_UL_403 = (
     / "tss"
     / "UL_600V_403A_000.tss"
 )
+SONG_SMC_HT_WL_1048 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "HT"
+    / "WL_750V_1048A_000.tss"
+)
 
 
 class TestWaveformImportAutoCenter(unittest.TestCase):
@@ -4454,6 +4464,93 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertGreater(res.didt, 1.0)
         self.assertIsNotNone(res.t_pct_a_s)
         self.assertIsNotNone(res.t_pct_b_s)
+
+    def test_slope_horizontal_drag_does_not_refocus_view(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        for section, name, enable in (
+            ("关断过程", "dv/dt", "_enable_dvdt_interaction"),
+            ("反向恢复", "di/dt", "_enable_didt_interaction"),
+        ):
+            with self.subTest(section=section, name=name):
+                plot, bundle, profile, result = self._load_and_plot(UH)
+                win = MainWindow()
+                win.bundle = bundle
+                win.profile = profile
+                win.result = result
+                win.cfg = __import__(
+                    "dpt_extractor.config.loader", fromlist=["load_config"]
+                ).load_config()
+                win.wave_plot = plot
+                win.result_table.set_result(result)
+                getattr(win, enable)(section)
+
+                plot.focus_interval_us(12.0, 14.0)
+                before = plot.current_x_range_us()
+                self.assertIsNotNone(before)
+                assert before is not None
+                assert plot._h_cursor_b is not None
+                plot._h_cursor_b.setPos(float(plot._h_cursor_b.value()) + 0.1)
+                QApplication.processEvents()
+                after = plot.current_x_range_us()
+                self.assertIsNotNone(after)
+                assert after is not None
+                self.assertAlmostEqual(after[0], before[0], places=6)
+                self.assertAlmostEqual(after[1], before[1], places=6)
+                win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_WL_1048.exists(), "songzhenxi SMC HT WL 1048A sample missing"
+    )
+    def test_switching_parameter_focus_keeps_gate_edge_two_divisions_from_left(self):
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_DEFAULT_US_PER_DIV
+
+        plot, bundle, profile, result = self._load_and_plot(SONG_SMC_HT_WL_1048)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+
+        def assert_focus(section: str, name: str) -> None:
+            win._on_value_clicked(section, name)
+            xr = plot.current_x_range_us()
+            self.assertIsNotNone(xr)
+            x0, x1 = xr
+            edge_us = win._switching_focus_anchor_us(section)
+            self.assertIsNotNone(edge_us)
+            assert edge_us is not None
+            if section == "关断过程":
+                ref = win._turn_off_timing_instants().t_v90_s
+            else:
+                ref = win._turn_on_timing_instants().t_v10_s
+            self.assertIsNotNone(ref)
+            assert ref is not None
+            ref_us = float(ref * 1e6)
+            self.assertGreaterEqual(ref_us - edge_us, -1e-9)
+            self.assertLessEqual(ref_us - edge_us, 0.250001)
+            self.assertAlmostEqual(
+                x0, edge_us - 2.0 * PARAM_FOCUS_DEFAULT_US_PER_DIV, delta=0.02
+            )
+            self.assertAlmostEqual(
+                x1 - x0, PARAM_FOCUS_DEFAULT_US_PER_DIV * 10.0, delta=0.02
+            )
+            if plot._cursor_a is not None and plot._cursor_b is not None:
+                a = float(plot._cursor_a.value())
+                b = float(plot._cursor_b.value())
+                self.assertGreaterEqual(min(a, b), x0 - 1e-6)
+                self.assertLessEqual(max(a, b), x1 + 1e-6)
+
+        assert_focus("关断过程", "Eoff")
+        assert_focus("开通", "Eon")
+        assert_focus("反向恢复", "di/dt")
+        win.close()
 
     def test_param_focus_x_scale_memory(self):
         from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_DEFAULT_US_PER_DIV

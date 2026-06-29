@@ -101,6 +101,7 @@ from dpt_extractor.models.slope_range import (
 from dpt_extractor.models.waveform import WaveformBundle, normalize_channel_reference
 from dpt_extractor.metrics.iec_windows import (
     IntegrationWindow,
+    _quiet_local_platform_level,
     eoff_energy_markers,
     eoff_window_scope_example,
     eon_energy_markers,
@@ -138,6 +139,7 @@ from dpt_extractor.metrics.iec_timings import (
     turn_on_vce_top_from_ic_rise,
     turn_on_timing_instants,
 )
+from dpt_extractor.utils.signal import crossing_time, smooth, threshold_value
 from dpt_extractor.metrics.plateau_level import _turn_on_vce_pre_fall_slice
 from dpt_extractor.models.test_mode import MODE_UI_LABELS, TestMode, parse_test_mode
 from dpt_extractor.pipeline.extract import _turn_on_delta_vce_knee_point
@@ -3024,6 +3026,174 @@ class MainWindow(QMainWindow):
             return None
         return 0.5 * (float(np.max(seg)) + float(np.min(seg)))
 
+    def _vge_focus_edge_start_us(self, section: str) -> float | None:
+        """默认局部视图锚点：在 IEC 10/90 计时点附近前探 Vge 边沿起始点。"""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        segs = self.result.segments
+        t = self.bundle.t
+        vge = np.asarray(self.bundle.get(self.profile.vge), dtype=np.float64)
+        dt = max(float(self.bundle.dt), 1e-15)
+        n = len(t)
+        if n < 20 or len(vge) != n:
+            return None
+
+        def _cross_start_us(
+            w0: int,
+            w1: int,
+            v_lo: float,
+            v_hi: float,
+            direction: str,
+            levels: tuple[float, ...],
+        ) -> float | None:
+            if w1 <= w0 + 10:
+                return None
+            if abs(v_hi - v_lo) < 1.0:
+                return None
+            ts = t[w0 : w1 + 1]
+            vge_s = smooth(vge[w0 : w1 + 1], dt, self.cfg.smoothing.detect_window_ns)
+            starts: list[float] = []
+            for pct in levels:
+                tv = crossing_time(
+                    ts,
+                    vge_s,
+                    threshold_value(v_lo, v_hi, pct),
+                    direction,
+                    start=0,
+                )
+                if tv is not None and np.isfinite(tv):
+                    starts.append(float(tv))
+            if not starts:
+                return None
+            return min(starts) * 1e6
+
+        reference_us: float | None = None
+        if section == "关断过程":
+            try:
+                inst = self._turn_off_timing_instants()
+                if inst.t_v90_s is not None:
+                    reference_us = float(inst.t_v90_s * 1e6)
+            except Exception:
+                reference_us = None
+            pulse1_on = int(segs.pulse1_on)
+            off_idx = int(segs.pulse1_off)
+            pulse2_on = int(segs.pulse2_on)
+            p1w = max(10, off_idx - pulse1_on)
+            gap12 = max(10, pulse2_on - off_idx)
+            pre_hi = max(int(50e-9 / dt), int(0.03 * p1w))
+            post_lo = max(int(80e-9 / dt), int(0.06 * gap12))
+
+            hi0 = max(0, min(pulse1_on, n - 2))
+            hi1 = max(hi0 + 20, min(off_idx - pre_hi, n - 1))
+            if hi1 <= hi0 + 5:
+                hi1 = max(hi0 + 20, min(off_idx - int(15e-9 / dt), n - 1))
+            lo0 = min(n - 1, max(off_idx + int(150e-9 / dt), hi1 + 10))
+            lo1 = max(lo0 + 20, min(pulse2_on - post_lo, n - 1))
+            if lo1 <= lo0 + 5:
+                lo1 = max(lo0 + 20, min(off_idx + int(2e-6 / dt), n - 1))
+            if hi1 <= hi0 + 5 or lo1 <= lo0 + 5:
+                return None
+
+            fall_span = max(int(1.2e-6 / dt), int(0.25 * p1w), int(0.5 * gap12))
+            w0 = max(0, pulse1_on, off_idx - fall_span)
+            if reference_us is not None:
+                ref_idx = int(np.searchsorted(t, reference_us * 1e-6, side="left"))
+                w0 = max(w0, ref_idx - int(350e-9 / dt))
+            w1 = min(n - 1, off_idx)
+            v_hi = float(np.percentile(vge[hi0:hi1], 95))
+            v_lo = float(np.percentile(vge[lo0:lo1], 5))
+            edge_us = _cross_start_us(w0, w1, v_lo, v_hi, "falling", (0.98, 0.95, 0.90))
+            if edge_us is None:
+                return None
+            if reference_us is not None:
+                edge_us = min(reference_us, max(edge_us, reference_us - 0.25))
+            return edge_us
+
+        if section in {"开通", "反向恢复"}:
+            try:
+                inst = self._turn_on_timing_instants()
+                if inst.t_v10_s is not None:
+                    reference_us = float(inst.t_v10_s * 1e6)
+            except Exception:
+                reference_us = None
+            pulse1_off = int(segs.pulse1_off)
+            on_idx = int(segs.pulse2_on)
+            pulse2_off = int(segs.pulse2_off)
+            same_pulse = on_idx <= pulse1_off
+            gap12 = max(10, on_idx - pulse1_off) if not same_pulse else max(10, on_idx)
+            p2w = max(10, pulse2_off - on_idx)
+            pre_lo = max(int(50e-9 / dt), int(0.05 * gap12))
+            post_hi = max(int(80e-9 / dt), int(0.06 * p2w))
+
+            if same_pulse:
+                lo0 = max(0, on_idx - int(500e-9 / dt))
+                lo1 = max(lo0 + 20, min(on_idx - pre_lo, n - 1))
+            else:
+                lo0 = min(n - 1, max(pulse1_off + int(150e-9 / dt), 0))
+                lo1 = max(lo0 + 20, min(on_idx - pre_lo, n - 1))
+            if lo1 <= lo0 + 5:
+                lo1 = max(lo0 + 20, min(on_idx - int(15e-9 / dt), n - 1))
+            hi0 = min(n - 1, max(on_idx + int(150e-9 / dt), lo1 + 10))
+            hi1 = max(hi0 + 20, min(pulse2_off - post_hi, n - 1))
+            if lo1 <= lo0 + 5 or hi1 <= hi0 + 5:
+                return None
+
+            rise_span = max(int(1.2e-6 / dt), int(0.25 * gap12), int(0.5 * p2w))
+            w0 = max(0, on_idx - rise_span) if same_pulse else max(0, pulse1_off, on_idx - rise_span)
+            if reference_us is not None:
+                ref_idx = int(np.searchsorted(t, reference_us * 1e-6, side="left"))
+                w0 = max(w0, ref_idx - int(350e-9 / dt))
+            w1 = min(n - 1, on_idx)
+            v_lo = float(np.percentile(vge[lo0:lo1], 5))
+            v_hi = float(np.percentile(vge[hi0:hi1], 95))
+            edge_us = _cross_start_us(w0, w1, v_lo, v_hi, "rising", (0.02, 0.05, 0.10))
+            if edge_us is None:
+                return None
+            if reference_us is not None:
+                edge_us = min(reference_us, max(edge_us, reference_us - 0.25))
+            return edge_us
+
+        return None
+
+    def _switching_focus_anchor_us(self, section: str) -> float | None:
+        """参数局部视图锚点：关断看 Vge 下降起始，开通/反向恢复看 Vge 抬升起始。"""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        edge_start_us = self._vge_focus_edge_start_us(section)
+        if edge_start_us is not None:
+            return edge_start_us
+        segs = self.result.segments
+        if section == "关断过程":
+            try:
+                inst = self._turn_off_timing_instants()
+                if inst.t_v90_s is not None:
+                    return float(inst.t_v90_s * 1e6)
+            except Exception:
+                pass
+            idx = int(segs.pulse1_off)
+        elif section in {"开通", "反向恢复"}:
+            try:
+                inst = self._turn_on_timing_instants()
+                if inst.t_v10_s is not None:
+                    return float(inst.t_v10_s * 1e6)
+            except Exception:
+                pass
+            idx = int(segs.pulse2_on)
+        else:
+            return None
+        if idx < 0 or idx >= len(self.bundle.t):
+            return None
+        return float(self.bundle.t[idx] * 1e6)
+
+    def _focus_switching_local_view(
+        self, section: str, fallback_t0_us: float, fallback_t1_us: float
+    ) -> None:
+        anchor_us = self._switching_focus_anchor_us(section)
+        if anchor_us is None:
+            self.wave_plot.focus_interval_us(fallback_t0_us, fallback_t1_us)
+            return
+        self.wave_plot.focus_anchor_left_divs_us(anchor_us, left_divs=2.0)
+
     def _turn_off_rise_us(self) -> float | None:
         """关断 Vce 主抬升脚时刻（µs）：段内 Vce<=on_hi 的最大 dV/dt 点。"""
         if self.bundle is None or self.result is None or self.result.segments is None:
@@ -3313,10 +3483,6 @@ class MainWindow(QMainWindow):
                 ta_us = res.t_pct_a_s * 1e6
                 tb_us = res.t_pct_b_s * 1e6
                 self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
-                pad = max(0.08, abs(ta_us - tb_us) * 4.0)
-                self.wave_plot.focus_interval_us(
-                    min(ta_us, tb_us) - pad, max(ta_us, tb_us) + pad
-                )
             self._apply_dvdt_result(section, res, top_v_live, base_v_live, t0, t1)
 
         self.wave_plot.enable_dvdt_interaction(
@@ -3333,6 +3499,11 @@ class MainWindow(QMainWindow):
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
+        if restored is None:
+            self._focus_switching_local_view(section, search_t0, search_t1)
+        elif res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
+            ta_us = res0.t_pct_a_s * 1e6
+            tb_us = res0.t_pct_b_s * 1e6
             pad = max(0.08, abs(ta_us - tb_us) * 4.0)
             self.wave_plot.focus_interval_us(
                 min(ta_us, tb_us) - pad, max(ta_us, tb_us) + pad
@@ -3479,7 +3650,14 @@ class MainWindow(QMainWindow):
             tail = seg[tail0:]
             if len(tail) < 8:
                 tail = seg[ipk_if :]
-            hb = float(np.percentile(tail, 50))
+            dt = float(getattr(getattr(self, "bundle", None), "dt", 0.0) or 0.0)
+            if len(tail) >= 8 and dt > 0.0:
+                hb = float(_quiet_local_platform_level(tail, dt, min_ns=200.0))
+            elif len(tail) >= 8:
+                p05, p95 = (float(np.nanpercentile(tail, p)) for p in (5, 95))
+                hb = 0.5 * (p05 + p95)
+            else:
+                hb = float(np.percentile(tail, 50)) if len(tail) else 0.0
             return ha, hb
         idm, _, _ = analyze_rr_recovery_current(seg)
         return 0.0, float(idm)
@@ -3790,15 +3968,10 @@ class MainWindow(QMainWindow):
                 ta_us = res.t_pct_a_s * 1e6
                 tb_us = res.t_pct_b_s * 1e6
                 self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
-                pad = max(0.08, abs(ta_us - tb_us) * 4.0)
-                t_lo = min(ta_us, tb_us) - pad
-                t_hi = max(ta_us, tb_us) + pad
-                self.wave_plot.focus_interval_us(t_lo, t_hi)
             self._apply_didt_result(
                 section, res, top_a_live, base_a_live, t0, t1, zero_live
             )
 
-        self.wave_plot.focus_interval_us(min(search_t0, search_t1), max(search_t0, search_t1))
         self.wave_plot.enable_dvdt_interaction(
             search_t0,
             search_t1,
@@ -3821,6 +3994,11 @@ class MainWindow(QMainWindow):
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
+        if manual is None:
+            self._focus_switching_local_view(section, search_t0, search_t1)
+        elif res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
+            ta_us = res0.t_pct_a_s * 1e6
+            tb_us = res0.t_pct_b_s * 1e6
             pad = max(0.08, abs(ta_us - tb_us) * 4.0)
             self.wave_plot.focus_interval_us(
                 min(ta_us, tb_us) - pad, max(ta_us, tb_us) + pad
@@ -4225,9 +4403,16 @@ class MainWindow(QMainWindow):
             tb_us = markers.t_end * 1e6
             ha_a, hb_v = markers.ha_v, markers.hb_a
 
-        self.wave_plot.focus_interval_us(
-            min(ta_us, tb_us) - 0.15, max(ta_us, tb_us) + 0.15
-        )
+        if restored is None and legacy is None:
+            self._focus_switching_local_view(
+                "反向恢复",
+                min(ta_us, tb_us) - 0.15,
+                max(ta_us, tb_us) + 0.15,
+            )
+        else:
+            self.wave_plot.focus_interval_us(
+                min(ta_us, tb_us) - 0.15, max(ta_us, tb_us) + 0.15
+            )
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
             search_t1,
@@ -4395,7 +4580,7 @@ class MainWindow(QMainWindow):
 
         ta_us = markers.t_start * 1e6
         tb_us = markers.t_end * 1e6
-        self.wave_plot.focus_interval_us(search_t0, search_t1)
+        self._focus_switching_local_view(section, search_t0, search_t1)
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
             search_t1,
@@ -4492,7 +4677,10 @@ class MainWindow(QMainWindow):
         def _on_irr_interval(t0_us: float, t1_us: float) -> None:
             _apply_irr_interval(t0_us, t1_us, remember=True)
 
-        self.wave_plot.focus_interval_us(t0_us, t1_us)
+        if restored is None:
+            self._focus_switching_local_view("反向恢复", t0_us, t1_us)
+        else:
+            self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_irr_peak_interaction(t0_us, t1_us, _on_irr_interval)
         _apply_irr_interval(t0_us, t1_us, remember=restored is not None)
 
@@ -4554,7 +4742,10 @@ class MainWindow(QMainWindow):
                 f"反向恢复 Trr={trr_ns:.3f}ns (A={ta_us:.3f}µs B={tb_us:.3f}µs Ha={ha:.2f}A)"
             )
 
-        self.wave_plot.focus_interval_us(t0_us, t1_us)
+        if saved is None:
+            self._focus_switching_local_view("反向恢复", t0_us, t1_us)
+        else:
+            self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_trr_measure_interaction(
             t0_us,
             t1_us,

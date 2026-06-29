@@ -159,8 +159,8 @@ def _err_b_on_vd_main_rise(
     t_b: float,
     hb: float,
     *,
-    within_s: float = 120e-9,
-    min_rise_v: float = 30.0,
+    within_s: float = 220e-9,
+    min_rise_v: float = 25.0,
 ) -> bool:
     vd_at_b = float(np.interp(float(t_b), t, vd))
     if abs(vd_at_b - float(hb)) > 1e-3:

@@ -101,6 +101,17 @@ class TestOffsetMeasurement(unittest.TestCase):
         self.assertAlmostEqual(top, 10.0)
         self.assertAlmostEqual(base, 0.0)
 
+    def test_top_base_ignores_narrow_overshoot_when_splitting_bands(self) -> None:
+        low = np.full(120, -4.0, dtype=np.float64)
+        high = np.full(130, 198.0, dtype=np.float64)
+        overshoot = np.array([426.0, 390.0, 350.0], dtype=np.float64)
+        y = np.concatenate([low, high, overshoot])
+
+        top, base = scope_top_base(y)
+
+        self.assertAlmostEqual(top, 198.0)
+        self.assertAlmostEqual(base, -4.0)
+
     def test_area_rms_and_ac_rms_stay_inside_selected_range(self) -> None:
         t = np.array([10.0, 11.0, 12.0, 13.0], dtype=np.float64)
         y = np.array([-2.0, 0.0, 2.0, 4.0], dtype=np.float64)

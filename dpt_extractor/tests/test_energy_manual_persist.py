@@ -194,6 +194,37 @@ class TestEnergyManualPersist(unittest.TestCase):
         self.assertAlmostEqual(stored[2], expected_ha, places=6)
         self.assertAlmostEqual(stored[3], expected_hb, places=6)
 
+    def test_energy_cursor_drag_does_not_refocus_view(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        win = self._window()
+        win._on_value_clicked("开通", "Eon")
+        plot = win.wave_plot
+        assert plot._cursor_a is not None
+        assert plot._h_cursor_b is not None
+
+        plot.focus_interval_us(12.0, 14.0)
+        before = plot.current_x_range_us()
+        self.assertIsNotNone(before)
+        assert before is not None
+
+        plot._cursor_a.setPos(float(plot._cursor_a.value()) + 0.025)
+        QApplication.processEvents()
+        after_vertical = plot.current_x_range_us()
+        self.assertIsNotNone(after_vertical)
+        assert after_vertical is not None
+        self.assertAlmostEqual(after_vertical[0], before[0], places=6)
+        self.assertAlmostEqual(after_vertical[1], before[1], places=6)
+
+        plot._h_cursor_b.setPos(float(plot._h_cursor_b.value()) + 0.1)
+        QApplication.processEvents()
+        after_horizontal = plot.current_x_range_us()
+        self.assertIsNotNone(after_horizontal)
+        assert after_horizontal is not None
+        self.assertAlmostEqual(after_horizontal[0], before[0], places=6)
+        self.assertAlmostEqual(after_horizontal[1], before[1], places=6)
+        win.close()
+
 
 if __name__ == "__main__":
     unittest.main()

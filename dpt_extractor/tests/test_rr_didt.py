@@ -9,7 +9,18 @@ from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.slopes import analyze_rr_recovery_current, didt_rr_recovery
 from dpt_extractor.tests.sample_paths import sample_tss
 
+ROOT = Path(__file__).resolve().parents[2]
 UH = sample_tss("UH_750V_1050A_000.tss")
+SONG_SMC_HT_WL_1048 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "HT"
+    / "WL_750V_1048A_000.tss"
+)
 
 
 class TestRrDidt(unittest.TestCase):
@@ -249,6 +260,45 @@ class TestRrDidt(unittest.TestCase):
         self.assertGreater(res.didt, 10.0)
         self.assertIsNotNone(res.t_pct_a_s)
         self.assertIsNotNone(res.t_pct_b_s)
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_WL_1048.exists(), "songzhenxi SMC HT WL 1048A sample missing"
+    )
+    def test_wl_rr_didt_hb_uses_tail_stable_band_center(self) -> None:
+        """反向恢复 di/dt 的 Hb 应落在恢复后稳定波形带中心，而不是尾段偏高采样值。"""
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.metrics.iec_windows import (
+            _quiet_local_platform_level,
+            rr_slope_window_indices,
+        )
+        from dpt_extractor.models.bridge_profile import guess_profile_from_path
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+        from dpt_extractor.pipeline.extract import extract_all
+
+        bundle = load_waveform(SONG_SMC_HT_WL_1048)
+        profile = guess_profile_from_path(str(SONG_SMC_HT_WL_1048))
+        result = extract_all(bundle, profile, load_config())
+        mw = MainWindow.__new__(MainWindow)
+        mw.bundle = bundle
+        mw.profile = profile
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        on0, _ = result.segments.turn_on
+        _, rr1 = result.segments.reverse_recovery
+        i0, i1 = rr_slope_window_indices(on0, rr1, len(bundle.t), bundle.dt)
+        seg = irr[i0 : i1 + 1]
+
+        ha, hb = mw._default_rr_didt_ha_hb(seg, "idm")
+        ipk_if = int(np.argmax(seg))
+        tail0 = ipk_if + max(8, int(0.30 * (len(seg) - ipk_if)))
+        tail = seg[tail0:]
+        if len(tail) < 8:
+            tail = seg[ipk_if:]
+        expected = float(_quiet_local_platform_level(tail, bundle.dt, min_ns=200.0))
+
+        self.assertAlmostEqual(hb, expected, delta=0.5)
+        self.assertLess(abs(hb), 8.0)
+        self.assertLess(ha, -900.0)
 
 
 if __name__ == "__main__":

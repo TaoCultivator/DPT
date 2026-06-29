@@ -221,12 +221,24 @@ def _modal_level(values: np.ndarray) -> float:
     return float(np.mean(bucket if bucket.size else arr))
 
 
+def _split_modal_top_base(arr: np.ndarray, midpoint: float) -> tuple[float, float]:
+    top_arr = arr[arr >= midpoint]
+    base_arr = arr[arr <= midpoint]
+    if top_arr.size == 0 or base_arr.size == 0:
+        midpoint = float((np.max(arr) + np.min(arr)) / 2.0)
+        top_arr = arr[arr >= midpoint]
+        base_arr = arr[arr <= midpoint]
+    return _modal_level(top_arr), _modal_level(base_arr)
+
+
 def scope_top_base(values: np.ndarray) -> tuple[float, float]:
     """Scope-style Top/Base for the current measurement range.
 
     This is the project-wide Tek-style approximation used by offset
     measurement: split the current range by its local midpoint, then take the
-    modal level of the upper and lower halves.
+    modal level of the upper and lower halves.  A narrow overshoot guard checks
+    the 5%/95% split only when the min/max midpoint would make the stable high
+    level masquerade as Base.
     """
     arr = _finite_values(values)
     if arr.size == 0:
@@ -234,10 +246,23 @@ def scope_top_base(values: np.ndarray) -> tuple[float, float]:
     if arr.size == 1:
         value = float(arr[0])
         return value, value
-    midpoint = float((np.max(arr) + np.min(arr)) / 2.0)
-    top_arr = arr[arr >= midpoint]
-    base_arr = arr[arr <= midpoint]
-    return _modal_level(top_arr), _modal_level(base_arr)
+    raw_midpoint = float((np.max(arr) + np.min(arr)) / 2.0)
+    raw_top, raw_base = _split_modal_top_base(arr, raw_midpoint)
+    lo_ref, hi_ref = np.percentile(arr, [5.0, 95.0])
+    if not np.isfinite(lo_ref) or not np.isfinite(hi_ref) or hi_ref <= lo_ref:
+        return raw_top, raw_base
+    robust_midpoint = float((hi_ref + lo_ref) / 2.0)
+    robust_top, robust_base = _split_modal_top_base(arr, robust_midpoint)
+
+    robust_span = abs(float(robust_top) - float(robust_base))
+    if robust_span > 1e-12:
+        base_tracks_robust_top = abs(float(raw_base) - float(robust_top)) <= max(
+            0.08 * robust_span,
+            abs(float(raw_base) - float(robust_base)) * 0.35,
+        )
+        if base_tracks_robust_top:
+            return float(robust_top), float(robust_base)
+    return raw_top, raw_base
 
 
 def _top_base(values: np.ndarray) -> tuple[float, float]:
