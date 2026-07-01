@@ -155,13 +155,81 @@ def try_bundle_total_current(
     """Return total device current when the mapped source channels are available."""
     direct = bundle.maybe_get(profile.ic)
     if direct is not None:
-        return direct
+        return _auto_orient_total_current(direct)
     if profile.ic_from_sum_irr_il:
-        irr = bundle.maybe_get(profile.irr)
         il = bundle.maybe_get(profile.il)
+        irr = _auto_orient_reverse_recovery_current(
+            bundle.maybe_get(profile.irr),
+            il,
+        )
         if irr is not None and il is not None:
             return irr + il
     return None
+
+
+def _finite_percentiles(values: np.ndarray) -> tuple[float, float]:
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return 0.0, 0.0
+    p05, p95 = np.percentile(arr, [5.0, 95.0])
+    return float(p05), float(p95)
+
+
+def _current_scale_hint(companion: np.ndarray | None) -> float:
+    if companion is None:
+        return 0.0
+    arr = np.asarray(companion, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return 0.0
+    return float(np.percentile(np.abs(arr), 95.0))
+
+
+def _dominant_current_polarity(
+    values: np.ndarray,
+    companion: np.ndarray | None = None,
+) -> int:
+    """Return +1/-1 when one high-current plateau polarity clearly dominates."""
+    p05, p95 = _finite_percentiles(values)
+    positive = max(float(p95), 0.0)
+    negative = max(-float(p05), 0.0)
+    scale = _current_scale_hint(companion)
+    floor = max(20.0, 0.15 * scale)
+    if positive >= max(3.0 * negative, floor):
+        return 1
+    if negative >= max(3.0 * positive, floor):
+        return -1
+    return 0
+
+
+def _auto_orient_total_current(current: np.ndarray | None) -> np.ndarray | None:
+    """Total device current should have a positive high-current plateau."""
+    if current is None:
+        return None
+    arr = np.asarray(current, dtype=np.float64)
+    return -arr if _dominant_current_polarity(arr) < 0 else arr
+
+
+def _auto_orient_reverse_recovery_current(
+    current: np.ndarray | None,
+    companion_il: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """
+    Reverse-recovery branch current uses the DPT physical polarity.
+
+    In the project samples, the large commutation/current-platform component of
+    Irr is negative and the recovery spike is measured from that physical
+    signal. Some scopes are saved with the current probe inverted; when the
+    dominant high-current plateau is positive and comparable to IL, flip only
+    the logical Irr used for extraction/display.
+    """
+    if current is None:
+        return None
+    arr = np.asarray(current, dtype=np.float64)
+    if companion_il is None or _current_scale_hint(companion_il) < 20.0:
+        return arr
+    return -arr if _dominant_current_polarity(arr, companion_il) > 0 else arr
 
 
 def bundle_reverse_recovery_current(
@@ -182,7 +250,10 @@ def try_bundle_reverse_recovery_current(
     """Return reverse-recovery current when its mapped source channels are available."""
     direct = bundle.maybe_get(profile.irr)
     if direct is not None:
-        return direct
+        return _auto_orient_reverse_recovery_current(
+            direct,
+            bundle.maybe_get(profile.il),
+        )
     if profile.irr_from_ic_minus_il:
         il = bundle.maybe_get(profile.il)
         if il is not None:

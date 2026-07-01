@@ -21,6 +21,13 @@ DDD_UH = (
     / "HT"
     / "UH_750V_000.tss"
 )
+NED34_SHORT_VH_750 = (
+    SAMPLE_ROOT
+    / "likangkang"
+    / "NED34jixian"
+    / "short"
+    / "750v-vh-short-25c_000.tss"
+)
 DDD_RT_VH = (
     SAMPLE_ROOT
     / "tss格式"
@@ -474,6 +481,33 @@ class TestShortCircuitMathChannels(unittest.TestCase):
         self.assertEqual(result.short_circuit.energy_dut_channel, "MATH1")
         self.assertEqual(result.short_circuit.energy_other_channel, "MATH2")
         self.assertGreater(result.short_circuit.esc_dut, result.short_circuit.esc_other)
+
+
+class TestValidateTssSampleClassification(unittest.TestCase):
+    def test_short_token_paths_use_short_circuit_validation(self):
+        from scripts.validate_tss_samples import _is_short_circuit_sample
+
+        self.assertTrue(
+            _is_short_circuit_sample(Path("case/short/750v-vh-short-25c_000.tss"))
+        )
+        self.assertTrue(
+            _is_short_circuit_sample(Path("case/uh/750v-uh-short-25c_000.tss"))
+        )
+        self.assertFalse(
+            _is_short_circuit_sample(
+                Path("case/uh/UH_400V_1070A_Rgon1.515R_Rgoff6.346R_000.tss")
+            )
+        )
+
+    @unittest.skipUnless(NED34_SHORT_VH_750.exists(), "NED34 short sample missing")
+    def test_short_token_sample_uses_mapped_short_validation(self):
+        from scripts.validate_tss_samples import _validate_sample
+
+        result = _validate_sample(NED34_SHORT_VH_750)
+
+        self.assertEqual(result.kind, "SC")
+        self.assertEqual(result.status, "OK")
+        self.assertIn("map=label", result.detail)
 
 
 @unittest.skipUnless(DDD_UH.exists(), "short-circuit DDD sample missing")

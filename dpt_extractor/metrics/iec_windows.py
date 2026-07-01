@@ -1994,10 +1994,30 @@ def eon_energy_markers(
         )
 
     ha_ic = _plateau_mean_ic_before_on(ic, on_ref, w0, dt)
-    hb_v = _plateau_mean_vce_after_on(vce, ic, on_ref, w1, dt)
+    base_win1 = min(
+        int(w1),
+        int(i1),
+        on_ref + _samples_for_seconds(dt, 1200e-9, minimum=16),
+    )
+    hb_clip = _plateau_mean_vce_after_on(vce, ic, on_ref, base_win1, dt)
+    post_tail_end = min(
+        len(t) - 1,
+        max(
+            int(w1),
+            int(i1),
+            on_ref + _samples_for_seconds(dt, 1200e-9, minimum=16),
+        ),
+    )
+    hb_v = float(hb_clip)
+    win1 = base_win1
+    if post_tail_end > base_win1 and not _use_legacy_loss_platform_mode():
+        hb_tail = _plateau_mean_vce_after_on(vce, ic, on_ref, post_tail_end, dt)
+        tail_gate = max(20.0, 0.04 * max(abs(float(v_top)), 1.0))
+        if abs(float(hb_tail)) < abs(float(hb_clip)) - tail_gate:
+            hb_v = float(hb_tail)
+            win1 = post_tail_end
 
     sw0 = max(w0, i0, on_ref - int(200e-9 / dt))
-    win1 = min(w1, i1, on_ref + int(1200e-9 / dt))
     if win1 <= sw0 + 2:
         win1 = min(len(t) - 1, max(i1, sw0 + int(350e-9 / dt)))
     # 带符号：下桥导通前基线为负，A=Ic 上升沿与 Ha 交点须在真实波形上
@@ -2257,6 +2277,20 @@ def _err_ha_top_from_offset_window(
     anchor_us = _vge_turn_on_focus_edge_start_us(
         t, vge, pulse1_off, pulse2_on, pulse2_off, dt
     )
+    if pulse2_on is not None:
+        p2_idx = max(0, min(int(pulse2_on), len(t) - 1))
+        p2_anchor_us = float(t[p2_idx]) * 1e6
+        # Multi-pulse sessions can contain a noisy post-pulse transition before
+        # the selected turn-on edge. If the Vge-derived anchor falls on that
+        # previous platform, the 200 ns/div local Top window reads the wrong
+        # high-current plateau. In that case anchor the local view to the
+        # selected pulse2_on edge instead.
+        if (
+            anchor_us is None
+            or anchor_us < p2_anchor_us - 0.25
+            or anchor_us > p2_anchor_us + 0.10
+        ):
+            anchor_us = p2_anchor_us
     if anchor_us is not None:
         local_window = _parameter_focus_window_s(t, anchor_us)
         if local_window is not None:
@@ -3007,8 +3041,6 @@ def _err_negative_ringing_tail_cross_t(
         y0, y1 = float(y[k]), float(y[k + 1])
         if min(y0, y1) <= lvl <= max(y0, y1) and abs(y1 - y0) > 1e-30:
             return float(_err_interp_cross_time(t, y, k, lvl))
-    if gate_t > float(t[k0]):
-        return float(gate_t)
     return None
 
 
@@ -3068,6 +3100,96 @@ def _level_cross_after_index(
     return float(crossings[0])
 
 
+def _err_irr_ha_level_series(
+    irr: np.ndarray,
+    ha: float,
+    ipk_global: int,
+    *,
+    force_signed: bool = False,
+) -> tuple[np.ndarray, float]:
+    k0 = max(0, min(int(ipk_global), len(irr) - 1))
+    peak = float(irr[k0]) if len(irr) else 0.0
+    use_mag = not force_signed and peak > 0.0 and float(ha) > 0.0
+    y = (
+        np.abs(np.asarray(irr, dtype=np.float64))
+        if use_mag
+        else np.asarray(irr, dtype=np.float64)
+    )
+    level = abs(float(ha)) if use_mag else float(ha)
+    return y, level
+
+
+def _err_true_irr_ha_cross_t(
+    t: np.ndarray,
+    irr: np.ndarray,
+    ha: float,
+    ipk_global: int,
+    i_end: int,
+    *,
+    after_idx: int,
+    force_signed: bool = False,
+) -> float | None:
+    """First real Irr/Ha crossing after the settled-gate index."""
+    if len(t) < 2 or len(irr) != len(t):
+        return None
+    y, level = _err_irr_ha_level_series(
+        irr,
+        ha,
+        ipk_global,
+        force_signed=force_signed,
+    )
+    start = max(0, min(max(int(ipk_global), int(after_idx) - 1), len(t) - 2))
+    stop = max(start, min(int(i_end), len(t) - 2))
+    t_after = float(t[max(0, min(int(after_idx), len(t) - 1))])
+    seg = np.asarray(y[start : stop + 2], dtype=np.float64)
+    if len(seg) < 2:
+        return None
+    d0 = seg[:-1] - level
+    d1 = seg[1:] - level
+    changes = (np.abs(seg[1:] - seg[:-1]) > 1e-30) & (d0 * d1 <= 0.0) & (d0 != d1)
+    for offset in np.flatnonzero(changes):
+        k = start + int(offset)
+        t_cross = float(_err_interp_cross_time(t, y, k, level))
+        if t_cross + 1e-15 >= t_after:
+            return t_cross
+    return None
+
+
+def _err_irr_ha_cross_matches(
+    t: np.ndarray,
+    irr: np.ndarray,
+    ha: float,
+    t_cross: float | None,
+    ipk_global: int,
+    *,
+    force_signed: bool = False,
+) -> bool:
+    if t_cross is None or len(t) < 2 or len(irr) != len(t):
+        return False
+    y, level = _err_irr_ha_level_series(
+        irr,
+        ha,
+        ipk_global,
+        force_signed=force_signed,
+    )
+    tc = float(t_cross)
+    if tc < float(t[0]) or tc > float(t[-1]):
+        return False
+    y_at = float(np.interp(tc, t, y))
+    if abs(y_at - level) > max(0.75, 0.005 * max(abs(level), 1.0)):
+        return False
+    k = int(np.searchsorted(t, tc, side="right")) - 1
+    k = max(0, min(k, len(t) - 2))
+    for kk in ((k - 1, k) if k > 0 else (k,)):
+        y0, y1 = float(y[kk]), float(y[kk + 1])
+        d0, d1 = y0 - level, y1 - level
+        if abs(y1 - y0) > 1e-30 and (
+            (d0 == 0.0 and d1 != 0.0) or (d0 * d1 <= 0.0 and d0 != d1)
+        ):
+            return True
+    return False
+
+
 def _err_ic_fall_cross_after_peak(
     t_seg: np.ndarray,
     seg_abs: np.ndarray,
@@ -3102,15 +3224,23 @@ def _err_window_mid(arr: np.ndarray, t: np.ndarray, t_lo_s: float, t_hi_s: float
 
 
 def _err_vd_main_rise_search(
-    t: np.ndarray, vd: np.ndarray, hb_hint: float, ipk_global: int, dt: float
+    t: np.ndarray,
+    vd: np.ndarray,
+    hb_hint: float,
+    ipk_global: int,
+    dt: float,
+    *,
+    pre_peak_ns: float = 800.0,
+    post_peak_ns: float = 50.0,
 ) -> tuple[int, int, int | None, float]:
     """Err Vd 主上升沿搜索：限定在第二脉冲开通过程/反向恢复 IRM 附近。"""
     ipk_global = int(ipk_global)
-    lo = max(0, ipk_global - int(800e-9 / max(dt, 1e-15)))
-    hi = min(len(vd) - 2, ipk_global + int(50e-9 / max(dt, 1e-15)))
+    lo = max(0, ipk_global - int(float(pre_peak_ns) * 1e-9 / max(dt, 1e-15)))
+    hi = min(len(vd) - 2, ipk_global + int(float(post_peak_ns) * 1e-9 / max(dt, 1e-15)))
     if hi <= lo + 1:
         return lo, hi, None, float(vd[min(ipk_global, len(vd) - 1)])
-    v_peak = float(np.max(vd[lo : ipk_global + 1]))
+    peak_hi = hi if float(post_peak_ns) > 50.0 else min(ipk_global, hi)
+    v_peak = float(np.max(vd[lo : peak_hi + 1]))
     span = max(abs(v_peak - float(hb_hint)), 1.0)
     trigger_step = min(max(30.0, 0.50 * span), 0.85 * span)
     trigger = float(hb_hint) + trigger_step
@@ -3123,11 +3253,25 @@ def _err_vd_main_rise_search(
 
 
 def _err_vd_base_before_main_rise(
-    t: np.ndarray, vd: np.ndarray, hb_hint: float, ipk_global: int, dt: float
+    t: np.ndarray,
+    vd: np.ndarray,
+    hb_hint: float,
+    ipk_global: int,
+    dt: float,
+    *,
+    prefer_post_peak_main_rise: bool = False,
 ) -> float:
     """Err Hb：第二脉冲开通过程中，Vd 主上升沿前的本地 base。"""
+    pre_peak_ns = 250.0 if prefer_post_peak_main_rise else 800.0
+    post_peak_ns = 650.0 if prefer_post_peak_main_rise else 50.0
     _lo, _hi, k_trigger, _v_peak = _err_vd_main_rise_search(
-        t, vd, hb_hint, ipk_global, dt
+        t,
+        vd,
+        hb_hint,
+        ipk_global,
+        dt,
+        pre_peak_ns=pre_peak_ns,
+        post_peak_ns=post_peak_ns,
     )
     if k_trigger is None:
         return float(hb_hint)
@@ -3151,6 +3295,7 @@ def _err_vd_rise_cross_hb_t(
     *,
     prefer_low_current_main_rise: bool = False,
     prefer_main_rise: bool = False,
+    prefer_post_peak_main_rise: bool = False,
 ) -> float:
     """Vd 主上升沿第一次穿 Hb（带符号）的交点。
 
@@ -3158,16 +3303,30 @@ def _err_vd_rise_cross_hb_t(
     段起点常晚于真实抬升脚，否则会误落在段界上）。
     """
     _ = i0  # 保留参数以兼容调用方
+    pre_peak_ns = 250.0 if prefer_post_peak_main_rise else 800.0
+    post_peak_ns = 650.0 if prefer_post_peak_main_rise else 50.0
     lo, hi, k_trigger, v_peak = _err_vd_main_rise_search(
-        t, vd, hb, ipk_global, dt
+        t,
+        vd,
+        hb,
+        ipk_global,
+        dt,
+        pre_peak_ns=pre_peak_ns,
+        post_peak_ns=post_peak_ns,
     )
     if hi <= lo + 1:
         return float(t[min(ipk_global, len(t) - 1)])
     span = abs(float(v_peak) - float(hb))
-    if prefer_main_rise and k_trigger is not None and (
-        span >= 500.0 or span < 260.0 or abs(float(hb)) >= 1.0
+    if (prefer_main_rise or prefer_post_peak_main_rise) and k_trigger is not None and (
+        prefer_post_peak_main_rise
+        or span >= 500.0
+        or span < 260.0
+        or abs(float(hb)) >= 1.0
     ):
-        raw_window_ns = 100.0 if span >= 500.0 else (40.0 if span < 260.0 else 60.0)
+        if prefer_post_peak_main_rise:
+            raw_window_ns = 60.0
+        else:
+            raw_window_ns = 100.0 if span >= 500.0 else (40.0 if span < 260.0 else 60.0)
         raw_lo = max(
             lo,
             int(np.searchsorted(t, float(t[k_trigger]) - raw_window_ns * 1e-9, side="left")),
@@ -3197,7 +3356,13 @@ def _err_vd_rise_cross_hb_t(
                 return float(_err_interp_cross_time(t, vd, k, float(hb)))
     lookahead = _samples_for_seconds(dt, 120e-9, minimum=2)
     min_rise = 30.0
-    for k in range(lo, hi):
+    scan_lo = lo
+    if prefer_post_peak_main_rise and k_trigger is not None:
+        scan_lo = max(
+            lo,
+            int(np.searchsorted(t, float(t[k_trigger]) - 90e-9, side="left")),
+        )
+    for k in range(scan_lo, hi):
         y0 = float(vd[k])
         y1 = float(vd[k + 1])
         if not (y0 <= float(hb) <= y1 and y1 > y0 and abs(y1 - y0) > 1e-30):
@@ -3216,7 +3381,8 @@ def _err_vd_rise_cross_hb_t(
         dt,
         min_trigger=30.0,
         prefer_raw_crossing=True,
-        raw_window_ns=160.0,
+        raw_window_ns=80.0 if prefer_post_peak_main_rise else 160.0,
+        first_sustained_rise=prefer_post_peak_main_rise,
     )
     return float(t_cross)
 
@@ -3259,7 +3425,7 @@ def _err_irr_fall_cross_ha_t(
     settle_idx: int | None = None,
     settle_end_idx: int | None = None,
     settle_strict: bool = False,
-) -> float:
+) -> float | None:
     """IRM 主峰后恢复沿与 Ha 的第一个真实交点（秒）。
 
     上桥软恢复：Irr 为正、Ha 为尾段带符号平台时，示波器读数为 |Irr| 与 |Ha|，
@@ -3267,10 +3433,12 @@ def _err_irr_fall_cross_ha_t(
     """
     k0 = max(0, int(ipk_global))
     k1 = max(k0 + 1, min(int(i_end), len(irr) - 1))
-    peak = float(irr[k0]) if k0 < len(irr) else 0.0
-    use_mag = not force_signed and peak > 0.0 and float(ha) > 0.0
-    y = np.abs(np.asarray(irr, dtype=np.float64)) if use_mag else np.asarray(irr, dtype=np.float64)
-    lvl = abs(float(ha)) if use_mag else float(ha)
+    y, lvl = _err_irr_ha_level_series(
+        irr,
+        ha,
+        ipk_global,
+        force_signed=force_signed,
+    )
 
     crossings: list[tuple[int, float, str]] = []
     for k in range(k0, k1):
@@ -3298,10 +3466,6 @@ def _err_irr_fall_cross_ha_t(
                 return float(t_cross)
         return float(crossings[0][1])
 
-    if use_mag:
-        lvl = abs(float(ha))
-    else:
-        lvl = float(ha)
     t_seg = t[k0 : k1 + 1]
     seg_abs = np.abs(np.asarray(irr[k0 : k1 + 1], dtype=np.float64))
     if len(seg_abs) >= 4:
@@ -3327,6 +3491,7 @@ def err_energy_markers(
     pulse2_on: int | None = None,
     pulse2_off: int | None = None,
     dc_current: float | None = None,
+    lower_bridge_irr_from_ic_minus_il: bool = False,
 ) -> EnergyLossMarkers:
     """
     反向恢复损耗 Err（示波器卡尺）：
@@ -3366,12 +3531,26 @@ def err_energy_markers(
     err_base = _err_recovery_settled_base(irr_full, ipk_global, dt, i_search_end)
     ha_tail = float(err_base.level)
     peak = float(irr_full[ipk_global])
+    lower_bridge_post_peak_vd_b = (
+        bool(lower_bridge_irr_from_ic_minus_il)
+        and peak < 0.0
+        and abs(float(peak)) >= 120.0
+    )
     # Hb=第二脉冲开通过程中，对管电压 Vd 主上升沿前的本地 base。
     # B 必须贴同一段 Vd 与该横线的真实交点，不能取全局或关断过程 base。
     hb_hint = _err_window_mid(vd_full, t, tpk - 600e-9, tpk - 200e-9)
-    hb_v = _err_vd_base_before_main_rise(t, vd_full, hb_hint, ipk_global, dt)
+    hb_v = _err_vd_base_before_main_rise(
+        t,
+        vd_full,
+        hb_hint,
+        ipk_global,
+        dt,
+        prefer_post_peak_main_rise=lower_bridge_post_peak_vd_b,
+    )
     prefer_low_current_b = abs(float(peak)) < 125.0
-    prefer_main_rise_b = peak > 0.0 and abs(float(peak)) >= 120.0
+    prefer_main_rise_b = (
+        peak > 0.0 and abs(float(peak)) >= 120.0
+    ) or lower_bridge_post_peak_vd_b
     # B=Vd 主抬升沿与 Hb 的首个上升穿越（带符号 Vd）。Err 的
     # Ha(Irr) 需要按点击参数后的局部放大窗口 Top 定义取值，所以先确定 B，
     # 再用 B 与 Irr 稳定入口组成局部窗口；不得用全波形 Top/Base。
@@ -3384,6 +3563,7 @@ def err_energy_markers(
         dt,
         prefer_low_current_main_rise=prefer_low_current_b,
         prefer_main_rise=prefer_main_rise_b,
+        prefer_post_peak_main_rise=lower_bridge_post_peak_vd_b,
     )
     if not _use_legacy_loss_platform_mode():
         hb_from_offset = _err_vd_base_from_offset_window(t, vd_full, t_b_v, err_base)
@@ -3398,6 +3578,7 @@ def err_energy_markers(
                 dt,
                 prefer_low_current_main_rise=prefer_low_current_b,
                 prefer_main_rise=prefer_main_rise_b,
+                prefer_post_peak_main_rise=lower_bridge_post_peak_vd_b,
             )
     if not _use_legacy_loss_cursor_mode():
         ha_top = _err_ha_top_from_offset_window(
@@ -3441,6 +3622,18 @@ def err_energy_markers(
             max(err_base.end_idx + 2, ipk_global + int(120e-9 / max(dt, 1e-15))),
         ),
     )
+    force_signed_a = ha < 0.0
+    a_search_end = max(
+        ipk_global + 2,
+        min(
+            len(t) - 1,
+            max(
+                int(i_search_end),
+                int(err_base.end_idx)
+                + _samples_for_seconds(dt, 900e-9, minimum=4),
+            ),
+        ),
+    )
     t_a_irr = _err_irr_fall_cross_ha_t(
         t,
         irr_full,
@@ -3448,11 +3641,33 @@ def err_energy_markers(
         ipk_global,
         i_fall_end,
         dt,
-        force_signed=ha < 0.0,
+        force_signed=force_signed_a,
         settle_idx=err_base.start_idx,
         settle_end_idx=err_base.end_idx,
         settle_strict=err_base.strict,
     )
+    if t_a_irr is None:
+        t_a_irr = _err_true_irr_ha_cross_t(
+            t,
+            irr_full,
+            ha,
+            ipk_global,
+            a_search_end,
+            after_idx=err_base.end_idx,
+            force_signed=force_signed_a,
+        )
+    if t_a_irr is None:
+        t_a_irr = _err_true_irr_ha_cross_t(
+            t,
+            irr_full,
+            ha,
+            ipk_global,
+            a_search_end,
+            after_idx=err_base.start_idx,
+            force_signed=force_signed_a,
+        )
+    if t_a_irr is None:
+        t_a_irr = float(t[min(max(ipk_global + 1, int(err_base.end_idx)), len(t) - 1)])
     if (
         peak > 0.0
         and signed_tail_after_rebound
@@ -3516,14 +3731,36 @@ def err_energy_markers(
             )
             if settled_t is not None and settled_t > t_a_irr + 20e-9:
                 t_a_irr = float(settled_t)
-    negative_tail_t = _err_negative_ringing_tail_cross_t(
-        t,
-        irr_full,
-        ha,
-        ipk_global,
-        i_search_end,
-        dt,
+    lower_bridge_positive_ha = (
+        bool(lower_bridge_irr_from_ic_minus_il)
+        and peak < 0.0
+        and ha > 0.0
+        and abs(float(peak)) >= 120.0
     )
+    if lower_bridge_positive_ha:
+        stable_cross_t = _err_true_irr_ha_cross_t(
+            t,
+            irr_full,
+            ha,
+            ipk_global,
+            a_search_end,
+            after_idx=err_base.end_idx,
+            force_signed=True,
+        )
+        if stable_cross_t is not None and (
+            t_a_irr < stable_cross_t - 20e-9 or t_a_irr > stable_cross_t + 200e-9
+        ):
+            t_a_irr = float(stable_cross_t)
+    negative_tail_t = None
+    if not lower_bridge_positive_ha:
+        negative_tail_t = _err_negative_ringing_tail_cross_t(
+            t,
+            irr_full,
+            ha,
+            ipk_global,
+            i_search_end,
+            dt,
+        )
     if negative_tail_t is not None and negative_tail_t > t_a_irr + 20e-9:
         t_a_irr = float(negative_tail_t)
     if dc_current is not None and abs(float(dc_current)) <= 150.0:
@@ -3537,6 +3774,45 @@ def err_energy_markers(
         )
         if stable_cross_t is not None:
             t_a_irr = float(stable_cross_t)
+    if abs(float(peak)) >= 120.0 and not _err_irr_ha_cross_matches(
+        t,
+        irr_full,
+        ha,
+        t_a_irr,
+        ipk_global,
+        force_signed=force_signed_a,
+    ):
+        corrected_t = _err_true_irr_ha_cross_t(
+            t,
+            irr_full,
+            ha,
+            ipk_global,
+            a_search_end,
+            after_idx=err_base.end_idx,
+            force_signed=force_signed_a,
+        )
+        if corrected_t is None:
+            corrected_t = _err_true_irr_ha_cross_t(
+                t,
+                irr_full,
+                ha,
+                ipk_global,
+                a_search_end,
+                after_idx=err_base.start_idx,
+                force_signed=force_signed_a,
+            )
+        if corrected_t is None:
+            corrected_t = _err_true_irr_ha_cross_t(
+                t,
+                irr_full,
+                ha,
+                ipk_global,
+                a_search_end,
+                after_idx=ipk_global,
+                force_signed=force_signed_a,
+            )
+        if corrected_t is not None:
+            t_a_irr = float(corrected_t)
     if abs(t_a_irr - t_b_v) < 1e-15:
         t_a_irr, t_b_v = float(t[i0]), float(t[i1])
 

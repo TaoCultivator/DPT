@@ -68,6 +68,20 @@ SONG_SMC_HT_WL_1048 = (
     / "HT"
     / "WL_750V_1048A_000.tss"
 )
+WANGLIHUI_UH_400_1070 = (
+    ROOT
+    / "示例文件"
+    / "wanglihui"
+    / "U"
+    / "UH_400V_1070A_Rgon1.515R_Rgoff6.346R_000.tss"
+)
+WANGLIHUI_UL_400_1070 = (
+    ROOT
+    / "示例文件"
+    / "wanglihui"
+    / "U"
+    / "UL_400V_1070A_Rgon1.1R_Rgof5R_000.tss"
+)
 
 
 class TestWaveformImportAutoCenter(unittest.TestCase):
@@ -2277,6 +2291,48 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             expected_peak,
             delta=1.0,
         )
+
+    def test_derived_ic_without_matching_math_uses_internal_logic_trace(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            bundle_total_current,
+        )
+
+        n = 300
+        t = np.linspace(0.0, 1e-6, n)
+        profile = make_profile("U", "upper")
+        irr = np.linspace(100.0, 700.0, n)
+        il = np.linspace(20.0, 320.0, n)
+        unrelated_math = np.linspace(-5.0, 5.0, n)
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                "CH1": np.linspace(-5.0, 15.0, n),
+                "CH2": np.linspace(50.0, 900.0, n),
+                "CH3": irr,
+                "CH4": il,
+                "CH5": np.linspace(0.0, 600.0, n),
+                "CH6": np.zeros(n),
+                "MATH1": unrelated_math,
+            },
+            meta=TekMetadata(
+                source_path="/fake/no_matching_math.tss",
+                channel_math_formulas={"MATH1": "CH1"},
+            ),
+        )
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+
+        self.assertEqual(plot._display_key_for_channel("ic"), "LOGIC_IC")
+        expected = bundle_total_current(bundle, profile)
+        np.testing.assert_allclose(plot._interactive_ic, expected)
+        np.testing.assert_allclose(plot._trace_raw["LOGIC_IC"], expected)
+        self.assertEqual(plot._unit_for_channel("ic"), "A")
 
     def test_peak_cursor_uses_full_resolution_signed_current(self):
         import numpy as np
@@ -4910,6 +4966,144 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertGreater(ta, 14.68)
         self.assertLess(ta, 14.74)
         self.assertAlmostEqual(ha_v, 12.34375, delta=0.5)
+        win.close()
+
+    @unittest.skipUnless(WANGLIHUI_UH_400_1070.exists(), "wanglihui UH sample missing")
+    def test_wanglihui_upper_inverted_irr_eoff_cursor_uses_logical_ic(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import (
+            bundle_reverse_recovery_current,
+            bundle_total_current,
+        )
+
+        win = MainWindow()
+        win._load_file(str(WANGLIHUI_UH_400_1070))
+        self.assertIsNotNone(win.result)
+
+        win.wave_plot.set_channel_inversion_enabled("CH3", True)
+        plot = win.wave_plot
+        self.assertEqual(plot._display_key_for_channel("ic"), "MATH1")
+        np.testing.assert_allclose(
+            np.asarray(plot._interactive_ic, dtype=float),
+            bundle_total_current(win.bundle, win.profile),
+        )
+        np.testing.assert_allclose(
+            np.asarray(plot._interactive_irr, dtype=float),
+            bundle_reverse_recovery_current(win.bundle, win.profile),
+        )
+
+        win._on_value_clicked("关断过程", "Eoff")
+        plot = win.wave_plot
+        tb = float(plot._cursor_b.value())
+        hb = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+        logic_ic = bundle_total_current(win.bundle, win.profile)
+        logic_at_b = float(np.interp(tb * 1e-6, win.bundle.t, logic_ic))
+        math_sample = plot._sample_cursor_channel("MATH1", tb)
+        self.assertIsNotNone(math_sample)
+        assert math_sample is not None
+        self.assertAlmostEqual(hb, logic_at_b, delta=0.5)
+        self.assertAlmostEqual(math_sample[0], hb, delta=0.5)
+        marker_x, marker_y = plot._cursor_b_wave_marker.getData()
+        self.assertEqual(len(marker_x), 1)
+        self.assertAlmostEqual(float(marker_x[0]), tb, places=6)
+        self.assertAlmostEqual(
+            plot._from_disp("ic", float(marker_y[0])),
+            hb,
+            delta=0.5,
+        )
+        win.close()
+
+    @unittest.skipUnless(WANGLIHUI_UH_400_1070.exists(), "wanglihui UH sample missing")
+    def test_wanglihui_upper_inverted_irr_err_cursor_uses_true_intersections(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        win = MainWindow()
+        win._load_file(str(WANGLIHUI_UH_400_1070))
+        self.assertIsNotNone(win.result)
+
+        win.wave_plot.set_channel_inversion_enabled("CH3", True)
+        win._on_value_clicked("反向恢复", "Err")
+        plot = win.wave_plot
+        ta_us = float(plot._cursor_a.value())
+        tb_us = float(plot._cursor_b.value())
+        ha = plot._from_disp("irr", float(plot._h_cursor_a.value()))
+        hb = plot._from_disp("v_diode", float(plot._h_cursor_b.value()))
+        irr = bundle_reverse_recovery_current(win.bundle, win.profile)
+        vd = win.bundle.get(win.profile.v_diode)
+
+        self.assertAlmostEqual(
+            float(np.interp(ta_us * 1e-6, win.bundle.t, irr)),
+            ha,
+            delta=0.75,
+        )
+        self.assertAlmostEqual(
+            float(np.interp(tb_us * 1e-6, win.bundle.t, vd)),
+            hb,
+            delta=0.02,
+        )
+        self.assertAlmostEqual(ta_us, 36.449, delta=0.025)
+        self.assertAlmostEqual(tb_us, 35.935, delta=0.025)
+        marker_x, marker_y = plot._cursor_a_wave_marker.getData()
+        self.assertEqual(len(marker_x), 1)
+        self.assertAlmostEqual(float(marker_x[0]), ta_us, places=6)
+        self.assertAlmostEqual(
+            plot._from_disp("irr", float(marker_y[0])),
+            ha,
+            delta=0.75,
+        )
+        win.close()
+
+    @unittest.skipUnless(WANGLIHUI_UL_400_1070.exists(), "wanglihui UL sample missing")
+    def test_wanglihui_lower_err_cursor_uses_stable_gate_not_tail(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        win = MainWindow()
+        win._load_file(str(WANGLIHUI_UL_400_1070))
+        self.assertIsNotNone(win.result)
+        self.assertTrue(win.profile.irr_from_ic_minus_il)
+
+        win._on_value_clicked("反向恢复", "Err")
+        plot = win.wave_plot
+        ta_us = float(plot._cursor_a.value())
+        tb_us = float(plot._cursor_b.value())
+        ha = plot._from_disp("irr", float(plot._h_cursor_a.value()))
+        hb = plot._from_disp("v_diode", float(plot._h_cursor_b.value()))
+        irr = bundle_reverse_recovery_current(win.bundle, win.profile)
+        vd = win.bundle.get(win.profile.v_diode)
+
+        self.assertAlmostEqual(
+            float(np.interp(ta_us * 1e-6, win.bundle.t, irr)),
+            ha,
+            delta=0.75,
+        )
+        self.assertAlmostEqual(
+            float(np.interp(tb_us * 1e-6, win.bundle.t, vd)),
+            hb,
+            delta=0.03,
+        )
+        self.assertAlmostEqual(ta_us, 36.977, delta=0.025)
+        self.assertAlmostEqual(tb_us, 36.640, delta=0.025)
+        self.assertGreater(tb_us, 36.60)
+        self.assertLess(ta_us, 37.2)
+        plot._sync_energy_b_from_hb(ta_us)
+        self.assertAlmostEqual(float(plot._cursor_b.value()), 36.640, delta=0.025)
+
+        marker_x, marker_y = plot._cursor_a_wave_marker.getData()
+        self.assertEqual(len(marker_x), 1)
+        self.assertAlmostEqual(float(marker_x[0]), ta_us, places=6)
+        self.assertAlmostEqual(
+            plot._from_disp("irr", float(marker_y[0])),
+            ha,
+            delta=0.75,
+        )
         win.close()
 
     def test_smc_rt_ul_806_eoff_a_uses_main_rise_ha_crossing(self):

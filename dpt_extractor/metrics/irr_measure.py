@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from dpt_extractor.metrics.rr_tail import reverse_recovery_tail_end_index
+
 
 @dataclass(frozen=True)
 class IrrTrrMeasure:
@@ -413,6 +415,12 @@ def default_irr_trr_measure(
 
     peak_idx = irr_parameter_peak_index(irr_arr, rr0, rr1, on_edge, on0, on1)
     peak_idx = max(rr0, min(int(peak_idx), min(on1, n - 1)))
+    fall_end = reverse_recovery_tail_end_index(
+        t_arr,
+        rr1,
+        on1,
+        peak_idx=peak_idx,
+    )
     measure_i1 = max(rr1, peak_idx)
 
     peak_t = float(t_arr[peak_idx])
@@ -424,7 +432,7 @@ def default_irr_trr_measure(
         measure_i1,
         ha=ha,
         peak_idx=peak_idx,
-        i_fall_end=on1,
+        i_fall_end=fall_end,
     )
     if marker is None and ha is not None:
         marker = measure_irr_trr(
@@ -433,6 +441,6 @@ def default_irr_trr_measure(
             rr0,
             measure_i1,
             peak_idx=peak_idx,
-            i_fall_end=on1,
+            i_fall_end=fall_end,
         )
     return marker

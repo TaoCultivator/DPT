@@ -111,6 +111,7 @@ from dpt_extractor.metrics.iec_windows import (
     integrate_vi_window,
 )
 from dpt_extractor.metrics.energy import peak_power_kw
+from dpt_extractor.metrics.rr_tail import reverse_recovery_tail_end_index
 from dpt_extractor.metrics.offset_measurement import (
     OFFSET_MEASUREMENT_BY_KEY,
     OFFSET_RANGE_LABELS,
@@ -4341,6 +4342,10 @@ class MainWindow(QMainWindow):
         v_diode = self.bundle.get(self.profile.v_diode)
         rr0, rr1 = segs.reverse_recovery
         on1 = segs.turn_on[1]
+        from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
+
+        ipk = err_recovery_peak_index(irr[rr0 : rr1 + 1], dt)
+        ipk_global = rr0 + ipk
         markers = err_energy_markers(
             t,
             irr,
@@ -4354,15 +4359,13 @@ class MainWindow(QMainWindow):
             pulse2_on=segs.pulse2_on,
             pulse2_off=segs.pulse2_off,
             dc_current=self.result.idc,
+            lower_bridge_irr_from_ic_minus_il=self.profile.irr_from_ic_minus_il,
         )
         search_t0 = float(t[rr0] * 1e6)
         search_t1 = float(t[on1] * 1e6)
         edge_a, edge_b = "falling", "rising"
         ha_channel, hb_channel, a_channel, b_channel = "irr", "v_diode", "irr", "v_diode"
-        from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
-
-        ipk = err_recovery_peak_index(irr[rr0 : rr1 + 1], dt)
-        a_anchor_us = float(t[rr0 + ipk] * 1e6)
+        a_anchor_us = float(t[ipk_global] * 1e6)
 
         def _idx_from_t_us(t_us: float) -> int:
             ts = t_us * 1e-6
@@ -4440,6 +4443,7 @@ class MainWindow(QMainWindow):
             rise_b_mode="err_vd",
             peak_channels=("irr", "v_diode"),
             sync_cursors_from_levels=False,
+            lower_bridge_irr_from_ic_minus_il=self.profile.irr_from_ic_minus_il,
         )
         if restored is None and legacy is None:
             self._show_stored_metric_status("反向恢复", "Err")
@@ -4729,6 +4733,15 @@ class MainWindow(QMainWindow):
         else:
             ha_a, hb_a, ta_us, tb_us, peak_idx = saved
             trr_init = abs(tb_us - ta_us) * 1e3
+        fall_end_idx = reverse_recovery_tail_end_index(
+            t,
+            i1,
+            on1,
+            peak_idx=peak_idx,
+            pulse2_off=segs.pulse2_off,
+            dt=self.bundle.dt,
+        )
+        t1_us = max(t1_us, float(t[fall_end_idx] * 1e6))
 
         def _on_trr_measure(
             ha: float,
@@ -4761,7 +4774,7 @@ class MainWindow(QMainWindow):
             tb_us,
             _on_trr_measure,
             peak_idx=peak_idx,
-            i_fall_end_idx=on1,
+            i_fall_end_idx=fall_end_idx,
         )
         if saved is not None:
             _on_trr_measure(ha_a, hb_a, ta_us, tb_us, trr_init)
@@ -6309,12 +6322,13 @@ class MainWindow(QMainWindow):
             from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 
             irr_sig = bundle_reverse_recovery_current(self.bundle, self.profile)
+            rr0, rr1 = segs.reverse_recovery
             markers = err_energy_markers(
                 t,
                 irr_sig,
                 self.bundle.get(self.profile.v_diode),
-                segs.reverse_recovery[0],
-                segs.reverse_recovery[1],
+                rr0,
+                rr1,
                 self.bundle.dt,
                 i_search_end=segs.turn_on[1],
                 vge=self.bundle.get(self.profile.vge),
@@ -6322,6 +6336,7 @@ class MainWindow(QMainWindow):
                 pulse2_on=segs.pulse2_on,
                 pulse2_off=segs.pulse2_off,
                 dc_current=self.result.idc,
+                lower_bridge_irr_from_ic_minus_il=self.profile.irr_from_ic_minus_il,
             )
             w = markers.as_integration_window()
             return w.t_start * 1e6, w.t_end * 1e6

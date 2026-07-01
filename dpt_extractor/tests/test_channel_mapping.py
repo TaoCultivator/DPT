@@ -185,6 +185,71 @@ class TestChannelMapping(unittest.TestCase):
             -ch3,
         )
 
+    def test_upper_inverted_lower_ic_is_oriented_as_irr(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            bundle_reverse_recovery_current,
+            try_bundle_total_current,
+        )
+
+        il = np.full(128, 1050.0)
+        raw_lower_ic = np.full(128, 980.0)
+        raw_lower_ic[64:72] = 1220.0
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, raw_lower_ic.size),
+            channels={"CH3": raw_lower_ic, "CH4": il},
+            meta=TekMetadata(),
+        )
+        profile = replace(
+            make_profile("U", "upper"),
+            ic="",
+            irr="CH3",
+            il="CH4",
+            ic_from_sum_irr_il=True,
+            irr_from_ic_minus_il=False,
+        )
+
+        np.testing.assert_allclose(
+            bundle_reverse_recovery_current(bundle, profile),
+            -raw_lower_ic,
+        )
+        np.testing.assert_allclose(
+            try_bundle_total_current(bundle, profile),
+            il - raw_lower_ic,
+        )
+
+    def test_direct_total_current_negative_platform_is_oriented_positive(self):
+        import numpy as np
+        from dataclasses import replace
+
+        from dpt_extractor.models.waveform import (
+            TekMetadata,
+            WaveformBundle,
+            try_bundle_total_current,
+        )
+
+        raw_total = np.full(96, -800.0)
+        raw_total[30:40] = -930.0
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, raw_total.size),
+            channels={"CH3": raw_total},
+            meta=TekMetadata(),
+        )
+        profile = replace(
+            make_profile("U", "lower"),
+            ic="CH3",
+            il="",
+            irr="",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+
+        np.testing.assert_allclose(try_bundle_total_current(bundle, profile), -raw_total)
+
     def test_direct_ic_overrides_sum_formula_fallback(self):
         import numpy as np
         from dataclasses import replace

@@ -841,6 +841,7 @@ def extract_all(
             pulse2_on=segs.pulse2_on,
             pulse2_off=segs.pulse2_off,
             dc_current=idc,
+            lower_bridge_irr_from_ic_minus_il=profile.irr_from_ic_minus_il,
         ).as_integration_window()
         err = integrate_err_recovery(t, v_diode, irr, win_rr_scope)
         pdmax_rr = peak_power_kw(v_diode, irr, win_rr_scope, absolute=True)

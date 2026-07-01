@@ -10,6 +10,7 @@ from dpt_extractor.metrics.iec_windows import (
     _loss_cursor_event_gate_after_main_edge,
     _err_ha_top_from_offset_window,
     _err_recovery_settled_base,
+    _err_true_irr_ha_cross_t,
     _err_vd_base_from_offset_window,
     _first_sustained_rise_crossing,
     _quiet_local_platform_level,
@@ -23,6 +24,10 @@ from dpt_extractor.metrics.iec_windows import (
 )
 from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 from dpt_extractor.models.bridge_profile import UPPER_BRIDGE, guess_profile_from_path
+from dpt_extractor.models.channel_mapping import (
+    apply_mapping,
+    infer_best_mapping_from_bundle,
+)
 from dpt_extractor.models.waveform import bundle_total_current
 from dpt_extractor.metrics.plateau_level import (
     dvdt_rr_vd_base_top,
@@ -235,6 +240,17 @@ SSS_LT_UH_1050 = (
     / "tss"
     / "UH-750V-1050A_000.tss"
 )
+WANGLIHUI_U_DIR = (
+    ROOT
+    / "示例文件"
+    / "wanglihui"
+    / "U"
+)
+WANGLIHUI_UH_400_1070 = (
+    WANGLIHUI_U_DIR
+    / "UH_400V_1070A_Rgon1.515R_Rgoff6.346R_000.tss"
+)
+WANGLIHUI_UL_400_1070 = WANGLIHUI_U_DIR / "UL_400V_1070A_Rgon1.1R_Rgof5R_000.tss"
 
 
 def _assert_crossing(
@@ -1181,6 +1197,174 @@ class TestEoffWindow(unittest.TestCase):
         self.assertAlmostEqual(mk.ha_v, -1.935, delta=0.08)
         self.assertAlmostEqual(mk.t_start * 1e6, 10.875, delta=0.030)
         _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+
+    @unittest.skipUnless(
+        WANGLIHUI_UH_400_1070.exists(), "wanglihui UH 400V 1070A sample missing"
+    )
+    def test_wanglihui_upper_inverted_irr_err_a_uses_true_ha_crossing(self):
+        bundle = load_waveform(WANGLIHUI_UH_400_1070)
+        profile = guess_profile_from_path(str(WANGLIHUI_UH_400_1070))
+        mapping, _source = infer_best_mapping_from_bundle(bundle, profile.bridge)
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        profile = apply_mapping(profile, mapping)
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        mk = err_energy_markers(
+            t,
+            irr,
+            vd,
+            segs.reverse_recovery[0],
+            segs.reverse_recovery[1],
+            bundle.dt,
+            i_search_end=segs.turn_on[1],
+            vge=bundle.get(profile.vge),
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
+            dc_current=result.idc,
+        )
+        energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+
+        self.assertAlmostEqual(result.reverse_recovery.err, energy, places=9)
+        self.assertAlmostEqual(mk.t_start * 1e6, 36.449, delta=0.025)
+        self.assertAlmostEqual(mk.t_end * 1e6, 35.935, delta=0.025)
+        self.assertGreater(energy, 10.0)
+        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_crossing(self, t, vd, mk.t_end, mk.hb_a, "any", delta=0.02)
+
+    @unittest.skipUnless(WANGLIHUI_U_DIR.exists(), "wanglihui U samples missing")
+    def test_wanglihui_upper_err_batch_a_uses_true_ha_crossing(self):
+        paths = sorted(WANGLIHUI_U_DIR.glob("UH_*.tss"))
+        if not paths:
+            self.skipTest("wanglihui upper samples missing")
+        cfg = load_config()
+        for path in paths:
+            with self.subTest(sample=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                mapping, _source = infer_best_mapping_from_bundle(bundle, profile.bridge)
+                self.assertIsNotNone(mapping)
+                assert mapping is not None
+                profile = apply_mapping(profile, mapping)
+                result = extract_all(bundle, profile, cfg)
+                segs = result.segments
+                assert segs is not None
+                t = bundle.t
+                irr = bundle_reverse_recovery_current(bundle, profile)
+                vd = bundle.get(profile.v_diode)
+                mk = err_energy_markers(
+                    t,
+                    irr,
+                    vd,
+                    segs.reverse_recovery[0],
+                    segs.reverse_recovery[1],
+                    bundle.dt,
+                    i_search_end=segs.turn_on[1],
+                    vge=bundle.get(profile.vge),
+                    pulse1_off=segs.pulse1_off,
+                    pulse2_on=segs.pulse2_on,
+                    pulse2_off=segs.pulse2_off,
+                    dc_current=result.idc,
+                )
+                ipk = segs.reverse_recovery[0] + err_recovery_peak_index(
+                    irr[segs.reverse_recovery[0] : segs.reverse_recovery[1] + 1],
+                    bundle.dt,
+                )
+                peak = float(irr[ipk])
+                if peak > 0.0 and mk.ha_v > 0.0:
+                    _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "any")
+                else:
+                    _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+
+    @unittest.skipUnless(WANGLIHUI_U_DIR.exists(), "wanglihui U samples missing")
+    def test_wanglihui_lower_err_batch_a_uses_stable_gate_not_tail(self):
+        paths = sorted(WANGLIHUI_U_DIR.glob("UL_*.tss"))
+        if not paths:
+            self.skipTest("wanglihui lower samples missing")
+        cfg = load_config()
+        for path in paths:
+            with self.subTest(sample=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                mapping, _source = infer_best_mapping_from_bundle(bundle, profile.bridge)
+                self.assertIsNotNone(mapping)
+                assert mapping is not None
+                profile = apply_mapping(profile, mapping)
+                self.assertTrue(profile.irr_from_ic_minus_il)
+                result = extract_all(bundle, profile, cfg)
+                segs = result.segments
+                assert segs is not None
+                t = bundle.t
+                irr = bundle_reverse_recovery_current(bundle, profile)
+                vd = bundle.get(profile.v_diode)
+                mk = err_energy_markers(
+                    t,
+                    irr,
+                    vd,
+                    segs.reverse_recovery[0],
+                    segs.reverse_recovery[1],
+                    bundle.dt,
+                    i_search_end=segs.turn_on[1],
+                    vge=bundle.get(profile.vge),
+                    pulse1_off=segs.pulse1_off,
+                    pulse2_on=segs.pulse2_on,
+                    pulse2_off=segs.pulse2_off,
+                    dc_current=result.idc,
+                    lower_bridge_irr_from_ic_minus_il=profile.irr_from_ic_minus_il,
+                )
+                energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+                self.assertAlmostEqual(result.reverse_recovery.err, energy, places=9)
+                _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+                _assert_crossing(self, t, vd, mk.t_end, mk.hb_a, "any", delta=0.03)
+
+                ipk = segs.reverse_recovery[0] + err_recovery_peak_index(
+                    irr[segs.reverse_recovery[0] : segs.reverse_recovery[1] + 1],
+                    bundle.dt,
+                )
+                peak = float(irr[ipk])
+                if peak < 0.0 and mk.ha_v > 0.0 and abs(peak) >= 120.0:
+                    err_base = _err_recovery_settled_base(
+                        irr,
+                        ipk,
+                        bundle.dt,
+                        segs.turn_on[1],
+                    )
+                    search_end = max(
+                        segs.turn_on[1],
+                        err_base.end_idx + int(900e-9 / max(bundle.dt, 1e-15)),
+                    )
+                    expected = _err_true_irr_ha_cross_t(
+                        t,
+                        irr,
+                        mk.ha_v,
+                        ipk,
+                        search_end,
+                        after_idx=err_base.end_idx,
+                        force_signed=True,
+                    )
+                    self.assertIsNotNone(expected)
+                    assert expected is not None
+                    self.assertAlmostEqual(mk.t_start, expected, delta=2e-9)
+                    self.assertGreater(
+                        mk.t_end,
+                        float(t[ipk]) + 20e-9,
+                        "下桥 Ic-IL 型 Err B 必须落在 Irr 主峰后的 Vd 主上升沿，不能抢前置低压毛刺",
+                    )
+                    j_b = int(np.searchsorted(t, mk.t_end, side="left"))
+                    j_hi = min(
+                        len(vd),
+                        j_b + int(180e-9 / max(bundle.dt, 1e-15)),
+                    )
+                    self.assertGreater(
+                        float(np.max(vd[j_b:j_hi])) - float(mk.hb_a),
+                        100.0,
+                        "Err B 后必须能看到 Vd 主上升沿的有效抬升",
+                    )
 
     @unittest.skipUnless(
         SONG_KSU2577_SSS_HT.exists() and SONG_KSU2577_SSS_RT.exists(),

@@ -157,6 +157,64 @@ class TestLabelMapping(unittest.TestCase):
         self.assertEqual(mapping.vge, "CH1")
         self.assertEqual(mapping.vce, "CH2")
 
+    def test_upper_label_ic_ul_is_upper_irr(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 16),
+            channels={f"CH{i}": np.zeros(16) for i in range(1, 7)},
+            meta=TekMetadata(
+                channel_labels={
+                    "CH1": "VGE_UH",
+                    "CH2": "VCE_UH",
+                    "CH3": "IC_UL",
+                    "CH4": "IL",
+                    "CH5": "VCE_UL",
+                    "CH6": "VGE_UL",
+                }
+            ),
+        )
+
+        mapping = infer_mapping_from_bundle(bundle, "upper")
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.irr, "CH3")
+        self.assertEqual(mapping.ic, "")
+        self.assertEqual(mapping.il, "CH4")
+        self.assertTrue(mapping.ic_from_sum_irr_il)
+        self.assertFalse(mapping.irr_from_ic_minus_il)
+
+    def test_lower_label_ic_ul_is_lower_total_current(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 1e-6, 16),
+            channels={f"CH{i}": np.zeros(16) for i in range(1, 7)},
+            meta=TekMetadata(
+                channel_labels={
+                    "CH1": "VGE_UH",
+                    "CH2": "VCE_UH",
+                    "CH3": "IC_UL",
+                    "CH4": "IL",
+                    "CH5": "VCE_UL",
+                    "CH6": "VGE_UL",
+                }
+            ),
+        )
+
+        mapping = infer_mapping_from_bundle(bundle, "lower")
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.ic, "CH3")
+        self.assertEqual(mapping.irr, "")
+        self.assertEqual(mapping.il, "CH4")
+        self.assertFalse(mapping.ic_from_sum_irr_il)
+        self.assertTrue(mapping.irr_from_ic_minus_il)
+
     def test_infer_uses_channel_order_for_equal_label_matches(self):
         import numpy as np
 

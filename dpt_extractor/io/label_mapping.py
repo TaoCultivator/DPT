@@ -66,9 +66,14 @@ _VDESAT_PATTERNS = (r"^DESAT$", r"VDESAT", r"DESATV", r"DSAT")
 
 # 上桥：下桥支路电流（IGBT: IC_VL / Ic；MOSFET: IVL / Id 低侧支路）
 _UPPER_LOWER_ARM_PATTERNS = (
+    r"IC[UVW]L$",
+    r"IC.*[UVW]L$",
     r"ICVL$",
     r"IC.*VL$",
+    r"I[UVW]L$",
     r"IVL$",
+    r"ID[UVW]L$",
+    r"ID.*[UVW]L$",
     r"IDVL$",
     r"ID.*VL$",
     r"^IRR$",
@@ -82,6 +87,11 @@ _UPPER_LOWER_ARM_PATTERNS = (
 _LOWER_TOTAL_IC_PATTERNS = (
     r"^ICTOTAL$",
     r"^IDTOTAL$",
+    r"IC[UVW]L$",
+    r"IC.*[UVW]L$",
+    r"I[UVW]L$",
+    r"ID[UVW]L$",
+    r"ID.*[UVW]L$",
     r"^IC$",
     r"^ID$",
     r"^IDS$",
@@ -95,6 +105,9 @@ _LOWER_TOTAL_IC_PATTERNS = (
 
 # 下桥总电流列排除：高侧支路分量（非被测管总电流）
 _LOWER_IC_EXCLUDE_NORM = (
+    r"IC[UVW]H$",
+    r"ID[UVW]H$",
+    r"I[UVW]H$",
     r"ICVH$",
     r"IDVH$",
     r"IC.*VH$",
@@ -193,7 +206,7 @@ def _is_lower_arm_current_norm(norm: str) -> bool:
         return False
     if any(re.search(ex, norm) for ex in _LOWER_IC_EXCLUDE_NORM):
         return True
-    if re.search(r"ICVL|IDVL|IVL|ILOW|ICLOW|IDLOW", norm):
+    if re.search(r"IC[UVW]L|ID[UVW]L|I[UVW]L|ICVL|IDVL|IVL|ILOW|ICLOW|IDLOW", norm):
         return True
     if norm in ("IC", "ID"):
         return True

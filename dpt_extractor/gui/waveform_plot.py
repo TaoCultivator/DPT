@@ -617,6 +617,8 @@ from dpt_extractor.models.waveform import (
     channel_reference_sign,
     normalize_channel_reference,
     split_channel_reference,
+    try_bundle_reverse_recovery_current,
+    try_bundle_total_current,
 )
 
 MAX_PLOT_POINTS = 8000
@@ -706,12 +708,19 @@ CHANNEL_UNITS = {
     "vce": "V",
     "ic": "A",
     "irr": "A",
+    "LOGIC_IC": "A",
+    "LOGIC_IRR": "A",
     "v_diode": "V",
     "vge_other": "V",
     "vdesat": "V",
 }
+LOGICAL_CURRENT_TRACE_KEYS = {
+    "ic": "LOGIC_IC",
+    "irr": "LOGIC_IRR",
+}
 
 SOURCE_CHANNEL_PATTERN = r"(?:CH[1-8]|MATH\d+)"
+FORMULA_REFERENCE_PATTERN = r"(?:CH[1-8]|MATH\d+|LOGIC_IC|LOGIC_IRR)"
 SOURCE_CHANNEL_RE = re.compile(rf"^{SOURCE_CHANNEL_PATTERN}$", re.I)
 
 MATH_TRACE_COLORS = (
@@ -1854,6 +1863,7 @@ class WaveformPlot(QWidget):
         self._energy_fall_b_mode: str | None = None
         self._energy_peak_channels: tuple[str, ...] = ("vce", "ic")
         self._energy_hb_channel = "ic"
+        self._energy_lower_bridge_irr_from_ic_minus_il = False
 
         # 视图限制
         self._full_x_range: tuple[float, float] | None = None
@@ -3301,7 +3311,7 @@ class WaveformPlot(QWidget):
         text = expr.upper()
         if "INTG" in text or "INTEG" in text:
             return "J"
-        source_refs = re.findall(rf"\b{SOURCE_CHANNEL_PATTERN}\b", text)
+        source_refs = re.findall(rf"\b{FORMULA_REFERENCE_PATTERN}\b", text)
         if "*" in text and len(set(ref.upper() for ref in source_refs)) >= 2:
             return "W"
         for name in source_refs:
@@ -3500,6 +3510,8 @@ class WaveformPlot(QWidget):
         self,
         profile: BridgeProfile,
         formulas: dict[str, str],
+        logical_currents: dict[str, np.ndarray] | None = None,
+        source_data: dict[str, np.ndarray] | None = None,
     ) -> None:
         """Bind derived logical currents to visible TSS Math traces when available."""
         if (
@@ -3508,20 +3520,127 @@ class WaveformPlot(QWidget):
             and profile.irr
             and profile.il
         ):
-            for key, expr in formulas.items():
-                if self._is_sum_formula(expr, profile.irr, profile.il):
-                    self._logical_display_keys["ic"] = key.upper()
-                    break
+            matched = self._best_matching_math_current_trace(
+                logical_currents.get("ic") if logical_currents else None,
+                source_data,
+            )
+            if matched:
+                self._logical_display_keys["ic"] = matched
+            else:
+                for key, expr in formulas.items():
+                    if self._is_sum_formula(expr, profile.irr, profile.il):
+                        self._logical_display_keys["ic"] = key.upper()
+                        break
+                else:
+                    self._logical_display_keys["ic"] = LOGICAL_CURRENT_TRACE_KEYS["ic"]
         if (
             profile.irr_from_ic_minus_il
             and not profile.irr
             and profile.ic
             and profile.il
         ):
-            for key, expr in formulas.items():
-                if self._is_difference_formula(expr, profile.ic, profile.il):
-                    self._logical_display_keys["irr"] = key.upper()
-                    break
+            matched = self._best_matching_math_current_trace(
+                logical_currents.get("irr") if logical_currents else None,
+                source_data,
+            )
+            if matched:
+                self._logical_display_keys["irr"] = matched
+            else:
+                for key, expr in formulas.items():
+                    if self._is_difference_formula(expr, profile.ic, profile.il):
+                        self._logical_display_keys["irr"] = key.upper()
+                        break
+                else:
+                    self._logical_display_keys["irr"] = LOGICAL_CURRENT_TRACE_KEYS["irr"]
+
+    @staticmethod
+    def _logical_current_match_error(
+        candidate: np.ndarray | None,
+        target: np.ndarray | None,
+    ) -> float | None:
+        if candidate is None or target is None:
+            return None
+        cand = np.asarray(candidate, dtype=np.float64)
+        tgt = np.asarray(target, dtype=np.float64)
+        if cand.shape != tgt.shape or cand.size == 0:
+            return None
+        finite = np.isfinite(cand) & np.isfinite(tgt)
+        if not np.any(finite):
+            return None
+        cand = cand[finite]
+        tgt = tgt[finite]
+        scale = max(
+            float(np.percentile(np.abs(cand), 95.0)),
+            float(np.percentile(np.abs(tgt), 95.0)),
+            1.0,
+        )
+        p95_err = float(np.percentile(np.abs(cand - tgt), 95.0))
+        return p95_err / scale
+
+    def _current_candidate_data(
+        self,
+        key: str,
+        source_data: dict[str, np.ndarray] | None,
+    ) -> np.ndarray | None:
+        if source_data is None:
+            return None
+        key = normalize_channel_reference(key)
+        raw = source_data.get(key)
+        if raw is None:
+            return None
+        arr = np.asarray(raw, dtype=np.float64)
+        return -arr if self._display_transform_inverted(key) else arr
+
+    def _best_matching_math_current_trace(
+        self,
+        target: np.ndarray | None,
+        source_data: dict[str, np.ndarray] | None,
+    ) -> str | None:
+        if target is None or source_data is None:
+            return None
+        best_key: str | None = None
+        best_err: float | None = None
+        for key in sorted(source_data, key=_source_channel_sort_key):
+            if not _is_math_trace_key(key):
+                continue
+            err = self._logical_current_match_error(
+                self._current_candidate_data(key, source_data),
+                target,
+            )
+            if err is None:
+                continue
+            if best_err is None or err < best_err:
+                best_key = key
+                best_err = err
+        if best_key is not None and best_err is not None and best_err <= 0.002:
+            return best_key
+        return None
+
+    def _install_logical_current_display_traces(
+        self,
+        logical_currents: dict[str, np.ndarray],
+    ) -> None:
+        for logical, key in LOGICAL_CURRENT_TRACE_KEYS.items():
+            if self._logical_display_keys.get(logical) != key:
+                continue
+            raw = logical_currents.get(logical)
+            if raw is None:
+                continue
+            arr = np.asarray(raw, dtype=np.float64)
+            self._trace_raw[key] = arr
+            self._trace_units[key] = "A"
+            if logical == "ic":
+                ref = self._base_logical_display_keys.get("ic") or self._base_logical_display_keys.get("irr")
+                legend = "Ic"
+                color = self._cursor_source_color(ref) if ref else WAVEFORM_PLOT_FG
+            else:
+                ref = self._base_logical_display_keys.get("irr") or self._base_logical_display_keys.get("ic")
+                legend = "Irr"
+                color = self._cursor_source_color(ref) if ref else WAVEFORM_PLOT_FG
+            self._trace_style[key] = (color, 1.0)
+            self._trace_legend[key] = legend
+            self._disp_scale[key] = _auto_vdiv_for_channel(key, arr, "A")
+            self._disp_offset[key] = _auto_center_offset_div(arr, self._disp_scale[key])
 
     def _display_key_for_channel(self, channel: str) -> str:
         logical = channel.strip().lower()
@@ -3558,7 +3677,7 @@ class WaveformPlot(QWidget):
         if "*" not in text:
             return False
         roles: set[str] = set()
-        for ref in re.findall(rf"\b{SOURCE_CHANNEL_PATTERN}\b", text):
+        for ref in re.findall(rf"\b{FORMULA_REFERENCE_PATTERN}\b", text):
             roles.update(self._logical_roles_for_source(ref))
         return "v_diode" in roles and "irr" in roles
 
@@ -3591,6 +3710,12 @@ class WaveformPlot(QWidget):
                     ctx[name.upper()] = effective
                 else:
                     ctx[name.upper()] = arr
+        for name in LOGICAL_CURRENT_TRACE_KEYS.values():
+            if name.upper() == target_key.upper():
+                continue
+            raw = self._trace_raw.get(name)
+            if raw is not None:
+                ctx[name.upper()] = np.asarray(raw, dtype=np.float64)
         ctx["PI"] = float(np.pi)
         ctx["E"] = float(np.e)
         return ctx
@@ -3959,33 +4084,28 @@ class WaveformPlot(QWidget):
             return zero_trace
 
         def safe_total_current() -> np.ndarray:
-            direct = effective_bundle_channel(profile.ic)
-            if direct is not None:
-                return direct
-            if profile.ic_from_sum_irr_il:
-                irr_source = effective_bundle_channel(profile.irr)
-                il_source = effective_bundle_channel(profile.il)
-                if irr_source is not None and il_source is not None:
-                    return irr_source + il_source
+            current = try_bundle_total_current(bundle, profile)
+            if current is not None:
+                return np.asarray(current, dtype=np.float64)
             return zero_trace
 
-        def safe_reverse_recovery_current() -> np.ndarray:
-            direct = effective_bundle_channel(profile.irr)
-            if direct is not None:
-                return direct
-            if profile.irr_from_ic_minus_il:
-                il_source = effective_bundle_channel(profile.il)
-                if il_source is not None:
-                    ic_source = safe_total_current()
-                    return ic_source - il_source
+        def safe_reverse_recovery_current(total_current: np.ndarray) -> np.ndarray:
+            current = try_bundle_reverse_recovery_current(
+                bundle,
+                profile,
+                total_current,
+            )
+            if current is not None:
+                return np.asarray(current, dtype=np.float64)
             return zero_trace
 
         vge = safe_channel(profile.vge)
         vce = safe_channel(profile.vce)
         ic = safe_total_current()
-        irr = safe_reverse_recovery_current()
+        irr = safe_reverse_recovery_current(ic)
         v_diode = safe_channel(profile.v_diode)
         vge_other = safe_channel(profile.vge_other)
+        logical_currents = {"ic": ic, "irr": irr}
         self._interactive_vce_t_us = t * 1e6
         self._interactive_vce = vce
         self._interactive_irr_t_us = t * 1e6
@@ -4034,7 +4154,10 @@ class WaveformPlot(QWidget):
         self._logical_display_keys = self._logical_display_key_map(profile)
         self._base_logical_display_keys = dict(self._logical_display_keys)
         self._prefer_math_display_keys_for_derived_currents(
-            profile, imported_math_formulas
+            profile,
+            imported_math_formulas,
+            logical_currents,
+            source_item_map,
         )
         self._display_channel_roles = self._build_display_channel_roles(
             profile, self._logical_display_keys
@@ -4136,6 +4259,7 @@ class WaveformPlot(QWidget):
                 self._set_math_formula(ch_key, expr)
             except Exception:
                 self._math_formulas.pop(ch_key, None)
+        self._install_logical_current_display_traces(logical_currents)
 
         self._hidden_channels.clear()
         self._active_channel = self._display_key_for_channel("ic")
@@ -6765,6 +6889,7 @@ class WaveformPlot(QWidget):
         peak_channels: tuple[str, ...] | None = None,
         sync_cursors_from_levels: bool = True,
         update_result_on_enter: bool = False,
+        lower_bridge_irr_from_ic_minus_il: bool = False,
     ) -> None:
         """
         Eoff：Ha/Vce，A=Vce 与 Ha 穿越。
@@ -6805,6 +6930,9 @@ class WaveformPlot(QWidget):
         self._energy_rise_b_mode = str(rise_b_mode) if rise_b_mode else None
         self._energy_peak_channels = (
             tuple(peak_channels) if peak_channels is not None else ("vce", "ic")
+        )
+        self._energy_lower_bridge_irr_from_ic_minus_il = bool(
+            lower_bridge_irr_from_ic_minus_il
         )
         self._active_channel = self._energy_ha_channel
 
@@ -6964,6 +7092,7 @@ class WaveformPlot(QWidget):
         from dpt_extractor.metrics.iec_windows import (
             _err_irr_fall_cross_ha_t,
             _err_recovery_settled_base,
+            _err_true_irr_ha_cross_t,
             err_recovery_peak_index,
         )
 
@@ -6997,6 +7126,39 @@ class WaveformPlot(QWidget):
             settle_idx=base.start_idx,
             settle_end_idx=base.end_idx,
         )
+        if (
+            bool(getattr(self, "_energy_lower_bridge_irr_from_ic_minus_il", False))
+            and peak < 0.0
+            and float(ha_a) > 0.0
+            and abs(float(peak)) >= 120.0
+        ):
+            stable_cross = _err_true_irr_ha_cross_t(
+                t_seg,
+                y_seg,
+                float(ha_a),
+                ipk_g,
+                i1,
+                after_idx=base.end_idx,
+                force_signed=True,
+            )
+            if stable_cross is not None and (
+                t_cross is None
+                or t_cross < stable_cross - 20e-9
+                or t_cross > stable_cross + 200e-9
+            ):
+                t_cross = stable_cross
+        if t_cross is None:
+            t_cross = _err_true_irr_ha_cross_t(
+                t_seg,
+                y_seg,
+                float(ha_a),
+                ipk_g,
+                i1,
+                after_idx=base.end_idx,
+                force_signed=force_signed,
+            )
+        if t_cross is None:
+            return None
         return float(t_cross) * 1e6
 
     def _err_vd_rise_crossing_us(
@@ -7028,7 +7190,18 @@ class WaveformPlot(QWidget):
         else:
             ipk_g = err_recovery_peak_index(np.abs(y_seg), self._interactive_dt)
         t_cross = _err_vd_rise_cross_hb_t(
-            t_s, y_seg, float(hb_v), ipk_g, i0_seg, self._interactive_dt
+            t_s,
+            y_seg,
+            float(hb_v),
+            ipk_g,
+            i0_seg,
+            self._interactive_dt,
+            prefer_main_rise=bool(
+                getattr(self, "_energy_lower_bridge_irr_from_ic_minus_il", False)
+            ),
+            prefer_post_peak_main_rise=bool(
+                getattr(self, "_energy_lower_bridge_irr_from_ic_minus_il", False)
+            ),
         )
         return float(t_cross) * 1e6
 

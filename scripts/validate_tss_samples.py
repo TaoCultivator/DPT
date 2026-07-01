@@ -28,10 +28,11 @@ from dpt_extractor.metrics.plateau_level import (
     turn_on_current_hb_ha_t,
     turn_on_didt_ha_at_turn_on,
 )
-from dpt_extractor.models.bridge_profile import guess_profile_from_path
+from dpt_extractor.models.bridge_profile import as_short_circuit_profile, guess_profile_from_path
 from dpt_extractor.models.channel_mapping import (
     apply_mapping,
     infer_best_mapping_from_bundle,
+    infer_short_circuit_mapping_from_bundle,
 )
 from dpt_extractor.models.test_mode import TestMode
 from dpt_extractor.models.waveform import (
@@ -42,9 +43,9 @@ from dpt_extractor.pipeline.extract import extract_all
 from dpt_extractor.pipeline.run_extract import run_extraction
 from dpt_extractor.utils.sample_corpus import discover_sample_waveforms
 
-_SHORT_CIRCUIT_DIR_TOKENS = {"DL", "DDD"}
+_SHORT_CIRCUIT_DIR_TOKENS = {"DL", "DDD", "SHORT"}
 _SHORT_CIRCUIT_FILENAME_RE = re.compile(
-    r"^[UVW][HL][_-]\d+(?:\.\d+)?V[_-]0{3}$",
+    r"(?:^|[_-])short(?:[_-]|$)|^[UVW][HL][_-]\d+(?:\.\d+)?V[_-]0{3}$",
     re.IGNORECASE,
 )
 _CONDITION_FILENAME_RE = re.compile(
@@ -207,12 +208,15 @@ def _mapping_fallback_result(
     if inferred_mapping is None:
         return None
     mapped_profile = apply_mapping(base_profile, inferred_mapping)
-    result = _validate_dpt_sample(
-        path,
-        profile_override=mapped_profile,
-        mapping_method=mapping_method or "inferred",
-        allow_mapping_fallback=False,
-    )
+    try:
+        result = _validate_dpt_sample(
+            path,
+            profile_override=mapped_profile,
+            mapping_method=mapping_method or "inferred",
+            allow_mapping_fallback=False,
+        )
+    except Exception:  # noqa: BLE001
+        return None
     return result if not result.warned and not result.failed else None
 
 
@@ -227,7 +231,18 @@ def _validate_dpt_sample(
     base_prof = guess_profile_from_path(path)
     prof = profile_override or base_prof
     b = load_waveform(path)
-    r = extract_all(b, prof, cfg)
+    try:
+        r = extract_all(b, prof, cfg)
+    except Exception:
+        fallback = _mapping_fallback_result(
+            path,
+            b,
+            base_prof,
+            allow_mapping_fallback=allow_mapping_fallback,
+        )
+        if fallback is not None:
+            return fallback
+        raise
     segs = r.segments
     assert segs is not None
     expected_voltage, expected_current = _expected_condition_from_filename(path)
@@ -324,7 +339,21 @@ def _validate_dpt_sample(
     )
     _, ha = turn_on_current_hb_ha_t(b.t, ic, on0, on1, b.dt)
     ha_d = turn_on_didt_ha_at_turn_on(b.t, ic, on0, on1, b.dt)
-    mk = err_energy_markers(b.t, irr, vd, rr0, rr1, b.dt, i_search_end=on1)
+    mk = err_energy_markers(
+        b.t,
+        irr,
+        vd,
+        rr0,
+        rr1,
+        b.dt,
+        i_search_end=on1,
+        vge=b.get(prof.vge),
+        pulse1_off=segs.pulse1_off,
+        pulse2_on=segs.pulse2_on,
+        pulse2_off=segs.pulse2_off,
+        dc_current=r.idc,
+        lower_bridge_irr_from_ic_minus_il=prof.irr_from_ic_minus_il,
+    )
     eoff_chk = integrate_vi_window(b.t, vce, ic, eoff_m.as_integration_window())
     eon_chk = integrate_vi_window(b.t, vce, ic, eon_m.as_integration_window())
     e_chk = integrate_err_recovery(b.t, vd, irr, mk.as_integration_window())
@@ -396,8 +425,15 @@ def _validate_dpt_sample(
 def _validate_short_circuit_sample(path: Path) -> SampleValidation:
     cfg = load_config()
     cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
-    prof = guess_profile_from_path(path)
+    base_prof = guess_profile_from_path(path)
     b = load_waveform(path)
+    inferred = infer_short_circuit_mapping_from_bundle(b, base_prof.bridge)
+    if inferred is not None:
+        prof = apply_mapping(as_short_circuit_profile(base_prof), inferred)
+        mapping_method = "label"
+    else:
+        prof = as_short_circuit_profile(base_prof)
+        mapping_method = "default"
     r = run_extraction(b, prof, cfg)
     sc = r.short_circuit
     problems: list[str] = []
@@ -410,6 +446,7 @@ def _validate_short_circuit_sample(path: Path) -> SampleValidation:
     status = "WARN" if problems else "OK"
     detail = (
         f"profile={prof.code} "
+        f"map={mapping_method} "
         f"Imax={sc.ic_max:.1f}A "
         f"Tsc={sc.tsc:.3f}us "
         f"EscDUT={sc.esc_dut:.4f}J "
