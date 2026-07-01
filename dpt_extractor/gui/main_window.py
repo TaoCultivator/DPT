@@ -85,6 +85,7 @@ from dpt_extractor.models.bridge_profile import (
     BridgeProfile,
     as_short_circuit_profile,
     guess_profile_from_path,
+    has_bridge_hint_from_path,
     make_profile,
 )
 from dpt_extractor.models.results import (
@@ -141,7 +142,7 @@ from dpt_extractor.metrics.iec_timings import (
     turn_on_timing_instants,
 )
 from dpt_extractor.utils.signal import crossing_time, smooth, threshold_value
-from dpt_extractor.metrics.plateau_level import _turn_on_vce_pre_fall_slice
+from dpt_extractor.metrics.plateau_level import turn_on_vce_on_max_window_indices
 from dpt_extractor.models.test_mode import MODE_UI_LABELS, TestMode, parse_test_mode
 from dpt_extractor.pipeline.extract import _turn_on_delta_vce_knee_point
 from dpt_extractor.pipeline.pulse_sequence import dpt_export_results
@@ -540,6 +541,91 @@ def _profile_for_test_mode(profile: BridgeProfile, cfg: AppConfig) -> BridgeProf
     return profile
 
 
+@dataclass
+class _AutoProfileCandidate:
+    profile: BridgeProfile
+    inferred: ChannelMapping | None
+    inferred_source: str
+    result: ExtractResult
+    score: float
+
+
+def _score_auto_dpt_profile(result: ExtractResult) -> float:
+    score = 0.0
+    if result.detected_pulse_count > 0:
+        score += min(float(result.detected_pulse_count), 2.0)
+    if abs(float(result.vdc)) > 20.0:
+        score += 2.0
+    ioff = abs(float(result.turn_off.ic_off_max))
+    ion = abs(float(result.turn_on.turn_on_current))
+    if ioff > 20.0:
+        score += 2.0
+        if ion > 20.0:
+            rel = abs(ioff - ion) / max(ioff, ion, 1.0)
+            score += max(0.0, 10.0 - 20.0 * rel)
+            if (
+                float(result.turn_off.ic_off_max) * float(result.turn_on.turn_on_current)
+                >= 0.0
+            ):
+                score += 1.0
+            else:
+                score -= 4.0
+        else:
+            score -= 10.0
+    else:
+        score -= 4.0
+    if result.turn_off.eoff > 0.01:
+        score += 1.0
+    if result.turn_on.eon > 0.01:
+        score += 1.0
+    if result.reverse_recovery.err > 0.01:
+        score += 0.5
+    if result.single_pulse_mode:
+        score -= 2.0
+    return score
+
+
+def _auto_dpt_profile_candidate(
+    bundle: WaveformBundle,
+    cfg: AppConfig,
+    phase: str,
+    bridge: str,
+) -> _AutoProfileCandidate | None:
+    base_profile = make_profile(phase, bridge)
+    inferred, inferred_source = infer_best_mapping_from_bundle(bundle, bridge)
+    profile = apply_mapping(base_profile, inferred) if inferred is not None else base_profile
+    try:
+        result = run_extraction(bundle, profile, cfg)
+    except Exception:  # noqa: BLE001
+        return None
+    return _AutoProfileCandidate(
+        profile=profile,
+        inferred=inferred,
+        inferred_source=inferred_source,
+        result=result,
+        score=_score_auto_dpt_profile(result),
+    )
+
+
+def _select_ambiguous_bridge_dpt_profile(
+    path: str,
+    bundle: WaveformBundle,
+    cfg: AppConfig,
+    guessed: BridgeProfile,
+) -> _AutoProfileCandidate | None:
+    if has_bridge_hint_from_path(path):
+        return None
+    candidates: list[_AutoProfileCandidate] = []
+    bridges = [guessed.bridge, "lower" if guessed.bridge == "upper" else "upper"]
+    for bridge in dict.fromkeys(bridges):
+        candidate = _auto_dpt_profile_candidate(bundle, cfg, guessed.phase, bridge)
+        if candidate is not None:
+            candidates.append(candidate)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.score)
+
+
 def _compute_waveform_load_outcome(
     path: str,
     cfg: AppConfig,
@@ -595,6 +681,16 @@ def _compute_waveform_load_outcome(
     try:
         if mode == TestMode.OFFSET_MEASUREMENT:
             result = None
+            short_circuit_not_ready = False
+        elif mode == TestMode.DPT and custom_mapping is None:
+            selected = _select_ambiguous_bridge_dpt_profile(path, bundle, cfg, guessed)
+            if selected is not None:
+                profile = selected.profile
+                inferred = selected.inferred
+                inferred_source = selected.inferred_source
+                result = selected.result
+            else:
+                result = run_extraction(bundle, profile, cfg)
             short_circuit_not_ready = False
         else:
             result = run_extraction(bundle, profile, cfg)
@@ -4927,7 +5023,7 @@ class MainWindow(QMainWindow):
         _on_interval_change(t0_us, t1_us)
 
     def _enable_short_circuit_current_interaction(self, name: str) -> None:
-        """短路 Imax/Tsc：按短路规范用 Ic 的 Hb 交点联动 A/B。"""
+        """短路 Imax/Tsc：默认按短路规范布置，手动拖动时横纵光标独立。"""
         self._active_slope_param = None
         if (
             self.bundle is None
@@ -6210,13 +6306,22 @@ class MainWindow(QMainWindow):
             from dpt_extractor.models.waveform import bundle_total_current
 
             ic = bundle_total_current(self.bundle, self.profile)
+            vge = self.bundle.get(self.profile.vge)
             vce = self.bundle.get(self.profile.vce)
             vce_top = turn_on_vce_top_from_ic_rise(
                 ic, vce, segs.pulse2_on, segs.pulse2_off, dt
             )
             return _clip_pair(
-                *_turn_on_vce_pre_fall_slice(
-                    vce, segs.turn_on[0], segs.turn_on[1], dt, vce_top
+                *turn_on_vce_on_max_window_indices(
+                    t,
+                    vge,
+                    vce,
+                    segs.turn_on[0],
+                    segs.turn_on[1],
+                    segs.pulse2_on,
+                    segs.pulse2_off,
+                    dt,
+                    vce_top,
                 )
             )
 

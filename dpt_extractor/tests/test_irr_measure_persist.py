@@ -42,7 +42,7 @@ class TestIrrMeasurePersist(unittest.TestCase):
         win.wave_plot = plot
 
         win._enable_trr_interaction()
-        # UH 为负向主瓣：Ha 过深（如 -120A）无有效交点；用 0A 验证拖 Ha 联动 A/B
+        # UH 为负向主瓣：Ha 过深（如 -120A）无有效交点；用 0A 验证重进 Trr 后保留手动 Ha
         user_ha = 0.0
         plot._interactive_syncing = True
         try:

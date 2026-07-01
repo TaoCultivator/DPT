@@ -118,7 +118,7 @@ def make_profile(phase: str, bridge: str) -> BridgeProfile:
         channels = dict(_LOWER_CHANNELS)
 
     return BridgeProfile(
-        name=f"{phase.lower}_{bridge}",
+        name=f"{phase.lower()}_{bridge}",
         display_name=f"{phase}相-{bridge_cn} ({code})",
         phase=phase,
         bridge=bridge,
@@ -242,6 +242,17 @@ def guess_profile_from_path(path: str | Path) -> BridgeProfile:
     if bridge:
         return make_profile("W", bridge)
     return UPPER_BRIDGE
+
+
+def has_bridge_hint_from_path(path: str | Path) -> bool:
+    """Return True when the path itself contains an upper/lower bridge hint."""
+    p = Path(path)
+    stem = p.stem.upper()
+    for code in _CODE_ORDER:
+        if code in stem or stem.endswith(code) or f"_{code}_" in stem:
+            return True
+    tokens = _tokenize_path_for_guess(p)
+    return _guess_bridge_from_tokens(tokens) is not None
 
 
 def profile_from_combo_data(data) -> BridgeProfile:

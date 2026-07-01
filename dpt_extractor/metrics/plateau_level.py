@@ -121,79 +121,132 @@ def dvdt_on_vce_fall_base_top(
     return hb, top
 
 
-def _turn_on_vce_pre_fall_slice(
+def turn_on_vce_on_max_window_indices(
+    t: np.ndarray,
+    vge: np.ndarray,
     vce: np.ndarray,
     i0: int,
     i1: int,
-    dt: float,
-    vce_top: float,
-) -> tuple[int, int]:
-    """跌落前高平台窗 [w0,w1]（与 extract._turn_on_vce_on_max 一致）。"""
-    n = len(vce)
-    if n == 0:
-        return 0, 0
-    i0 = max(0, min(int(i0), n - 2))
-    i1 = max(i0 + 2, min(int(i1), n - 1))
-    dt = max(float(dt), 1e-15)
-    s0 = max(0, min(i0 - int(400e-9 / dt), n - 2))
-    s1 = max(s0 + 2, min(i1, n - 1))
-    seg = vce[s0 : s1 + 1].astype(np.float64)
-    if len(seg) < 5:
-        return s0, s1
-
-    th_drop = float(vce_top) - max(0.01 * float(vce_top), 3.0)
-    cross = np.where(seg <= th_drop)[0]
-    if len(cross):
-        drop_rel = int(cross[0])
-    else:
-        k = min(21, max(5, (len(seg) // 40) | 1))
-        ker = np.ones(k, dtype=np.float64) / float(k)
-        seg_s = np.convolve(seg, ker, mode="same")
-        dv = np.diff(seg_s)
-        drop_rel = int(np.argmin(dv)) if len(dv) else 0
-
-    drop_idx = max(s0 + drop_rel, i0)
-    w1 = max(s0 + 1, min(drop_idx, s1 - 1))
-    w0 = max(s0, w1 - int(200e-9 / dt))
-    if w1 <= w0 + 1:
-        w0 = max(s0, w1 - 5)
-    return int(w0), int(w1)
-
-
-def turn_on_vce_on_max_ha_level(
-    vce: np.ndarray,
-    i0: int,
-    i1: int,
+    pulse2_on: int,
+    pulse2_off: int,
     dt: float,
     vce_top: float | None = None,
-) -> float:
-    """开通 Vce_on_max 示波器 Ha：跌落前 200ns 高平台 (max+min)/2。"""
-    if len(vce) == 0:
-        return 0.0
-    i0 = max(0, min(int(i0), len(vce) - 2))
-    i1 = max(i0 + 2, min(int(i1), len(vce) - 1))
-    if vce_top is None:
-        vce_top = float(np.max(vce[i0 : i1 + 1]))
-    w0, w1 = _turn_on_vce_pre_fall_slice(vce, i0, i1, dt, float(vce_top))
-    block = vce[w0 : w1 + 1].astype(np.float64)
-    if len(block) < 3:
-        return float(np.max(block)) if len(block) else 0.0
-    return float(_quiet_plateau_mid(block, prefer="high"))
+) -> tuple[int, int]:
+    """
+    开通 Vce_on_max 窗口：A=Vge 低电平开始抬升点，B=本管 Vce 跌到低平台后。
+
+    这个窗口用于数值和 GUI 光标，避免旧逻辑只截取跌落前高平台而把 A/B 卡到
+    开通事件左侧。
+    """
+    t_arr = np.asarray(t, dtype=np.float64)
+    vge_arr = np.asarray(vge, dtype=np.float64)
+    vce_arr = np.asarray(vce, dtype=np.float64)
+    n = min(len(t_arr), len(vge_arr), len(vce_arr))
+    if n == 0:
+        return 0, 0
+    if n < 4:
+        return 0, n - 1
+    dt_s = max(float(dt), 1e-15)
+    s0 = max(0, min(int(i0), n - 2))
+    s1 = max(s0 + 2, min(int(i1), n - 1))
+    on_idx = max(s0, min(int(pulse2_on), n - 2))
+    off_idx = max(on_idx + 1, min(int(pulse2_off), n - 1))
+
+    def _block_percentile(
+        arr: np.ndarray, lo: int, hi: int, pct: float, fallback: float
+    ) -> float:
+        lo = max(0, min(int(lo), n - 1))
+        hi = max(lo + 1, min(int(hi), n))
+        block = arr[lo:hi]
+        if len(block) == 0 or not np.isfinite(block).any():
+            return float(fallback)
+        return float(np.nanpercentile(block, float(pct)))
+
+    pre0 = max(0, min(s0, on_idx - int(800e-9 / dt_s)))
+    pre0 = max(pre0, on_idx - int(800e-9 / dt_s))
+    pre1 = min(on_idx, on_idx - int(50e-9 / dt_s))
+    if pre1 <= pre0 + 3:
+        pre0 = max(s0, on_idx - int(500e-9 / dt_s))
+        pre1 = max(pre0 + 3, on_idx)
+    post0 = min(n - 1, max(on_idx + int(100e-9 / dt_s), on_idx))
+    post1 = min(n, max(post0 + 4, min(off_idx, on_idx + int(900e-9 / dt_s))))
+    vge_lo = _block_percentile(vge_arr, pre0, pre1, 5.0, float(vge_arr[on_idx]))
+    vge_hi = _block_percentile(vge_arr, post0, post1, 95.0, float(vge_arr[on_idx]))
+    span = vge_hi - vge_lo
+
+    a_idx = on_idx
+    search_a0 = max(s0, pre0)
+    search_a1 = min(n - 1, on_idx + int(250e-9 / dt_s))
+    if abs(span) >= 0.5 and search_a1 > search_a0:
+        threshold = vge_lo + 0.02 * span
+        if span >= 0.0:
+            hits = np.where(vge_arr[search_a0 : search_a1 + 1] >= threshold)[0]
+        else:
+            hits = np.where(vge_arr[search_a0 : search_a1 + 1] <= threshold)[0]
+        if len(hits):
+            a_idx = search_a0 + int(hits[0])
+
+    if vce_top is None or not np.isfinite(float(vce_top)):
+        vce_top = float(np.nanmax(vce_arr[s0 : s1 + 1]))
+    top = float(vce_top)
+    base0 = min(n - 1, max(a_idx + int(100e-9 / dt_s), on_idx + int(300e-9 / dt_s)))
+    base1 = min(n, max(base0 + 6, min(off_idx, on_idx + int(1400e-9 / dt_s))))
+    if base1 <= base0 + 3:
+        base0 = min(n - 1, max(a_idx + int(120e-9 / dt_s), s0))
+        base1 = min(n, max(base0 + 6, s1 + 1))
+    base_block = vce_arr[base0:base1]
+    if len(base_block) >= 3 and np.isfinite(base_block).any():
+        vce_base = float(np.nanpercentile(base_block, 20))
+    else:
+        vce_base = float(np.nanmin(vce_arr[s0 : s1 + 1]))
+    swing = max(top - vce_base, 1.0)
+    low_threshold = vce_base + max(0.05 * swing, 5.0)
+    hold_threshold = low_threshold + max(0.02 * swing, 5.0)
+    hold = max(3, int(40e-9 / dt_s))
+    search_b1 = min(n - 1, max(s1, min(off_idx - 1, a_idx + int(2000e-9 / dt_s))))
+
+    b_idx = s1
+    for k in range(max(a_idx + 1, s0), search_b1 + 1):
+        if float(vce_arr[k]) > low_threshold:
+            continue
+        if k + hold <= n:
+            sub = vce_arr[k : k + hold]
+            if len(sub) and float(np.nanpercentile(sub, 80)) <= hold_threshold:
+                b_idx = k + hold - 1
+                break
+        else:
+            b_idx = k
+            break
+    if b_idx <= a_idx + 2:
+        b_idx = max(a_idx + 2, s1)
+    return int(max(0, min(a_idx, n - 1))), int(max(a_idx + 1, min(b_idx, n - 1)))
 
 
 def turn_on_vce_on_max_value(
+    t: np.ndarray,
+    vge: np.ndarray,
     vce: np.ndarray,
     i0: int,
     i1: int,
+    pulse2_on: int,
+    pulse2_off: int,
     dt: float,
     vce_top: float | None = None,
 ) -> float:
-    """开通 Vce_on_max 数值：跌落前 200ns 平台窗内最大值。"""
+    """开通 Vce_on_max 数值：Vge 抬升到 Vce 低平台窗口内最大值。"""
     if len(vce) == 0:
         return 0.0
-    if vce_top is None:
-        vce_top = float(np.max(vce[max(0, i0) : min(len(vce), i1 + 1)]))
-    w0, w1 = _turn_on_vce_pre_fall_slice(vce, i0, i1, dt, float(vce_top))
+    w0, w1 = turn_on_vce_on_max_window_indices(
+        t,
+        vge,
+        vce,
+        i0,
+        i1,
+        pulse2_on,
+        pulse2_off,
+        dt,
+        vce_top,
+    )
     block = vce[w0 : w1 + 1]
     return float(np.max(block)) if len(block) else 0.0
 

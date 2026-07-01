@@ -28,7 +28,12 @@ from dpt_extractor.metrics.plateau_level import (
     turn_on_current_hb_ha_t,
     turn_on_didt_ha_at_turn_on,
 )
-from dpt_extractor.models.bridge_profile import as_short_circuit_profile, guess_profile_from_path
+from dpt_extractor.models.bridge_profile import (
+    as_short_circuit_profile,
+    guess_profile_from_path,
+    has_bridge_hint_from_path,
+    make_profile,
+)
 from dpt_extractor.models.channel_mapping import (
     apply_mapping,
     infer_best_mapping_from_bundle,
@@ -201,23 +206,30 @@ def _mapping_fallback_result(
 ) -> SampleValidation | None:
     if not allow_mapping_fallback:
         return None
-    inferred_mapping, mapping_method = infer_best_mapping_from_bundle(
-        bundle,
-        base_profile.bridge,
-    )
-    if inferred_mapping is None:
-        return None
-    mapped_profile = apply_mapping(base_profile, inferred_mapping)
-    try:
-        result = _validate_dpt_sample(
-            path,
-            profile_override=mapped_profile,
-            mapping_method=mapping_method or "inferred",
-            allow_mapping_fallback=False,
+    bridges = [base_profile.bridge]
+    if not has_bridge_hint_from_path(path):
+        bridges.append("lower" if base_profile.bridge == "upper" else "upper")
+    for bridge in dict.fromkeys(bridges):
+        candidate_base = make_profile(base_profile.phase, bridge)
+        inferred_mapping, mapping_method = infer_best_mapping_from_bundle(
+            bundle,
+            bridge,
         )
-    except Exception:  # noqa: BLE001
-        return None
-    return result if not result.warned and not result.failed else None
+        if inferred_mapping is None:
+            continue
+        mapped_profile = apply_mapping(candidate_base, inferred_mapping)
+        try:
+            result = _validate_dpt_sample(
+                path,
+                profile_override=mapped_profile,
+                mapping_method=mapping_method or "inferred",
+                allow_mapping_fallback=False,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if not result.warned and not result.failed:
+            return result
+    return None
 
 
 def _validate_dpt_sample(

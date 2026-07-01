@@ -47,6 +47,17 @@ class TestFourTssCompatibility(unittest.TestCase):
       result = extract_all(bundle, profile, self.cfg)
       return profile, bundle, result
 
+  def test_unhinted_360a_uses_lower_trend_validation_fallback(self) -> None:
+      path = sample_tss("360A.tss")
+      if not path.exists():
+          self.skipTest("missing 360A.tss")
+      from scripts.validate_tss_samples import _validate_dpt_sample
+
+      result = _validate_dpt_sample(path)
+      self.assertEqual(result.status, "OK")
+      self.assertIn("profile=WL", result.detail)
+      self.assertIn("map=trend", result.detail)
+
   def test_err_positive_and_marker_order(self) -> None:
       for path in SAMPLES:
           with self.subTest(sample=path.name):

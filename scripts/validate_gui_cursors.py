@@ -9,6 +9,7 @@ DPT_VALIDATE_ALL_CURSORS=1 可扫描所有示例 .tss。
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -76,6 +77,19 @@ DEFAULT_SAMPLE_FRAGMENTS = (
     ("SSM1R7PB12B3DTFMMSPP25M4CF0016", "SSS", "LT", "WH-750V-1050A_000.tss"),
     ("SSM1R7PB12B3DTFMMSPP25M4CF0016", "SSS", "LT", "WL-750V-1050A_000.tss"),
 )
+
+_SHORT_CIRCUIT_DIR_TOKENS = {"DL", "DDD", "SHORT"}
+_SHORT_CIRCUIT_FILENAME_RE = re.compile(
+    r"(?:^|[_-])short(?:[_-]|$)|^[UVW][HL][_-]\d+(?:\.\d+)?V[_-]0{3}$",
+    re.IGNORECASE,
+)
+
+
+def _is_short_circuit_sample(path: Path) -> bool:
+    parts = {part.upper() for part in path.parts}
+    if parts & _SHORT_CIRCUIT_DIR_TOKENS:
+        return True
+    return bool(_SHORT_CIRCUIT_FILENAME_RE.search(path.stem))
 
 
 class Capture:
@@ -173,8 +187,12 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
         "ic": bundle_total_current(bundle, profile),
         "irr": bundle_reverse_recovery_current(bundle, profile),
         "v_diode": bundle.get(profile.v_diode),
-        "vge_other": bundle.get(profile.vge_other),
     }
+    if profile.vge_other:
+        try:
+            chan["vge_other"] = bundle.get(profile.vge_other)
+        except KeyError:
+            pass
     seg_idx = {
         "turn_off": segs.turn_off,
         "turn_on": segs.turn_on,
@@ -361,6 +379,9 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
         elif name == "串扰电压":
             c = calls.get("enable_crosstalk_interaction")
             if c is None:
+                if not profile.vge_other or result.is_metric_unavailable(section, name):
+                    record(section, name, "INFO", "无对管门极通道，串扰电压不可用")
+                    continue
                 record(section, name, "FAIL", "未触发 enable_crosstalk_interaction")
                 continue
             b = c["bound"]
@@ -400,9 +421,23 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
 
 
 def _selected_sample_waveforms(root: Path) -> list[Path]:
-    paths = discover_sample_waveforms(root)
+    paths = [
+        path
+        for path in discover_sample_waveforms(root)
+        if not _is_short_circuit_sample(path)
+    ]
     if os.environ.get("DPT_VALIDATE_ALL_CURSORS", "").lower() in {"1", "true", "yes"}:
-        return paths
+        try:
+            offset = max(0, int(os.environ.get("DPT_VALIDATE_CURSOR_OFFSET", "0")))
+        except ValueError:
+            offset = 0
+        try:
+            limit = int(os.environ.get("DPT_VALIDATE_CURSOR_LIMIT", "0"))
+        except ValueError:
+            limit = 0
+        if limit > 0:
+            return paths[offset : offset + limit]
+        return paths[offset:]
     selected: list[Path] = []
     for fragments in DEFAULT_SAMPLE_FRAGMENTS:
         for path in paths:

@@ -401,16 +401,22 @@ def _turn_on_current_top_after_rr_end(
 
 
 def _turn_on_vce_on_max(
+    t: np.ndarray,
+    vge: np.ndarray,
     vce: np.ndarray,
     on0: int,
     on1: int,
+    pulse2_on: int,
+    pulse2_off: int,
     dt: float,
     vce_top: float,
 ) -> float:
-    """开通 Vce_on_max：跌落前 200ns 平台窗内最大值。"""
+    """开通 Vce_on_max：Vge 抬升到 Vce 低平台窗口内最大值。"""
     from dpt_extractor.metrics.plateau_level import turn_on_vce_on_max_value
 
-    return turn_on_vce_on_max_value(vce, on0, on1, dt, vce_top)
+    return turn_on_vce_on_max_value(
+        t, vge, vce, on0, on1, pulse2_on, pulse2_off, dt, vce_top
+    )
 
 
 def _irr_peak(
@@ -693,7 +699,9 @@ def extract_all(
     vce_top_on = turn_on_vce_top_from_ic_rise(
         ic, vce, edges.pulse2_on, edges.pulse2_off, dt
     )
-    vce_on_max = _turn_on_vce_on_max(vce, on0, on1, dt, vce_top_on)
+    vce_on_max = _turn_on_vce_on_max(
+        t, vge, vce, on0, on1, edges.pulse2_on, edges.pulse2_off, dt, vce_top_on
+    )
     ic_on_max = _turn_on_ic_max_in_base_window(
         ic, vce, on0, on1, dt, ic_top_on, vce_top_on
     )

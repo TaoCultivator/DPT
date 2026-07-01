@@ -1932,6 +1932,14 @@ class WaveformPlot(QWidget):
     def cursor_linked(self) -> bool:
         return bool(self._cursor_linked)
 
+    def _effective_cursor_linked(self) -> bool:
+        """Only slope measurements keep horizontal/vertical cursor linkage active."""
+        if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
+            return bool(self._cursor_linked)
+        if self._interactive_mode != "global":
+            return False
+        return bool(self._cursor_linked)
+
     def set_cursor_linked(self, linked: bool) -> None:
         self._set_cursor_link_mode(linked=bool(linked))
 
@@ -6519,6 +6527,7 @@ class WaveformPlot(QWidget):
         emit_result_on_enter: bool = False,
     ) -> None:
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = "delta_vce"
@@ -6692,6 +6701,7 @@ class WaveformPlot(QWidget):
         if search_t1_us < search_t0_us:
             search_t0_us, search_t1_us = search_t1_us, search_t0_us
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=True)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = mode
@@ -6793,6 +6803,7 @@ class WaveformPlot(QWidget):
         if end_t_us < start_t_us:
             start_t_us, end_t_us = end_t_us, start_t_us
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = (
@@ -6842,6 +6853,7 @@ class WaveformPlot(QWidget):
         if end_t_us < start_t_us:
             start_t_us, end_t_us = end_t_us, start_t_us
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = "crosstalk"
@@ -6899,6 +6911,7 @@ class WaveformPlot(QWidget):
         if search_t1_us < search_t0_us:
             search_t0_us, search_t1_us = search_t1_us, search_t0_us
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = "energy_loss"
@@ -7590,10 +7603,11 @@ class WaveformPlot(QWidget):
         *,
         emit_result_on_enter: bool = False,
     ) -> None:
-        """开通电流：Hb↔A、Ha↔B 双向吸附交汇；Hb/Ha 为 |Ic| 平台电平。"""
+        """开通电流：A/B 与 Hb/Ha 默认同源，手动拖动时横纵光标独立。"""
         t_lo = min(t_a_us, t_search_end_us)
         t_hi = max(t_a_us, t_search_end_us)
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = "turn_on_current"
@@ -7623,11 +7637,6 @@ class WaveformPlot(QWidget):
                 self._h_cursor_a_locked = False
         finally:
             self._interactive_syncing = False
-        self._interactive_syncing = True
-        try:
-            self._link_turn_on_current_from_horizontal("both")
-        finally:
-            self._interactive_syncing = False
         self._update_readout()
         if emit_result_on_enter:
             self._emit_turn_on_current_changed()
@@ -7654,69 +7663,6 @@ class WaveformPlot(QWidget):
         finally:
             self._interactive_syncing = False
         self._update_readout()
-
-    def _ic_at_t_us(self, t_us: float) -> float:
-        # 带符号：下桥导通前基线为负，光标须贴真实波形而非 |Ic|
-        return float(self._interp_channel("ic", float(t_us)))
-
-    def _turn_on_ic_dt_s(self) -> float:
-        tt = self._interactive_ic_t_us
-        if tt is not None and len(tt) > 1:
-            return float(np.median(np.diff(tt))) * 1e-6
-        return 8e-8
-
-    def _turn_on_ic_search_slice(self) -> tuple[np.ndarray, np.ndarray, int, int]:
-        tt = self._interactive_ic_t_us
-        ic = self._interactive_ic
-        if tt is None or ic is None or len(tt) < 2:
-            return np.array([0.0]), np.array([0.0]), 0, 0
-        t_s = np.asarray(tt, dtype=np.float64) * 1e-6
-        ic_abs = np.asarray(ic, dtype=np.float64)
-        t0 = float(self._interactive_search_t0_us)
-        t1 = float(self._interactive_search_t1_us)
-        i0 = int(np.searchsorted(tt, min(t0, t1)))
-        i1 = int(np.searchsorted(tt, max(t0, t1)))
-        i0 = max(0, min(i0, len(tt) - 2))
-        i1 = max(i0 + 1, min(i1, len(tt) - 1))
-        return t_s, ic_abs, i0, i1
-
-    def _turn_on_ab_cross_us(self, hb: float, ha: float) -> tuple[float, float]:
-        from dpt_extractor.metrics.plateau_level import (
-            turn_on_ic_a_cross_hb_us,
-            turn_on_ic_b_cross_ha_us,
-        )
-
-        t_s, ic_abs, i0, i1 = self._turn_on_ic_search_slice()
-        dt = self._turn_on_ic_dt_s()
-        t_a = turn_on_ic_a_cross_hb_us(t_s, ic_abs, i0, i1, hb, dt)
-        t_b = turn_on_ic_b_cross_ha_us(t_s, ic_abs, i0, i1, ha, dt)
-        return float(t_a), float(t_b)
-
-    def _link_turn_on_current_from_vertical(self, which: str) -> None:
-        """拖 A/B：Hb/Ha 随 Ic@该时刻移动（同 ΔVce），不吸回纵线位置以便手调。"""
-        if self._h_cursor_a is None or self._h_cursor_b is None:
-            return
-        t_a = t_b = None
-        if which in ("a", "both") and self._cursor_a is not None:
-            t_a = float(self._cursor_a.value())
-            self._h_cursor_b.setPos(self._to_disp("ic", self._ic_at_t_us(t_a)))
-        if which in ("b", "both") and self._cursor_b is not None:
-            t_b = float(self._cursor_b.value())
-            self._h_cursor_a.setPos(self._to_disp("ic", self._ic_at_t_us(t_b)))
-
-    def _link_turn_on_current_from_horizontal(self, which: str) -> None:
-        """横光标 Hb→A 上升沿首交点，Ha→B 平稳段首交点（保持 Hb/Ha 电平）。"""
-        if self._h_cursor_a is None or self._h_cursor_b is None:
-            return
-        hb = float(self._from_disp("ic", float(self._h_cursor_b.value())))
-        ha = float(self._from_disp("ic", float(self._h_cursor_a.value())))
-        t_a, t_b = self._turn_on_ab_cross_us(hb, ha)
-        if which in ("hb", "both") and self._cursor_a is not None:
-            self._cursor_a.setPos(t_a)
-            self._h_cursor_b.setPos(self._to_disp("ic", self._ic_at_t_us(t_a)))
-        if which in ("ha", "both") and self._cursor_b is not None:
-            self._cursor_b.setPos(t_b)
-            self._h_cursor_a.setPos(self._to_disp("ic", self._ic_at_t_us(t_b)))
 
     def _emit_turn_on_current_changed(self) -> None:
         if self._interactive_on_change is None:
@@ -7747,10 +7693,11 @@ class WaveformPlot(QWidget):
         channel: str = "ic",
         emit_result_on_enter: bool = False,
     ) -> None:
-        """短路电流/Tsc：Hb 与电流交点联动 A/B，Ha 保持窗口内电流最大值。"""
+        """短路电流/Tsc：默认按 Hb 交点给 A/B，手动拖动时光标独立。"""
         lo = min(float(search_t0_us), float(search_t1_us), float(t_a_us), float(t_b_us))
         hi = max(float(search_t0_us), float(search_t1_us), float(t_a_us), float(t_b_us))
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = "short_current"
@@ -7937,6 +7884,7 @@ class WaveformPlot(QWidget):
         if end_t_us < start_t_us:
             start_t_us, end_t_us = end_t_us, start_t_us
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = "irr_peak"
@@ -8052,6 +8000,7 @@ class WaveformPlot(QWidget):
         if search_t1_us < search_t0_us:
             search_t0_us, search_t1_us = search_t1_us, search_t0_us
         self._interactive_enabled = True
+        self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_mode = "trr_measure"
@@ -8172,7 +8121,7 @@ class WaveformPlot(QWidget):
         self._update_readout()
         if not self._interactive_enabled or self._cursor_a is None or self._cursor_b is None:
             return
-        if not self._cursor_linked:
+        if not self._effective_cursor_linked():
             if self._interactive_mode == "delta_vce":
                 self._emit_delta_vce_changed()
                 return
@@ -8247,19 +8196,6 @@ class WaveformPlot(QWidget):
                 self._interactive_on_change(min(t0, t1), max(t0, t1))
             self._update_readout()
             return
-        if self._interactive_mode == "turn_on_current":
-            sender = self.sender()
-            self._interactive_syncing = True
-            try:
-                if sender is self._cursor_a:
-                    self._link_turn_on_current_from_vertical("a")
-                elif sender is self._cursor_b:
-                    self._link_turn_on_current_from_vertical("b")
-            finally:
-                self._interactive_syncing = False
-            self._emit_turn_on_current_changed()
-            self._update_readout()
-            return
         if self._interactive_mode == "short_current":
             self._interactive_syncing = True
             try:
@@ -8292,7 +8228,7 @@ class WaveformPlot(QWidget):
         if self._interactive_syncing:
             return
         self._update_readout()
-        if not self._cursor_linked:
+        if not self._effective_cursor_linked():
             if self._interactive_mode == "delta_vce":
                 self._emit_delta_vce_changed()
                 return
@@ -8363,21 +8299,6 @@ class WaveformPlot(QWidget):
             return
         if self._interactive_mode == "energy_loss":
             self._emit_energy_loss_changed()
-            self._update_readout()
-            return
-        if self._interactive_mode == "turn_on_current":
-            sender = self.sender()
-            self._interactive_syncing = True
-            try:
-                if sender is self._h_cursor_a:
-                    self._link_turn_on_current_from_horizontal("ha")
-                elif sender is self._h_cursor_b:
-                    self._link_turn_on_current_from_horizontal("hb")
-                else:
-                    self._link_turn_on_current_from_horizontal("both")
-            finally:
-                self._interactive_syncing = False
-            self._emit_turn_on_current_changed()
             self._update_readout()
             return
         if self._interactive_mode == "short_current":
