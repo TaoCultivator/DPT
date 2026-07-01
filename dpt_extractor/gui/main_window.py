@@ -4342,7 +4342,18 @@ class MainWindow(QMainWindow):
         rr0, rr1 = segs.reverse_recovery
         on1 = segs.turn_on[1]
         markers = err_energy_markers(
-            t, irr, v_diode, rr0, rr1, dt, i_search_end=on1
+            t,
+            irr,
+            v_diode,
+            rr0,
+            rr1,
+            dt,
+            i_search_end=on1,
+            vge=self.bundle.get(self.profile.vge),
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
+            dc_current=self.result.idc,
         )
         search_t0 = float(t[rr0] * 1e6)
         search_t1 = float(t[on1] * 1e6)
@@ -4408,10 +4419,6 @@ class MainWindow(QMainWindow):
                 "反向恢复",
                 min(ta_us, tb_us) - 0.15,
                 max(ta_us, tb_us) + 0.15,
-            )
-        else:
-            self.wave_plot.focus_interval_us(
-                min(ta_us, tb_us) - 0.15, max(ta_us, tb_us) + 0.15
             )
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
@@ -4555,7 +4562,6 @@ class MainWindow(QMainWindow):
         )
         if restored is not None:
             ta_us, tb_us, ha_v, hb_v = restored
-            self.wave_plot.focus_interval_us(min(ta_us, tb_us), max(ta_us, tb_us))
             self.wave_plot.enable_energy_loss_interaction(
                 search_t0,
                 search_t1,
@@ -6311,6 +6317,11 @@ class MainWindow(QMainWindow):
                 segs.reverse_recovery[1],
                 self.bundle.dt,
                 i_search_end=segs.turn_on[1],
+                vge=self.bundle.get(self.profile.vge),
+                pulse1_off=segs.pulse1_off,
+                pulse2_on=segs.pulse2_on,
+                pulse2_off=segs.pulse2_off,
+                dc_current=self.result.idc,
             )
             w = markers.as_integration_window()
             return w.t_start * 1e6, w.t_end * 1e6

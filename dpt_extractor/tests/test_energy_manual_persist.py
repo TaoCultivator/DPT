@@ -71,6 +71,34 @@ class TestEnergyManualPersist(unittest.TestCase):
         self.assertAlmostEqual(float(ha), manual[2], places=6)
         self.assertAlmostEqual(float(hb), manual[3], places=6)
 
+    def _assert_energy_reclick_keeps_current_view(
+        self,
+        section: str,
+        name: str,
+        manual: tuple[float, float, float, float],
+    ) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        win = self._window()
+        win._on_value_clicked(section, name)
+        plot = win.wave_plot
+        assert plot._interactive_on_change is not None
+        plot._interactive_on_change(*manual)
+
+        plot.focus_interval_us(12.0, 14.0)
+        before = plot.current_x_range_us()
+        self.assertIsNotNone(before)
+        assert before is not None
+
+        win._on_value_clicked(section, name)
+        QApplication.processEvents()
+        after = plot.current_x_range_us()
+        self.assertIsNotNone(after)
+        assert after is not None
+        self.assertAlmostEqual(after[0], before[0], places=6)
+        self.assertAlmostEqual(after[1], before[1], places=6)
+        win.close()
+
     def test_reclick_eoff_keeps_manual_energy_cursors(self) -> None:
         self._assert_energy_reclick_restores_manual(
             "关断过程",
@@ -91,6 +119,15 @@ class TestEnergyManualPersist(unittest.TestCase):
             "Err",
             (19.060, 18.560, 24.0, 8.0),
         )
+
+    def test_reclick_energy_keeps_current_view(self) -> None:
+        for section, name, manual in (
+            ("关断过程", "Eoff", (14.420, 15.260, 12.0, 45.0)),
+            ("开通", "Eon", (18.360, 18.920, 35.0, 8.0)),
+            ("反向恢复", "Err", (19.060, 18.560, 24.0, 8.0)),
+        ):
+            with self.subTest(section=section, name=name):
+                self._assert_energy_reclick_keeps_current_view(section, name, manual)
 
     def test_energy_adjustment_feeds_power_window(self) -> None:
         win = self._window()

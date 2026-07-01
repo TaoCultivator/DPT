@@ -37,6 +37,26 @@ import numpy as np
 
 WH = sample_tss("WH_480V_800A_000.tss")
 ROOT = Path(__file__).resolve().parents[2]
+SONG_KSU2577_SSS_HT = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+    / "SSS"
+    / "HT"
+    / "tss"
+)
+SONG_KSU2577_SSS_RT = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+    / "SSS"
+    / "RT"
+    / "tss"
+)
 UH = (
     ROOT
     / "示例文件"
@@ -722,14 +742,34 @@ class TestEoffWindow(unittest.TestCase):
         t = bundle.t
         irr = bundle_reverse_recovery_current(bundle, profile)
         vd = bundle.get(profile.v_diode)
+        vge = bundle.get(profile.vge)
         rr0, rr1 = segs.reverse_recovery
         mk = err_energy_markers(
-            t, irr, vd, rr0, rr1, bundle.dt, i_search_end=segs.turn_on[1]
+            t,
+            irr,
+            vd,
+            rr0,
+            rr1,
+            bundle.dt,
+            i_search_end=segs.turn_on[1],
+            vge=vge,
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
+            dc_current=result.idc,
         )
         ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
         base = _err_recovery_settled_base(irr, ipk, bundle.dt, segs.turn_on[1])
         local_top = _err_ha_top_from_offset_window(
-            t, irr, mk.t_end, base, bundle.dt
+            t,
+            irr,
+            mk.t_end,
+            base,
+            bundle.dt,
+            vge=vge,
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
         )
         self.assertIsNotNone(local_top)
         assert local_top is not None
@@ -991,11 +1031,209 @@ class TestEoffWindow(unittest.TestCase):
                         segs.reverse_recovery[1],
                         bundle.dt,
                         i_search_end=segs.turn_on[1],
+                        vge=bundle.get(profile.vge),
+                        pulse1_off=segs.pulse1_off,
+                        pulse2_on=segs.pulse2_on,
+                        pulse2_off=segs.pulse2_off,
+                        dc_current=result.idc,
                     )
                     energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
                 self.assertAlmostEqual(mk.t_start * 1e6, ta_us, delta=time_tol_us)
                 self.assertAlmostEqual(mk.t_end * 1e6, tb_us, delta=time_tol_us)
                 self.assertAlmostEqual(energy, energy_mj, delta=max(0.02, energy_mj * 0.02))
+
+    def test_song_ht_loss_cursors_match_manual_workbook_regressions(self):
+        cases = [
+            ("WH_750V_1050A_000.tss", "eoff", 14.546, 14.874, 90.553, 0.020),
+            ("WH_750V_1050A_000.tss", "err", 19.475, 18.442, 57.612, 0.020),
+            ("WH_750V_805A_000.tss", "err", 15.813, 14.827, 53.001, 0.025),
+            ("VH_750V_50A_000.tss", "err", 9.889, 9.508, 1.699, 0.040),
+            ("UL_750V_50A_000.tss", "eoff", 6.621, 6.934, 1.073, 0.030),
+            ("UL_750V_50A_000.tss", "eon", 10.389, 10.528, 3.285, 0.030),
+            ("UL_750V_50A_000.tss", "err", 10.875, 10.413, 3.325, 0.040),
+            ("WH_750V_50A_000.tss", "err", 10.355, 10.001, 1.485, 0.040),
+            ("VL_750V_805A_000.tss", "eon", 15.476, 15.890, 40.892, 0.020),
+            ("VL_750V_1050A_000.tss", "eon", 19.395, 19.854, 55.293, 0.020),
+            ("WH_600V_285A_000.tss", "eoff", 4.582, 4.963, 13.031, 0.030),
+            ("WH_600V_285A_000.tss", "err", 8.626, 8.380, 2.986, 0.030),
+            ("VL_600V_285A_000.tss", "err", 9.073, 8.739, 4.825, 0.020),
+            ("WL_750V_1050A_000.tss", "err", 20.390, 19.679, 39.519, 0.030),
+            ("VL_750V_1050A_000.tss", "err", 19.932, 19.436, 19.969, 0.030),
+            ("VL_750V_805A_000.tss", "err", 15.990, 15.514, 17.179, 0.030),
+        ]
+        cfg = load_config()
+        cache = {}
+        for name, kind, ta_us, tb_us, energy_mj, time_tol_us in cases:
+            path = SONG_KSU2577_SSS_HT / name
+            if not path.exists():
+                continue
+            with self.subTest(sample=name, kind=kind):
+                if name not in cache:
+                    profile = guess_profile_from_path(str(path))
+                    bundle = load_waveform(path)
+                    result = extract_all(bundle, profile, cfg)
+                    cache[name] = (profile, bundle, result, result.segments)
+                profile, bundle, _result, segs = cache[name]
+                assert segs is not None
+                t = bundle.t
+                ic = bundle_total_current(bundle, profile)
+                vce = bundle.get(profile.vce)
+                irr = bundle_reverse_recovery_current(bundle, profile)
+                vd = bundle.get(profile.v_diode)
+                if kind == "eoff":
+                    mk = eoff_energy_markers(
+                        t,
+                        ic,
+                        vce,
+                        segs.turn_off[0],
+                        segs.turn_off[1],
+                        segs.pulse1_off,
+                        bundle.dt,
+                        pre_ns=cfg.energy.eoff_pre_ns,
+                        pulse1_on=segs.pulse1_on,
+                    )
+                    energy = integrate_vi_window(t, vce, ic, mk.as_integration_window())
+                elif kind == "eon":
+                    mk = eon_energy_markers(
+                        t,
+                        ic,
+                        vce,
+                        segs.turn_on[0],
+                        segs.turn_on[1],
+                        segs.pulse2_on,
+                        bundle.dt,
+                        pulse1_off=segs.pulse1_off,
+                    )
+                    energy = integrate_vi_window(t, vce, ic, mk.as_integration_window())
+                else:
+                    mk = err_energy_markers(
+                        t,
+                        irr,
+                        vd,
+                        segs.reverse_recovery[0],
+                        segs.reverse_recovery[1],
+                        bundle.dt,
+                        i_search_end=segs.turn_on[1],
+                        vge=bundle.get(profile.vge),
+                        pulse1_off=segs.pulse1_off,
+                        pulse2_on=segs.pulse2_on,
+                        pulse2_off=segs.pulse2_off,
+                        dc_current=_result.idc,
+                    )
+                    energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+                self.assertAlmostEqual(mk.t_start * 1e6, ta_us, delta=time_tol_us)
+                self.assertAlmostEqual(mk.t_end * 1e6, tb_us, delta=time_tol_us)
+                self.assertAlmostEqual(energy, energy_mj, delta=max(0.05, energy_mj * 0.01))
+
+    @unittest.skipUnless(
+        (SONG_KSU2577_SSS_HT / "UL_750V_50A_000.tss").exists(),
+        "songzhenxi SSS HT UL 50A sample missing",
+    )
+    def test_song_ht_ul_50_err_ha_uses_parameter_local_offset_top(self):
+        path = SONG_KSU2577_SSS_HT / "UL_750V_50A_000.tss"
+        bundle = load_waveform(path)
+        profile = guess_profile_from_path(str(path))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        vge = bundle.get(profile.vge)
+        mk = err_energy_markers(
+            t,
+            irr,
+            vd,
+            segs.reverse_recovery[0],
+            segs.reverse_recovery[1],
+            bundle.dt,
+            i_search_end=segs.turn_on[1],
+            vge=vge,
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
+            dc_current=result.idc,
+        )
+        ipk = segs.reverse_recovery[0] + err_recovery_peak_index(
+            irr[segs.reverse_recovery[0] : segs.reverse_recovery[1] + 1],
+            bundle.dt,
+        )
+        err_base = _err_recovery_settled_base(
+            irr,
+            ipk,
+            bundle.dt,
+            segs.turn_on[1],
+        )
+        local_top = _err_ha_top_from_offset_window(
+            t,
+            irr,
+            mk.t_end,
+            err_base,
+            bundle.dt,
+            vge=vge,
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
+        )
+        self.assertIsNotNone(local_top)
+        assert local_top is not None
+        self.assertAlmostEqual(mk.ha_v, local_top, delta=1e-9)
+        self.assertAlmostEqual(mk.ha_v, -1.935, delta=0.08)
+        self.assertAlmostEqual(mk.t_start * 1e6, 10.875, delta=0.030)
+        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+
+    @unittest.skipUnless(
+        SONG_KSU2577_SSS_HT.exists() and SONG_KSU2577_SSS_RT.exists(),
+        "songzhenxi SSS 50A HT/RT samples missing",
+    )
+    def test_song_sss_50a_err_batch_matches_manual_loss_values(self):
+        cases = [
+            (SONG_KSU2577_SSS_HT, "UH_750V_50A_000.tss", 1.670),
+            (SONG_KSU2577_SSS_HT, "UL_750V_50A_000.tss", 3.325),
+            (SONG_KSU2577_SSS_HT, "VH_750V_50A_000.tss", 1.699),
+            (SONG_KSU2577_SSS_HT, "VL_750V_50A_000.tss", 3.892),
+            (SONG_KSU2577_SSS_HT, "WH_750V_50A_000.tss", 1.485),
+            (SONG_KSU2577_SSS_HT, "WL_750V_50A_000.tss", 4.096),
+            (SONG_KSU2577_SSS_RT, "UH_750V_50A_000.tss", 1.024),
+            (SONG_KSU2577_SSS_RT, "UL_750V_50A_000.tss", 2.347),
+            (SONG_KSU2577_SSS_RT, "VH_750V_50A_000.tss", 1.172),
+            (SONG_KSU2577_SSS_RT, "VL_750V_50A_000.tss", 2.643),
+            (SONG_KSU2577_SSS_RT, "WH_750V_50A_000.tss", 1.095),
+            (SONG_KSU2577_SSS_RT, "WL_750V_50A_000.tss", 3.273),
+        ]
+        cfg = load_config()
+        for root, name, expected_err in cases:
+            path = root / name
+            with self.subTest(sample=str(path.relative_to(ROOT))):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                result = extract_all(bundle, profile, cfg)
+                segs = result.segments
+                assert segs is not None
+                t = bundle.t
+                irr = bundle_reverse_recovery_current(bundle, profile)
+                vd = bundle.get(profile.v_diode)
+                vge = bundle.get(profile.vge)
+                rr0, rr1 = segs.reverse_recovery
+                mk = err_energy_markers(
+                    t,
+                    irr,
+                    vd,
+                    rr0,
+                    rr1,
+                    bundle.dt,
+                    i_search_end=segs.turn_on[1],
+                    vge=vge,
+                    pulse1_off=segs.pulse1_off,
+                    pulse2_on=segs.pulse2_on,
+                    pulse2_off=segs.pulse2_off,
+                    dc_current=result.idc,
+                )
+                energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+                self.assertAlmostEqual(result.reverse_recovery.err, energy, places=9)
+                self.assertAlmostEqual(energy, expected_err, delta=0.18)
+                self.assertGreater(mk.t_start, mk.t_end)
+                _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
 
     @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
     def test_smc_rt_uh_1048_err_waits_for_late_settlement(self):
@@ -1217,7 +1455,8 @@ class TestEoffWindow(unittest.TestCase):
     def test_smc_ht_1048_err_vd_hb_matches_local_offset_base(self):
         """Err Hb(Vd) must match the Vd Base of the parameter-local offset window."""
         paths = sorted(SONG_SMC_HT.glob("*_750V_1048A_000.tss"))
-        self.assertGreaterEqual(len(paths), 6)
+        if len(paths) < 6:
+            self.skipTest("songzhenxi SMC HT 1048A samples missing")
         for path in paths:
             with self.subTest(path=path.name):
                 bundle = load_waveform(path)

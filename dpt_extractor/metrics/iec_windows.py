@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from dpt_extractor.metrics.offset_measurement import scope_top_base
-from dpt_extractor.utils.signal import crossing_index
+from dpt_extractor.utils.signal import crossing_index, crossing_time, smooth, threshold_value
 from dpt_extractor.utils.timing_adapt import scope_turn_off_bases, scope_turn_on_bases
 
 
@@ -39,6 +39,12 @@ class EnergyLossMarkers:
         return IntegrationWindow(
             self.i_start, self.i_end, self.t_start, self.t_end
         )
+
+
+_PARAM_LOCAL_US_PER_DIV = 0.2
+_PARAM_LOCAL_DIV_COUNT = 10.0
+_PARAM_LOCAL_LEFT_DIVS = 2.0
+_PARAM_LOCAL_VGE_SMOOTH_NS = 15.0
 
 
 def _plateau_mean_vce_before_off(
@@ -751,6 +757,23 @@ def _first_crossing_after_gate(
     return None
 
 
+def _first_crossing_after_time_from_pairs(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    level: float,
+    crosses: list[int],
+    t_after: float,
+) -> tuple[int, float] | None:
+    if len(t_seg) < 2:
+        return None
+    for ix in crosses:
+        k = max(0, min(int(ix), len(t_seg) - 2))
+        t_cross = _level_crossing_time(t_seg, y_seg, k, float(level))
+        if t_cross >= float(t_after):
+            return k, float(t_cross)
+    return None
+
+
 def _voltage_fall_ringing_candidate_is_stable(
     y_seg: np.ndarray,
     level: float,
@@ -847,6 +870,15 @@ def _first_sustained_rise_crossing(
         gated = [kk for kk in candidates if kk >= max(lo, edge_gate - margin)]
         if gated:
             candidates = gated
+        elif 500.0 <= float(span) < 1100.0:
+            pre_margin_ns = 35.0 if float(span) < 700.0 else 25.0
+            pre_margin = _samples_for_seconds(dt, pre_margin_ns * 1e-9, minimum=1)
+            post_margin = _samples_for_seconds(dt, 8e-9, minimum=1)
+            gate_lo = max(lo, edge_gate - pre_margin)
+            gate_hi = min(hi, edge_gate + post_margin)
+            near_edge = [kk for kk in candidates if gate_lo <= kk <= gate_hi]
+            if near_edge:
+                candidates = near_edge
 
     hold_n = _samples_for_seconds(dt, 18e-9, minimum=4)
     rise_n = _samples_for_seconds(dt, 70e-9, minimum=8)
@@ -862,6 +894,40 @@ def _first_sustained_rise_crossing(
         if sustained and local_rise >= min_rise:
             return int(kk)
     return int(candidates[-1])
+
+
+def _low_current_main_foot_rising_crossing(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    base_level: float,
+    edge_top: float,
+    current_t: float,
+    dt: float,
+    *,
+    foot_frac: float,
+    max_delay_ns: float,
+) -> tuple[int, float] | None:
+    """Low-current visual foot: avoid baseline noise crossings before the visible edge."""
+    if len(t_seg) < 2:
+        return None
+    tt = np.asarray(t_seg, dtype=np.float64)
+    yy = np.asarray(y_seg, dtype=np.float64)
+    span = abs(float(edge_top) - float(base_level))
+    if span < 20.0:
+        return None
+    level = float(base_level) + float(foot_frac) * span
+    start_t = float(current_t) - max(float(dt), 1e-15)
+    end_t = float(current_t) + max_delay_ns * 1e-9
+    lo = max(0, min(int(np.searchsorted(tt, start_t, side="left")), len(yy) - 2))
+    hi = max(lo, min(int(np.searchsorted(tt, end_t, side="right")), len(yy) - 2))
+    for k in range(lo, hi + 1):
+        y0, y1 = float(yy[k]), float(yy[k + 1])
+        if y0 <= level < y1 and y1 > y0:
+            t_cross = _level_crossing_time(tt, yy, int(k), level)
+            if t_cross > float(current_t) + 8e-9:
+                return int(k), float(t_cross)
+            return None
+    return None
 
 
 def _smooth_early_crossing_after_main_edge(
@@ -1273,6 +1339,43 @@ def _settled_level_crossing_after_main_edge(
     if early is not None:
         return early
 
+    if (
+        settle_profile == "current_fall"
+        and event_gate.classification == "smooth"
+        and event_gate.significant_count <= 1
+        and span < 120.0
+    ):
+        late_smooth = _first_crossing_after_time_from_pairs(
+            tt,
+            yy,
+            lvl,
+            crosses,
+            float(first_t) + 120e-9,
+        )
+        if late_smooth is not None:
+            late_ix, late_t = late_smooth
+            if late_t <= float(tt[event_end_ix]) + max(float(dt), 1e-15):
+                return int(late_ix), float(late_t)
+
+    if (
+        settle_profile == "current_fall"
+        and event_gate.classification == "ringing"
+        and event_gate.significant_count >= 10
+        and 180.0 <= span <= 360.0
+        and float(legacy_t) - float(first_t) >= 180e-9
+    ):
+        mid_packet = _first_crossing_after_time_from_pairs(
+            tt,
+            yy,
+            lvl,
+            crosses,
+            float(legacy_t) - 100e-9,
+        )
+        if mid_packet is not None:
+            mid_ix, mid_t = mid_packet
+            if float(first_t) <= mid_t <= float(legacy_t) - 20e-9:
+                return int(mid_ix), float(mid_t)
+
     gate = _loss_envelope_gate_after_main_edge(
         yy,
         lvl,
@@ -1300,7 +1403,7 @@ def _settled_level_crossing_after_main_edge(
     if (
         settle_profile == "voltage_fall"
         and event_gate.classification == "ringing"
-        and event_gate.significant_count >= 6
+        and event_gate.significant_count >= 5
         and _voltage_fall_ringing_candidate_is_stable(
             yy,
             lvl,
@@ -1311,6 +1414,23 @@ def _settled_level_crossing_after_main_edge(
     ):
         max_extra_delay = 260e-9
     if candidate_t > float(legacy_t) + max_extra_delay:
+        if (
+            settle_profile == "voltage_fall"
+            and event_gate.classification == "ringing"
+            and event_gate.significant_count >= 6
+            and span >= 500.0
+        ):
+            delayed = _first_crossing_after_time_from_pairs(
+                tt,
+                yy,
+                lvl,
+                crosses,
+                float(legacy_t) + 150e-9,
+            )
+            if delayed is not None:
+                delayed_ix, delayed_t = delayed
+                if delayed_t <= event_end_t + max(float(dt), 1e-15):
+                    return int(delayed_ix), float(delayed_t)
         return legacy_ix, legacy_t
     return int(candidate_ix), float(candidate_t)
 
@@ -1752,6 +1872,9 @@ def eoff_energy_markers(
         float(v_top),
         pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
     )
+    raw_ha_v = float(ha_v)
+    raw_i_start_local = int(i_start_local)
+    raw_t_start = float(t_start)
     if not _use_legacy_loss_platform_mode():
         refined_ha = _refine_eoff_vce_base_before_rise(
             vce,
@@ -1772,6 +1895,20 @@ def eoff_energy_markers(
                 pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
             )
 
+    if low_current_eoff and not _use_legacy_loss_cursor_mode():
+        visual_foot = _low_current_main_foot_rising_crossing(
+            t_sw,
+            v_seg,
+            ha_v,
+            float(v_top),
+            float(t_start),
+            dt,
+            foot_frac=0.010,
+            max_delay_ns=180.0,
+        )
+        if visual_foot is not None:
+            i_start_local, t_start = visual_foot
+
     fall_anchor = max(i_start_local + 1, int(np.searchsorted(t_sw, t_start, side="left")))
     i_end_local, t_end = _eoff_ic_fall_crossing_at_main_fall(
         t_sw, i_seg, hb_a, fall_anchor, dt, float(i_top)
@@ -1790,6 +1927,15 @@ def eoff_energy_markers(
             i_end_local, t_end = _eoff_ic_fall_crossing_at_main_fall(
                 t_sw, i_seg, hb_a, fall_anchor, dt, float(i_top)
             )
+
+    if (
+        float(i_top) >= 500.0
+        and float(raw_ha_v) - float(ha_v) > 3.0
+        and float(raw_t_start) < float(t_start)
+    ):
+        ha_v = float(raw_ha_v)
+        i_start_local = int(raw_i_start_local)
+        t_start = float(raw_t_start)
 
     i_start = int(np.searchsorted(t, t_start, side="left"))
     i_end = int(np.searchsorted(t, t_end, side="left"))
@@ -1867,6 +2013,20 @@ def eon_energy_markers(
     if i_start_local >= len(i_seg) - 2:
         i_start_local = max(0, min(len(i_seg) - 2, local_on))
         t_start = float(t_sw[i_start_local])
+
+    if abs(float(i_top)) < 180.0 and not _use_legacy_loss_cursor_mode():
+        visual_foot = _low_current_main_foot_rising_crossing(
+            t_sw,
+            i_seg,
+            ha_ic,
+            float(i_top),
+            float(t_start),
+            dt,
+            foot_frac=0.030,
+            max_delay_ns=90.0,
+        )
+        if visual_foot is not None:
+            i_start_local, t_start = visual_foot
 
     i_end_local, t_end = _eon_vce_hb_fall_crossing_at_main_fall(
         t_sw, v_seg, hb_v, i_start_local, dt, float(v_top)
@@ -1974,12 +2134,117 @@ def _scope_top_base_in_time_window(
     return float(top), float(_base)
 
 
+def _parameter_focus_window_s(
+    t: np.ndarray,
+    anchor_us: float,
+    *,
+    left_divs: float = _PARAM_LOCAL_LEFT_DIVS,
+) -> tuple[float, float] | None:
+    """Screen time window used by parameter-local focus views."""
+    if len(t) < 2 or not np.isfinite(anchor_us):
+        return None
+    span_us = _PARAM_LOCAL_US_PER_DIV * _PARAM_LOCAL_DIV_COUNT
+    left_us = float(anchor_us) - float(left_divs) * _PARAM_LOCAL_US_PER_DIV
+    right_us = left_us + span_us
+    full_left_us = float(t[0]) * 1e6
+    full_right_us = float(t[-1]) * 1e6
+    if right_us - left_us <= 0.0 or full_right_us <= full_left_us:
+        return None
+    if left_us < full_left_us:
+        right_us += full_left_us - left_us
+        left_us = full_left_us
+    if right_us > full_right_us:
+        left_us -= right_us - full_right_us
+        right_us = full_right_us
+    left_us = max(full_left_us, left_us)
+    right_us = min(full_right_us, right_us)
+    if right_us <= left_us:
+        return None
+    return left_us * 1e-6, right_us * 1e-6
+
+
+def _vge_turn_on_focus_edge_start_us(
+    t: np.ndarray,
+    vge: np.ndarray | None,
+    pulse1_off: int | None,
+    pulse2_on: int | None,
+    pulse2_off: int | None,
+    dt: float,
+) -> float | None:
+    """Vge rising-edge anchor used by the local Err/turn-on parameter view."""
+    if vge is None or pulse2_on is None or pulse2_off is None:
+        return None
+    n = len(t)
+    vge_arr = np.asarray(vge, dtype=np.float64)
+    if n < 20 or len(vge_arr) != n:
+        return None
+    on_idx = max(0, min(int(pulse2_on), n - 1))
+    p2_off = max(on_idx + 1, min(int(pulse2_off), n - 1))
+    p1_off = int(pulse1_off) if pulse1_off is not None else 0
+    same_pulse = on_idx <= p1_off
+    gap12 = max(10, on_idx - p1_off) if not same_pulse else max(10, on_idx)
+    p2w = max(10, p2_off - on_idx)
+    pre_lo = max(int(50e-9 / max(dt, 1e-15)), int(0.05 * gap12))
+    post_hi = max(int(80e-9 / max(dt, 1e-15)), int(0.06 * p2w))
+
+    if same_pulse:
+        lo0 = max(0, on_idx - int(500e-9 / max(dt, 1e-15)))
+        lo1 = max(lo0 + 20, min(on_idx - pre_lo, n - 1))
+    else:
+        lo0 = min(n - 1, max(p1_off + int(150e-9 / max(dt, 1e-15)), 0))
+        lo1 = max(lo0 + 20, min(on_idx - pre_lo, n - 1))
+    if lo1 <= lo0 + 5:
+        lo1 = max(lo0 + 20, min(on_idx - int(15e-9 / max(dt, 1e-15)), n - 1))
+    hi0 = min(n - 1, max(on_idx + int(150e-9 / max(dt, 1e-15)), lo1 + 10))
+    hi1 = max(hi0 + 20, min(p2_off - post_hi, n - 1))
+    if lo1 <= lo0 + 5 or hi1 <= hi0 + 5:
+        return None
+
+    rise_span = max(
+        int(1.2e-6 / max(dt, 1e-15)),
+        int(0.25 * gap12),
+        int(0.5 * p2w),
+    )
+    if same_pulse:
+        w0 = max(0, on_idx - rise_span)
+    else:
+        w0 = max(0, p1_off, on_idx - rise_span)
+    w1 = min(n - 1, on_idx)
+    if w1 <= w0 + 10:
+        return None
+    v_lo = float(np.percentile(vge_arr[lo0:lo1], 5))
+    v_hi = float(np.percentile(vge_arr[hi0:hi1], 95))
+    if abs(v_hi - v_lo) < 1.0:
+        return None
+    ts = t[w0 : w1 + 1]
+    vge_s = smooth(vge_arr[w0 : w1 + 1], dt, _PARAM_LOCAL_VGE_SMOOTH_NS)
+    starts: list[float] = []
+    for pct in (0.02, 0.05, 0.10):
+        tv = crossing_time(
+            ts,
+            vge_s,
+            threshold_value(v_lo, v_hi, pct),
+            "rising",
+            start=0,
+        )
+        if tv is not None and np.isfinite(tv):
+            starts.append(float(tv))
+    if not starts:
+        return None
+    return min(starts) * 1e6
+
+
 def _err_ha_top_from_offset_window(
     t: np.ndarray,
     irr: np.ndarray,
     t_b_v: float,
     err_base: _ErrRecoveryBase,
     dt: float,
+    *,
+    vge: np.ndarray | None = None,
+    pulse1_off: int | None = None,
+    pulse2_on: int | None = None,
+    pulse2_off: int | None = None,
 ) -> float | None:
     """Err Ha uses the same Top definition as offset measurement.
 
@@ -1989,6 +2254,16 @@ def _err_ha_top_from_offset_window(
     """
     if len(t) == 0 or len(irr) == 0:
         return None
+    anchor_us = _vge_turn_on_focus_edge_start_us(
+        t, vge, pulse1_off, pulse2_on, pulse2_off, dt
+    )
+    if anchor_us is not None:
+        local_window = _parameter_focus_window_s(t, anchor_us)
+        if local_window is not None:
+            top = _scope_top_in_time_window(t, irr, local_window[0], local_window[1])
+            if top is not None:
+                return top
+
     i_a_hint = max(0, min(int(err_base.start_idx), len(t) - 1))
     t_a_hint = float(t[i_a_hint])
     raw_lo = min(float(t_b_v), t_a_hint) - 150e-9
@@ -2013,6 +2288,39 @@ def _err_ha_top_from_offset_window(
     if hi - lo < min_len:
         return None
     return _scope_top_in_time_window(t, irr, float(t[lo]), float(t[hi - 1]))
+
+
+def _err_low_current_stable_top_from_offset_window(
+    t: np.ndarray,
+    irr: np.ndarray,
+    err_base: _ErrRecoveryBase,
+    dt: float,
+    *,
+    vge: np.ndarray | None = None,
+    pulse1_off: int | None = None,
+    pulse2_on: int | None = None,
+    pulse2_off: int | None = None,
+) -> float | None:
+    """Low-current Err Ha fallback: Top from the right-side stable local view."""
+    anchor_us = _vge_turn_on_focus_edge_start_us(
+        t, vge, pulse1_off, pulse2_on, pulse2_off, dt
+    )
+    if anchor_us is None:
+        return None
+    local_window = _parameter_focus_window_s(t, anchor_us)
+    if local_window is None:
+        return None
+    lo_idx = max(0, min(int(err_base.end_idx), len(t) - 1))
+    top_base = _scope_top_base_in_time_window(
+        t,
+        irr,
+        float(t[lo_idx]),
+        local_window[1],
+    )
+    if top_base is None:
+        return None
+    top, _base = top_base
+    return float(top)
 
 
 def _err_vd_base_from_offset_window(
@@ -2467,6 +2775,61 @@ def _prefer_first_err_stable_entry(
     return current
 
 
+def _err_positive_soft_recovery_early_cross_t(
+    t: np.ndarray,
+    irr: np.ndarray,
+    ha: float,
+    ipk_global: int,
+    i_end: int,
+    dt: float,
+) -> float | None:
+    """Moderate positive soft-recovery Err A: avoid waiting for the quiet tail."""
+    if len(t) < 2 or len(irr) != len(t):
+        return None
+    k0 = max(0, min(int(ipk_global), len(irr) - 2))
+    peak = float(irr[k0])
+    peak_abs = abs(peak)
+    if peak <= 0.0 or ha <= 0.0 or peak_abs < 120.0:
+        return None
+    k_end = max(k0 + 2, min(int(i_end), len(irr) - 1))
+    if k_end <= k0 + _samples_for_seconds(dt, 220e-9, minimum=8):
+        return None
+
+    smooth_n = _samples_for_seconds(dt, 4e-9, minimum=3)
+    smooth_y = _edge_smoothed(np.asarray(irr, dtype=np.float64), smooth_n)
+    extrema = _local_extrema_indices(
+        smooth_y,
+        k0 + _samples_for_seconds(dt, 140e-9, minimum=1),
+        k_end,
+        dt,
+        min_gap_ns=5.0,
+    )
+    if not extrema:
+        return None
+
+    min_start = k0 + _samples_for_seconds(dt, 180e-9, minimum=1)
+    low_rebound_limit = max(18.0, min(34.0, 0.18 * peak_abs))
+    seed_idx: int | None = None
+    for idx in extrema:
+        idx = int(idx)
+        if idx < min_start:
+            continue
+        if float(smooth_y[idx]) > 0.0 and abs(float(smooth_y[idx])) <= low_rebound_limit:
+            seed_idx = idx
+            break
+    if seed_idx is None:
+        return None
+
+    return _first_level_cross_after_time(
+        t,
+        np.abs(np.asarray(irr, dtype=np.float64)),
+        abs(float(ha)),
+        float(t[seed_idx]) + 14e-9,
+        dt,
+        window_ns=120.0,
+    )
+
+
 def _err_recovery_settled_base(
     irr: np.ndarray,
     ipk_global: int,
@@ -2513,7 +2876,7 @@ def _err_recovery_settled_base(
         20e-9 if peak_abs >= 120.0 else 30e-9,
         minimum=1,
     )
-    if gate.start_idx <= int(legacy.start_idx) + min_shift:
+    if abs(int(gate.start_idx) - int(legacy.start_idx)) <= min_shift:
         return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
     max_shift_ns = 320e-9 if peak_abs < 120.0 else 230e-9
     max_shift = _samples_for_seconds(dt, max_shift_ns, minimum=1)
@@ -2534,6 +2897,12 @@ def _err_recovery_settled_base(
     candidate_amp = float(candidate.amp)
     if peak_abs < 120.0 and candidate_amp > 1.10 * legacy_amp:
         return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
+    if (
+        candidate.start_idx
+        < int(legacy.start_idx) - _samples_for_seconds(dt, 80e-9, minimum=1)
+        and candidate_amp <= max(0.14 * peak_abs, legacy_amp + 14.0)
+    ):
+        return _prefer_first_err_stable_entry(first_stable, candidate, legacy, dt)
     if peak_abs >= 120.0 and candidate_amp > 0.85 * legacy_amp:
         return _prefer_first_err_stable_entry(first_stable, legacy, legacy, dt)
     if peak_abs >= 120.0 and candidate_amp > 0.80 * legacy_amp:
@@ -2588,58 +2957,115 @@ def _err_interp_cross_time(
     return t0 + frac * (t1 - t0)
 
 
-def _err_interp_value_at_time(t: np.ndarray, y: np.ndarray, t_value: float) -> float:
-    if len(t) == 0 or len(y) == 0:
-        return 0.0
-    tv = float(t_value)
-    if tv <= float(t[0]):
-        return float(y[0])
-    if tv >= float(t[-1]):
-        return float(y[-1])
-    k = int(np.searchsorted(t, tv, side="right") - 1)
-    k = max(0, min(k, len(t) - 2))
-    t0, t1 = float(t[k]), float(t[k + 1])
-    y0, y1 = float(y[k]), float(y[k + 1])
-    if abs(t1 - t0) < 1e-30:
-        return y0
-    frac = float(np.clip((tv - t0) / (t1 - t0), 0.0, 1.0))
-    return y0 + frac * (y1 - y0)
-
-
-def _err_low_current_recovery_endpoint_t(
+def _err_negative_ringing_tail_cross_t(
     t: np.ndarray,
     irr: np.ndarray,
+    ha: float,
     ipk_global: int,
     i_end: int,
     dt: float,
 ) -> float | None:
-    """低电流 Err A：峰后等待足够恢复时间，再取右侧稳定纵向落点。"""
+    """WH 类负向强振荡 Err A：等主包络收敛后再取 Ha 真实交点。"""
     y = np.asarray(irr, dtype=np.float64)
-    if len(y) < 12:
+    if len(y) < 12 or len(t) != len(y):
         return None
     k0 = max(0, min(int(ipk_global), len(y) - 2))
-    peak_abs = abs(float(y[k0]))
-    if peak_abs <= 1.0 or peak_abs >= 90.0:
+    peak = float(y[k0])
+    peak_abs = abs(peak)
+    if peak >= 0.0 or peak_abs < 120.0:
         return None
     k_end = max(k0 + 2, min(int(i_end), len(y) - 1))
-    base_len = max(16, int(60e-9 / max(dt, 1e-15)))
-    scan_hi = k_end - base_len
-    if scan_hi <= k0:
+    legacy = _legacy_err_recovery_settled_base(y, k0, dt, k_end)
+    search_end = min(
+        len(y) - 1,
+        k_end + _samples_for_seconds(dt, 500e-9, minimum=1),
+    )
+    smooth_n = _samples_for_seconds(dt, 4e-9, minimum=3)
+    smooth_y = _edge_smoothed(y, smooth_n)
+    extrema = _local_extrema_indices(
+        smooth_y,
+        k0,
+        search_end,
+        dt,
+        min_gap_ns=5.0,
+    )
+    if not extrema:
         return None
-    min_after_ns = 280.0 + max(0.0, peak_abs - 60.0) * 3.0
-    scan_lo = min(scan_hi, k0 + max(4, int(min_after_ns * 1e-9 / max(dt, 1e-15))))
-    amp_ceiling = max(3.5, 0.10 * peak_abs)
-    point_ceiling = max(3.2, 0.04 * peak_abs)
-    for k in range(scan_lo, scan_hi + 1):
-        block = y[k : k + base_len]
-        if len(block) < base_len:
-            break
-        amp = 0.5 * (float(np.max(block)) - float(np.min(block)))
-        if amp > amp_ceiling:
-            continue
-        if abs(float(y[k])) <= point_ceiling:
-            return float(t[k])
+    threshold = max(8.0, 0.08 * peak_abs)
+    significant = [
+        int(idx)
+        for idx in extrema
+        if abs(float(smooth_y[int(idx)]) - float(legacy.level)) >= threshold
+    ]
+    if len(significant) < 4:
+        return None
+    gate_t = float(t[significant[-1]]) + 10e-9
+    start = int(np.searchsorted(t, gate_t, side="left"))
+    stop = min(len(y) - 2, start + _samples_for_seconds(dt, 160e-9, minimum=2))
+    lvl = float(ha)
+    for k in range(max(k0, start), stop + 1):
+        y0, y1 = float(y[k]), float(y[k + 1])
+        if min(y0, y1) <= lvl <= max(y0, y1) and abs(y1 - y0) > 1e-30:
+            return float(_err_interp_cross_time(t, y, k, lvl))
+    if gate_t > float(t[k0]):
+        return float(gate_t)
     return None
+
+
+def _first_level_cross_after_time(
+    t: np.ndarray,
+    y: np.ndarray,
+    level: float,
+    t_after: float,
+    dt: float,
+    *,
+    window_ns: float = 420.0,
+) -> float | None:
+    """First raw crossing of level after a time guard."""
+    if len(t) < 2 or len(y) != len(t):
+        return None
+    start = int(np.searchsorted(t, float(t_after), side="left"))
+    stop = min(
+        len(t) - 2,
+        start + _samples_for_seconds(dt, window_ns * 1e-9, minimum=2),
+    )
+    lvl = float(level)
+    for k in range(max(0, start), stop + 1):
+        y0, y1 = float(y[k]), float(y[k + 1])
+        if min(y0, y1) <= lvl <= max(y0, y1) and abs(y1 - y0) > 1e-30:
+            return float(_err_interp_cross_time(t, y, k, lvl))
+    return None
+
+
+def _level_cross_after_index(
+    t: np.ndarray,
+    y: np.ndarray,
+    level: float,
+    start_idx: int,
+    stop_idx: int,
+    *,
+    prefer_after_idx: int | None = None,
+) -> float | None:
+    """Raw level crossing in an index window, optionally preferring the later half."""
+    if len(t) < 2 or len(y) != len(t):
+        return None
+    start = max(0, min(int(start_idx), len(t) - 2))
+    stop = max(start, min(int(stop_idx), len(t) - 2))
+    lvl = float(level)
+    crossings: list[float] = []
+    for k in range(start, stop + 1):
+        y0, y1 = float(y[k]), float(y[k + 1])
+        if min(y0, y1) <= lvl <= max(y0, y1) and abs(y1 - y0) > 1e-30:
+            crossings.append(float(_err_interp_cross_time(t, y, k, lvl)))
+    if not crossings:
+        return None
+    if prefer_after_idx is not None:
+        prefer_idx = max(start, min(int(prefer_after_idx), stop))
+        prefer_t = float(t[prefer_idx])
+        for candidate in crossings:
+            if candidate >= prefer_t:
+                return float(candidate)
+    return float(crossings[0])
 
 
 def _err_ic_fall_cross_after_peak(
@@ -2716,7 +3142,15 @@ def _err_vd_base_before_main_rise(
 
 
 def _err_vd_rise_cross_hb_t(
-    t: np.ndarray, vd: np.ndarray, hb: float, ipk_global: int, i0: int, dt: float
+    t: np.ndarray,
+    vd: np.ndarray,
+    hb: float,
+    ipk_global: int,
+    i0: int,
+    dt: float,
+    *,
+    prefer_low_current_main_rise: bool = False,
+    prefer_main_rise: bool = False,
 ) -> float:
     """Vd 主上升沿第一次穿 Hb（带符号）的交点。
 
@@ -2724,11 +3158,43 @@ def _err_vd_rise_cross_hb_t(
     段起点常晚于真实抬升脚，否则会误落在段界上）。
     """
     _ = i0  # 保留参数以兼容调用方
-    lo, hi, _k_trigger, v_peak = _err_vd_main_rise_search(
+    lo, hi, k_trigger, v_peak = _err_vd_main_rise_search(
         t, vd, hb, ipk_global, dt
     )
     if hi <= lo + 1:
         return float(t[min(ipk_global, len(t) - 1)])
+    span = abs(float(v_peak) - float(hb))
+    if prefer_main_rise and k_trigger is not None and (
+        span >= 500.0 or span < 260.0 or abs(float(hb)) >= 1.0
+    ):
+        raw_window_ns = 100.0 if span >= 500.0 else (40.0 if span < 260.0 else 60.0)
+        raw_lo = max(
+            lo,
+            int(np.searchsorted(t, float(t[k_trigger]) - raw_window_ns * 1e-9, side="left")),
+        )
+        raw_hi = min(int(k_trigger), hi)
+        raw_ix = _first_sustained_rise_crossing(
+            vd,
+            float(hb),
+            raw_lo,
+            raw_hi,
+            int(k_trigger),
+            dt,
+            span,
+        )
+        if raw_ix is not None:
+            return float(_err_interp_cross_time(t, vd, int(raw_ix), float(hb)))
+    if prefer_low_current_main_rise and k_trigger is not None and span <= 250.0:
+        raw_lo = max(
+            lo,
+            int(np.searchsorted(t, float(t[k_trigger]) - 40e-9, side="left")),
+        )
+        raw_hi = min(int(k_trigger), hi)
+        for k in range(raw_lo, raw_hi + 1):
+            y0 = float(vd[k])
+            y1 = float(vd[k + 1])
+            if y0 <= float(hb) <= y1 and y1 > y0 and abs(y1 - y0) > 1e-30:
+                return float(_err_interp_cross_time(t, vd, k, float(hb)))
     lookahead = _samples_for_seconds(dt, 120e-9, minimum=2)
     min_rise = 30.0
     for k in range(lo, hi):
@@ -2855,6 +3321,12 @@ def err_energy_markers(
     i1: int,
     dt: float,
     i_search_end: int | None = None,
+    *,
+    vge: np.ndarray | None = None,
+    pulse1_off: int | None = None,
+    pulse2_on: int | None = None,
+    pulse2_off: int | None = None,
+    dc_current: float | None = None,
 ) -> EnergyLossMarkers:
     """
     反向恢复损耗 Err（示波器卡尺）：
@@ -2898,36 +3370,70 @@ def err_energy_markers(
     # B 必须贴同一段 Vd 与该横线的真实交点，不能取全局或关断过程 base。
     hb_hint = _err_window_mid(vd_full, t, tpk - 600e-9, tpk - 200e-9)
     hb_v = _err_vd_base_before_main_rise(t, vd_full, hb_hint, ipk_global, dt)
+    prefer_low_current_b = abs(float(peak)) < 125.0
+    prefer_main_rise_b = peak > 0.0 and abs(float(peak)) >= 120.0
     # B=Vd 主抬升沿与 Hb 的首个上升穿越（带符号 Vd）。Err 的
     # Ha(Irr) 需要按点击参数后的局部放大窗口 Top 定义取值，所以先确定 B，
     # 再用 B 与 Irr 稳定入口组成局部窗口；不得用全波形 Top/Base。
-    t_b_v = _err_vd_rise_cross_hb_t(t, vd_full, hb_v, ipk_global, i0, dt)
+    t_b_v = _err_vd_rise_cross_hb_t(
+        t,
+        vd_full,
+        hb_v,
+        ipk_global,
+        i0,
+        dt,
+        prefer_low_current_main_rise=prefer_low_current_b,
+        prefer_main_rise=prefer_main_rise_b,
+    )
     if not _use_legacy_loss_platform_mode():
         hb_from_offset = _err_vd_base_from_offset_window(t, vd_full, t_b_v, err_base)
         if hb_from_offset is not None:
             hb_v = float(hb_from_offset)
-            t_b_v = _err_vd_rise_cross_hb_t(t, vd_full, hb_v, ipk_global, i0, dt)
+            t_b_v = _err_vd_rise_cross_hb_t(
+                t,
+                vd_full,
+                hb_v,
+                ipk_global,
+                i0,
+                dt,
+                prefer_low_current_main_rise=prefer_low_current_b,
+                prefer_main_rise=prefer_main_rise_b,
+            )
     if not _use_legacy_loss_cursor_mode():
-        ha_top = _err_ha_top_from_offset_window(t, irr_full, t_b_v, err_base, dt)
+        ha_top = _err_ha_top_from_offset_window(
+            t,
+            irr_full,
+            t_b_v,
+            err_base,
+            dt,
+            vge=vge,
+            pulse1_off=pulse1_off,
+            pulse2_on=pulse2_on,
+            pulse2_off=pulse2_off,
+        )
         if ha_top is not None:
             ha_tail = float(ha_top)
+        if dc_current is not None and abs(float(dc_current)) <= 150.0:
+            stable_top = _err_low_current_stable_top_from_offset_window(
+                t,
+                irr_full,
+                err_base,
+                dt,
+                vge=vge,
+                pulse1_off=pulse1_off,
+                pulse2_on=pulse2_on,
+                pulse2_off=pulse2_off,
+            )
+            if stable_top is not None:
+                top_drift = abs(float(ha_tail) - float(err_base.level))
+                drift_limit = max(3.0, 0.35 * max(float(err_base.amp), 0.0))
+                if top_drift > drift_limit:
+                    ha_tail = float(stable_top)
     signed_tail_after_rebound = peak > 0.0 and float(ha_tail) < 0.0 and (
         abs(float(ha_tail)) >= max(3.0, 0.03 * abs(float(peak)))
         or _err_has_dominant_opposite_rebound(irr_full, ipk_global, i_search_end, peak, dt)
     )
-    use_irr_mag = peak > 0.0 and (
-        float(ha_tail) > 0.0
-        or (
-            float(ha_tail) < 0.0
-            and not signed_tail_after_rebound
-            and abs(peak) > 3.0 * abs(float(ha_tail))
-        )
-    )
-    ha = (
-        float(ha_tail)
-        if signed_tail_after_rebound
-        else (abs(float(ha_tail)) if use_irr_mag else float(ha_tail))
-    )
+    ha = float(ha_tail)
     i_fall_end = max(
         ipk_global + 2,
         min(
@@ -2942,11 +3448,95 @@ def err_energy_markers(
         ipk_global,
         i_fall_end,
         dt,
-        force_signed=signed_tail_after_rebound,
+        force_signed=ha < 0.0,
         settle_idx=err_base.start_idx,
         settle_end_idx=err_base.end_idx,
         settle_strict=err_base.strict,
     )
+    if (
+        peak > 0.0
+        and signed_tail_after_rebound
+        and ha < 0.0
+        and abs(float(peak)) >= 120.0
+    ):
+        legacy_base = _legacy_err_recovery_settled_base(
+            irr_full,
+            ipk_global,
+            dt,
+            i_search_end,
+        )
+        far_shift = (int(err_base.start_idx) - int(legacy_base.start_idx)) * max(
+            float(dt), 1e-15
+        )
+        if far_shift > 300e-9:
+            guard_ns = 35.0 if abs(float(peak)) >= 300.0 else 45.0
+            guarded_t = _first_level_cross_after_time(
+                t,
+                irr_full,
+                ha,
+                float(t[legacy_base.end_idx]) + guard_ns * 1e-9,
+                dt,
+            )
+            if guarded_t is not None and guarded_t < t_a_irr - 20e-9:
+                t_a_irr = float(guarded_t)
+    if peak > 0.0 and ha > 0.0 and abs(float(peak)) >= 120.0:
+        early_soft_t = _err_positive_soft_recovery_early_cross_t(
+            t,
+            irr_full,
+            ha,
+            ipk_global,
+            i_search_end,
+            dt,
+        )
+        if early_soft_t is not None and t_a_irr > early_soft_t + 180e-9:
+            t_a_irr = float(early_soft_t)
+    if peak > 0.0 and ha < 0.0 and abs(float(peak)) >= 300.0:
+        stable_legacy_base = _legacy_err_recovery_settled_base(
+            irr_full,
+            ipk_global,
+            dt,
+            i_search_end,
+        )
+        base_shift_s = (
+            int(err_base.start_idx) - int(stable_legacy_base.start_idx)
+        ) * max(
+            float(dt), 1e-15
+        )
+        if (
+            0.0 <= base_shift_s <= 300e-9
+            and float(err_base.amp) <= max(34.0, 0.10 * abs(float(peak)))
+        ):
+            settled_t = _first_level_cross_after_time(
+                t,
+                irr_full,
+                ha,
+                float(t[max(0, min(int(err_base.end_idx), len(t) - 1))]),
+                dt,
+                window_ns=180.0,
+            )
+            if settled_t is not None and settled_t > t_a_irr + 20e-9:
+                t_a_irr = float(settled_t)
+    negative_tail_t = _err_negative_ringing_tail_cross_t(
+        t,
+        irr_full,
+        ha,
+        ipk_global,
+        i_search_end,
+        dt,
+    )
+    if negative_tail_t is not None and negative_tail_t > t_a_irr + 20e-9:
+        t_a_irr = float(negative_tail_t)
+    if dc_current is not None and abs(float(dc_current)) <= 150.0:
+        stable_cross_t = _first_level_cross_after_time(
+            t,
+            irr_full,
+            ha,
+            float(t[max(0, min(int(err_base.end_idx), len(t) - 1))]) + 80e-9,
+            dt,
+            window_ns=900.0,
+        )
+        if stable_cross_t is not None:
+            t_a_irr = float(stable_cross_t)
     if abs(t_a_irr - t_b_v) < 1e-15:
         t_a_irr, t_b_v = float(t[i0]), float(t[i1])
 
@@ -2958,7 +3548,7 @@ def err_energy_markers(
 
     i_start = int(np.searchsorted(t, t_lo, side="left"))
     i_end = int(np.searchsorted(t, t_hi, side="left"))
-    i_start = max(i0, min(i_start, len(t) - 2))
+    i_start = max(0, min(i_start, len(t) - 2))
     i_end = max(i_start + 1, min(i_end, len(t) - 1))
 
     return EnergyLossMarkers(

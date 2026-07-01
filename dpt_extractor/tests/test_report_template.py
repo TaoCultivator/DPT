@@ -730,6 +730,90 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(saved.cell(7, COL_CURRENT).value, 403)
             self.assertEqual(saved.cell(7, COL_OFF["delta_vce"]).value, 403)
 
+    def test_dpt_filename_setpoints_are_strict_report_keys(self):
+        from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_VOLTAGE
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A7")
+            ws.merge_cells("B5:B7")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            ws.cell(5, COL_VOLTAGE, 750)
+            ws.cell(5, COL_CURRENT, 1050)
+            wb.save(report)
+
+            summary = write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1048A_000.tss"),
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=1048.0),
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(summary.data_row, 6)
+            self.assertIsNone(saved.cell(5, COL_OFF["delta_vce"]).value)
+            self.assertEqual(saved.cell(6, COL_VOLTAGE).value, 750)
+            self.assertEqual(saved.cell(6, COL_CURRENT).value, 1048)
+            self.assertEqual(saved.cell(6, COL_OFF["delta_vce"]).value, 1048)
+
+    def test_dpt_missing_filename_setpoint_fallback_is_limited_to_ten_units(self):
+        from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_VOLTAGE
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        def build_report(path: Path) -> None:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A7")
+            ws.merge_cells("B5:B7")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            ws.cell(5, COL_VOLTAGE, 750)
+            ws.cell(5, COL_CURRENT, 1050)
+            wb.save(path)
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "within.xlsx"
+            build_report(report)
+            summary = write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_000.tss"),
+                    profile_code="UH",
+                    idc_set=1041.0,
+                    turn_off=TurnOffResult(delta_vce=1041.0, ic_off_max=1041.0),
+                ),
+                report,
+            )
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(summary.data_row, 5)
+            self.assertEqual(saved.cell(5, COL_CURRENT).value, 1041)
+            self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 1041)
+
+            report = Path(td) / "outside.xlsx"
+            build_report(report)
+            summary = write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_000.tss"),
+                    profile_code="UH",
+                    idc_set=1039.0,
+                    turn_off=TurnOffResult(delta_vce=1039.0, ic_off_max=1039.0),
+                ),
+                report,
+            )
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(summary.data_row, 6)
+            self.assertIsNone(saved.cell(5, COL_OFF["delta_vce"]).value)
+            self.assertEqual(saved.cell(6, COL_CURRENT).value, 1039)
+
     def test_dpt_waveform_blocks_do_not_keep_blank_reserved_rows_between_groups(self):
         from dpt_extractor.export.report_template import write_report_template
         from dpt_extractor.models.results import ExtractResult, TurnOffResult
@@ -815,13 +899,13 @@ class TestReportTemplateWriter(unittest.TestCase):
             ws.merge_cells("C5:C8")
             ws["A5"] = "UH"
             ws["B5"] = "25℃"
-            ws["C5"] = "Rg_on = 3.233 ohm"
+            ws["C5"] = "Rg_on =  ohm\nRg_off =  ohm\nCg =  nf"
             ws.merge_cells("A9:A12")
             ws.merge_cells("B9:B12")
             ws.merge_cells("C9:C12")
             ws["A9"] = "UL"
             ws["B9"] = "25℃"
-            ws["C9"] = "Rg_on = 3.233 ohm"
+            ws["C9"] = "Rg_on =  ohm\nRg_off =  ohm\nCg =  nf"
 
             fill = PatternFill("solid", fgColor="D9EAD3")
             border = Border(
@@ -918,7 +1002,7 @@ class TestReportTemplateWriter(unittest.TestCase):
             ws.merge_cells("C25:C28")
             ws["A25"] = "WL"
             ws["B25"] = "-40℃"
-            ws["C25"] = "Rg_on = 3.624ohm\nRg_off = 3.586 ohm\nCg = 10 nf"
+            ws["C25"] = "Rg_on =  ohm\nRg_off =  ohm\nCg =  nf"
 
             stale_style_cols = (
                 COL_ON["ls_on"],
@@ -1520,6 +1604,108 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(summary.data_row, 9)
             self.assertEqual(summary.waveform_anchor_row, 213)
             self.assertEqual(saved["U相_双脉冲数据"].cell(9, COL_OFF["delta_vce"]).value, 555.0)
+
+    def test_dpt_template_distinguishes_gate_resistance_condition_groups(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CONDITION,
+            COL_CURRENT,
+            COL_OFF,
+            COL_VOLTAGE,
+        )
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "condition_groups.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            for start, rg_on, rg_off, cg in (
+                (5, 3.3, 3.6, 10),
+                (9, 5.6, 7.5, 22),
+            ):
+                ws.merge_cells(start_row=start, start_column=1, end_row=start + 3, end_column=1)
+                ws.merge_cells(start_row=start, start_column=2, end_row=start + 3, end_column=2)
+                ws.merge_cells(start_row=start, start_column=3, end_row=start + 3, end_column=3)
+                ws.cell(start, 1, "UH")
+                ws.cell(start, 2, "25℃")
+                ws.cell(
+                    start,
+                    COL_CONDITION,
+                    f"Rg_on = {rg_on} ohm\nRg_off = {rg_off} ohm\nCg = {cg} nf",
+                )
+                ws.cell(start, COL_VOLTAGE, 750)
+                ws.cell(start, COL_CURRENT, 805)
+            wb.save(report)
+
+            rows = []
+            for filename, marker in (
+                ("Rg_on3.3_Rg_off3.6_Cg10_UH_750V_805A_000.tss", 33.0),
+                ("UH_750V_805A_Rg_on5.6_Rg_off7.5_Cg22_000.tss", 56.0),
+            ):
+                summary = write_report_template(
+                    ExtractResult(
+                        source_path=str(Path("samples") / "RT" / filename),
+                        profile_code="UH",
+                        turn_off=TurnOffResult(delta_vce=marker),
+                    ),
+                    report,
+                )
+                rows.append(summary.data_row)
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(rows, [5, 9])
+            self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 33.0)
+            self.assertEqual(saved.cell(9, COL_OFF["delta_vce"]).value, 56.0)
+            self.assertEqual(saved.cell(5, COL_CURRENT).value, 805)
+            self.assertEqual(saved.cell(9, COL_CURRENT).value, 805)
+
+    def test_dpt_template_syncs_condition_cell_from_filename(self):
+        from dpt_extractor.export.mcu2506_layout import COL_CONDITION, COL_OFF
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "sync_condition.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws.merge_cells("C5:C8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            ws.cell(
+                5,
+                COL_CONDITION,
+                "备注保留\nRg_on =  ohm\nRg_off =  ohm\nCg =  nf",
+            )
+            wb.save(report)
+
+            summary = write_report_template(
+                ExtractResult(
+                    source_path=str(
+                        Path("samples")
+                        / "RT"
+                        / "UH_750V_805A_Rg_on3.233_Rg_off3.586_Cg10_000.tss"
+                    ),
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=12.0),
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            condition = saved.cell(5, COL_CONDITION).value
+            self.assertEqual(summary.data_row, 5)
+            self.assertIn("备注保留", condition)
+            self.assertIn("Rg_on = 3.233 ohm", condition)
+            self.assertIn("Rg_off = 3.586 ohm", condition)
+            self.assertIn("Cg = 10 nf", condition)
+            self.assertEqual(condition.count("Rg_on"), 1)
+            self.assertEqual(condition.count("Rg_off"), 1)
+            self.assertEqual(condition.count("Cg"), 1)
+            self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 12.0)
 
     def test_dpt_template_multi_pulse_rows_do_not_overwrite_next_condition(self):
         from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_ON, COL_VOLTAGE

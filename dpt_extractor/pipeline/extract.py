@@ -829,7 +829,18 @@ def extract_all(
     # Err 按示波器口径：从反向谷值到电流/电压同时回到 base 的区间积分
     if v_diode is not None:
         win_rr_scope = err_energy_markers(
-            t, irr, v_diode, rr0, rr1, dt, i_search_end=on1
+            t,
+            irr,
+            v_diode,
+            rr0,
+            rr1,
+            dt,
+            i_search_end=on1,
+            vge=vge,
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
+            dc_current=idc,
         ).as_integration_window()
         err = integrate_err_recovery(t, v_diode, irr, win_rr_scope)
         pdmax_rr = peak_power_kw(v_diode, irr, win_rr_scope, absolute=True)

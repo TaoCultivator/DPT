@@ -61,7 +61,18 @@ class TestFourTssCompatibility(unittest.TestCase):
               rr0, rr1 = segs.reverse_recovery
               on1 = segs.turn_on[1]
               mk = err_energy_markers(
-                  t, irr, vd, rr0, rr1, bundle.dt, i_search_end=on1
+                  t,
+                  irr,
+                  vd,
+                  rr0,
+                  rr1,
+                  bundle.dt,
+                  i_search_end=on1,
+                  vge=bundle.get(profile.vge),
+                  pulse1_off=segs.pulse1_off,
+                  pulse2_on=segs.pulse2_on,
+                  pulse2_off=segs.pulse2_off,
+                  dc_current=result.idc,
               )
               # Hb=恢复前正向导通 Vd 平台；Ha=恢复后稳定 Irr 平台/幅值光标。
               self.assertLess(abs(mk.hb_a), 50.0, "Hb 应在二极管正向导通电平附近")
@@ -101,7 +112,18 @@ class TestFourTssCompatibility(unittest.TestCase):
       rr0, rr1 = segs.reverse_recovery
       on1 = segs.turn_on[1]
       mk = err_energy_markers(
-          t, irr, vd, rr0, rr1, bundle.dt, i_search_end=on1
+          t,
+          irr,
+          vd,
+          rr0,
+          rr1,
+          bundle.dt,
+          i_search_end=on1,
+          vge=bundle.get(profile.vge),
+          pulse1_off=segs.pulse1_off,
+          pulse2_on=segs.pulse2_on,
+          pulse2_off=segs.pulse2_off,
+          dc_current=result.idc,
       )
       ipk = rr0 + err_recovery_peak_index(
           irr[rr0 : rr1 + 1], bundle.dt

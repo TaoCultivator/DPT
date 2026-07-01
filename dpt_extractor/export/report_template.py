@@ -19,6 +19,7 @@ from openpyxl.worksheet.cell_range import CellRange
 from openpyxl.worksheet.worksheet import Worksheet
 
 from dpt_extractor.export.mcu2506_layout import (
+    COL_CONDITION,
     COL_CURRENT,
     COL_VOLTAGE,
     DATA_ROW,
@@ -125,6 +126,8 @@ _REPORT_VIEW_DEFAULT_SCREEN_WIDTH_PX = 1920
 _REPORT_VIEW_HORIZONTAL_MARGIN_PX = 160
 _REPORT_VIEW_MIN_ZOOM = 55
 _REPORT_VIEW_MAX_ZOOM = 100
+_FILENAME_SETPOINT_TOLERANCE = 0.05
+_FALLBACK_SETPOINT_TOLERANCE = 10.0
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,7 @@ class _DptDataGroup:
     end_row: int
     phase: str
     temp: str
+    condition: str
 
 
 @dataclass(frozen=True)
@@ -154,6 +158,14 @@ class _DptDataTarget:
     group_start_row: int
     row_offset: int
     inserted_row: bool = False
+
+
+@dataclass(frozen=True)
+class _DptSetpointMatch:
+    vdc: float | None
+    idc: float | None
+    vdc_from_filename: bool = False
+    idc_from_filename: bool = False
 
 
 def _format_temperature_number(value: float) -> str:
@@ -351,7 +363,188 @@ def _phase_sheet_prefix(phase_code: str) -> str:
     return phase_code[0]
 
 
-def _format_condition_key(vdc: float | None, idc: float | None) -> str:
+_CONDITION_NUMBER = r"(-?\d+(?:\.\d+)?)"
+_RG_ON_TERMS = r"RG[\s_\-]*ON|RGON|R[\s_\-]*ON|RON|开通(?:栅极)?(?:电阻)?"
+_RG_OFF_TERMS = r"RG[\s_\-]*OFF|RGOFF|R[\s_\-]*OFF|ROFF|关断(?:栅极)?(?:电阻)?"
+_CG_TERMS = r"CG|栅极电容|驱动电容"
+_RG_TERMS = r"RG|栅极电阻|驱动电阻"
+_INLINE_SEP = r"[ _\-\t]*"
+_CONDITION_TOKEN_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
+    (
+        "rg_on",
+        (
+            re.compile(
+                rf"(?:{_RG_ON_TERMS})\s*(?:=|:|：)?\s*{_CONDITION_NUMBER}",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                rf"{_CONDITION_NUMBER}{_INLINE_SEP}(?:OHM|R|Ω)?{_INLINE_SEP}(?:{_RG_ON_TERMS})",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+    (
+        "rg_off",
+        (
+            re.compile(
+                rf"(?:{_RG_OFF_TERMS})\s*(?:=|:|：)?\s*{_CONDITION_NUMBER}",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                rf"{_CONDITION_NUMBER}{_INLINE_SEP}(?:OHM|R|Ω)?{_INLINE_SEP}(?:{_RG_OFF_TERMS})",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+    (
+        "cg",
+        (
+            re.compile(
+                rf"(?:{_CG_TERMS})\s*(?:=|:|：)?\s*{_CONDITION_NUMBER}",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                rf"{_CONDITION_NUMBER}{_INLINE_SEP}(?:NF|PF|UF)?{_INLINE_SEP}(?:{_CG_TERMS})",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+    (
+        "rg",
+        (
+            re.compile(
+                rf"(?:^|[^A-Z0-9])(?:{_RG_TERMS})(?![\s_\-]*(?:ON|OFF))\s*(?:=|:|：)?\s*{_CONDITION_NUMBER}",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                rf"{_CONDITION_NUMBER}{_INLINE_SEP}(?:OHM|R|Ω)?{_INLINE_SEP}(?:{_RG_TERMS})(?![\s_\-]*(?:ON|OFF))",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+)
+_CONDITION_TOKEN_ORDER = ("rg_on", "rg_off", "rg", "cg")
+_CONDITION_LINE_KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("rg_on", re.compile(rf"(?:{_RG_ON_TERMS})", re.IGNORECASE)),
+    ("rg_off", re.compile(rf"(?:{_RG_OFF_TERMS})", re.IGNORECASE)),
+    (
+        "rg",
+        re.compile(
+            rf"(?:^|[^A-Z0-9])(?:{_RG_TERMS})(?![\s_\-]*(?:ON|OFF))",
+            re.IGNORECASE,
+        ),
+    ),
+    ("cg", re.compile(rf"(?:{_CG_TERMS})", re.IGNORECASE)),
+)
+
+
+def _condition_signature(text: object) -> dict[str, float]:
+    if text is None:
+        return {}
+    normalized = str(text).upper().replace("Ω", "OHM").replace("欧姆", "OHM")
+    tokens: dict[str, float] = {}
+    for key, patterns in _CONDITION_TOKEN_PATTERNS:
+        for pattern in patterns:
+            match = pattern.search(normalized)
+            if match:
+                value = next(group for group in match.groups() if group is not None)
+                tokens[key] = float(value)
+                break
+    return tokens
+
+
+def _condition_value_matches(expected: float, actual: float) -> bool:
+    return abs(float(expected) - float(actual)) <= max(0.05, abs(float(expected)) * 0.02)
+
+
+def _condition_signature_matches(
+    source: Mapping[str, float],
+    candidate: Mapping[str, float],
+) -> bool:
+    if not source:
+        return True
+    if not candidate:
+        return False
+    for key, expected in source.items():
+        if key in candidate:
+            if not _condition_value_matches(expected, candidate[key]):
+                return False
+            continue
+        if key == "rg":
+            if any(
+                _condition_value_matches(expected, candidate[alt])
+                for alt in ("rg_on", "rg_off")
+                if alt in candidate
+            ):
+                continue
+        return False
+    return True
+
+
+def _format_condition_signature(signature: Mapping[str, float]) -> str:
+    parts: list[str] = []
+    labels = {
+        "rg_on": "Rg_on",
+        "rg_off": "Rg_off",
+        "rg": "Rg",
+        "cg": "Cg",
+    }
+    for key in _CONDITION_TOKEN_ORDER:
+        if key not in signature:
+            continue
+        parts.append(f"{labels[key]}{_format_condition_number(signature[key])}")
+    return "_".join(parts)
+
+
+def _format_condition_number(value: float) -> str:
+    fv = float(value)
+    if abs(fv - round(fv)) < 0.05:
+        return str(int(round(fv)))
+    return f"{fv:g}"
+
+
+def _format_condition_line(key: str, value: float) -> str:
+    labels = {
+        "rg_on": ("Rg_on", "ohm"),
+        "rg_off": ("Rg_off", "ohm"),
+        "rg": ("Rg", "ohm"),
+        "cg": ("Cg", "nf"),
+    }
+    label, unit = labels[key]
+    return f"{label} = {_format_condition_number(value)} {unit}"
+
+
+def _condition_line_key(line: str) -> str | None:
+    normalized = str(line or "").upper().replace("Ω", "OHM").replace("欧姆", "OHM")
+    for key, pattern in _CONDITION_LINE_KEY_PATTERNS:
+        if pattern.search(normalized):
+            return key
+    return None
+
+
+def _merged_condition_text(
+    existing: object,
+    signature: Mapping[str, float],
+) -> str:
+    lines = [line for line in str(existing or "").splitlines() if line.strip()]
+    used: set[str] = set()
+    for idx, line in enumerate(lines):
+        key = _condition_line_key(line)
+        if key is None or key not in signature:
+            continue
+        lines[idx] = _format_condition_line(key, signature[key])
+        used.add(key)
+    for key in _CONDITION_TOKEN_ORDER:
+        if key in signature and key not in used:
+            lines.append(_format_condition_line(key, signature[key]))
+    return "\n".join(lines)
+
+
+def _format_condition_key(
+    vdc: float | None,
+    idc: float | None,
+    condition_signature: Mapping[str, float] | None = None,
+) -> str:
     def fmt(v: float | None) -> str:
         if v is None:
             return ""
@@ -360,9 +553,11 @@ def _format_condition_key(vdc: float | None, idc: float | None) -> str:
             return str(int(round(fv)))
         return f"{fv:g}"
 
+    suffix = _format_condition_signature(condition_signature or {})
     if vdc is None and idc is None:
-        return ""
-    return f"{fmt(vdc)}V_{fmt(idc)}A"
+        return suffix
+    base = f"{fmt(vdc)}V_{fmt(idc)}A"
+    return f"{base}_{suffix}" if suffix else base
 
 
 def _condition_values(text: str | None) -> tuple[float | None, float | None]:
@@ -371,8 +566,43 @@ def _condition_values(text: str | None) -> tuple[float | None, float | None]:
     return parse_setpoints_from_filename(str(text))
 
 
-def _condition_tolerance(idc: float | None, candidate_current: float | None) -> float:
-    return max(30.0, abs(float(idc or candidate_current or 0.0)) * 0.08)
+def _dpt_setpoint_match(result: ExtractResult) -> _DptSetpointMatch:
+    fn_v, fn_i = parse_setpoints_from_filename(result.source_path)
+    vdc_from_filename = fn_v is not None
+    idc_from_filename = fn_i is not None and fn_i > 0
+    vdc, idc = _match_setpoints(result)
+    return _DptSetpointMatch(
+        vdc=vdc,
+        idc=idc,
+        vdc_from_filename=vdc_from_filename,
+        idc_from_filename=idc_from_filename,
+    )
+
+
+def _condition_setpoint_match(text: str | None) -> _DptSetpointMatch:
+    vdc, idc = _condition_values(text)
+    return _DptSetpointMatch(
+        vdc=vdc,
+        idc=idc,
+        vdc_from_filename=vdc is not None,
+        idc_from_filename=idc is not None and idc > 0,
+    )
+
+
+def _setpoint_value_matches(
+    expected: float | None,
+    actual: float | None,
+    *,
+    expected_from_filename: bool,
+) -> bool:
+    if expected is None or actual is None:
+        return False
+    tolerance = (
+        _FILENAME_SETPOINT_TOLERANCE
+        if expected_from_filename
+        else _FALLBACK_SETPOINT_TOLERANCE
+    )
+    return abs(float(actual) - float(expected)) <= tolerance
 
 
 def _merged_value(ws: Worksheet, row: int, col: int):
@@ -453,14 +683,18 @@ def _data_row_setpoints(ws: Worksheet, row: int) -> tuple[float | None, float | 
 def _data_row_matches_setpoints(
     ws: Worksheet,
     row: int,
-    vdc: float | None,
-    idc: float | None,
+    setpoints: _DptSetpointMatch,
 ) -> bool:
     row_vdc, row_idc = _data_row_setpoints(ws, row)
-    if row_vdc is None or row_idc is None or vdc is None or idc is None:
-        return False
-    score = abs(row_vdc - float(vdc)) * 10.0 + abs(row_idc - float(idc))
-    return score <= _condition_tolerance(idc, row_idc)
+    return _setpoint_value_matches(
+        setpoints.vdc,
+        row_vdc,
+        expected_from_filename=setpoints.vdc_from_filename,
+    ) and _setpoint_value_matches(
+        setpoints.idc,
+        row_idc,
+        expected_from_filename=setpoints.idc_from_filename,
+    )
 
 
 def _data_row_has_payload(ws: Worksheet, row: int) -> bool:
@@ -555,9 +789,23 @@ def _dpt_data_groups(data_ws: Worksheet) -> list[_DptDataGroup]:
                 end_row=next_row,
                 phase=str(phase_value),
                 temp=str(_merged_value(data_ws, phase_rng.min_row, 2) or ""),
+                condition=str(_merged_value(data_ws, phase_rng.min_row, COL_CONDITION) or ""),
             )
         )
     return groups
+
+
+def _sync_dpt_condition_cell(
+    data_ws: Worksheet,
+    group_start_row: int,
+    signature: Mapping[str, float],
+) -> None:
+    if not signature:
+        return
+    current = _merged_value(data_ws, group_start_row, COL_CONDITION)
+    merged = _merged_condition_text(current, signature)
+    if merged:
+        _set_merged_cell_value(data_ws, group_start_row, COL_CONDITION, merged)
 
 
 def _next_dpt_data_row(
@@ -565,11 +813,10 @@ def _next_dpt_data_row(
     start_row: int,
     end_row_exclusive: int,
     *,
-    vdc: float | None,
-    idc: float | None,
+    setpoints: _DptSetpointMatch,
 ) -> tuple[int, bool]:
     for row in range(start_row, end_row_exclusive):
-        if _data_row_matches_setpoints(data_ws, row, vdc, idc):
+        if _data_row_matches_setpoints(data_ws, row, setpoints):
             return row, False
     for row in range(start_row, end_row_exclusive):
         if not _data_row_has_payload(data_ws, row):
@@ -594,14 +841,14 @@ def _prepare_dpt_data_rows(
     """Reserve consecutive report rows without overwriting unrelated conditions."""
     if not results:
         return []
-    vdc, idc = _match_setpoints(results[0])
+    setpoints = _dpt_setpoint_match(results[0])
     rows = [target.row]
     for offset in range(1, len(results)):
         row = target.row + offset
         group = _dpt_group_containing(data_ws, target.group_start_row)
         needs_insert = group is None or row >= group.end_row
         if not needs_insert and _data_row_has_payload(data_ws, row):
-            needs_insert = not _data_row_matches_setpoints(data_ws, row, vdc, idc)
+            needs_insert = not _data_row_matches_setpoints(data_ws, row, setpoints)
         if needs_insert:
             row = _insert_dpt_data_row(data_ws, target.group_start_row, row)
         rows.append(row)
@@ -615,18 +862,34 @@ def _find_dpt_data_target(
     temp_code: str,
     temperature_labels: TemperatureLabels | None = None,
 ) -> _DptDataTarget:
-    vdc, idc = _match_setpoints(result)
+    setpoints = _dpt_setpoint_match(result)
+    source_condition = _condition_signature(result.source_path)
+    matching_groups: list[tuple[int, _DptDataGroup]] = []
     for group_index, group in enumerate(_dpt_data_groups(data_ws)):
         if group.phase.upper() != phase_code.upper():
             continue
         if not _temperature_cell_matches(group.temp, temp_code, temperature_labels):
             continue
+        matching_groups.append((group_index, group))
+
+    if source_condition:
+        condition_groups = [
+            item
+            for item in matching_groups
+            if _condition_signature_matches(
+                source_condition,
+                _condition_signature(item[1].condition),
+            )
+        ]
+        if condition_groups:
+            matching_groups = condition_groups
+
+    for group_index, group in matching_groups:
         row, inserted = _next_dpt_data_row(
             data_ws,
             group.start_row,
             group.end_row,
-            vdc=vdc,
-            idc=idc,
+            setpoints=setpoints,
         )
         target = _DptDataTarget(
             row=row,
@@ -641,6 +904,7 @@ def _find_dpt_data_target(
             2,
             _temperature_display(temp_code, temperature_labels),
         )
+        _sync_dpt_condition_cell(data_ws, group.start_row, source_condition)
         return target
 
     row = 5
@@ -811,16 +1075,22 @@ def _dpt_waveform_block_has_data_match(
     if phase_temp is None:
         return False
     phase_code, temp_code = phase_temp
-    vdc, idc = _condition_values(condition_label)
-    if vdc is None or idc is None:
+    setpoints = _condition_setpoint_match(condition_label)
+    if setpoints.vdc is None or setpoints.idc is None:
         return False
+    condition_signature = _condition_signature(condition_label)
     for group in _dpt_data_groups(data_ws):
         if group.phase.upper() != phase_code:
             continue
         if not _temperature_cell_matches(group.temp, temp_code, temperature_labels):
             continue
+        if condition_signature and not _condition_signature_matches(
+            condition_signature,
+            _condition_signature(group.condition),
+        ):
+            continue
         for row in range(group.start_row, group.end_row):
-            if _data_row_matches_setpoints(data_ws, row, vdc, idc):
+            if _data_row_matches_setpoints(data_ws, row, setpoints):
                 return True
     return False
 
@@ -851,6 +1121,7 @@ def _ensure_dpt_waveform_anchor(
     temp_code: str,
     vdc: float | None,
     idc: float | None,
+    condition_signature: Mapping[str, float] | None = None,
     temperature_labels: TemperatureLabels | None = None,
 ) -> int:
     group_base = _dpt_waveform_group_base(data_ws, target.group_index)
@@ -884,7 +1155,7 @@ def _ensure_dpt_waveform_anchor(
     _set_range_value(
         ws,
         _left_merged_range_at(ws, anchor_row + 17),
-        _format_condition_key(vdc, idc),
+        _format_condition_key(vdc, idc, condition_signature),
     )
     _set_range_value(ws, _left_merged_range_at(ws, anchor_row + 34), "总概览图")
     return anchor_row
@@ -1646,14 +1917,27 @@ def _remove_images_in_range(ws: Worksheet, rng: CellRange) -> None:
 
 def _condition_matches_setpoints(
     condition_label: str | None,
-    vdc: float | None,
-    idc: float | None,
+    setpoints: _DptSetpointMatch,
+    condition_signature: Mapping[str, float] | None = None,
 ) -> bool:
     cv, ci = _condition_values(condition_label)
-    if cv is None or ci is None or vdc is None or idc is None:
+    if not _setpoint_value_matches(
+        setpoints.vdc,
+        cv,
+        expected_from_filename=setpoints.vdc_from_filename,
+    ) or not _setpoint_value_matches(
+        setpoints.idc,
+        ci,
+        expected_from_filename=setpoints.idc_from_filename,
+    ):
         return False
-    score = abs(cv - float(vdc)) * 10.0 + abs(ci - float(idc))
-    return score <= _condition_tolerance(idc, ci)
+    signature = condition_signature or {}
+    if signature and not _condition_signature_matches(
+        signature,
+        _condition_signature(condition_label),
+    ):
+        return False
+    return True
 
 
 def _clear_dpt_waveform_block_payload(ws: Worksheet, anchor_row: int) -> None:
@@ -1670,11 +1954,12 @@ def _clear_dpt_waveform_block_payload(ws: Worksheet, anchor_row: int) -> None:
 
 def _clear_duplicate_dpt_waveform_blocks(
     ws: Worksheet,
+    data_ws: Worksheet,
     target_anchor_row: int | None,
     phase_code: str,
     temp_code: str,
-    vdc: float | None,
-    idc: float | None,
+    setpoints: _DptSetpointMatch,
+    condition_signature: Mapping[str, float] | None = None,
     temperature_labels: TemperatureLabels | None = None,
 ) -> None:
     if target_anchor_row is None:
@@ -1691,8 +1976,18 @@ def _clear_duplicate_dpt_waveform_blocks(
         ):
             continue
         condition_label = label_by_row.get(anchor_row + 17)
-        if not _condition_matches_setpoints(condition_label, vdc, idc):
-            continue
+        if not _condition_matches_setpoints(
+            condition_label,
+            setpoints,
+            condition_signature,
+        ):
+            if _dpt_waveform_block_has_data_match(
+                data_ws,
+                str(phase_label),
+                str(condition_label or ""),
+                temperature_labels,
+            ):
+                continue
         _clear_dpt_waveform_block_payload(ws, anchor_row)
 
 
@@ -2194,6 +2489,8 @@ def write_report_template(
         temp_code,
         temperature_labels,
     )
+    condition_signature = _condition_signature(result0.source_path)
+    _sync_dpt_condition_cell(data_ws, target.group_start_row, condition_signature)
     data_rows = _prepare_dpt_data_rows(data_ws, target, results)
     data_row = data_rows[0]
     for row, row_result in zip(data_rows, results):
@@ -2201,6 +2498,7 @@ def write_report_template(
     _normalize_dpt_data_temperature_cells(data_ws, temperature_labels)
     emit(2, "写入报告数据")
     vdc, idc = _match_setpoints(result0)
+    setpoints = _dpt_setpoint_match(result0)
     waveform_anchor_row = (
         _ensure_dpt_waveform_anchor(
             waveform_ws,
@@ -2210,6 +2508,7 @@ def write_report_template(
             temp_code,
             vdc,
             idc,
+            condition_signature,
             temperature_labels,
         )
         if waveform_ws is not None
@@ -2218,11 +2517,12 @@ def write_report_template(
     if waveform_ws is not None:
         _clear_duplicate_dpt_waveform_blocks(
             waveform_ws,
+            data_ws,
             waveform_anchor_row,
             phase_code,
             temp_code,
-            vdc,
-            idc,
+            setpoints,
+            condition_signature,
             temperature_labels,
         )
     images_written = (
