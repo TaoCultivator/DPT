@@ -105,3 +105,69 @@ class TestTurnOnCursorWindows(unittest.TestCase):
         )
         self.assertTrue(plot.cursor_linked())
         plot.close()
+
+    def test_vce_on_max_horizontal_cursor_updates_value_only_from_ha(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication
+        except Exception:
+            self.skipTest("PyQt6 unavailable")
+        if not WANGLIHUI_UH.exists():
+            self.skipTest(f"missing {WANGLIHUI_UH}")
+        from dpt_extractor.gui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        bundle, profile, result = _load_mapped(WANGLIHUI_UH)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = load_config()
+        win.result_table.set_result(result)
+        win.wave_plot.plot_waveforms(bundle, profile, result)
+
+        win._on_value_clicked("开通", "Vce_on_max")
+        plot = win.wave_plot
+        assert plot._cursor_a is not None
+        assert plot._cursor_b is not None
+        assert plot._h_cursor_a is not None
+        assert plot._h_cursor_b is not None
+
+        a0 = float(plot._cursor_a.value())
+        b0 = float(plot._cursor_b.value())
+        i0 = int(np.searchsorted(bundle.t, min(a0, b0) * 1e-6, side="left"))
+        i1 = int(np.searchsorted(bundle.t, max(a0, b0) * 1e-6, side="left"))
+        i0 = max(0, min(i0, len(bundle.t) - 1))
+        i1 = max(i0 + 1, min(i1, len(bundle.t) - 1))
+        vce = bundle.get(profile.vce)
+
+        ha = plot._from_disp("vce", float(plot._h_cursor_a.value()))
+        hb = plot._from_disp("vce", float(plot._h_cursor_b.value()))
+        self.assertAlmostEqual(float(ha), float(np.max(vce[i0 : i1 + 1])), places=6)
+        self.assertAlmostEqual(float(hb), float(np.min(vce[i0 : i1 + 1])), places=6)
+
+        manual_ha = float(ha) - 12.5
+        plot._h_cursor_a.setPos(plot._to_disp("vce", manual_ha))
+        QApplication.processEvents()
+        self.assertAlmostEqual(float(plot._cursor_a.value()), a0, places=6)
+        self.assertAlmostEqual(float(plot._cursor_b.value()), b0, places=6)
+        self.assertAlmostEqual(win.result.turn_on.vce_on_max, manual_ha, places=6)
+
+        plot._h_cursor_b.setPos(plot._to_disp("vce", float(hb) + 20.0))
+        QApplication.processEvents()
+        self.assertAlmostEqual(win.result.turn_on.vce_on_max, manual_ha, places=6)
+
+        plot.focus_interval_us(30.0, 31.0)
+        before = plot.current_x_range_us()
+        self.assertIsNotNone(before)
+        win._on_value_clicked("开通", "Vce_on_max")
+        QApplication.processEvents()
+        after = plot.current_x_range_us()
+        self.assertIsNotNone(after)
+        assert before is not None and after is not None
+        self.assertAlmostEqual(after[0], before[0], places=6)
+        self.assertAlmostEqual(after[1], before[1], places=6)
+        restored_ha = plot._from_disp("vce", float(plot._h_cursor_a.value()))
+        self.assertAlmostEqual(float(restored_ha), manual_ha, places=6)
+        win.close()
+        _ = app

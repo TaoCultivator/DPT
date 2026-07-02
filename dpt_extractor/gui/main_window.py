@@ -857,6 +857,8 @@ class MainWindow(QMainWindow):
         self.cfg.short_circuit_tsc_range = self._load_short_circuit_tsc_range()
         # 记忆每个参数手动调整的光标区间（µs），再次点击时恢复而非回退默认窗口
         self._manual_intervals: dict[tuple[str, str], tuple[float, float]] = {}
+        # Maximum 类参数：保存用户手动拖动的主横向光标值 (line_value, metric_value)
+        self._manual_extreme_values: dict[tuple[str, str], tuple[float, float]] = {}
         # 开通电流：保存 A/B 时刻 + Hb/Ha 电平 (µs, µs, A, A)
         self._manual_turn_on_current: tuple[float, float, float, float] | None = None
         # Eoff/Eon 四光标 (A_t, B_t, Ha_v, Hb_a)
@@ -2491,6 +2493,7 @@ class MainWindow(QMainWindow):
 
     def _clear_manual_adjustments(self, *, reset_plot: bool = True) -> None:
         self._manual_intervals.clear()
+        self._manual_extreme_values.clear()
         self._manual_turn_on_current = None
         self._manual_energy.clear()
         self._manual_delta_vce.clear()
@@ -5123,6 +5126,15 @@ class MainWindow(QMainWindow):
         is_short_energy_param = is_short_circuit_param and name in short_energy_names
         short_vpeak_role = short_vpeak_roles.get(name) if is_short_circuit_param else None
         is_short_desat_param = is_short_circuit_param and name == "Desat动作时间"
+        _MAX_INTERVAL_NAMES = {
+            "Ic_off_max",
+            "Vce_off_max",
+            "Ic_on_max",
+            "Vce_on_max",
+            "Vrr",
+            "应力Vpeak_本管",
+            "应力Vpeak_对管",
+        }
 
         def _idx_from_t_us(t_us: float) -> int:
             ts = t_us * 1e-6
@@ -5139,7 +5151,12 @@ class MainWindow(QMainWindow):
                 return
             # 记住用户手动调整的区间，下次点击该参数时恢复
             self._touch_manual_waveform_source()
-            self._manual_intervals[(section, name)] = (min(t0_us, t1_us), max(t0_us, t1_us))
+            self._manual_intervals[(section, name)] = (
+                min(t0_us, t1_us),
+                max(t0_us, t1_us),
+            )
+            if name in _MAX_INTERVAL_NAMES:
+                self._manual_extreme_values.pop((section, name), None)
             ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
             if is_short_energy_param:
                 marker = self._short_circuit_energy_peak_marker(name, i0, i1)
@@ -5185,15 +5202,18 @@ class MainWindow(QMainWindow):
                     )
                     self.wave_plot.set_interval_base_horizontal(hb, channel=desat_channel)
             else:
-                peak_y = self._peak_y_for_param(section, name, i0, i1)
-                if peak_y is not None:
-                    self.wave_plot.set_interval_peak_horizontal(
-                        float(peak_y),
-                        channel=self._channel_for_param(section, name),
-                        t0_us=ta,
-                        t1_us=tb,
-                        use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
-                    )
+                if name in _MAX_INTERVAL_NAMES:
+                    self._set_extreme_horizontal_lines(section, name, i0, i1, ta, tb)
+                else:
+                    peak_y = self._peak_y_for_param(section, name, i0, i1)
+                    if peak_y is not None:
+                        self.wave_plot.set_interval_peak_horizontal(
+                            float(peak_y),
+                            channel=self._channel_for_param(section, name),
+                            t0_us=ta,
+                            t1_us=tb,
+                            use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
+                        )
             if section == "关断过程" and name in {"Ic_off_max", "Vce_off_max"} and self.result is not None:
                 cur = (
                     self.result.turn_off.ic_off_max
@@ -5228,15 +5248,52 @@ class MainWindow(QMainWindow):
                     f"实时值={val:.3f}"
                 )
 
+        def _on_horizontal_extreme_change(
+            which: str,
+            t0_us: float,
+            t1_us: float,
+            ha_value: float,
+            hb_value: float,
+        ) -> None:
+            ta, tb = min(float(t0_us), float(t1_us)), max(float(t0_us), float(t1_us))
+            if which == "hb":
+                self.statusBar().showMessage(
+                    f"{section}-{name}: Hb={hb_value:.3f} 为当前窗口最小值参考，"
+                    "不改参数值"
+                )
+                return
+            if which != "ha":
+                return
+            metric_value = self._metric_value_from_extreme_line(section, name, ha_value)
+            self._touch_manual_waveform_source()
+            self._manual_intervals[(section, name)] = (ta, tb)
+            self._manual_extreme_values[(section, name)] = (
+                float(ha_value),
+                float(metric_value),
+            )
+            self._store_extreme_metric_value(section, name, float(metric_value))
+            self.statusBar().showMessage(
+                f"{section}-{name}: 手动 Ha={ha_value:.3f}，"
+                f"{name}={metric_value:.3f}（A/B 不跟随）"
+            )
+
         # 若该参数此前手动调整过，恢复手动区间而非默认窗口
         restored = self._manual_intervals.get((section, name))
+        manual_extreme = (
+            self._manual_extreme_values.get((section, name))
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
         t0_us, t1_us = restored if restored is not None else interval
-        if not is_short_circuit_param:
+        if not is_short_circuit_param and restored is None and manual_extreme is None:
             self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_interval_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
             on_change=_on_interval_change,
+            on_horizontal_change=(
+                _on_horizontal_extreme_change if name in _MAX_INTERVAL_NAMES else None
+            ),
             show_horizontal_peak=name
             in {
                 "Ic_off_max",
@@ -5252,19 +5309,16 @@ class MainWindow(QMainWindow):
             },
         )
         # IEC 时间参数：点击仅对齐 A/B 光标；拖动 A/B 时由 on_change 重算并联动
-        _MAX_INTERVAL_NAMES = {
-            "Ic_off_max",
-            "Vce_off_max",
-            "Ic_on_max",
-            "Vce_on_max",
-            "Vrr",
-            "应力Vpeak_本管",
-            "应力Vpeak_对管",
-        }
         if (section, name) in self._IEC_TIMING_PARAMS:
             self._refresh_iec_timing_status(section, name, t0_us, t1_us)
-        elif restored is not None:
+        elif restored is not None and manual_extreme is None:
             _on_interval_change(t0_us, t1_us)
+        elif manual_extreme is not None:
+            self._store_extreme_metric_value(section, name, manual_extreme[1])
+            self.statusBar().showMessage(
+                f"{section}-{name}: 恢复手动 Ha={manual_extreme[0]:.3f}，"
+                f"{name}={manual_extreme[1]:.3f}"
+            )
         elif name in _MAX_INTERVAL_NAMES:
             stored = self._stored_param_value(section, name)
             if stored is not None:
@@ -5329,19 +5383,39 @@ class MainWindow(QMainWindow):
                 )
                 self.wave_plot.set_interval_base_horizontal(hb, channel=desat_channel)
         else:
-            peak_y = self._peak_y_for_param(section, name, i0, i1)
-            if peak_y is not None:
-                self.wave_plot.set_interval_peak_horizontal(
-                    float(peak_y),
-                    channel=self._channel_for_param(section, name),
-                    t0_us=ta,
-                    t1_us=tb,
-                    use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
+            if name in _MAX_INTERVAL_NAMES:
+                self._set_extreme_horizontal_lines(
+                    section,
+                    name,
+                    i0,
+                    i1,
+                    ta,
+                    tb,
+                    primary_override=manual_extreme[0]
+                    if manual_extreme is not None
+                    else None,
                 )
+            else:
+                peak_y = self._peak_y_for_param(section, name, i0, i1)
+                if peak_y is not None:
+                    self.wave_plot.set_interval_peak_horizontal(
+                        float(peak_y),
+                        channel=self._channel_for_param(section, name),
+                        t0_us=ta,
+                        t1_us=tb,
+                        use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
+                    )
         if name in _MAX_INTERVAL_NAMES:
-            self.statusBar().showMessage(
-                f"{section}-{name} 区间最大值模式：拖动两根纵向光标，实时取窗口内最大值"
-            )
+            if manual_extreme is not None:
+                self.statusBar().showMessage(
+                    f"{section}-{name}: 已恢复手动 Ha={manual_extreme[0]:.3f}，"
+                    f"{name}={manual_extreme[1]:.3f}；Hb 为最小值参考"
+                )
+            else:
+                self.statusBar().showMessage(
+                    f"{section}-{name} 区间最大值模式：拖动 A/B 重算窗口最大值；"
+                    "拖 Ha 手动改参数值，Hb 显示窗口最小值参考"
+                )
         elif name in short_energy_names:
             self.statusBar().showMessage(
                 f"{section}-{name} 积分窗口模式：拖动两根纵向光标，实时积分"
@@ -5708,6 +5782,150 @@ class MainWindow(QMainWindow):
                     return None
                 return float(np.max(v_diode[i0 : i1 + 1]))
         return None
+
+    def _secondary_y_for_param(
+        self, section: str, name: str, i0: int, i1: int
+    ) -> float | None:
+        """同窗口辅助横线：max 型参数用 Hb 展示当前范围内的最小值。"""
+        if self.bundle is None:
+            return None
+        if self._metric_unavailable(section, name):
+            return None
+        from dpt_extractor.models.waveform import (
+            bundle_reverse_recovery_current,
+            bundle_total_current,
+        )
+
+        vce = self.bundle.get(self.profile.vce)
+        ic = bundle_total_current(self.bundle, self.profile)
+        irr = bundle_reverse_recovery_current(self.bundle, self.profile)
+        v_diode = self.bundle.maybe_get(self.profile.v_diode)
+
+        if section == "短路过程":
+            if name in {"短路电流Imax", "短路时间Tsc"}:
+                seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
+                if len(seg) == 0:
+                    return None
+                return float(np.nanmin(seg))
+            if name == "应力Vpeak_本管":
+                return float(np.nanmin(vce[i0 : i1 + 1]))
+            if name == "应力Vpeak_对管":
+                if v_diode is None:
+                    return None
+                return float(np.nanmin(v_diode[i0 : i1 + 1]))
+
+        if section == "关断过程":
+            if name == "Ic_off_max":
+                seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
+                if len(seg) == 0:
+                    return None
+                return float(np.nanmin(seg))
+            if name == "Vce_off_max":
+                return float(np.nanmin(vce[i0 : i1 + 1]))
+        if section == "开通":
+            if name == "Ic_on_max":
+                seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
+                if len(seg) == 0:
+                    return None
+                return float(np.nanmin(seg))
+            if name == "Vce_on_max":
+                return float(np.nanmin(vce[i0 : i1 + 1]))
+        if section == "反向恢复":
+            if name == "Irr":
+                seg = np.asarray(irr[i0 : i1 + 1], dtype=np.float64)
+                if len(seg) == 0:
+                    return None
+                return float(np.nanmin(seg))
+            if name == "Vrr":
+                if v_diode is None:
+                    return None
+                return float(np.nanmin(v_diode[i0 : i1 + 1]))
+        return None
+
+    def _metric_value_from_extreme_line(
+        self, section: str, name: str, line_value: float
+    ) -> float:
+        _ = section
+        if name in {"Ic_off_max", "Ic_on_max", "短路电流Imax"}:
+            return abs(float(line_value))
+        return float(line_value)
+
+    def _store_extreme_metric_value(
+        self, section: str, name: str, metric_value: float
+    ) -> None:
+        if self.result is None:
+            return
+        value = float(metric_value)
+        if section == "关断过程":
+            if name == "Ic_off_max":
+                self.result.turn_off.ic_off_max = value
+            elif name == "Vce_off_max":
+                self.result.turn_off.vce_off_max = value
+            else:
+                return
+            self.result_table.set_metric_value(section, name, value)
+            return
+        if section == "开通":
+            if name == "Ic_on_max":
+                self.result.turn_on.ic_on_max = value
+            elif name == "Vce_on_max":
+                self.result.turn_on.vce_on_max = value
+            else:
+                return
+            self.result_table.set_metric_value(section, name, value)
+            return
+        if section == "反向恢复" and name == "Vrr":
+            self.result.reverse_recovery.vrr = value
+            self.result_table.set_metric_value(section, name, value)
+            return
+        if section == "短路过程":
+            sc = self.result.short_circuit
+            if name == "短路电流Imax":
+                sc.ic_max = value
+                self.result.idc = value
+                self.result.idc_set = value
+            elif name == "应力Vpeak_本管":
+                sc.vpeak_dut = value
+            elif name == "应力Vpeak_对管":
+                sc.vpeak_other = value
+            else:
+                return
+            self.result_table.set_metric_value(section, name, value)
+
+    def _set_extreme_horizontal_lines(
+        self,
+        section: str,
+        name: str,
+        i0: int,
+        i1: int,
+        t0_us: float,
+        t1_us: float,
+        *,
+        primary_override: float | None = None,
+    ) -> None:
+        channel = self._channel_for_param(section, name)
+        if not channel:
+            return
+        primary = (
+            float(primary_override)
+            if primary_override is not None
+            else self._peak_y_for_param(section, name, i0, i1)
+        )
+        if primary is None:
+            return
+        use_window_marker = primary_override is None
+        self.wave_plot.set_interval_peak_horizontal(
+            float(primary),
+            channel=channel,
+            t0_us=t0_us if use_window_marker else None,
+            t1_us=t1_us if use_window_marker else None,
+            use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
+        )
+        secondary = self._secondary_y_for_param(section, name, i0, i1)
+        if secondary is not None:
+            self.wave_plot.set_interval_base_horizontal(
+                float(secondary), channel=channel
+            )
 
     def _irr_peak_interactive(self, irr: np.ndarray, i0: int, i1: int) -> float:
         idx = self._irr_peak_index_interactive(irr, i0, i1)

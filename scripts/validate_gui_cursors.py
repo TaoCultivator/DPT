@@ -142,6 +142,7 @@ class Capture:
             "enable_crosstalk_interaction",
             "enable_interval_interaction",
             "set_interval_peak_horizontal",
+            "set_interval_base_horizontal",
         ):
             orig = getattr(wave_plot, meth)
             setattr(wave_plot, meth, wrap(meth, orig))
@@ -409,7 +410,18 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             }.get(name)
             check_channel(ch, expected, "峰")
             check_level(peak_y, ch, "峰值", win)
-            detail = f"ch={ch} 峰={peak_y:.1f} win={win}"
+            base = calls.get("set_interval_base_horizontal")
+            min_y = None
+            if base is None:
+                problems.append("未设置Hb最小值参考线")
+            else:
+                bb = base["bound"]
+                min_y = bb.get("y")
+                min_ch = bb.get("channel")
+                check_channel(min_ch, expected, "Hb最小值")
+                check_level(min_y, min_ch, "Hb最小值", win)
+            min_txt = "" if min_y is None else f" HbMin={min_y:.1f}"
+            detail = f"ch={ch} 峰={peak_y:.1f}{min_txt} win={win}"
 
         status = "OK" if not problems else "FAIL"
         if problems:

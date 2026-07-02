@@ -1838,6 +1838,7 @@ class WaveformPlot(QWidget):
 
         # 交互状态
         self._interactive_on_change = None
+        self._interactive_on_horizontal_change = None
         self._interactive_enabled = True
         self._interactive_mode: str = "global"
         self._interactive_search_t0_us: float | None = None
@@ -1911,6 +1912,7 @@ class WaveformPlot(QWidget):
         self._interactive_enabled = False
         self._interactive_mode = "global"
         self._interactive_on_change = None
+        self._interactive_on_horizontal_change = None
         self._interactive_search_t0_us = None
         self._interactive_search_t1_us = None
         self._h_cursor_a_locked = False
@@ -1970,6 +1972,7 @@ class WaveformPlot(QWidget):
         self.clear_cursor_auxiliary_guides()
         self._interactive_enabled = True
         self._interactive_on_change = None
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "global"
         self._interactive_search_t0_us = None
         self._interactive_search_t1_us = None
@@ -4950,6 +4953,7 @@ class WaveformPlot(QWidget):
         self.clear_cursor_auxiliary_guides()
         self._interactive_mode = "global"
         self._interactive_on_change = None
+        self._interactive_on_horizontal_change = None
         self._interactive_search_t0_us = None
         self._interactive_search_t1_us = None
         self._interval_max_hline_enabled = False
@@ -6498,6 +6502,7 @@ class WaveformPlot(QWidget):
         """退回 global 模式（光标依旧存在、可拖、显示读数）。"""
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = None
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "global"
         self._interactive_search_t0_us = None
         self._interactive_search_t1_us = None
@@ -6530,6 +6535,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "delta_vce"
         self._active_channel = "vce"
         if search_t0_us is not None and search_t1_us is not None:
@@ -6704,6 +6710,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=True)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = mode
         self._slope_channel = channel
         self._active_channel = channel
@@ -6799,6 +6806,7 @@ class WaveformPlot(QWidget):
         show_horizontal_peak: bool = False,
         *,
         mode: str = "interval",
+        on_horizontal_change=None,
     ) -> None:
         if end_t_us < start_t_us:
             start_t_us, end_t_us = end_t_us, start_t_us
@@ -6806,6 +6814,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = on_horizontal_change
         self._interactive_mode = (
             mode
             if mode
@@ -6856,6 +6865,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "crosstalk"
         self._interval_max_hline_enabled = False
         self._interval_peak_on_hb = False
@@ -6914,6 +6924,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "energy_loss"
         self._slope_channel = None
         self._interval_max_hline_enabled = False
@@ -7610,6 +7621,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "turn_on_current"
         self._active_channel = "ic"
         self._slope_channel = "ic"
@@ -7700,6 +7712,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "short_current"
         self._active_channel = channel
         self._slope_channel = channel
@@ -7887,6 +7900,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "irr_peak"
         self._active_channel = "irr"
         self._slope_channel = None
@@ -8003,6 +8017,7 @@ class WaveformPlot(QWidget):
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
+        self._interactive_on_horizontal_change = None
         self._interactive_mode = "trr_measure"
         self._active_channel = "irr"
         self._slope_channel = None
@@ -8113,6 +8128,36 @@ class WaveformPlot(QWidget):
         finally:
             self._interactive_syncing = False
         self._update_readout()
+
+    def _emit_interval_horizontal_changed(self) -> bool:
+        if (
+            self._interactive_on_horizontal_change is None
+            or self._h_cursor_a is None
+            or self._h_cursor_b is None
+            or self._cursor_a is None
+            or self._cursor_b is None
+        ):
+            return False
+        sender = self.sender()
+        if sender is self._h_cursor_a:
+            which = "ha"
+        elif sender is self._h_cursor_b:
+            which = "hb"
+        else:
+            which = ""
+        ch = self._active_channel
+        ha = self._from_disp(ch, float(self._h_cursor_a.value()))
+        hb = self._from_disp(ch, float(self._h_cursor_b.value()))
+        t0 = float(self._cursor_a.value())
+        t1 = float(self._cursor_b.value())
+        self._interactive_on_horizontal_change(
+            which,
+            min(t0, t1),
+            max(t0, t1),
+            float(ha),
+            float(hb),
+        )
+        return True
 
     # ------------------------------------------------------------------ 信号回调 ----
     def _on_any_cursor_moved(self) -> None:
@@ -8254,6 +8299,9 @@ class WaveformPlot(QWidget):
             if self._interactive_mode == "trr_measure":
                 self._emit_trr_measure_changed()
                 return
+            if self._interactive_mode in {"interval", "power_peak"}:
+                if self._emit_interval_horizontal_changed():
+                    return
             if self._horizontal_callback is not None:
                 ch = self._active_channel
                 ha = self._from_disp(ch, float(self._h_cursor_a.value())) if self._h_cursor_a is not None else 0.0
