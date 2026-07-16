@@ -343,6 +343,164 @@ def _level_on_channel(level: float, arr: np.ndarray, i0: int, i1: int) -> bool:
     return (lo - tol) <= float(level) <= (hi + tol)
 
 
+def _slope_intersection_atol(
+    t: np.ndarray,
+    values: np.ndarray,
+    t_cross_s: float,
+    threshold: float,
+) -> float:
+    """Return a numerical-only tolerance for a raw slope intersection."""
+    times = np.asarray(t, dtype=np.float64)
+    signal = np.asarray(values, dtype=np.float64)
+    if len(times) < 2 or len(signal) != len(times):
+        return 1e-6
+
+    k = int(np.searchsorted(times, float(t_cross_s), side="right")) - 1
+    k = max(0, min(k, len(times) - 2))
+    t0, t1 = float(times[k]), float(times[k + 1])
+    y0, y1 = float(signal[k]), float(signal[k + 1])
+    dt = abs(t1 - t0)
+    slope_per_s = abs(y1 - y0) / dt if dt > 0.0 else 0.0
+    time_ulp_s = max(
+        abs(float(np.spacing(t0))),
+        abs(float(np.spacing(t1))),
+        abs(float(np.spacing(float(t_cross_s)))),
+    )
+    value_ulp = max(
+        abs(float(np.spacing(y0))),
+        abs(float(np.spacing(y1))),
+        abs(float(np.spacing(float(threshold)))),
+    )
+    return max(1e-6, 64.0 * (value_ulp + slope_per_s * time_ulp_s))
+
+
+def _audit_turn_off_slope_context_consistency(
+    *,
+    metric_name: str,
+    gui_top: float,
+    gui_base: float,
+    gui_ab_us: tuple[float, float] | None,
+    context_top: float,
+    context_base: float,
+    context_value: float,
+    context_t_a_s: float | None,
+    context_t_b_s: float | None,
+    threshold_a: float,
+    threshold_b: float,
+    used_fallback: bool,
+    result_value: float,
+    t: np.ndarray,
+    raw_values: np.ndarray,
+    use_abs: bool,
+) -> tuple[list[str], str]:
+    """Audit one turn-off slope GUI call against its shared pure context.
+
+    Top/Base, A/B and the published result are expected to be the exact values
+    passed through from the common context.  The only tolerance in this audit
+    is for evaluating the captured microsecond A/B back on the raw waveform,
+    where a seconds -> microseconds -> seconds float round trip is unavoidable.
+    """
+    problems: list[str] = []
+
+    def check_exact(label: str, actual: float, expected: float) -> None:
+        actual_f = float(actual)
+        expected_f = float(expected)
+        if (
+            not np.isfinite(actual_f)
+            or not np.isfinite(expected_f)
+            or actual_f != expected_f
+        ):
+            problems.append(
+                f"{metric_name} {label}={actual_f!r} 与context={expected_f!r}不精确一致"
+            )
+
+    check_exact("Top", gui_top, context_top)
+    check_exact("Base", gui_base, context_base)
+    check_exact("result", result_value, context_value)
+
+    has_a = context_t_a_s is not None
+    has_b = context_t_b_s is not None
+    if has_a and has_b:
+        crossing_state = "full"
+    elif has_a:
+        crossing_state = "partial-A"
+    elif has_b:
+        crossing_state = "partial-B"
+    else:
+        crossing_state = "none"
+
+    if not used_fallback and crossing_state != "full":
+        problems.append(
+            f"{metric_name} 未fallback但context交点状态={crossing_state}"
+        )
+
+    raw = np.asarray(raw_values, dtype=np.float64)
+    if use_abs:
+        raw = np.abs(raw)
+    times = np.asarray(t, dtype=np.float64)
+    raw_a: float | None = None
+    raw_b: float | None = None
+
+    if crossing_state == "full":
+        assert context_t_a_s is not None
+        assert context_t_b_s is not None
+        if gui_ab_us is None:
+            problems.append(f"{metric_name} context有完整A/B但GUI未调用apply_dvdt_ab_times")
+        else:
+            gui_a_us, gui_b_us = (float(gui_ab_us[0]), float(gui_ab_us[1]))
+            expected_a_us = float(context_t_a_s) * 1e6
+            expected_b_us = float(context_t_b_s) * 1e6
+            check_exact("A", gui_a_us, expected_a_us)
+            check_exact("B", gui_b_us, expected_b_us)
+
+            if len(times) < 2 or len(raw) != len(times):
+                problems.append(
+                    f"{metric_name} 原始波形长度无效: len(t)={len(times)} len(y)={len(raw)}"
+                )
+            else:
+                gui_a_s = gui_a_us * 1e-6
+                gui_b_s = gui_b_us * 1e-6
+                raw_a = float(np.interp(gui_a_s, times, raw))
+                raw_b = float(np.interp(gui_b_s, times, raw))
+                atol_a = _slope_intersection_atol(
+                    times, raw, gui_a_s, float(threshold_a)
+                )
+                atol_b = _slope_intersection_atol(
+                    times, raw, gui_b_s, float(threshold_b)
+                )
+                if abs(raw_a - float(threshold_a)) > atol_a:
+                    problems.append(
+                        f"{metric_name} 原始A插值={raw_a:.9g} 不等于阈值"
+                        f"{float(threshold_a):.9g} (tol={atol_a:.3g})"
+                    )
+                if abs(raw_b - float(threshold_b)) > atol_b:
+                    problems.append(
+                        f"{metric_name} 原始B插值={raw_b:.9g} 不等于阈值"
+                        f"{float(threshold_b):.9g} (tol={atol_b:.3g})"
+                    )
+    elif gui_ab_us is not None:
+        problems.append(
+            f"{metric_name} context交点状态={crossing_state}但GUI仍设置了完整A/B"
+        )
+
+    if gui_ab_us is None:
+        ab_detail = "guiAB=none"
+    else:
+        ab_detail = f"guiAB={float(gui_ab_us[0]):.9f}/{float(gui_ab_us[1]):.9f}us"
+    raw_detail = (
+        "rawAB=none"
+        if raw_a is None or raw_b is None
+        else f"rawAB={raw_a:.9g}/{raw_b:.9g}"
+    )
+    detail = (
+        f"contextTop={float(context_top):.9g} contextBase={float(context_base):.9g} "
+        f"contextValue={float(context_value):.12g} result={float(result_value):.12g} "
+        f"used_fallback={bool(used_fallback)} cross={crossing_state} {ab_detail} "
+        f"thAB={float(threshold_a):.9g}/{float(threshold_b):.9g} {raw_detail}"
+    )
+    return problems, detail
+
+
 ERR_A_INTERP_MIN_ATOL_A = 1e-6
 ERR_A_INTERP_ULP_FACTOR = 32.0
 ERR_A_NEAR_ZERO_PEAK_RATIO = 0.01
@@ -558,6 +716,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             )
             continue
         problems: list[str] = []
+        turn_off_slope_crossing_full: bool | None = None
 
         def check_channel(actual, expected, label):
             if actual != expected:
@@ -602,12 +761,62 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             check_level(base_v, channel, "Hb", win)
             ab = calls.get("apply_dvdt_ab_times")
             ab_txt = ""
+            gui_ab_us: tuple[float, float] | None = None
             if ab is not None:
                 ta, tb = ab["bound"]["t_a_us"], ab["bound"]["t_b_us"]
+                gui_ab_us = (float(ta), float(tb))
                 check_time(ta, "A")
                 check_time(tb, "B")
                 ab_txt = f" A={ta:.3f} B={tb:.3f}"
             detail = f"ch={channel} Ha={top_v:.2f} Hb={base_v:.2f}{ab_txt}"
+            if section == "关断过程":
+                context = (
+                    mw._turn_off_dvdt_context(*win)
+                    if name == "dv/dt"
+                    else mw._turn_off_didt_context(*win)
+                )
+                if context is None:
+                    problems.append(f"{name} MainWindow共用context不可用")
+                    detail += " | context=none used_fallback=unknown cross=unknown"
+                else:
+                    turn_off_slope_crossing_full = (
+                        context.crossing.t_pct_a_s is not None
+                        and context.crossing.t_pct_b_s is not None
+                    )
+                    if name == "dv/dt":
+                        context_top = float(context.top_v)
+                        context_base = float(context.base_v)
+                        context_value = float(context.crossing.dvdt)
+                        result_value = float(result.turn_off.dvdt)
+                        use_abs = False
+                    else:
+                        context_top = float(context.top_a)
+                        context_base = float(context.base_a)
+                        context_value = float(context.crossing.didt)
+                        result_value = float(result.turn_off.didt)
+                        use_abs = True
+                    context_problems, context_detail = (
+                        _audit_turn_off_slope_context_consistency(
+                            metric_name=name,
+                            gui_top=float(top_v),
+                            gui_base=float(base_v),
+                            gui_ab_us=gui_ab_us,
+                            context_top=context_top,
+                            context_base=context_base,
+                            context_value=context_value,
+                            context_t_a_s=context.crossing.t_pct_a_s,
+                            context_t_b_s=context.crossing.t_pct_b_s,
+                            threshold_a=float(context.crossing.th_a),
+                            threshold_b=float(context.crossing.th_b),
+                            used_fallback=bool(context.used_fallback),
+                            result_value=result_value,
+                            t=t,
+                            raw_values=chan[channel],
+                            use_abs=use_abs,
+                        )
+                    )
+                    problems.extend(context_problems)
+                    detail += " | " + context_detail
 
         elif name in ("Eoff", "Eon"):
             c = calls.get("enable_energy_loss_interaction")
@@ -898,7 +1107,12 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 )
             cursor_a = None
             cursor_b = None
-            if mw.wave_plot._cursor_a is not None and mw.wave_plot._cursor_b is not None:
+            has_real_slope_ab = turn_off_slope_crossing_full is not False
+            if (
+                has_real_slope_ab
+                and mw.wave_plot._cursor_a is not None
+                and mw.wave_plot._cursor_b is not None
+            ):
                 cursor_a = float(mw.wave_plot._cursor_a.value())
                 cursor_b = float(mw.wave_plot._cursor_b.value())
                 if min(cursor_a, cursor_b) < x0 - 1e-6 or max(cursor_a, cursor_b) > x1 + 1e-6:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import re
 import tempfile
@@ -56,6 +57,7 @@ from dpt_extractor.gui.recent_paths import (
     set_report_template_source_path,
 )
 from dpt_extractor.gui.result_table import ResultTable
+from dpt_extractor.gui.task_progress import UnitRateEstimator, format_duration_ms
 from dpt_extractor.gui.theme import (
     DARK_STYLESHEET,
     SUMMARY_STYLE,
@@ -124,7 +126,9 @@ from dpt_extractor.metrics.offset_measurement import (
     offset_measurement_unit,
 )
 from dpt_extractor.metrics.slopes import (
+    DidtMeasurementContext,
     DidtCrossingResult,
+    DvdtMeasurementContext,
     DvdtCrossingResult,
     analyze_rr_recovery_current,
     didt_between_base_top,
@@ -132,6 +136,8 @@ from dpt_extractor.metrics.slopes import (
     didt_rr_recovery,
     dvdt_between_base_top,
     dvdt_max,
+    turn_off_didt_measurement_context,
+    turn_off_dvdt_measurement_context,
 )
 from dpt_extractor.metrics.derived import crosstalk_extrema
 from dpt_extractor.metrics.iec_timings import (
@@ -166,13 +172,16 @@ NONCOMMERCIAL_NOTICE_SETTINGS_KEY = "license/noncommercial_notice_shown"
 TASK_PROGRESS_TOTAL = 100000
 REPORT_PROGRESS_TOTAL = TASK_PROGRESS_TOTAL
 REPORT_PROGRESS_TEMPLATE_DONE = 5000
-REPORT_PROGRESS_CAPTURE_DONE = 62000
+REPORT_PROGRESS_PREPARE_DONE = 15000
+REPORT_PROGRESS_CAPTURE_DONE = 55000
 REPORT_PROGRESS_WRITE_START = REPORT_PROGRESS_CAPTURE_DONE
-REPORT_PROGRESS_WRITE_DONE_CAP = 99000
+REPORT_PROGRESS_WRITE_TEMPLATE_DONE = 57500
+REPORT_PROGRESS_WRITE_DATA_DONE = 60000
+REPORT_PROGRESS_WRITE_IMAGES_DONE = 80000
+REPORT_PROGRESS_WRITE_DONE_CAP = 85000
 LOAD_PROGRESS_PARSE_DONE = 35000
-LOAD_PROGRESS_EXTRACT_DONE = 80000
-LOAD_PROGRESS_APPLY_START = 84000
-LOAD_PROGRESS_PLOT_DONE = 98000
+LOAD_PROGRESS_MAPPING_DONE = 45000
+LOAD_PROGRESS_EXTRACT_DONE = 85000
 TEMP_CONDITION_DEFAULTS = {
     "RT": 25.0,
     "HT": 150.0,
@@ -180,6 +189,43 @@ TEMP_CONDITION_DEFAULTS = {
 }
 TEMP_CONDITION_SETTINGS_PREFIX = "conditions/temperature/"
 SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY = "short_circuit/tsc_range"
+
+
+def _readonly_waveform_view(values: np.ndarray) -> np.ndarray:
+    """Return a read-only ndarray view without copying waveform samples."""
+
+    view = np.asarray(values).view()
+    view.setflags(write=False)
+    return view
+
+
+def _snapshot_waveform_bundle(bundle: WaveformBundle | None) -> WaveformBundle | None:
+    """Freeze report-visible bundle state while sharing immutable sample buffers."""
+
+    if bundle is None:
+        return None
+    return WaveformBundle(
+        t=_readonly_waveform_view(bundle.t),
+        channels={
+            key: _readonly_waveform_view(values)
+            for key, values in bundle.channels.items()
+        },
+        meta=deepcopy(bundle.meta),
+    )
+
+
+def _safe_cleanup_tempdir(tempdir: tempfile.TemporaryDirectory | None) -> None:
+    """Best-effort cleanup that must never suppress a report terminal signal."""
+
+    if tempdir is None:
+        return
+    try:
+        tempdir.cleanup()
+    except Exception:
+        # A report has already succeeded or failed at this point.  Windows can
+        # transiently retain a PNG handle; cleanup must not overwrite that
+        # authoritative task outcome or leave the GUI permanently busy.
+        return
 
 
 def _format_temperature_number(value: float) -> str:
@@ -264,9 +310,14 @@ class ReportProgressPanel(QFrame):
         self._minimum = 0
         self._maximum = 100
         self._value = 0
+        self._progress_fraction = 0.0
         self._format = "待命"
-        self._started_at = time.perf_counter()
         self._busy = False
+        self._running = False
+        self._eta_active = False
+        self._finished_ok = False
+        self._task_started = False
+        self._eta_estimator = UnitRateEstimator()
 
         self._timer = QTimer(self)
         self._timer.setInterval(200)
@@ -300,18 +351,20 @@ class ReportProgressPanel(QFrame):
             QSizePolicy.Policy.Fixed,
         )
 
-        self._percent_label = QLabel("0.000%")
+        self._percent_label = QLabel("0.0%")
         self._percent_label.setObjectName("reportProgressPercent")
         self._percent_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._percent_label.setMinimumWidth(74)
-        self._eta_label = QLabel("0 ms")
+        self._eta_label = QLabel("—")
         self._eta_label.setObjectName("reportProgressEta")
         self._eta_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._eta_label.setMinimumWidth(50)
+        self._eta_caption = QLabel("当前阶段预计剩余")
+        self._eta_caption.setObjectName("reportProgressEtaCaption")
 
         lay.addWidget(self._stage_label)
         lay.addWidget(sep_a)
@@ -320,19 +373,30 @@ class ReportProgressPanel(QFrame):
         lay.addWidget(self._bar, stretch=1)
         lay.addWidget(self._percent_label)
         lay.addWidget(sep_c)
+        lay.addWidget(self._eta_caption)
         lay.addWidget(self._eta_label)
-        self.setToolTip("当前后台任务的阶段、百分比和预计剩余时间")
+        self.setToolTip(
+            "百分比表示整个后台任务进度；预计剩余时间仅按当前同质阶段估算"
+        )
         self.reset_idle()
 
     def set_stage(self, stage: str) -> None:
         self._stage_label.setText(str(stage or "任务进度"))
 
     def begin(self, total: int, label: str, *, stage: str = "任务进度") -> None:
-        self._started_at = time.perf_counter()
         self._busy = False
+        self._running = True
+        self._eta_active = False
+        self._finished_ok = False
+        self._task_started = True
+        self._eta_estimator = UnitRateEstimator()
         self.set_stage(stage)
-        self.setRange(0, max(1, int(total)))
-        self.setValue(0)
+        # Reset atomically so a previous successful 100% cannot flash while
+        # the new task's range is being installed.
+        self._minimum = 0
+        self._maximum = max(1, int(total))
+        self._value = 0
+        self._progress_fraction = 0.0
         self.setFormat(label)
         self._timer.start()
         self.show()
@@ -345,19 +409,65 @@ class ReportProgressPanel(QFrame):
         label: str,
         *,
         stage: str | None = None,
+        eta_phase: str | None = None,
+        eta_completed: int = 0,
+        eta_total: int = 0,
     ) -> None:
+        # A terminal state is immutable.  This also blocks a queued progress
+        # signal from the same request from rewriting 100% after ``finished``.
+        if not self._running:
+            return
         self._busy = False
+        self._finished_ok = False
+        self._task_started = True
         if stage is not None:
             self.set_stage(stage)
-        self.setRange(0, max(1, int(total)))
-        self.setValue(value)
+        self._set_running_progress_value(value, total)
         self.setFormat(label)
+        self._eta_active = eta_phase is not None
+        if eta_phase is not None:
+            self._eta_estimator.observe(
+                eta_phase,
+                int(eta_completed),
+                max(0, int(eta_total)),
+            )
+        self._timer.start()
+        self.show()
+        self._refresh_readout()
+
+    def update_busy_progress(
+        self,
+        value: int,
+        total: int,
+        label: str,
+        *,
+        stage: str | None = None,
+    ) -> None:
+        """Atomically publish a completed checkpoint followed by an atomic phase."""
+
+        if not self._running:
+            return
+        self._busy = True
+        self._eta_active = False
+        self._finished_ok = False
+        self._task_started = True
+        if stage is not None:
+            self.set_stage(stage)
+        self._set_running_progress_value(value, total)
+        self._format = str(label or "")
+        self._detail_label.setText(self._detail_text(self._format))
+        self._detail_label.setToolTip(self._format)
         self._timer.start()
         self.show()
         self._refresh_readout()
 
     def set_busy(self, label: str, *, stage: str | None = None) -> None:
+        if not self._running:
+            return
         self._busy = True
+        self._eta_active = False
+        self._finished_ok = False
+        self._task_started = True
         if stage is not None:
             self.set_stage(stage)
         self.setFormat(label)
@@ -365,12 +475,45 @@ class ReportProgressPanel(QFrame):
         self.show()
         self._refresh_readout()
 
+    def _set_running_progress_value(self, value: int, total: int) -> None:
+        """Publish a monotonic, non-terminal checkpoint for the active task."""
+
+        new_minimum = 0
+        new_maximum = max(1, int(total))
+        requested = max(new_minimum, min(int(value), new_maximum))
+        requested_fraction = requested / new_maximum
+        fraction = max(self._progress_fraction, requested_fraction)
+
+        # One-decimal rendering means 99.95% would round to 100.0%.  Keep all
+        # running states at or below 99.9%; only finish(ok=True) may publish
+        # the authoritative 100%/0 ms terminal state.
+        ceiling = max(
+            new_minimum,
+            int(math.floor(new_maximum * 0.999 + 1e-12)),
+        )
+        fraction = min(fraction, 0.999)
+        self._progress_fraction = fraction
+        next_value = int(round(fraction * new_maximum))
+        self._minimum = new_minimum
+        self._maximum = new_maximum
+        self._value = max(new_minimum, min(next_value, ceiling))
+
     def finish(self, label: str, *, ok: bool, stage: str | None = None) -> None:
+        # The first terminal signal wins.  Duplicate or contradictory queued
+        # callbacks must not rewrite a completed task's result.
+        if not self._running:
+            return
         self._busy = False
+        self._running = False
+        self._eta_active = False
+        self._finished_ok = bool(ok)
+        self._task_started = True
         if stage is not None:
             self.set_stage(stage)
-        self.setRange(0, 100)
-        self.setValue(100 if ok else 0)
+        if ok:
+            self._progress_fraction = 1.0
+            self.setRange(0, 100)
+            self.setValue(100)
         self.setFormat(label)
         self._refresh_readout()
         self._timer.stop()
@@ -378,12 +521,17 @@ class ReportProgressPanel(QFrame):
 
     def reset_idle(self) -> None:
         self._busy = False
+        self._running = False
+        self._eta_active = False
+        self._finished_ok = False
+        self._task_started = False
+        self._progress_fraction = 0.0
         self.set_stage("任务进度")
         self.setRange(0, 100)
         self.setValue(0)
         self.setFormat("待命")
         self._timer.stop()
-        self._eta_label.setText("0 ms")
+        self._eta_label.setText("—")
         self.show()
 
     def setRange(self, minimum: int, maximum: int) -> None:  # noqa: N802
@@ -421,6 +569,9 @@ class ReportProgressPanel(QFrame):
     def eta_text(self) -> str:
         return self._eta_label.text()
 
+    def eta_caption_text(self) -> str:
+        return self._eta_caption.text()
+
     def detail_text(self) -> str:
         return self._detail_label.text()
 
@@ -431,36 +582,46 @@ class ReportProgressPanel(QFrame):
         return self._busy
 
     def _percent(self) -> float:
-        span = self._maximum - self._minimum
-        if span <= 0:
-            return 0.0
-        return 100.0 * (self._value - self._minimum) / span
+        if self._task_started:
+            percent = 100.0 * self._progress_fraction
+        else:
+            span = self._maximum - self._minimum
+            if span <= 0:
+                return 0.0
+            percent = 100.0 * (self._value - self._minimum) / span
+        if self._task_started and percent < 100.0:
+            return max(1.0, percent)
+        return percent
 
     def _refresh_readout(self) -> None:
         percent = max(0.0, min(100.0, self._percent()))
         self._bar.setRange(0, 100000)
         self._bar.setValue(int(round(percent * 1000.0)))
-        self._percent_label.setText(f"{percent:0.3f}%")
-        if self._busy:
-            self._eta_label.setText("--")
+        self._percent_label.setText(f"{percent:0.1f}%")
+        if percent >= 100.0 and not self._running and self._finished_ok:
+            self._eta_label.setText("0 ms")
             return
-        self._eta_label.setText(self._format_duration_ms(self._eta_ms(percent)))
-
-    def _eta_ms(self, percent: float) -> float:
-        if percent <= 0.0 or percent >= 100.0:
-            return 0.0
-        elapsed_ms = max(0.0, (time.perf_counter() - self._started_at) * 1000.0)
-        return elapsed_ms * (100.0 - percent) / percent
+        if not self._running:
+            self._eta_label.setText("—")
+            return
+        if self._busy or not self._eta_active:
+            self._eta_label.setText("估算中")
+            return
+        eta_ms = self._eta_estimator.eta_ms()
+        if eta_ms is None or eta_ms <= 0.0:
+            self._eta_label.setText("估算中")
+        elif eta_ms < 1000.0:
+            # GUI repaint and queued worker callbacks make millisecond digits
+            # look much more precise than they are.  Preserve the useful
+            # "finishing within a second" signal without presenting false
+            # precision; exact ``0 ms`` remains reserved for success.
+            self._eta_label.setText("<1 s")
+        else:
+            self._eta_label.setText(format_duration_ms(eta_ms))
 
     @staticmethod
     def _format_duration_ms(ms: float) -> str:
-        if ms < 1000.0:
-            return f"{int(round(ms))} ms"
-        if ms < 60000.0:
-            return f"{ms / 1000.0:.1f} s"
-        minutes = int(ms // 60000.0)
-        seconds = int(round((ms - minutes * 60000.0) / 1000.0))
-        return f"{minutes}m {seconds}s"
+        return format_duration_ms(ms)
 
     @staticmethod
     def _detail_text(label: str) -> str:
@@ -470,14 +631,22 @@ class ReportProgressPanel(QFrame):
             ("准备读取原始数据", "准备读取"),
             ("读取原始数据", "读取"),
             ("解析波形数据", "解析波形"),
+            ("读取完成，正在识别通道", "识别通道"),
             ("识别通道", "识别通道"),
+            ("通道识别完成，正在计算参数", "参数计算"),
             ("执行参数计算", "参数计算"),
+            ("参数计算完成，准备刷新界面", "刷新界面"),
+            ("正在刷新界面并绘制波形", "绘制波形"),
             ("刷新界面", "刷新界面"),
             ("绘制波形", "绘制波形"),
             ("导入完成", "导入完成"),
             ("导入失败", "导入失败"),
             ("准备报告截图", "准备截图"),
+            ("准备报告文件", "准备报告"),
+            ("报告文件已就绪，准备分析数据", "分析数据"),
+            ("报告数据准备完成，准备截图", "准备截图"),
             ("截图完成，准备写入 Excel", "准备写入 Excel"),
+            ("正在打开并写入 Excel", "写入 Excel"),
             ("正在写入 Excel", "写入 Excel"),
             ("写入完成 100%", "完成"),
             ("写入失败", "失败"),
@@ -639,7 +808,7 @@ def _compute_waveform_load_outcome(
     load_t0 = time.perf_counter()
     bundle = load_waveform(path)
     load_t1 = time.perf_counter()
-    emit_progress(LOAD_PROGRESS_PARSE_DONE, "解析波形数据...")
+    emit_progress(LOAD_PROGRESS_PARSE_DONE, "读取完成，正在识别通道...")
 
     guessed = guess_profile_from_path(path)
     base_profile = make_profile(guessed.phase, guessed.bridge)
@@ -674,7 +843,7 @@ def _compute_waveform_load_outcome(
                 profile = apply_mapping(base_profile, inferred)
     else:
         profile = _profile_for_test_mode(profile, cfg)
-    emit_progress(55000, "识别通道...")
+    emit_progress(LOAD_PROGRESS_MAPPING_DONE, "通道识别完成，正在计算参数...")
 
     extract_t0 = time.perf_counter()
     extraction_error = ""
@@ -700,7 +869,7 @@ def _compute_waveform_load_outcome(
         short_circuit_not_ready = False
         extraction_error = str(exc) or exc.__class__.__name__
     extract_t1 = time.perf_counter()
-    emit_progress(LOAD_PROGRESS_EXTRACT_DONE, "执行参数计算...")
+    emit_progress(LOAD_PROGRESS_EXTRACT_DONE, "参数计算完成，准备刷新界面...")
 
     return _WaveformLoadOutcome(
         path=path,
@@ -761,6 +930,66 @@ class _ReportWriteSignals(QObject):
     failed = pyqtSignal(int, str)
 
 
+class _ReportPrepareSignals(QObject):
+    progress = pyqtSignal(int, int, int, str)
+    finished = pyqtSignal(int, object)
+    failed = pyqtSignal(int, str)
+
+
+class _ReportPrepareTask(QRunnable):
+    """在后台准备报告数据行，避免多脉冲重复提取阻塞界面。"""
+
+    def __init__(
+        self,
+        request_id: int,
+        bundle: WaveformBundle | None,
+        profile: BridgeProfile,
+        cfg: AppConfig,
+        current_result: ExtractResult,
+    ) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.bundle = _snapshot_waveform_bundle(bundle)
+        self.profile = profile
+        self.cfg = deepcopy(cfg)
+        self.current_result = deepcopy(current_result)
+        self.signals = _ReportPrepareSignals()
+
+    def run(self) -> None:
+        try:
+            result = self.current_result
+            if (
+                self.bundle is None
+                or result.short_circuit_mode
+                or result.single_pulse_mode
+                or result.detected_pulse_count <= 2
+            ):
+                rows = [result]
+                self.signals.progress.emit(
+                    self.request_id,
+                    1,
+                    1,
+                    "报告数据准备完成",
+                )
+            else:
+                rows = dpt_export_results(
+                    self.bundle,
+                    self.profile,
+                    self.cfg,
+                    result,
+                    progress_callback=lambda done, total: self.signals.progress.emit(
+                        self.request_id,
+                        done,
+                        total,
+                        f"分析脉冲组合 {done}/{total}",
+                    ),
+                )
+        except Exception as exc:
+            self.signals.failed.emit(self.request_id, str(exc))
+            return
+        self.signals.finished.emit(self.request_id, rows)
+
+
 @dataclass
 class _ReportCaptureState:
     request_id: int
@@ -815,6 +1044,7 @@ class _ReportWriteTask(QRunnable):
                 ),
             )
         except PermissionError as exc:
+            _safe_cleanup_tempdir(self.tempdir)
             self.signals.failed.emit(
                 self.request_id,
                 "无法保存报告文件，通常是这个 .xlsx 正在被 Excel 打开或没有写入权限。\n"
@@ -824,10 +1054,10 @@ class _ReportWriteTask(QRunnable):
             )
             return
         except Exception as exc:
+            _safe_cleanup_tempdir(self.tempdir)
             self.signals.failed.emit(self.request_id, str(exc))
             return
-        finally:
-            self.tempdir.cleanup()
+        _safe_cleanup_tempdir(self.tempdir)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         self.signals.finished.emit(self.request_id, summary, elapsed_ms)
 
@@ -881,9 +1111,17 @@ class MainWindow(QMainWindow):
         self._load_request_id = 0
         self._load_tasks: dict[int, _WaveformLoadTask] = {}
         self._report_request_id = 0
+        self._report_prepare_tasks: dict[int, _ReportPrepareTask] = {}
         self._report_tasks: dict[int, _ReportWriteTask] = {}
         self._report_capture_state: _ReportCaptureState | None = None
         self._report_progress_active = False
+        self._report_operation_active = False
+        self._report_interaction_locked = False
+        self._report_toolbar_enabled_states: list[tuple[QWidget, bool]] = []
+        self._report_focus_policies: list[tuple[QWidget, Qt.FocusPolicy]] = []
+        self._report_result_table_enabled = True
+        self._report_waveform_mouse_transparent = False
+        self._report_splitter_mouse_transparent = False
         self._load_pool = QThreadPool.globalInstance()
         self._license_notice_dialog: QDialog | None = None
         self._license_notice_timer = QTimer(self)
@@ -2368,20 +2606,86 @@ class MainWindow(QMainWindow):
             self._apply_test_mode_ui()
 
     def _set_report_busy(self, busy: bool) -> None:
-        self.btn_open.setEnabled(not busy)
-        self.btn_recalc.setEnabled(not busy)
-        self.btn_export.setEnabled(not busy)
-        self.btn_select_report_template.setEnabled(not busy)
-        self.btn_select_report_output.setEnabled(not busy)
-        self.btn_write_report.setEnabled(not busy)
+        busy = bool(busy)
+        if busy != self._report_interaction_locked:
+            if busy:
+                controls: list[QWidget] = []
+                seen: set[int] = set()
+                for widget_type in (QPushButton, QComboBox, QDoubleSpinBox):
+                    for widget in self.toolbar.findChildren(widget_type):
+                        if id(widget) in seen:
+                            continue
+                        seen.add(id(widget))
+                        controls.append(widget)
+                self._report_toolbar_enabled_states = [
+                    (widget, widget.isEnabled()) for widget in controls
+                ]
+                for widget, _enabled in self._report_toolbar_enabled_states:
+                    widget.setEnabled(False)
+
+                self._report_result_table_enabled = self.result_table.isEnabled()
+                self.result_table.setEnabled(False)
+                mouse_attribute = Qt.WidgetAttribute.WA_TransparentForMouseEvents
+                self._report_waveform_mouse_transparent = self.wave_plot.testAttribute(
+                    mouse_attribute
+                )
+                self._report_splitter_mouse_transparent = self.splitter.testAttribute(
+                    mouse_attribute
+                )
+                self.wave_plot.setAttribute(mouse_attribute, True)
+                self.splitter.setAttribute(mouse_attribute, True)
+
+                focus_widgets = [
+                    self.wave_plot,
+                    *self.wave_plot.findChildren(QWidget),
+                ]
+                self._report_focus_policies = [
+                    (widget, widget.focusPolicy())
+                    for widget in focus_widgets
+                    if widget.focusPolicy() != Qt.FocusPolicy.NoFocus
+                ]
+                for widget, _policy in self._report_focus_policies:
+                    widget.clearFocus()
+                    widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                focus_widget = QApplication.focusWidget()
+                if focus_widget is not None:
+                    focus_widget.clearFocus()
+            else:
+                for widget, enabled in self._report_toolbar_enabled_states:
+                    widget.setEnabled(enabled)
+                self._report_toolbar_enabled_states = []
+                self.result_table.setEnabled(self._report_result_table_enabled)
+                mouse_attribute = Qt.WidgetAttribute.WA_TransparentForMouseEvents
+                self.wave_plot.setAttribute(
+                    mouse_attribute,
+                    self._report_waveform_mouse_transparent,
+                )
+                self.splitter.setAttribute(
+                    mouse_attribute,
+                    self._report_splitter_mouse_transparent,
+                )
+                for widget, policy in self._report_focus_policies:
+                    widget.setFocusPolicy(policy)
+                self._report_focus_policies = []
+            self._report_interaction_locked = busy
         if busy:
             self.statusBar().showMessage("正在处理报告...")
+
+    def _try_begin_report_operation(self) -> bool:
+        if self._report_operation_active:
+            return False
+        self._report_operation_active = True
+        self._set_report_busy(True)
+        return True
+
+    def _release_report_operation(self) -> None:
+        self._report_operation_active = False
+        self._set_report_busy(False)
 
     def _begin_task_progress(self, stage: str, total: int, label: str) -> None:
         total = max(1, int(total))
         self._report_progress_active = True
         self.report_progress.begin(total, label, stage=stage)
-        QApplication.processEvents()
 
     def _set_task_progress(
         self,
@@ -2390,14 +2694,38 @@ class MainWindow(QMainWindow):
         label: str,
         *,
         stage: str | None = None,
+        eta_phase: str | None = None,
+        eta_completed: int = 0,
+        eta_total: int = 0,
     ) -> None:
         total = max(1, int(total))
-        self.report_progress.update_progress(value, total, label, stage=stage)
-        QApplication.processEvents()
+        self.report_progress.update_progress(
+            value,
+            total,
+            label,
+            stage=stage,
+            eta_phase=eta_phase,
+            eta_completed=eta_completed,
+            eta_total=eta_total,
+        )
 
-    def _set_task_progress_busy(self, label: str, *, stage: str | None = None) -> None:
-        self.report_progress.set_busy(label, stage=stage)
-        QApplication.processEvents()
+    def _set_task_progress_busy(
+        self,
+        label: str,
+        *,
+        stage: str | None = None,
+        value: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        if value is None:
+            self.report_progress.set_busy(label, stage=stage)
+            return
+        self.report_progress.update_busy_progress(
+            value,
+            max(1, int(total if total is not None else self.report_progress.maximum())),
+            label,
+            stage=stage,
+        )
 
     def _finish_task_progress(
         self,
@@ -2412,11 +2740,39 @@ class MainWindow(QMainWindow):
     def _begin_report_progress(self, total: int, label: str) -> None:
         self._begin_task_progress("报告写入", total, label)
 
-    def _set_report_progress(self, value: int, total: int, label: str) -> None:
-        self._set_task_progress(value, total, label, stage="报告写入")
+    def _set_report_progress(
+        self,
+        value: int,
+        total: int,
+        label: str,
+        *,
+        eta_phase: str | None = None,
+        eta_completed: int = 0,
+        eta_total: int = 0,
+    ) -> None:
+        self._set_task_progress(
+            value,
+            total,
+            label,
+            stage="报告写入",
+            eta_phase=eta_phase,
+            eta_completed=eta_completed,
+            eta_total=eta_total,
+        )
 
-    def _set_report_progress_busy(self, label: str) -> None:
-        self._set_task_progress_busy(label, stage="报告写入")
+    def _set_report_progress_busy(
+        self,
+        label: str,
+        *,
+        value: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        self._set_task_progress_busy(
+            label,
+            stage="报告写入",
+            value=value,
+            total=total,
+        )
 
     def _finish_report_progress(self, label: str, *, ok: bool) -> None:
         self._finish_task_progress(label, ok=ok, stage="报告写入")
@@ -2458,19 +2814,11 @@ class MainWindow(QMainWindow):
         if request_id != self._load_request_id:
             return
         try:
-            self._set_task_progress(
-                LOAD_PROGRESS_APPLY_START,
-                TASK_PROGRESS_TOTAL,
-                "刷新界面...",
+            self._set_task_progress_busy(
+                "正在刷新界面并绘制波形...",
                 stage="数据导入",
             )
             self._apply_loaded_waveform(outcome)
-            self._set_task_progress(
-                LOAD_PROGRESS_PLOT_DONE,
-                TASK_PROGRESS_TOTAL,
-                "绘制波形...",
-                stage="数据导入",
-            )
             self._finish_task_progress("导入完成 100%", ok=True, stage="数据导入")
         except Exception as exc:
             self._finish_task_progress("导入失败", ok=False, stage="数据导入")
@@ -3293,7 +3641,7 @@ class MainWindow(QMainWindow):
         *,
         anchor_us: float | None = None,
     ) -> None:
-        # 关断/开通以门极事件为 28% 锚点；反向恢复则必须以当前参数的
+        # 关断/开通以门极事件为约 12% 锚点；反向恢复则必须以当前参数的
         # 实际 A/窗口起点为锚点，否则 Vge 边沿会把主要振荡挤到屏幕中部，
         # 右侧反向恢复尾部在报告截图中显示不足。
         if anchor_us is None:
@@ -3309,28 +3657,6 @@ class MainWindow(QMainWindow):
             fallback_t0_us,
             fallback_t1_us,
         )
-
-    def _turn_off_rise_us(self) -> float | None:
-        """关断 Vce 主抬升脚时刻（µs）：段内 Vce<=on_hi 的最大 dV/dt 点。"""
-        if self.bundle is None or self.result is None or self.result.segments is None:
-            return None
-        t = self.bundle.t
-        vce = self.bundle.get(self.profile.vce)
-        off0, off1 = self.result.segments.turn_off
-        seg = vce[off0 : off1 + 1].astype(np.float64)
-        if len(seg) < 4:
-            return None
-        v_base = float(np.percentile(seg[: max(4, len(seg) // 5)], 50))
-        v_top = float(np.max(seg))
-        on_hi = v_base + max(30.0, 0.04 * max(v_top - v_base, 1.0))
-        d = np.diff(seg) / np.maximum(np.diff(t[off0 : off1 + 1]), 1e-15)
-        best_k, best = 0, -1.0
-        for k in range(len(d)):
-            if seg[k] > on_hi:
-                continue
-            if d[k] > best:
-                best, best_k = d[k], k
-        return float(t[off0 + best_k]) * 1e6
 
     def _recovery_peak_us(self) -> float | None:
         """反向恢复主峰 (IRM) 时刻（µs，定向后取 argmax）。"""
@@ -3382,6 +3708,45 @@ class MainWindow(QMainWindow):
         search_end = max(ipk + 2, search_end)
         return dvdt_rr_vd_base_top(t, vd, ipk, self.bundle.dt, search_end)
 
+    def _turn_off_dvdt_context(
+        self, t0_us: float, t1_us: float
+    ) -> DvdtMeasurementContext | None:
+        """与 pipeline 共用的关断 dv/dt 默认测量上下文。"""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        t = self.bundle.t
+        i0 = int(np.searchsorted(t, min(t0_us, t1_us) * 1e-6, side="left"))
+        i1 = int(np.searchsorted(t, max(t0_us, t1_us) * 1e-6, side="left"))
+        i0 = max(0, min(i0, len(t) - 2))
+        i1 = max(i0 + 1, min(i1, len(t) - 1))
+        sr = self._slope_ranges.get(SLOPE_ROW_KEYS.get(("关断过程", "dv/dt"), ""))
+        pct_a, pct_b = sr.as_fractions() if sr else (0.1, 0.9)
+        segs = self.result.segments
+        fall_win = turn_off_ic_fall_window(
+            t,
+            self.bundle.get(self.profile.vge),
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_on,
+            segs.pulse1_off,
+            segs.pulse2_on,
+            self.bundle.dt,
+            self.cfg,
+        )
+        rise_start, rise_end = fall_win if fall_win is not None else segs.turn_off
+        return turn_off_dvdt_measurement_context(
+            t,
+            self.bundle.get(self.profile.vce),
+            i0,
+            i1,
+            self.bundle.dt,
+            self.cfg,
+            pct_a,
+            pct_b,
+            rise_start=rise_start,
+            rise_end=rise_end,
+        )
+
     def _default_dvdt_base_top_v(
         self, section: str, t0_us: float, t1_us: float
     ) -> tuple[float, float] | None:
@@ -3392,28 +3757,10 @@ class MainWindow(QMainWindow):
             return self._default_rr_dvdt_base_top_v()
         if self.bundle is None or self.result is None or section != "关断过程":
             return None
-        t = self.bundle.t
-        i0 = int(np.searchsorted(t, min(t0_us, t1_us) * 1e-6, side="left"))
-        i1 = int(np.searchsorted(t, max(t0_us, t1_us) * 1e-6, side="left"))
-        i0 = max(0, min(i0, len(t) - 1))
-        i1 = max(i0 + 1, min(i1, len(t) - 1))
-        from dpt_extractor.metrics.plateau_level import dvdt_rise_base_top_mid
-
-        vce = self.bundle.get(self.profile.vce)
-        seg = vce[i0 : i1 + 1]
-        if len(seg) < 8:
-            off = self.result.turn_off
-            top = float(max(0.0, off.vce_off_max - off.delta_vce))
-            base = float(np.min(seg)) if len(seg) else top * 0.05
-            return base, top
-        base, top = dvdt_rise_base_top_mid(seg)
-        # Hb(Base)=导通态 Vce 平台 (max+min)/2（抬升脚前窗，贴真实波形）
-        rise_us = self._turn_off_rise_us()
-        if rise_us is not None:
-            hb = self._window_mid(vce, rise_us - 0.5, rise_us - 0.1)
-            if hb is not None:
-                base = float(hb)
-        return base, top
+        context = self._turn_off_dvdt_context(t0_us, t1_us)
+        if context is None:
+            return None
+        return context.base_v, context.top_v
 
     def _default_dvdt_top_v(self, section: str, t0_us: float, t1_us: float) -> float:
         if self.bundle is None or self.result is None:
@@ -3462,12 +3809,6 @@ class MainWindow(QMainWindow):
         if len(seg) == 0:
             return vdc if section == "关断过程" else vdc
         if section == "关断过程":
-            # Hb=导通态 Vce 平台 (max+min)/2（抬升脚前 ~100–500ns 窗，贴真实波形）
-            rise_us = self._turn_off_rise_us()
-            if rise_us is not None:
-                hb = self._window_mid(vce, rise_us - 0.5, rise_us - 0.1)
-                if hb is not None:
-                    return float(hb)
             pair = self._default_dvdt_base_top_v(section, t0_us, t1_us)
             if pair is not None:
                 return pair[0]
@@ -3573,9 +3914,18 @@ class MainWindow(QMainWindow):
         self._active_slope_param = key
         search_t0, search_t1 = interval
         restored = self._manual_dvdt.get(key)
+        default_context: DvdtMeasurementContext | None = None
         if restored is not None:
             search_t0, search_t1, top_v, base_v = restored
-        elif section in ("关断过程", "反向恢复"):
+        elif section == "关断过程":
+            default_context = self._turn_off_dvdt_context(search_t0, search_t1)
+            if default_context is not None:
+                base_v = default_context.base_v
+                top_v = default_context.top_v
+            else:
+                top_v = self._default_dvdt_top_v(section, search_t0, search_t1)
+                base_v = self._default_dvdt_base_v(section, search_t0, search_t1)
+        elif section == "反向恢复":
             pair = self._default_dvdt_base_top_v(section, search_t0, search_t1)
             if pair is not None:
                 base_v, top_v = pair
@@ -3610,7 +3960,13 @@ class MainWindow(QMainWindow):
             _on_dvdt_voltages_changed,
             mode="dvdt",
         )
-        res0 = self._compute_dvdt_base_top(section, search_t0, search_t1, top_v, base_v)
+        res0 = (
+            default_context.crossing
+            if default_context is not None
+            else self._compute_dvdt_base_top(
+                section, search_t0, search_t1, top_v, base_v
+            )
+        )
         if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
@@ -3808,6 +4164,52 @@ class MainWindow(QMainWindow):
             return 0.0
         return float(np.median(settled))
 
+    def _turn_off_didt_context(
+        self, t0_us: float, t1_us: float
+    ) -> DidtMeasurementContext | None:
+        """与 pipeline 共用的关断 di/dt 默认测量上下文。"""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        t = self.bundle.t
+        segs = self.result.segments
+        i0 = int(np.searchsorted(t, min(t0_us, t1_us) * 1e-6, side="left"))
+        i1 = int(np.searchsorted(t, max(t0_us, t1_us) * 1e-6, side="left"))
+        i0 = max(0, min(i0, len(t) - 2))
+        i1 = max(i0 + 1, min(i1, len(t) - 1))
+        fall_win = turn_off_ic_fall_window(
+            t,
+            self.bundle.get(self.profile.vge),
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_on,
+            segs.pulse1_off,
+            segs.pulse2_on,
+            self.bundle.dt,
+            self.cfg,
+        )
+        fall_start, fall_end = fall_win if fall_win is not None else segs.turn_off
+        row_key = SLOPE_ROW_KEYS.get(("关断过程", "di/dt"))
+        sr = self._slope_ranges.get(row_key) if row_key else None
+        pct_a, pct_b = sr.as_fractions() if sr else (0.9, 0.1)
+        edge = sr.ic_direction if sr else "fall"
+        return turn_off_didt_measurement_context(
+            t,
+            bundle_total_current(self.bundle, self.profile),
+            i0,
+            i1,
+            segs.pulse1_on,
+            segs.pulse1_off,
+            fall_start,
+            fall_end,
+            self.bundle.dt,
+            self.cfg,
+            pct_a,
+            pct_b,
+            edge=edge,
+        )
+
     def _default_didt_top_a(self, section: str, t0_us: float, t1_us: float) -> float:
         if self.bundle is None or self.result is None:
             return 0.0
@@ -3817,7 +4219,8 @@ class MainWindow(QMainWindow):
         i0 = max(0, min(i0, len(t) - 1))
         i1 = max(i0 + 1, min(i1, len(t) - 1))
         if section == "关断过程":
-            return float(self.result.turn_off.ic_off_max)
+            context = self._turn_off_didt_context(t0_us, t1_us)
+            return float(context.top_a) if context is not None else 0.0
         if section == "开通":
             from dpt_extractor.metrics.plateau_level import turn_on_didt_ha_at_turn_on
             from dpt_extractor.models.waveform import bundle_total_current
@@ -3870,8 +4273,6 @@ class MainWindow(QMainWindow):
         i0 = max(0, min(i0, len(t) - 1))
         i1 = max(i0 + 1, min(i1, len(t) - 1))
         from dpt_extractor.models.waveform import bundle_total_current
-        from dpt_extractor.metrics.plateau_level import didt_fall_top_base_mid
-
         ic = bundle_total_current(self.bundle, self.profile)
         if section == "开通" and (i1 - i0) >= 8:
             from dpt_extractor.metrics.plateau_level import (
@@ -3882,11 +4283,10 @@ class MainWindow(QMainWindow):
             seg_signed = ic[i0 : i1 + 1].astype(np.float64)
             hb, _ha = turn_on_current_baseline_and_plateau(seg_signed, self.bundle.dt)
             return float(hb)
-        # 带符号：下桥关断后回落平台为负，Hb 须取回落后平稳区 (max+min)/2 贴真实波形
+        if section == "关断过程":
+            context = self._turn_off_didt_context(t0_us, t1_us)
+            return float(context.base_a) if context is not None else 0.0
         seg = ic[i0 : i1 + 1].astype(np.float64)
-        if section == "关断过程" and len(seg) >= 8:
-            _top, base = didt_fall_top_base_mid(seg)
-            return base
         return float(np.min(np.abs(seg))) if len(seg) else 0.0
 
     def _compute_didt_base_top(
@@ -4047,8 +4447,21 @@ class MainWindow(QMainWindow):
         search_t0, search_t1 = interval
         mode_tag = self._rr_didt_mode_tag(section)
         use_zero = mode_tag == "if_irm"
-        auto_top = self._default_didt_top_a(section, search_t0, search_t1)
-        auto_base = self._default_didt_base_a(section, search_t0, search_t1)
+        default_context = (
+            self._turn_off_didt_context(search_t0, search_t1)
+            if section == "关断过程"
+            else None
+        )
+        auto_top = (
+            default_context.top_a
+            if default_context is not None
+            else self._default_didt_top_a(section, search_t0, search_t1)
+        )
+        auto_base = (
+            default_context.base_a
+            if default_context is not None
+            else self._default_didt_base_a(section, search_t0, search_t1)
+        )
         auto_zero = self._default_didt_zero_a(section, search_t0, search_t1) if use_zero else None
         manual = self._restore_manual_didt(key, mode_tag)
         saved_levels = self._saved_didt_slope_state(section)
@@ -4101,13 +4514,19 @@ class MainWindow(QMainWindow):
             mode="didt",
             zero_v=zero_a if use_zero else None,
         )
-        res0 = self._compute_didt_base_top(
-            section,
-            search_t0,
-            search_t1,
-            top_a,
-            base_a,
-            zero_a if use_zero else None,
+        res0 = (
+            default_context.crossing
+            if default_context is not None
+            and manual is None
+            and saved_levels is None
+            else self._compute_didt_base_top(
+                section,
+                search_t0,
+                search_t1,
+                top_a,
+                base_a,
+                zero_a if use_zero else None,
+            )
         )
         if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
             ta_us = res0.t_pct_a_s * 1e6
@@ -7003,11 +7422,14 @@ class MainWindow(QMainWindow):
             self._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告截图...")
         capture_start = max(0, min(self.report_progress.value(), REPORT_PROGRESS_TEMPLATE_DONE))
         capture_span = max(1, REPORT_PROGRESS_CAPTURE_DONE - capture_start)
-        capture_total = max(1, len(params) + 1)
+        capture_total = max(1, len(params))
         self._set_report_progress(
             capture_start,
             REPORT_PROGRESS_TOTAL,
             "准备报告截图...",
+            eta_phase="report-capture",
+            eta_completed=0,
+            eta_total=len(params),
         )
         images: dict[tuple[str, str], Path] = {}
         vb = self.wave_plot.plot.getPlotItem().getViewBox()
@@ -7036,6 +7458,9 @@ class MainWindow(QMainWindow):
                     min(progress_value, REPORT_PROGRESS_CAPTURE_DONE),
                     REPORT_PROGRESS_TOTAL,
                     f"截图 {index}/{len(params)} · {name}",
+                    eta_phase="report-capture",
+                    eta_completed=index,
+                    eta_total=len(params),
                 )
         finally:
             vb.setRange(
@@ -7054,19 +7479,26 @@ class MainWindow(QMainWindow):
         self,
         tempdir: tempfile.TemporaryDirectory,
         results: list[ExtractResult],
+        *,
+        request_id: int | None = None,
     ) -> None:
         if self.result is None:
-            tempdir.cleanup()
-            self._set_report_busy(False)
+            _safe_cleanup_tempdir(tempdir)
+            self._finish_report_progress("写入失败", ok=False)
+            self._release_report_operation()
             return
         params = self._report_image_params()
         if not self._report_progress_active:
             self._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告截图...")
-        capture_start = max(0, min(self.report_progress.value(), REPORT_PROGRESS_TEMPLATE_DONE))
+        capture_start = max(
+            REPORT_PROGRESS_PREPARE_DONE,
+            min(self.report_progress.value(), REPORT_PROGRESS_CAPTURE_DONE),
+        )
         vb = self.wave_plot.plot.getPlotItem().getViewBox()
         old_x, old_y = vb.viewRange()
-        self._report_request_id += 1
-        request_id = self._report_request_id
+        if request_id is None:
+            self._report_request_id += 1
+            request_id = self._report_request_id
         self._report_capture_state = _ReportCaptureState(
             request_id=request_id,
             tempdir=tempdir,
@@ -7080,7 +7512,14 @@ class MainWindow(QMainWindow):
             capture_size=self._report_plot_capture_size(),
             images={},
         )
-        self._set_report_progress(capture_start, REPORT_PROGRESS_TOTAL, "准备报告截图...")
+        self._set_report_progress(
+            capture_start,
+            REPORT_PROGRESS_TOTAL,
+            "准备报告截图...",
+            eta_phase="report-capture",
+            eta_completed=0,
+            eta_total=len(params),
+        )
         self.wave_plot._fit_full_range()
         QTimer.singleShot(0, self._capture_next_report_image)
 
@@ -7092,13 +7531,28 @@ class MainWindow(QMainWindow):
             padding=0.0,
         )
 
+    def _fail_report_capture(
+        self,
+        state: _ReportCaptureState,
+        exc: Exception,
+    ) -> None:
+        self._report_capture_state = None
+        try:
+            self._restore_report_capture_view(state)
+        except Exception:
+            pass
+        _safe_cleanup_tempdir(state.tempdir)
+        self._finish_report_progress("写入失败", ok=False)
+        self._release_report_operation()
+        QMessageBox.critical(self, "写入报告失败", str(exc))
+
     def _capture_next_report_image(self) -> None:
         state = self._report_capture_state
         if state is None:
             return
         if state.request_id != self._report_request_id:
-            state.tempdir.cleanup()
             self._report_capture_state = None
+            _safe_cleanup_tempdir(state.tempdir)
             return
         try:
             total = len(state.params)
@@ -7123,7 +7577,6 @@ class MainWindow(QMainWindow):
                 return
 
             section, name = state.params[state.index]
-            display_index = state.index + 1
             if (section, name) == DPT_OVERVIEW_IMAGE_PARAM:
                 self.wave_plot._fit_full_range()
             elif self.result is not None and self.result.short_circuit_mode:
@@ -7132,7 +7585,27 @@ class MainWindow(QMainWindow):
                 self.wave_plot._fit_full_range()
             else:
                 self._on_value_clicked(section, name)
-            QApplication.processEvents()
+            # 让本次参数点击/缩放先完整经过一次事件循环，再抓取像素；避免
+            # 选中图片后需要轻微移动才能恢复的陈旧帧，也避免嵌套 processEvents 重入。
+            QTimer.singleShot(0, self._save_current_report_image)
+        except Exception as exc:
+            self._fail_report_capture(state, exc)
+
+    def _save_current_report_image(self) -> None:
+        state = self._report_capture_state
+        if state is None:
+            return
+        if state.request_id != self._report_request_id:
+            self._report_capture_state = None
+            _safe_cleanup_tempdir(state.tempdir)
+            return
+        try:
+            total = len(state.params)
+            if state.index >= total:
+                QTimer.singleShot(0, self._capture_next_report_image)
+                return
+            section, name = state.params[state.index]
+            display_index = state.index + 1
             path = state.directory / self._safe_report_image_name(
                 section,
                 name,
@@ -7142,24 +7615,20 @@ class MainWindow(QMainWindow):
             if state.images is not None:
                 state.images[(section, name)] = path
             progress_value = state.capture_start + int(
-                round(state.capture_span * display_index / max(1, total + 1))
+                round(state.capture_span * display_index / max(1, total))
             )
             self._set_report_progress(
                 min(progress_value, REPORT_PROGRESS_CAPTURE_DONE),
                 REPORT_PROGRESS_TOTAL,
                 f"截图 {display_index}/{total} · {name}",
+                eta_phase="report-capture",
+                eta_completed=display_index,
+                eta_total=total,
             )
             state.index = display_index
             QTimer.singleShot(0, self._capture_next_report_image)
         except Exception as exc:
-            try:
-                self._restore_report_capture_view(state)
-            finally:
-                state.tempdir.cleanup()
-                self._report_capture_state = None
-                self._set_report_busy(False)
-                self._finish_report_progress("写入失败", ok=False)
-            QMessageBox.critical(self, "写入报告失败", str(exc))
+            self._fail_report_capture(state, exc)
 
     def _short_desat_image_available(self) -> bool:
         if self.result is None or not self.result.short_circuit_mode:
@@ -7245,11 +7714,7 @@ class MainWindow(QMainWindow):
 
         try:
             self._begin_report_progress(REPORT_PROGRESS_TOTAL, "复制模板...")
-            self._set_report_progress(
-                REPORT_PROGRESS_TEMPLATE_DONE // 2,
-                REPORT_PROGRESS_TOTAL,
-                "复制模板...",
-            )
+            self._set_report_progress_busy("复制模板...")
             self._report_output_path = copy_report_template(src, target)
             self._set_report_progress(
                 REPORT_PROGRESS_TEMPLATE_DONE,
@@ -7279,29 +7744,120 @@ class MainWindow(QMainWindow):
         )
         return True
 
-    def _write_report_template(self) -> None:
+    def _start_report_prepare_task(self) -> None:
         if self.result is None:
+            raise RuntimeError("报告任务启动前提取结果已失效")
+        self._report_request_id += 1
+        request_id = self._report_request_id
+        task = _ReportPrepareTask(
+            request_id,
+            self.bundle,
+            self.profile,
+            self.cfg,
+            self.result,
+        )
+        result_snapshot = task.current_result
+        if not self._report_progress_active:
+            self._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告文件...")
+        prepare_total = max(
+            1,
+            int(result_snapshot.detected_pulse_count or 0) - 1
+            if not result_snapshot.short_circuit_mode
+            and not result_snapshot.single_pulse_mode
+            and int(result_snapshot.detected_pulse_count or 0) > 2
+            else 1,
+        )
+        self._set_report_progress(
+            REPORT_PROGRESS_TEMPLATE_DONE,
+            REPORT_PROGRESS_TOTAL,
+            "报告文件已就绪，准备分析数据...",
+            eta_phase="report-prepare",
+            eta_completed=0,
+            eta_total=prepare_total,
+        )
+        task.signals.progress.connect(self._on_report_prepare_progress)
+        task.signals.finished.connect(self._on_report_prepare_finished)
+        task.signals.failed.connect(self._on_report_prepare_failed)
+        self._report_prepare_tasks[request_id] = task
+        try:
+            self._load_pool.start(task)
+        except Exception:
+            self._report_prepare_tasks.pop(request_id, None)
+            raise
+
+    def _on_report_prepare_progress(
+        self,
+        request_id: int,
+        done: int,
+        total: int,
+        label: str,
+    ) -> None:
+        if request_id != self._report_request_id:
+            return
+        total = max(1, int(total))
+        ratio = max(0.0, min(float(done) / total, 1.0))
+        span = REPORT_PROGRESS_PREPARE_DONE - REPORT_PROGRESS_TEMPLATE_DONE
+        value = REPORT_PROGRESS_TEMPLATE_DONE + int(round(span * ratio))
+        self._set_report_progress(
+            min(value, REPORT_PROGRESS_PREPARE_DONE),
+            REPORT_PROGRESS_TOTAL,
+            label,
+            eta_phase="report-prepare",
+            eta_completed=max(0, int(done)),
+            eta_total=total,
+        )
+
+    def _on_report_prepare_finished(
+        self,
+        request_id: int,
+        results: list[ExtractResult],
+    ) -> None:
+        self._report_prepare_tasks.pop(request_id, None)
+        if request_id != self._report_request_id:
+            return
+        self._set_report_progress(
+            REPORT_PROGRESS_PREPARE_DONE,
+            REPORT_PROGRESS_TOTAL,
+            "报告数据准备完成，准备截图...",
+        )
+        tempdir: tempfile.TemporaryDirectory | None = None
+        try:
+            tempdir = tempfile.TemporaryDirectory()
+            self._start_report_capture_sequence(
+                tempdir,
+                results,
+                request_id=request_id,
+            )
+            tempdir = None
+        except Exception as exc:
+            _safe_cleanup_tempdir(tempdir)
+            self._finish_report_progress("写入失败", ok=False)
+            self._release_report_operation()
+            QMessageBox.critical(self, "写入报告失败", str(exc))
+
+    def _on_report_prepare_failed(self, request_id: int, message: str) -> None:
+        self._report_prepare_tasks.pop(request_id, None)
+        if request_id != self._report_request_id:
+            return
+        self._finish_report_progress("写入失败", ok=False)
+        self._release_report_operation()
+        QMessageBox.critical(self, "写入报告失败", message)
+
+    def _write_report_template(self) -> None:
+        if not self._try_begin_report_operation():
+            return
+        if self.result is None:
+            self._release_report_operation()
             QMessageBox.warning(self, "提示", "无提取结果可写入报告")
             return
-        if not self._ensure_report_output_file():
-            return
-        tempdir = None
-        self._set_report_busy(True)
         try:
-            report_results = self._results_for_export_or_report()
-            if not self._report_progress_active:
-                self._begin_report_progress(
-                    REPORT_PROGRESS_TOTAL,
-                    "准备报告截图...",
-                )
-            tempdir = tempfile.TemporaryDirectory()
-            self._start_report_capture_sequence(tempdir, report_results)
-            tempdir = None
+            if not self._ensure_report_output_file():
+                self._release_report_operation()
+                return
+            self._start_report_prepare_task()
         except PermissionError as e:
-            if tempdir is not None:
-                tempdir.cleanup()
-            self._set_report_busy(False)
             self._finish_report_progress("写入失败", ok=False)
+            self._release_report_operation()
             QMessageBox.critical(
                 self,
                 "写入报告失败",
@@ -7311,10 +7867,8 @@ class MainWindow(QMainWindow):
                 f"错误:\n{e}",
             )
         except Exception as e:
-            if tempdir is not None:
-                tempdir.cleanup()
-            self._set_report_busy(False)
             self._finish_report_progress("写入失败", ok=False)
+            self._release_report_operation()
             QMessageBox.critical(self, "写入报告失败", str(e))
 
     def _start_report_write_task(
@@ -7325,8 +7879,10 @@ class MainWindow(QMainWindow):
         *,
         request_id: int | None = None,
     ) -> None:
-        if self.result is None or self._report_output_path is None:
-            tempdir.cleanup()
+        if not results or self._report_output_path is None:
+            _safe_cleanup_tempdir(tempdir)
+            self._finish_report_progress("写入失败", ok=False)
+            self._release_report_operation()
             return
         if request_id is None:
             self._report_request_id += 1
@@ -7345,12 +7901,13 @@ class MainWindow(QMainWindow):
         task.signals.failed.connect(self._on_report_write_failed)
         self._report_tasks[request_id] = task
         self._set_report_busy(True)
-        self._set_report_progress(
-            REPORT_PROGRESS_WRITE_START,
-            REPORT_PROGRESS_TOTAL,
-            "正在写入 Excel...",
-        )
-        self._load_pool.start(task)
+        self._set_report_progress_busy("正在打开并写入 Excel...")
+        try:
+            self._load_pool.start(task)
+        except Exception:
+            self._report_tasks.pop(request_id, None)
+            _safe_cleanup_tempdir(tempdir)
+            raise
 
     def _on_report_write_progress(
         self,
@@ -7362,11 +7919,34 @@ class MainWindow(QMainWindow):
         if request_id != self._report_request_id:
             return
         total = max(1, int(total))
-        ratio = max(0.0, min(float(value) / total, 1.0))
-        span = REPORT_PROGRESS_WRITE_DONE_CAP - REPORT_PROGRESS_WRITE_START
-        progress_value = REPORT_PROGRESS_WRITE_START + int(round(span * ratio))
+        if label == "保存报告文件":
+            self._set_report_progress_busy(
+                label,
+                value=REPORT_PROGRESS_WRITE_DONE_CAP,
+                total=REPORT_PROGRESS_TOTAL,
+            )
+            return
+        if label == "插入报告图片":
+            ratio = max(0.0, min(float(value) / total, 1.0))
+            span = REPORT_PROGRESS_WRITE_IMAGES_DONE - REPORT_PROGRESS_WRITE_DATA_DONE
+            progress_value = REPORT_PROGRESS_WRITE_DATA_DONE + int(round(span * ratio))
+            self._set_report_progress(
+                min(progress_value, REPORT_PROGRESS_WRITE_IMAGES_DONE),
+                REPORT_PROGRESS_TOTAL,
+                label,
+                eta_phase="report-write-images",
+                eta_completed=max(0, int(value)),
+                eta_total=total,
+            )
+            return
+        checkpoint_values = {
+            "打开报告文件": REPORT_PROGRESS_WRITE_START,
+            "读取报告模板": REPORT_PROGRESS_WRITE_TEMPLATE_DONE,
+            "写入报告数据": REPORT_PROGRESS_WRITE_DATA_DONE,
+        }
+        progress_value = checkpoint_values.get(label, self.report_progress.value())
         self._set_report_progress(
-            min(progress_value, REPORT_PROGRESS_WRITE_DONE_CAP),
+            min(progress_value, REPORT_PROGRESS_WRITE_DATA_DONE),
             REPORT_PROGRESS_TOTAL,
             label,
         )
@@ -7377,11 +7957,11 @@ class MainWindow(QMainWindow):
         summary: ReportWriteSummary,
         elapsed_ms: float,
     ) -> None:
-        self._report_tasks.pop(request_id, None)
-        if request_id != self._report_request_id:
+        task = self._report_tasks.pop(request_id, None)
+        if request_id != self._report_request_id or task is None:
             return
-        self._set_report_busy(False)
         self._finish_report_progress("写入完成 100%", ok=True)
+        self._release_report_operation()
         if self._report_output_path is not None:
             set_report_output_path(self._report_output_path)
             set_last_export_path(self._report_output_path)
@@ -7407,11 +7987,11 @@ class MainWindow(QMainWindow):
         )
 
     def _on_report_write_failed(self, request_id: int, message: str) -> None:
-        self._report_tasks.pop(request_id, None)
-        if request_id != self._report_request_id:
+        task = self._report_tasks.pop(request_id, None)
+        if request_id != self._report_request_id or task is None:
             return
-        self._set_report_busy(False)
         self._finish_report_progress("写入失败", ok=False)
+        self._release_report_operation()
         QMessageBox.critical(self, "写入报告失败", message)
 
     def _export_excel(self) -> None:

@@ -16,7 +16,6 @@ from dpt_extractor.metrics.iec_timings import (
     ic_stats_in_window,
     reverse_recovery_trr,
     turn_off_ic_fall_window,
-    turn_off_ic_top,
     turn_on_ic_top,
     turn_on_vce_top_from_ic_rise,
     turn_off_timings,
@@ -37,12 +36,12 @@ from dpt_extractor.metrics.irr_measure import irr_parameter_peak_value
 from dpt_extractor.metrics.slopes import (
     didt_diode_recovery,
     didt_max,
-    didt_off,
     didt_on,
     dvdt_diode_recovery,
     dvdt_max,
-    dvdt_off,
     dvdt_on,
+    turn_off_didt_measurement_context,
+    turn_off_dvdt_measurement_context,
 )
 from dpt_extractor.models.slope_range import SlopeRange, default_slope_ranges
 from dpt_extractor.models.bridge_profile import BridgeProfile
@@ -540,13 +539,9 @@ def extract_all(
     if fall_win is not None:
         ic_f0, ic_f1 = fall_win
         ic_off_max = float(np.max(np.abs(ic[ic_f0 : ic_f1 + 1])))
-        ic_top = turn_off_ic_top(
-            ic, edges.pulse1_on, edges.pulse1_off, ic_f0, dt
-        )
     else:
         ic_f0, ic_f1 = off0, off1
         ic_off_max = float(np.max(np.abs(ic[off0:off1])))
-        ic_top = float(np.percentile(np.abs(ic[off0:off1]), 95))
 
     slope_active = default_slope_ranges()
     slope_active.update(cfg.slope_ranges)
@@ -554,35 +549,35 @@ def extract_all(
     off_di = slope_active["off_didt"]
     dv_lo, dv_hi = off_dv.as_fractions()
     off_di_p0, off_di_p1 = off_di.as_fractions()
-    dvdt_o = dvdt_off(
+    off_dvdt_context = turn_off_dvdt_measurement_context(
         t,
         vce,
-        vdc_top,
-        ic_f0,
-        ic_f1 + 1,
+        off0,
+        off1,
+        dt,
         cfg,
-        pct_lo=dv_lo,
-        pct_hi=dv_hi,
-        vce_top=vdc_top,
+        dv_lo,
+        dv_hi,
+        rise_start=ic_f0,
+        rise_end=ic_f1,
     )
-    if dvdt_o < 1e-6:
-        dvdt_o = dvdt_max(t, vce, ic_f0, ic_f1 + 1, dt, cfg)
-    # 关断 di/dt：Vge 下降窗内搜穿越；阈值 = Top% × 关断前电流 Top（100% Ic）
-    didt_o = didt_off(
+    dvdt_o = float(off_dvdt_context.crossing.dvdt)
+    off_didt_context = turn_off_didt_measurement_context(
         t,
         ic,
+        off0,
+        off1,
+        edges.pulse1_on,
+        edges.pulse1_off,
         ic_f0,
-        ic_f1 + 1,
+        ic_f1,
+        dt,
         cfg,
-        pct_start=off_di_p0,
-        pct_end=off_di_p1,
-        ic_reference=off_di.ic_reference,
-        ic_direction=off_di.ic_direction,
-        icm_override=ic_top,
-        search_from_peak=False,
+        off_di_p0,
+        off_di_p1,
+        edge=off_di.ic_direction,
     )
-    if didt_o < 1e-6:
-        didt_o = didt_max(t, ic, ic_f0, ic_f1 + 1, dt, cfg)
+    didt_o = float(off_didt_context.crossing.didt)
 
     # 关断尖峰相关量基于 Vce Top（尖峰减 Top）
     ls_off = (vce_off_max - vce_off_top) / (didt_o * 1e9) * 1e9 if didt_o > 1e-9 else 0.0
@@ -628,8 +623,14 @@ def extract_all(
         vce_off_max=vce_off_max,
         dvdt=dvdt_o,
         didt=didt_o,
-        dvdt_range=off_dv.label(),
-        didt_range=off_di.label(),
+        dvdt_range=(
+            f"{off_dv.label()}·Top={off_dvdt_context.top_v:.2f}V"
+            f"·Base={off_dvdt_context.base_v:.2f}V"
+        ),
+        didt_range=(
+            f"{off_di.label()}·Top={off_didt_context.top_a:.2f}A"
+            f"·Base={off_didt_context.base_a:.2f}A"
+        ),
         ls_off=ls_off,
         toff=toff,
         td_off=td_off,

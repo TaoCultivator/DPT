@@ -656,7 +656,7 @@ DISP_HALF_DIV = 5.0  # 纵向显示半高（格），总高 10 格（同示波�
 HORIZONTAL_DIV_COUNT = 10.0  # 横向整格数（与 _update_x_ticks 一致）
 X_NS_PER_DIV = 50  # 水平标度 ns/格 步进（滚轮与显示量化）
 PARAM_FOCUS_DEFAULT_US_PER_DIV = 0.2  # 点击参数局部放大默认 200 ns/div
-PARAM_FOCUS_ANCHOR_FRACTION = 0.28  # 事件左留约 28%，右留约 72% 观察振荡长尾
+PARAM_FOCUS_ANCHOR_FRACTION = 0.12  # 左留约 1.2 格保住前态/切换起点，其余尽量展示右侧振铃
 PARAM_FOCUS_REQUIRED_GUARD_US = 0.02  # A/B 等必要内容离视窗边缘至少约 20ns
 VERT_VIEW_MARGIN = 0.10  # 纵向上下各留 10% 空白
 PLOT_AXIS_LABEL_EDGE_INSET = 0.0
@@ -8579,7 +8579,7 @@ class WaveformPlot(QWidget):
         *required_times_us: float,
         anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
     ) -> None:
-        """按事件锚点构造参数视窗，默认左留约 28%、右留约 72%。"""
+        """按事件锚点构造参数视窗；保住左侧前态/切换起点后尽量展示右侧振铃。"""
         base_span = self._param_focus_x_scale_us() * HORIZONTAL_DIV_COUNT
         x0, x1 = _solve_parameter_x_window(
             self._full_x_range,

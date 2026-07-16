@@ -54,6 +54,34 @@ def plateau_mid(seg: np.ndarray) -> float:
     return 0.5 * (float(np.max(block)) + float(np.min(block)))
 
 
+def _plateau_mid_without_isolated_spikes(seg: np.ndarray) -> float:
+    """Return the visible stable-band midpoint while ignoring one-sample spikes.
+
+    A stable oscilloscope plateau can legitimately have a fairly wide ripple, so
+    percentile clipping would move the requested ``(max + min) / 2`` centre.
+    Only samples whose two neighbours agree while the sample itself makes a
+    much larger excursion than the normal adjacent ripple are excluded.
+    """
+    block = np.asarray(seg, dtype=np.float64)
+    if len(block) < 5:
+        return plateau_mid(block)
+    diffs = np.abs(np.diff(block))
+    normal_step = float(np.percentile(diffs, 90.0))
+    jump_limit = max(1e-9, 8.0 * normal_step)
+    prev = block[:-2]
+    cur = block[1:-1]
+    nxt = block[2:]
+    neighbour_gap = np.abs(nxt - prev)
+    excursion = np.abs(cur - 0.5 * (prev + nxt))
+    isolated = (excursion > jump_limit) & (neighbour_gap <= 0.5 * jump_limit)
+    if not np.any(isolated):
+        return plateau_mid(block)
+    keep = np.ones(len(block), dtype=bool)
+    keep[1:-1] = ~isolated
+    cleaned = block[keep]
+    return plateau_mid(cleaned if len(cleaned) >= 2 else block)
+
+
 def _transition_index_rise(seg: np.ndarray) -> int:
     dy = np.diff(seg.astype(np.float64))
     ipk = int(np.argmax(dy))
@@ -85,6 +113,45 @@ def dvdt_rise_base_top_mid(seg: np.ndarray) -> tuple[float, float]:
     base = _quiet_plateau_mid(pre_w, prefer="low")
     top = _quiet_plateau_mid(post_w, prefer="high")
     return base, top
+
+
+def turn_off_dvdt_base_top_levels(
+    t: np.ndarray,
+    vce: np.ndarray,
+    i0: int,
+    i1: int,
+) -> tuple[float, float]:
+    """关断 dv/dt 的本地 Base/Top 稳定带中心。
+
+    Top 取关断参数本地窗口后端的安静高平台；Base 取关断窗口起点前
+    0.5~0.1us 的稳定低平台，并按该稳定段 ``(max + min) / 2``
+    定位到可见波形带正中。Base 平台窗允许位于交点搜索窗之前，但仍属于
+    同一关断参数本地测量上下文。
+    """
+    t = np.asarray(t, dtype=np.float64)
+    vce = np.asarray(vce, dtype=np.float64)
+    n = min(len(t), len(vce))
+    if n < 2:
+        return 0.0, 0.0
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 1, min(int(i1), n - 1))
+    seg = vce[i0 : i1 + 1]
+    base, top = dvdt_rise_base_top_mid(seg)
+    if len(seg) < 4:
+        return float(base), float(top)
+
+    base_anchor_time = float(t[i0])
+    base_lo_t = max(float(t[0]), base_anchor_time - 0.5e-6)
+    base_hi_t = min(float(t[n - 1]), base_anchor_time - 0.1e-6)
+    if base_hi_t <= base_lo_t:
+        return float(base), float(top)
+    b0 = int(np.searchsorted(t, base_lo_t, side="left"))
+    b1 = int(np.searchsorted(t, base_hi_t, side="right"))
+    b0 = max(0, min(b0, n - 1))
+    b1 = max(b0 + 1, min(b1, n))
+    if b1 - b0 >= 2:
+        base = _plateau_mid_without_isolated_spikes(vce[b0:b1])
+    return float(base), float(top)
 
 
 def dvdt_on_vce_fall_base_top(
@@ -777,3 +844,52 @@ def didt_fall_top_base_mid(seg: np.ndarray) -> tuple[float, float]:
     top = _quiet_plateau_mid(pre_w, prefer="high")
     base = _quiet_plateau_mid(post_w, prefer="low")
     return top, base
+
+
+def turn_off_didt_base_top_levels(
+    ic: np.ndarray,
+    local_start: int,
+    local_end: int,
+    pulse1_on: int,
+    off_idx: int,
+    fall_start: int,
+    fall_end: int,
+    dt: float,
+) -> tuple[float, float]:
+    """关断 di/dt 的本地 Base/Top 稳定带中心。
+
+    Top 使用真实关断前约 250ns 导通平台的 ``(max + min) / 2``，
+    不再使用峰值或 P95；Base 使用主下降沿后的本地安静回落平台。
+    返回顺序为 ``(Base, Top)``，便于直接生成百分比参考电平。
+    """
+    ic = np.asarray(ic, dtype=np.float64)
+    n = len(ic)
+    if n < 2:
+        return 0.0, 0.0
+    dt_s = max(float(dt), 1e-15)
+    pulse1_on = max(0, min(int(pulse1_on), n - 2))
+    local_start = max(0, min(int(local_start), n - 2))
+    local_end = max(local_start + 1, min(int(local_end), n - 1))
+    off_idx = max(pulse1_on + 1, min(int(off_idx), n - 1))
+    fall_start = max(pulse1_on + 1, min(int(fall_start), n - 2))
+    fall_end = max(fall_start + 1, min(int(fall_end), n - 1))
+
+    top_end = max(
+        pulse1_on + 10,
+        min(off_idx - int(40e-9 / dt_s), fall_start, n - 1),
+    )
+    top_start = max(pulse1_on, top_end - int(250e-9 / dt_s))
+    if top_end <= top_start + 5:
+        top_start = pulse1_on
+        top_end = max(top_start + 1, min(fall_start, off_idx, n - 1))
+    top_seg = ic[top_start:top_end]
+    if len(top_seg) == 0:
+        top_seg = ic[pulse1_on:off_idx]
+    top = _plateau_mid_without_isolated_spikes(top_seg)
+
+    local_seg = ic[local_start : local_end + 1]
+    if len(local_seg) >= 2:
+        _unused_top, base = didt_fall_top_base_mid(local_seg)
+    else:
+        base = plateau_mid(local_seg)
+    return float(base), float(top)

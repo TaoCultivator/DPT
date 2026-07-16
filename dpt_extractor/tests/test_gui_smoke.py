@@ -1696,7 +1696,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertFalse(hasattr(win, "spin_vdc"))
         self.assertIn("#081719", win.combo_phase.view().styleSheet())
         self.assertFalse(win.report_progress.isHidden())
-        self.assertEqual(win.report_progress.percent_text(), "0.000%")
+        self.assertEqual(win.report_progress.percent_text(), "0.0%")
         assert_test_mode_children_contained()
 
         win._apply_toolbar_density(1600)
@@ -1798,25 +1798,138 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(win.report_progress.stage_text(), "报告写入")
         self.assertEqual(win.report_progress.maximum(), 5)
         self.assertEqual(win.report_progress.value(), 0)
-        self.assertEqual(win.report_progress.percent_text(), "0.000%")
+        self.assertEqual(win.report_progress.percent_text(), "1.0%")
         self.assertEqual(win.report_progress.detail_text(), "准备截图")
+        self.assertEqual(
+            win.report_progress.eta_caption_text(),
+            "当前阶段预计剩余",
+        )
 
         win._set_report_progress(3, 5, "截图 3/5")
         self.assertEqual(win.report_progress.value(), 3)
         self.assertEqual(win.report_progress.format(), "截图 3/5")
-        self.assertEqual(win.report_progress.percent_text(), "60.000%")
+        self.assertEqual(win.report_progress.percent_text(), "60.0%")
         self.assertEqual(win.report_progress.detail_text(), "截图 3/5")
 
         win._set_report_progress_busy("正在写入 Excel...")
         self.assertTrue(win.report_progress.is_busy())
         self.assertEqual(win.report_progress.detail_text(), "写入 Excel")
-        self.assertEqual(win.report_progress.eta_text(), "--")
+        self.assertEqual(win.report_progress.eta_text(), "估算中")
 
         win._finish_report_progress("写入完成 100%", ok=True)
         self.assertEqual(win.report_progress.maximum(), 100)
         self.assertEqual(win.report_progress.value(), 100)
-        self.assertEqual(win.report_progress.percent_text(), "100.000%")
+        self.assertEqual(win.report_progress.percent_text(), "100.0%")
         self.assertEqual(win.report_progress.detail_text(), "完成")
+        win.close()
+
+    def test_progress_eta_uses_completed_units_and_failure_keeps_last_value(self):
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.task_progress import UnitRateEstimator
+
+        now = [0.0]
+        win = MainWindow()
+        win._begin_report_progress(100, "准备报告截图...")
+        win.report_progress._eta_estimator = UnitRateEstimator(lambda: now[0])
+        win._set_report_progress(
+            10,
+            100,
+            "准备报告截图...",
+            eta_phase="capture",
+            eta_completed=0,
+            eta_total=5,
+        )
+        now[0] = 1.0
+        win._set_report_progress(
+            20,
+            100,
+            "截图 1/5",
+            eta_phase="capture",
+            eta_completed=1,
+            eta_total=5,
+        )
+        self.assertEqual(win.report_progress.eta_text(), "估算中")
+        now[0] = 2.0
+        win._set_report_progress(
+            30,
+            100,
+            "截图 2/5",
+            eta_phase="capture",
+            eta_completed=2,
+            eta_total=5,
+        )
+        self.assertEqual(win.report_progress.eta_text(), "3.0 s")
+
+        win._finish_report_progress("写入失败", ok=False)
+        self.assertEqual(win.report_progress.value(), 30)
+        self.assertEqual(win.report_progress.percent_text(), "30.0%")
+        self.assertEqual(win.report_progress.eta_text(), "—")
+        win.close()
+
+    def test_completed_eta_phase_does_not_claim_whole_task_is_finished(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._begin_report_progress(100, "准备报告截图...")
+        win._set_report_progress(
+            15,
+            100,
+            "准备报告截图...",
+            eta_phase="capture",
+            eta_completed=0,
+            eta_total=1,
+        )
+        win._set_report_progress(
+            55,
+            100,
+            "截图 1/1",
+            eta_phase="capture",
+            eta_completed=1,
+            eta_total=1,
+        )
+
+        self.assertEqual(win.report_progress.percent_text(), "55.0%")
+        self.assertEqual(win.report_progress.eta_text(), "估算中")
+        self.assertIn("当前同质阶段", win.report_progress.toolTip())
+        win.close()
+
+    def test_positive_sub_second_eta_uses_honest_coarse_display(self):
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.task_progress import UnitRateEstimator
+
+        now = [0.0]
+        win = MainWindow()
+        win._begin_report_progress(100, "准备报告截图...")
+        win.report_progress._eta_estimator = UnitRateEstimator(lambda: now[0])
+        win._set_report_progress(
+            55,
+            100,
+            "插入报告图片",
+            eta_phase="report-write-images",
+            eta_completed=0,
+            eta_total=3,
+        )
+        now[0] = 0.0001
+        win._set_report_progress(
+            65,
+            100,
+            "插入报告图片",
+            eta_phase="report-write-images",
+            eta_completed=1,
+            eta_total=3,
+        )
+        now[0] = 0.0002
+        win._set_report_progress(
+            78,
+            100,
+            "插入报告图片",
+            eta_phase="report-write-images",
+            eta_completed=2,
+            eta_total=3,
+        )
+
+        self.assertEqual(win.report_progress.percent_text(), "78.0%")
+        self.assertEqual(win.report_progress.eta_text(), "<1 s")
         win.close()
 
     def test_load_progress_bar_updates(self):
@@ -1828,18 +1941,26 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(win.report_progress.stage_text(), "数据导入")
         self.assertEqual(win.report_progress.detail_text(), "准备读取")
 
-        win._on_background_load_progress(7, 35000, TASK_PROGRESS_TOTAL, "解析波形数据...")
+        win._on_background_load_progress(
+            7,
+            35000,
+            TASK_PROGRESS_TOTAL,
+            "读取完成，正在识别通道...",
+        )
         self.assertEqual(win.report_progress.value(), 35000)
-        self.assertEqual(win.report_progress.percent_text(), "35.000%")
-        self.assertEqual(win.report_progress.detail_text(), "解析波形")
+        self.assertEqual(win.report_progress.percent_text(), "35.0%")
+        self.assertEqual(win.report_progress.detail_text(), "识别通道")
 
         win._finish_task_progress("导入完成 100%", ok=True, stage="数据导入")
         self.assertEqual(win.report_progress.value(), 100)
-        self.assertEqual(win.report_progress.percent_text(), "100.000%")
+        self.assertEqual(win.report_progress.percent_text(), "100.0%")
         self.assertEqual(win.report_progress.detail_text(), "导入完成")
         win.close()
 
     def test_report_write_progress_caps_until_finished(self):
+        from PyQt6.QtCore import QTimer
+        from PyQt6.QtWidgets import QApplication
+
         from dpt_extractor.gui.main_window import (
             MainWindow,
             REPORT_PROGRESS_TOTAL,
@@ -1858,13 +1979,240 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         win._on_report_write_progress(9, 10, 10, "保存报告文件")
         self.assertEqual(win.report_progress.value(), REPORT_PROGRESS_WRITE_DONE_CAP)
-        self.assertEqual(win.report_progress.percent_text(), "99.000%")
+        self.assertEqual(win.report_progress.percent_text(), "85.0%")
         self.assertEqual(win.report_progress.detail_text(), "保存报告文件")
+        self.assertTrue(win.report_progress.is_busy())
 
-        win._finish_report_progress("写入完成 100%", ok=True)
+        QTimer.singleShot(
+            0,
+            lambda: win._finish_report_progress("写入完成 100%", ok=True),
+        )
+        QApplication.processEvents()
         self.assertEqual(win.report_progress.value(), 100)
-        self.assertEqual(win.report_progress.percent_text(), "100.000%")
+        self.assertEqual(win.report_progress.percent_text(), "100.0%")
         self.assertEqual(win.report_progress.detail_text(), "完成")
+        self.assertFalse(win.report_progress.is_busy())
+        win.close()
+
+    def test_report_image_progress_uses_actual_inserted_image_count(self):
+        from unittest.mock import Mock
+
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            REPORT_PROGRESS_TOTAL,
+        )
+
+        win = MainWindow()
+        win._report_request_id = 10
+        win._begin_report_progress(REPORT_PROGRESS_TOTAL, "正在写入 Excel...")
+        observe = Mock()
+        win.report_progress._eta_estimator.observe = observe
+
+        win._on_report_write_progress(10, 1, 2, "插入报告图片")
+
+        observe.assert_called_once_with("report-write-images", 1, 2)
+        self.assertEqual(win.report_progress.value(), 70000)
+        win.close()
+
+    def test_report_write_progress_is_monotonic_across_real_callback_sequence(self):
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            REPORT_PROGRESS_TOTAL,
+            REPORT_PROGRESS_WRITE_DATA_DONE,
+            REPORT_PROGRESS_WRITE_IMAGES_DONE,
+            REPORT_PROGRESS_WRITE_START,
+            REPORT_PROGRESS_WRITE_TEMPLATE_DONE,
+        )
+
+        win = MainWindow()
+        win._report_request_id = 11
+        win._begin_report_progress(REPORT_PROGRESS_TOTAL, "正在写入 Excel...")
+
+        observed: list[int] = []
+        callbacks = (
+            (0, 25, "打开报告文件"),
+            (1, 25, "读取报告模板"),
+            (2, 25, "写入报告数据"),
+            (1, 19, "插入报告图片"),
+            (2, 19, "插入报告图片"),
+            (19, 19, "插入报告图片"),
+        )
+        for value, total, label in callbacks:
+            win._on_report_write_progress(11, value, total, label)
+            observed.append(win.report_progress.value())
+
+        self.assertEqual(observed, sorted(observed))
+        self.assertEqual(observed[0], REPORT_PROGRESS_WRITE_START)
+        self.assertEqual(observed[1], REPORT_PROGRESS_WRITE_TEMPLATE_DONE)
+        self.assertEqual(observed[2], REPORT_PROGRESS_WRITE_DATA_DONE)
+        self.assertGreater(observed[3], REPORT_PROGRESS_WRITE_DATA_DONE)
+        self.assertEqual(observed[-1], REPORT_PROGRESS_WRITE_IMAGES_DONE)
+
+        win._on_report_write_progress(11, 24, 25, "保存报告文件")
+        self.assertEqual(win.report_progress.percent_text(), "85.0%")
+        win._finish_report_progress("写入完成 100%", ok=True)
+        self.assertEqual(win.report_progress.percent_text(), "100.0%")
+        self.assertEqual(win.report_progress.eta_text(), "0 ms")
+        win.close()
+
+    def test_running_progress_cannot_publish_100_or_regress(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._begin_report_progress(100, "开始")
+        win._set_report_progress(70, 100, "阶段一")
+        win._set_report_progress(60, 100, "乱序旧检查点")
+        self.assertEqual(win.report_progress.value(), 70)
+
+        win._set_report_progress(100, 100, "仍在运行")
+        self.assertLess(win.report_progress.value(), win.report_progress.maximum())
+        self.assertNotEqual(win.report_progress.percent_text(), "100.0%")
+
+        win._finish_report_progress("写入失败", ok=False)
+        self.assertNotEqual(win.report_progress.percent_text(), "100.0%")
+        self.assertEqual(win.report_progress.eta_text(), "—")
+        win.close()
+
+    def test_progress_display_remains_monotonic_when_total_changes(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._begin_report_progress(100, "开始")
+        win._set_report_progress(70, 100, "大分母")
+        self.assertEqual(win.report_progress.percent_text(), "70.0%")
+
+        win._set_report_progress(2, 3, "小分母")
+        self.assertEqual(win.report_progress.percent_text(), "70.0%")
+        win.close()
+
+    def test_first_terminal_state_is_immutable(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._begin_report_progress(100, "开始")
+        win._finish_report_progress("成功", ok=True)
+        win._finish_report_progress("迟到失败", ok=False)
+        self.assertEqual(win.report_progress.percent_text(), "100.0%")
+        self.assertEqual(win.report_progress.detail_text(), "成功")
+        self.assertEqual(win.report_progress.eta_text(), "0 ms")
+
+        win._begin_report_progress(100, "重试")
+        win._set_report_progress(40, 100, "处理中")
+        win._finish_report_progress("失败", ok=False)
+        win._finish_report_progress("迟到成功", ok=True)
+        self.assertEqual(win.report_progress.percent_text(), "40.0%")
+        self.assertEqual(win.report_progress.detail_text(), "失败")
+        self.assertEqual(win.report_progress.eta_text(), "—")
+        win.close()
+
+    def test_sub_second_eta_display_boundary(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        class _FixedEstimator:
+            def __init__(self, value: float) -> None:
+                self.value = value
+
+            def observe(self, *_args) -> None:
+                return None
+
+            def eta_ms(self) -> float:
+                return self.value
+
+        win = MainWindow()
+        win._begin_report_progress(100, "开始")
+        estimator = _FixedEstimator(999.0)
+        win.report_progress._eta_estimator = estimator  # type: ignore[assignment]
+        win._set_report_progress(
+            50,
+            100,
+            "阶段",
+            eta_phase="phase",
+            eta_completed=1,
+            eta_total=2,
+        )
+        self.assertEqual(win.report_progress.eta_text(), "<1 s")
+
+        estimator.value = 1000.0
+        win.report_progress._refresh_readout()
+        self.assertEqual(win.report_progress.eta_text(), "1.0 s")
+        win.close()
+
+    def test_late_same_request_progress_cannot_rewrite_success_terminal(self):
+        from dpt_extractor.gui.main_window import MainWindow, REPORT_PROGRESS_TOTAL
+
+        win = MainWindow()
+        win._report_request_id = 12
+        win._begin_report_progress(REPORT_PROGRESS_TOTAL, "正在写入 Excel...")
+        win._finish_report_progress("写入完成 100%", ok=True)
+
+        win._on_report_write_progress(12, 1, 19, "插入报告图片")
+        self.assertEqual(win.report_progress.percent_text(), "100.0%")
+        self.assertEqual(win.report_progress.eta_text(), "0 ms")
+        win.close()
+
+    def test_production_report_capture_yields_between_view_change_and_grab(self):
+        import tempfile
+
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.export.report_template import DPT_OVERVIEW_IMAGE_PARAM
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            REPORT_PROGRESS_CAPTURE_DONE,
+            REPORT_PROGRESS_TOTAL,
+        )
+        from dpt_extractor.models.results import ExtractResult
+
+        win = MainWindow()
+        win.result = ExtractResult()
+        params = (
+            DPT_OVERVIEW_IMAGE_PARAM,
+            ("关断过程", "dv/dt"),
+            ("关断过程", "di/dt"),
+        )
+        selected: list[tuple[str, str]] = []
+        saved: list[tuple[str, int]] = []
+        writer_calls: list[tuple[int, int]] = []
+        win._report_image_params = lambda: params  # type: ignore[method-assign]
+        win._on_value_clicked = (  # type: ignore[method-assign]
+            lambda section, name: selected.append((section, name))
+        )
+
+        def fake_save(path, _size):
+            path.write_bytes(b"captured")
+            saved.append((path.name, len(selected)))
+
+        def fake_start_writer(tempdir, images, _results, *, request_id=None):
+            self.assertEqual(len(images), len(params))
+            self.assertTrue(all(path.read_bytes() == b"captured" for path in images.values()))
+            writer_calls.append((int(request_id or 0), len(images)))
+            tempdir.cleanup()
+
+        win._save_report_plot_capture = fake_save  # type: ignore[method-assign]
+        win._start_report_write_task = fake_start_writer  # type: ignore[method-assign]
+        before_window = win.geometry()
+        before_plot = win.wave_plot.geometry()
+        tempdir = tempfile.TemporaryDirectory()
+        win._report_request_id = 41
+        win._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告截图...")
+        win._start_report_capture_sequence(
+            tempdir,
+            [win.result],
+            request_id=41,
+        )
+        for _ in range(30):
+            QApplication.processEvents()
+            if writer_calls:
+                break
+
+        self.assertEqual(len(saved), len(params))
+        self.assertEqual(selected, list(params[1:]))
+        self.assertEqual([count for _name, count in saved], [0, 1, 2])
+        self.assertEqual(writer_calls, [(41, len(params))])
+        self.assertIsNone(win._report_capture_state)
+        self.assertEqual(win.report_progress.value(), REPORT_PROGRESS_CAPTURE_DONE)
+        self.assertEqual(win.geometry(), before_window)
+        self.assertEqual(win.wave_plot.geometry(), before_plot)
         win.close()
 
     def test_toolbar_temperature_values_are_editable_and_persisted(self):
@@ -2096,10 +2444,12 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         )
         self.assertLessEqual(expanded0, 4.0)
         self.assertGreaterEqual(expanded1, 7.0)
-        self.assertAlmostEqual(
+        # This synthetic required range cannot coexist with a 12% anchor and
+        # the finite right boundary.  Required content and data bounds take
+        # precedence, so the anchor may move right but no required point clips.
+        self.assertGreaterEqual(
             (5.0 - expanded0) / (expanded1 - expanded0),
             PARAM_FOCUS_ANCHOR_FRACTION,
-            places=9,
         )
 
         left0, left1 = _solve_parameter_x_window(

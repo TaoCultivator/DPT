@@ -97,10 +97,17 @@ class TestReportTemplateWriter(unittest.TestCase):
                 profile_code="UH",
                 turn_off=TurnOffResult(delta_vce=123.456),
             )
+            progress_events: list[tuple[int, int, str]] = []
             summary = write_report_template(
                 result,
                 report,
-                images={("关断过程", "ΔVce"): image},
+                images={
+                    ("关断过程", "ΔVce"): image,
+                    ("不存在的分区", "不存在的参数"): image,
+                },
+                progress_callback=lambda done, total, label: progress_events.append(
+                    (done, total, label)
+                ),
             )
 
             saved = load_workbook(report)
@@ -114,6 +121,10 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(saved_wave.cell(35, 1).value, "总概览图")
             self.assertLess(saved_wave.column_dimensions["J"].width, 13)
             self.assertEqual(len(saved_wave._images), 1)
+            self.assertEqual(
+                [event for event in progress_events if event[2] == "插入报告图片"],
+                [(1, 1, "插入报告图片")],
+            )
 
     def test_dpt_template_uses_current_temperature_label(self):
         from dpt_extractor.export.report_template import write_report_template

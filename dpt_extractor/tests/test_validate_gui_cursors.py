@@ -16,6 +16,7 @@ from scripts.validate_gui_cursors import (
     _group_rows_by_sample,
     _level_on_channel,
     _sample_trace_id,
+    _audit_turn_off_slope_context_consistency,
     _unnecessary_ab_focus_expansion,
 )
 
@@ -41,7 +42,7 @@ class _CapturePlot:
         self,
         anchor_us: float,
         *required_times_us: float,
-        anchor_fraction: float = 0.28,
+        anchor_fraction: float = 0.12,
     ) -> tuple[float, tuple[float, ...], float]:
         return anchor_us, required_times_us, anchor_fraction
 
@@ -52,6 +53,176 @@ def _ok_method(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
 
 for _method_name in _CAPTURE_METHODS:
     setattr(_CapturePlot, _method_name, _ok_method)
+
+
+class TestTurnOffSlopeContextAudit(unittest.TestCase):
+    def test_exact_gui_context_and_raw_voltage_intersections_pass(self) -> None:
+        t = np.asarray([0.0, 1.0e-6, 2.0e-6], dtype=np.float64)
+        vce = np.asarray([0.0, 5.0, 10.0], dtype=np.float64)
+        t_a_s, t_b_s = 0.2e-6, 1.8e-6
+
+        problems, detail = _audit_turn_off_slope_context_consistency(
+            metric_name="dv/dt",
+            gui_top=10.0,
+            gui_base=0.0,
+            gui_ab_us=(t_a_s * 1e6, t_b_s * 1e6),
+            context_top=10.0,
+            context_base=0.0,
+            context_value=0.005,
+            context_t_a_s=t_a_s,
+            context_t_b_s=t_b_s,
+            threshold_a=1.0,
+            threshold_b=9.0,
+            used_fallback=False,
+            result_value=0.005,
+            t=t,
+            raw_values=vce,
+            use_abs=False,
+        )
+
+        self.assertEqual(problems, [])
+        self.assertIn("used_fallback=False", detail)
+        self.assertIn("cross=full", detail)
+        self.assertIn("rawAB=1/9", detail)
+
+    def test_exact_negative_current_intersections_use_raw_absolute_signal(self) -> None:
+        t = np.asarray([0.0, 1.0e-6, 2.0e-6], dtype=np.float64)
+        ic = np.asarray([-10.0, -5.0, 0.0], dtype=np.float64)
+        t_a_s, t_b_s = 0.2e-6, 1.8e-6
+
+        problems, detail = _audit_turn_off_slope_context_consistency(
+            metric_name="di/dt",
+            gui_top=-10.0,
+            gui_base=0.0,
+            gui_ab_us=(t_a_s * 1e6, t_b_s * 1e6),
+            context_top=-10.0,
+            context_base=0.0,
+            context_value=0.005,
+            context_t_a_s=t_a_s,
+            context_t_b_s=t_b_s,
+            threshold_a=9.0,
+            threshold_b=1.0,
+            used_fallback=False,
+            result_value=0.005,
+            t=t,
+            raw_values=ic,
+            use_abs=True,
+        )
+
+        self.assertEqual(problems, [])
+        self.assertIn("cross=full", detail)
+        self.assertIn("rawAB=9/1", detail)
+
+    def test_mismatched_gui_values_and_raw_a_are_rejected(self) -> None:
+        t = np.asarray([0.0, 1.0e-6, 2.0e-6], dtype=np.float64)
+        vce = np.asarray([0.0, 5.0, 10.0], dtype=np.float64)
+
+        problems, _detail = _audit_turn_off_slope_context_consistency(
+            metric_name="dv/dt",
+            gui_top=10.5,
+            gui_base=0.0,
+            gui_ab_us=(0.3, 1.8),
+            context_top=10.0,
+            context_base=0.0,
+            context_value=0.005,
+            context_t_a_s=0.2e-6,
+            context_t_b_s=1.8e-6,
+            threshold_a=1.0,
+            threshold_b=9.0,
+            used_fallback=False,
+            result_value=0.006,
+            t=t,
+            raw_values=vce,
+            use_abs=False,
+        )
+
+        joined = " | ".join(problems)
+        self.assertIn("Top", joined)
+        self.assertIn("result", joined)
+        self.assertIn(" A=", joined)
+        self.assertIn("原始A插值", joined)
+
+    def test_fallback_without_intersections_is_recorded_not_failed(self) -> None:
+        t = np.asarray([0.0, 1.0e-6], dtype=np.float64)
+        values = np.asarray([3.0, 3.0], dtype=np.float64)
+
+        problems, detail = _audit_turn_off_slope_context_consistency(
+            metric_name="dv/dt",
+            gui_top=3.0,
+            gui_base=3.0,
+            gui_ab_us=None,
+            context_top=3.0,
+            context_base=3.0,
+            context_value=0.0,
+            context_t_a_s=None,
+            context_t_b_s=None,
+            threshold_a=3.0,
+            threshold_b=3.0,
+            used_fallback=True,
+            result_value=0.0,
+            t=t,
+            raw_values=values,
+            use_abs=False,
+        )
+
+        self.assertEqual(problems, [])
+        self.assertIn("used_fallback=True", detail)
+        self.assertIn("cross=none", detail)
+        self.assertIn("rawAB=none", detail)
+
+    def test_fallback_with_partial_intersection_is_recorded_not_failed(self) -> None:
+        t = np.asarray([0.0, 1.0e-6], dtype=np.float64)
+        values = np.asarray([0.0, 1.0], dtype=np.float64)
+
+        problems, detail = _audit_turn_off_slope_context_consistency(
+            metric_name="di/dt",
+            gui_top=1.0,
+            gui_base=0.0,
+            gui_ab_us=None,
+            context_top=1.0,
+            context_base=0.0,
+            context_value=0.001,
+            context_t_a_s=0.5e-6,
+            context_t_b_s=None,
+            threshold_a=0.5,
+            threshold_b=0.1,
+            used_fallback=True,
+            result_value=0.001,
+            t=t,
+            raw_values=values,
+            use_abs=True,
+        )
+
+        self.assertEqual(problems, [])
+        self.assertIn("used_fallback=True", detail)
+        self.assertIn("cross=partial-A", detail)
+        self.assertIn("guiAB=none", detail)
+
+    def test_missing_intersections_without_fallback_are_rejected(self) -> None:
+        t = np.asarray([0.0, 1.0e-6], dtype=np.float64)
+        values = np.asarray([3.0, 3.0], dtype=np.float64)
+
+        problems, detail = _audit_turn_off_slope_context_consistency(
+            metric_name="dv/dt",
+            gui_top=3.0,
+            gui_base=3.0,
+            gui_ab_us=None,
+            context_top=3.0,
+            context_base=3.0,
+            context_value=0.0,
+            context_t_a_s=None,
+            context_t_b_s=None,
+            threshold_a=3.0,
+            threshold_b=3.0,
+            used_fallback=False,
+            result_value=0.0,
+            t=t,
+            raw_values=values,
+            use_abs=False,
+        )
+
+        self.assertTrue(any("未fallback" in problem for problem in problems))
+        self.assertIn("cross=none", detail)
 
 
 class TestCursorAuditCapture(unittest.TestCase):
@@ -83,7 +254,7 @@ class TestCursorAuditCapture(unittest.TestCase):
         def broken_focus(
             anchor_us: float,
             *required_times_us: float,
-            anchor_fraction: float = 0.28,
+            anchor_fraction: float = 0.12,
         ) -> None:
             _ = anchor_us, required_times_us, anchor_fraction
             raise RuntimeError("focus exploded")
@@ -122,7 +293,7 @@ class TestCursorAuditCapture(unittest.TestCase):
             "Eoff",
             (22.871, 26.871),
             (0.0, 60.0),
-            (23.991, (22.977, 25.015), 0.28),
+            (23.991, (22.977, 25.015), 0.12),
             24.190,
             24.560,
         )
@@ -138,7 +309,7 @@ class TestCursorAuditCapture(unittest.TestCase):
             "di/dt",
             (23.431, 25.431),
             (0.0, 60.0),
-            (23.991, (24.190, 24.560), 0.28),
+            (23.991, (24.190, 24.560), 0.12),
             24.190,
             24.560,
         )
@@ -151,7 +322,7 @@ class TestCursorAuditCapture(unittest.TestCase):
             "Trr",
             (27.0, 31.0),
             (0.0, 60.0),
-            (28.1, (28.1, 30.9), 0.28),
+            (28.1, (28.1, 30.9), 0.12),
             28.1,
             28.45,
         )

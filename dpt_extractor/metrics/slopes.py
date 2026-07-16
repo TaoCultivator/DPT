@@ -278,11 +278,31 @@ def _didt_fall_robust(
     if len(seg_t) < 2:
         return None
     start = max(0, int(np.argmax(seg_y)) - 1)
-    t_lo = crossing_time(seg_t, seg_y, th_lo, "falling", start=start)
-    if t_lo is None:
+    dt_s = float(np.median(np.diff(seg_t))) if len(seg_t) > 1 else 0.0
+    hold = max(3, int(round(5e-9 / max(dt_s, 1e-15))))
+    hold = min(64, hold)
+    tolerance = 0.01 * max(span, 1.0)
+    low_idx: int | None = None
+    low_crossings = np.flatnonzero(
+        (seg_y[:-1] >= th_lo) & (seg_y[1:] < th_lo)
+    )
+    for k_raw in low_crossings:
+        k = int(k_raw)
+        if k < start:
+            continue
+        tail = seg_y[k + 1 : min(len(seg_y), k + 1 + hold)]
+        if len(tail) >= 3 and float(np.mean(tail <= th_lo + tolerance)) >= 0.70:
+            low_idx = k
+            break
+    if low_idx is None:
         return None
-    local = int(np.searchsorted(seg_t, t_lo, side="left"))
-    local = max(1, min(local, len(seg_y) - 1))
+    y0 = float(seg_y[low_idx])
+    y1 = float(seg_y[low_idx + 1])
+    frac = (th_lo - y0) / (y1 - y0) if abs(y1 - y0) > 1e-30 else 0.0
+    t_lo = float(
+        seg_t[low_idx] + frac * (seg_t[low_idx + 1] - seg_t[low_idx])
+    )
+    local = low_idx + 1
     t_hi: float | None = None
     for k in range(local - 1, start - 1, -1):
         if seg_y[k] >= th_hi > seg_y[k + 1]:
@@ -328,6 +348,218 @@ def didt_between_base_top(
     )
     return DidtCrossingResult(
         float(r.dvdt), r.t_pct_a_s, r.t_pct_b_s, r.th_a, r.th_b
+    )
+
+
+def _sustained_rise_between_base_top(
+    t: np.ndarray,
+    y: np.ndarray,
+    i0: int,
+    i1: int,
+    base_v: float,
+    top_v: float,
+    pct_a: float,
+    pct_b: float,
+    dt: float,
+) -> DvdtCrossingResult | None:
+    """Find raw A/B intersections around a rise that reaches a lasting high level.
+
+    The persistence check is used only to choose the physical switching edge;
+    the returned times are still linearly interpolated intersections of the raw
+    waveform.  This prevents an isolated pre-edge spike from becoming cursor A.
+    """
+    i0 = max(0, min(int(i0), len(t) - 2))
+    i1 = max(i0 + 1, min(int(i1), len(t) - 1))
+    v_lo = float(min(base_v, top_v))
+    v_hi = float(max(base_v, top_v))
+    span = v_hi - v_lo
+    if span <= 1e-9:
+        return None
+    th_a = v_lo + float(pct_a) * span
+    th_b = v_lo + float(pct_b) * span
+    th_lo = min(th_a, th_b)
+    th_hi = max(th_a, th_b)
+    seg_t = np.asarray(t[i0 : i1 + 1], dtype=np.float64)
+    seg_y = np.asarray(y[i0 : i1 + 1], dtype=np.float64)
+    if len(seg_t) < 3:
+        return None
+
+    hold = max(3, int(round(5e-9 / max(float(dt), 1e-15))))
+    hold = min(64, hold)
+    tolerance = 0.01 * max(span, 1.0)
+    high_crossings = np.flatnonzero(
+        (seg_y[:-1] < th_hi) & (seg_y[1:] >= th_hi)
+    )
+    high_idx: int | None = None
+    for k_raw in high_crossings:
+        k = int(k_raw)
+        tail = seg_y[k + 1 : min(len(seg_y), k + 1 + hold)]
+        if len(tail) >= 3 and float(np.mean(tail >= th_hi - tolerance)) >= 0.70:
+            high_idx = k
+            break
+    if high_idx is None:
+        return None
+
+    low_crossings = np.flatnonzero(
+        (seg_y[: high_idx + 1] < th_lo)
+        & (seg_y[1 : high_idx + 2] >= th_lo)
+    )
+    if len(low_crossings) == 0:
+        return None
+    low_idx = int(low_crossings[-1])
+
+    def _interp(k: int, threshold: float) -> float:
+        y0 = float(seg_y[k])
+        y1 = float(seg_y[k + 1])
+        frac = (threshold - y0) / (y1 - y0) if abs(y1 - y0) > 1e-30 else 0.0
+        return float(seg_t[k] + frac * (seg_t[k + 1] - seg_t[k]))
+
+    t_lo = _interp(low_idx, th_lo)
+    t_hi = _interp(high_idx, th_hi)
+    if t_hi <= t_lo:
+        return None
+    value = abs(th_hi - th_lo) / (t_hi - t_lo) / 1e9
+    if th_a <= th_b:
+        return DvdtCrossingResult(float(value), t_lo, t_hi, th_a, th_b)
+    return DvdtCrossingResult(float(value), t_hi, t_lo, th_a, th_b)
+
+
+@dataclass(frozen=True)
+class DvdtMeasurementContext:
+    """一次关断 dv/dt 测量的稳定电平、真实交点与最终值。"""
+
+    base_v: float
+    top_v: float
+    crossing: DvdtCrossingResult
+    used_fallback: bool = False
+
+
+@dataclass(frozen=True)
+class DidtMeasurementContext:
+    """一次关断 di/dt 测量的稳定电平、真实交点与最终值。"""
+
+    base_a: float
+    top_a: float
+    crossing: DidtCrossingResult
+    used_fallback: bool = False
+
+
+def turn_off_dvdt_measurement_context(
+    t: np.ndarray,
+    vce: np.ndarray,
+    i0: int,
+    i1: int,
+    dt: float,
+    cfg: AppConfig,
+    pct_a: float,
+    pct_b: float,
+    *,
+    rise_start: int | None = None,
+    rise_end: int | None = None,
+) -> DvdtMeasurementContext:
+    """用同一参数本地窗口生成关断 dv/dt 的完整默认测量上下文。"""
+    from dpt_extractor.metrics.plateau_level import turn_off_dvdt_base_top_levels
+
+    n = min(len(t), len(vce))
+    if n < 2:
+        crossing = DvdtCrossingResult(0.0, None, None, 0.0, 0.0)
+        return DvdtMeasurementContext(0.0, 0.0, crossing, True)
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 1, min(int(i1), n - 1))
+    search0 = i0 if rise_start is None else max(i0, min(int(rise_start), i1 - 1))
+    search1 = i1 if rise_end is None else max(search0 + 1, min(int(rise_end), i1))
+    base_v, top_v = turn_off_dvdt_base_top_levels(t, vce, i0, i1)
+    crossing = _sustained_rise_between_base_top(
+        t, vce, search0, search1, base_v, top_v, pct_a, pct_b, dt
+    )
+    if crossing is None:
+        crossing = dvdt_between_base_top(
+            t,
+            vce,
+            search0,
+            search1,
+            base_v,
+            top_v,
+            pct_a,
+            pct_b,
+            "rise",
+        )
+    used_fallback = crossing.dvdt < 1e-6
+    if used_fallback:
+        fallback = dvdt_max(t, vce, search0, search1 + 1, dt, cfg)
+        crossing = DvdtCrossingResult(
+            float(fallback),
+            crossing.t_pct_a_s,
+            crossing.t_pct_b_s,
+            crossing.th_a,
+            crossing.th_b,
+        )
+    return DvdtMeasurementContext(
+        float(base_v), float(top_v), crossing, used_fallback
+    )
+
+
+def turn_off_didt_measurement_context(
+    t: np.ndarray,
+    ic: np.ndarray,
+    i0: int,
+    i1: int,
+    pulse1_on: int,
+    off_idx: int,
+    fall_start: int,
+    fall_end: int,
+    dt: float,
+    cfg: AppConfig,
+    pct_a: float,
+    pct_b: float,
+    edge: str = "fall",
+) -> DidtMeasurementContext:
+    """用同一参数本地窗口生成关断 di/dt 的完整默认测量上下文。"""
+    from dpt_extractor.metrics.plateau_level import turn_off_didt_base_top_levels
+
+    n = min(len(t), len(ic))
+    if n < 2:
+        crossing = DidtCrossingResult(0.0, None, None, 0.0, 0.0)
+        return DidtMeasurementContext(0.0, 0.0, crossing, True)
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 1, min(int(i1), n - 1))
+    search0 = max(i0, min(int(fall_start), i1 - 1))
+    search1 = max(search0 + 1, min(int(fall_end), i1))
+    base_a, top_a = turn_off_didt_base_top_levels(
+        ic,
+        i0,
+        i1,
+        pulse1_on,
+        off_idx,
+        fall_start,
+        fall_end,
+        dt,
+    )
+    crossing = didt_between_base_top(
+        t,
+        ic,
+        search0,
+        search1,
+        base_a,
+        top_a,
+        pct_a,
+        pct_b,
+        edge,
+    )
+    used_fallback = crossing.didt < 1e-6
+    if used_fallback:
+        fallback = didt_max(t, ic, search0, search1 + 1, dt, cfg)
+        crossing = DidtCrossingResult(
+            float(fallback),
+            crossing.t_pct_a_s,
+            crossing.t_pct_b_s,
+            crossing.th_a,
+            crossing.th_b,
+            crossing.idm,
+            crossing.irm,
+        )
+    return DidtMeasurementContext(
+        float(base_a), float(top_a), crossing, used_fallback
     )
 
 

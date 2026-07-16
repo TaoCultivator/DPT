@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import Callable
 
 from dpt_extractor.config.loader import AppConfig
 from dpt_extractor.models.bridge_profile import BridgeProfile
@@ -29,6 +30,8 @@ def dpt_export_results(
     profile: BridgeProfile,
     cfg: AppConfig,
     current_result: ExtractResult,
+    *,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[ExtractResult]:
     """Build the result rows that should be written for the current DPT waveform."""
     mode = parse_test_mode(cfg.test_mode.mode)
@@ -39,9 +42,12 @@ def dpt_export_results(
         return [current_result]
 
     rows: list[ExtractResult] = []
-    for off_pulse, on_pulse in dpt_export_pulse_pairs(count):
+    pairs = dpt_export_pulse_pairs(count)
+    for index, (off_pulse, on_pulse) in enumerate(pairs, start=1):
         row_cfg = deepcopy(cfg)
         row_cfg.pulse_selection.off_pulse = off_pulse
         row_cfg.pulse_selection.on_pulse = on_pulse
         rows.append(run_extraction(bundle, profile, row_cfg))
+        if progress_callback is not None:
+            progress_callback(index, len(pairs))
     return rows

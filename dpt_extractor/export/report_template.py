@@ -2456,6 +2456,14 @@ def write_report_template(
                 label,
             )
 
+    def emit_image(done: int, total: int, label: str) -> None:
+        if progress_callback is not None:
+            progress_callback(
+                max(0, min(int(done), max(0, int(total)))),
+                max(0, int(total)),
+                label,
+            )
+
     emit(0, "打开报告文件")
     wb = load_workbook(path)
     emit(1, "读取报告模板")
@@ -2496,7 +2504,7 @@ def write_report_template(
                 anchor_row,
                 image_map,
                 result,
-                progress_callback=lambda done, _total, label: emit(2 + done, label),
+                progress_callback=emit_image,
                 temperature_labels=temperature_labels,
             )
         _normalize_report_temperature_labels(wb, temperature_labels)
@@ -2569,7 +2577,7 @@ def write_report_template(
             waveform_anchor_row,
             image_map,
             result0,
-            progress_callback=lambda done, _total, label: emit(2 + done, label),
+            progress_callback=emit_image,
             temperature_labels=temperature_labels,
         )
         if waveform_ws is not None
