@@ -16,6 +16,7 @@ from scripts.validate_gui_cursors import (
     _group_rows_by_sample,
     _level_on_channel,
     _sample_trace_id,
+    _unnecessary_ab_focus_expansion,
 )
 
 
@@ -114,6 +115,48 @@ class TestCursorAuditCapture(unittest.TestCase):
             _captured_parameter_focus(capture.calls),
             (10.25, (10.5, 12.75), 0.31),
         )
+
+    def test_cursor_a_b_audit_rejects_search_window_overexpansion(self) -> None:
+        problem = _unnecessary_ab_focus_expansion(
+            "关断过程",
+            "Eoff",
+            (22.871, 26.871),
+            (0.0, 60.0),
+            (23.991, (22.977, 25.015), 0.28),
+            24.190,
+            24.560,
+        )
+
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("实际4.000us", problem)
+        self.assertIn("真实A/B仅需2.000us", problem)
+
+    def test_cursor_a_b_audit_accepts_compact_default_view(self) -> None:
+        problem = _unnecessary_ab_focus_expansion(
+            "开通",
+            "di/dt",
+            (23.431, 25.431),
+            (0.0, 60.0),
+            (23.991, (24.190, 24.560), 0.28),
+            24.190,
+            24.560,
+        )
+
+        self.assertIsNone(problem)
+
+    def test_cursor_a_b_audit_does_not_constrain_recovery_tail_views(self) -> None:
+        problem = _unnecessary_ab_focus_expansion(
+            "反向恢复",
+            "Trr",
+            (27.0, 31.0),
+            (0.0, 60.0),
+            (28.1, (28.1, 30.9), 0.28),
+            28.1,
+            28.45,
+        )
+
+        self.assertIsNone(problem)
 
     def test_level_check_preserves_signal_sign(self) -> None:
         values = np.asarray([-30.0, -25.0, -20.0], dtype=np.float64)

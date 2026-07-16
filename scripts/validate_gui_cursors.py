@@ -28,6 +28,7 @@ import numpy as np  # noqa: E402
 
 from dpt_extractor.gui.waveform_plot import (  # noqa: E402
     PARAM_FOCUS_ANCHOR_FRACTION,
+    _solve_parameter_x_window,
 )
 from dpt_extractor.models.waveform import (  # noqa: E402
     bundle_reverse_recovery_current,
@@ -214,6 +215,54 @@ def _captured_parameter_focus(
         float(bound["anchor_us"]),
         required,
         float(bound.get("anchor_fraction", PARAM_FOCUS_ANCHOR_FRACTION)),
+    )
+
+
+_COMPACT_AB_FOCUS_PARAMS = {
+    ("关断过程", "dv/dt"),
+    ("关断过程", "di/dt"),
+    ("关断过程", "Eoff"),
+    ("开通", "dv/dt"),
+    ("开通", "di/dt"),
+    ("开通", "Eon"),
+}
+
+
+def _unnecessary_ab_focus_expansion(
+    section: str,
+    name: str,
+    view_range_us: tuple[float, float],
+    full_range_us: tuple[float, float],
+    captured_focus: tuple[float, tuple[float, ...], float] | None,
+    cursor_a_us: float | None,
+    cursor_b_us: float | None,
+    *,
+    tolerance_us: float = 0.02,
+) -> str | None:
+    """Flag default views widened by search bounds when actual A/B already fit.
+
+    The UI is allowed to expand the 2 us baseline for physical A/B visibility or
+    full-waveform boundaries.  Search windows are calculation inputs, however,
+    and must not make the report view wider after real cursor times are known.
+    """
+    if (section, name) not in _COMPACT_AB_FOCUS_PARAMS:
+        return None
+    if captured_focus is None or cursor_a_us is None or cursor_b_us is None:
+        return None
+    anchor_us, _implementation_required, anchor_fraction = captured_focus
+    expected_x0, expected_x1 = _solve_parameter_x_window(
+        full_range_us,
+        anchor_us,
+        (float(cursor_a_us), float(cursor_b_us)),
+        anchor_fraction=anchor_fraction,
+    )
+    actual_span = float(view_range_us[1]) - float(view_range_us[0])
+    expected_span = expected_x1 - expected_x0
+    if actual_span <= expected_span + max(0.0, float(tolerance_us)):
+        return None
+    return (
+        f"局部视窗不必要放大: 实际{actual_span:.3f}us，"
+        f"真实A/B仅需{expected_span:.3f}us"
     )
 
 
@@ -847,6 +896,8 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     f" focus_anchor={anchor_us:.3f}"
                     f" required={required_times_us}"
                 )
+            cursor_a = None
+            cursor_b = None
             if mw.wave_plot._cursor_a is not None and mw.wave_plot._cursor_b is not None:
                 cursor_a = float(mw.wave_plot._cursor_a.value())
                 cursor_b = float(mw.wave_plot._cursor_b.value())
@@ -855,6 +906,17 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                         f"A/B={cursor_a:.3f}/{cursor_b:.3f} 不在视窗"
                         f"[{x0:.3f},{x1:.3f}]"
                     )
+            expansion_problem = _unnecessary_ab_focus_expansion(
+                section,
+                name,
+                (x0, x1),
+                (full_x0, full_x1),
+                captured_focus,
+                cursor_a,
+                cursor_b,
+            )
+            if expansion_problem is not None:
+                problems.append(expansion_problem)
             detail += f" view=[{x0:.3f},{x1:.3f}]"
 
         status = "OK" if not problems else "FAIL"
@@ -923,7 +985,13 @@ def main() -> None:
             mark = {"OK": "OK ", "FAIL": "FAIL", "INFO": "INFO"}.get(status, status)
             print(f"  [{mark}] {section}/{name}: {detail}")
 
-    print(f"\n总计 FAIL={len(fails)}")
+    ok_count = sum(1 for row in all_rows if row[3] == "OK")
+    info_count = sum(1 for row in all_rows if row[3] == "INFO")
+    print(
+        "\nSUMMARY "
+        f"files={len(by_file)} items={len(all_rows)} "
+        f"OK={ok_count} INFO={info_count} FAIL={len(fails)}"
+    )
     if fails:
         raise SystemExit(1)
 

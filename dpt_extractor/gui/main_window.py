@@ -3616,7 +3616,10 @@ class MainWindow(QMainWindow):
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
         if restored is None or section == "反向恢复":
-            self._focus_switching_local_view(section, search_t0, search_t1)
+            if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
+                self._focus_switching_local_view(section, ta_us, tb_us)
+            else:
+                self._focus_switching_local_view(section, search_t0, search_t1)
         elif res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
@@ -4111,7 +4114,10 @@ class MainWindow(QMainWindow):
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
         if manual is None or section == "反向恢复":
-            self._focus_switching_local_view(section, search_t0, search_t1)
+            if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
+                self._focus_switching_local_view(section, ta_us, tb_us)
+            else:
+                self._focus_switching_local_view(section, search_t0, search_t1)
         elif res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
@@ -4712,7 +4718,7 @@ class MainWindow(QMainWindow):
 
         ta_us = markers.t_start * 1e6
         tb_us = markers.t_end * 1e6
-        self._focus_switching_local_view(section, search_t0, search_t1)
+        self._focus_switching_local_view(section, ta_us, tb_us)
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
             search_t1,

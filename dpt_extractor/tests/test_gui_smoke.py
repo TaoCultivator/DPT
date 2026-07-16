@@ -66,7 +66,19 @@ SONG_SMC_HT_WL_1048 = (
     / "07CF2C1000 20260506"
     / "SMC"
     / "HT"
+    / "tss"
     / "WL_750V_1048A_000.tss"
+)
+SONG_DCU_RT_WL_480_1000 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2506"
+    / "DCU"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "WL_480V_1000A_000.tss"
 )
 WANGLIHUI_UH_400_1070 = (
     ROOT
@@ -4816,8 +4828,13 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             self.assertIsNotNone(xr)
             x0, x1 = xr
             edge_us = (
-                min(interval)
+                min(
+                    float(plot._cursor_a.value()),
+                    float(plot._cursor_b.value()),
+                )
                 if section == "反向恢复"
+                and plot._cursor_a is not None
+                and plot._cursor_b is not None
                 else win._switching_focus_anchor_us(section)
             )
             self.assertIsNotNone(edge_us)
@@ -4855,6 +4872,122 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         assert_focus("开通", "Eon")
         assert_focus("反向恢复", "di/dt")
         win.close()
+
+    @unittest.skipUnless(
+        SONG_DCU_RT_WL_480_1000.exists() and SONG_SMC_HT_WL_1048.exists(),
+        "songzhenxi focus regression samples missing",
+    )
+    def test_default_slope_and_energy_focus_uses_real_ab_not_search_bounds(self):
+        from copy import deepcopy
+
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_ANCHOR_FRACTION
+
+        cases = (
+            (
+                SONG_DCU_RT_WL_480_1000,
+                (
+                    ("关断过程", "dv/dt"),
+                    ("关断过程", "di/dt"),
+                    ("关断过程", "Eoff"),
+                ),
+            ),
+            (
+                SONG_SMC_HT_WL_1048,
+                (
+                    ("开通", "dv/dt"),
+                    ("开通", "di/dt"),
+                    ("开通", "Eon"),
+                ),
+            ),
+        )
+
+        for sample_path, params in cases:
+            plot, bundle, profile, result = self._load_and_plot(sample_path)
+            result_before_focus = deepcopy(result)
+            win = MainWindow()
+            win.bundle = bundle
+            win.profile = profile
+            win.result = result
+            win.cfg = load_config()
+            win.wave_plot = plot
+            win.result_table.set_result(result)
+            focus_calls: list[tuple[float, tuple[float, ...], float]] = []
+            original_focus = plot.focus_parameter_window_us
+
+            def _record_focus(
+                anchor_us: float,
+                *required_times_us: float,
+                anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
+            ) -> None:
+                focus_calls.append(
+                    (
+                        float(anchor_us),
+                        tuple(float(value) for value in required_times_us),
+                        float(anchor_fraction),
+                    )
+                )
+                original_focus(
+                    anchor_us,
+                    *required_times_us,
+                    anchor_fraction=anchor_fraction,
+                )
+
+            plot.focus_parameter_window_us = _record_focus
+            try:
+                for section, name in params:
+                    with self.subTest(
+                        sample=sample_path.name,
+                        section=section,
+                        name=name,
+                    ):
+                        focus_calls.clear()
+                        win._on_value_clicked(section, name)
+                        QApplication.processEvents()
+                        self.assertTrue(focus_calls)
+                        self.assertIsNotNone(plot._cursor_a)
+                        self.assertIsNotNone(plot._cursor_b)
+                        assert (
+                            plot._cursor_a is not None
+                            and plot._cursor_b is not None
+                        )
+
+                        anchor_us, required_times, anchor_fraction = focus_calls[-1]
+                        self.assertEqual(len(required_times), 2)
+                        actual_ab = sorted(
+                            (
+                                float(plot._cursor_a.value()),
+                                float(plot._cursor_b.value()),
+                            )
+                        )
+                        required_ab = sorted(required_times)
+                        self.assertAlmostEqual(
+                            required_ab[0], actual_ab[0], places=6
+                        )
+                        self.assertAlmostEqual(
+                            required_ab[1], actual_ab[1], places=6
+                        )
+
+                        xr = plot.current_x_range_us()
+                        self.assertIsNotNone(xr)
+                        assert xr is not None
+                        x0, x1 = xr
+                        span = x1 - x0
+                        self.assertAlmostEqual(span, 2.0, delta=0.02)
+                        self.assertAlmostEqual(
+                            (anchor_us - x0) / span,
+                            anchor_fraction,
+                            delta=0.025,
+                        )
+                        self.assertGreaterEqual(actual_ab[0], x0 - 1e-6)
+                        self.assertLessEqual(actual_ab[1], x1 + 1e-6)
+
+                self.assertEqual(result, result_before_focus)
+            finally:
+                win.close()
 
     def test_restored_trr_refocuses_and_restored_err_keeps_current_view(self):
         from PyQt6.QtWidgets import QApplication
