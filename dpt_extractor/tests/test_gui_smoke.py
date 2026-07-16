@@ -82,6 +82,35 @@ WANGLIHUI_UL_400_1070 = (
     / "U"
     / "UL_400V_1070A_Rgon1.1R_Rgof5R_000.tss"
 )
+WANGLIHUI_SLOW_TURN_ON_CASES = (
+    (
+        ROOT
+        / "示例文件"
+        / "wanglihui"
+        / "U"
+        / "UH_400V_1070A_Rgon2.88R_Rgoff6.21R_000.tss",
+        498.734,
+        85.105,
+    ),
+    (
+        ROOT
+        / "示例文件"
+        / "wanglihui"
+        / "U"
+        / "UH_486V_1035A_Rgon2.88R_Rgoff6.21R_000.tss",
+        489.155,
+        83.571,
+    ),
+    (
+        ROOT
+        / "示例文件"
+        / "wanglihui"
+        / "U"
+        / "UH_486V_985A_Rgon2.88R_Rgoff6.21R_000.tss",
+        488.207,
+        80.422,
+    ),
+)
 
 
 class TestWaveformImportAutoCenter(unittest.TestCase):
@@ -1932,6 +1961,164 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(large.height(), REPORT_PLOT_CAPTURE_SIZE.height())
         self.assertAlmostEqual(large.width() / large.height(), 4 / 3, places=3)
         win.close()
+
+    def test_report_plot_capture_keeps_window_geometry_and_writes_complete_png(self):
+        import tempfile
+
+        from PyQt6.QtGui import QPixmap
+
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            REPORT_PLOT_CAPTURE_SIZE,
+        )
+
+        win = MainWindow()
+        win.resize(1000, 720)
+        win.show()
+        self.app.processEvents()
+        target = win.wave_plot
+        before_window_geometry = win.geometry()
+        before_target_geometry = target.geometry()
+        before_minimum = target.minimumSize()
+        before_maximum = target.maximumSize()
+        before_policy = target.sizePolicy()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report_capture.png"
+            win._save_report_plot_capture(path, REPORT_PLOT_CAPTURE_SIZE)
+
+            self.assertTrue(path.is_file())
+            self.assertGreater(path.stat().st_size, 0)
+            image = QPixmap(str(path))
+            self.assertFalse(image.isNull())
+            self.assertEqual(image.size(), REPORT_PLOT_CAPTURE_SIZE)
+
+        self.assertEqual(win.geometry(), before_window_geometry)
+        self.assertEqual(target.geometry(), before_target_geometry)
+        self.assertEqual(target.minimumSize(), before_minimum)
+        self.assertEqual(target.maximumSize(), before_maximum)
+        self.assertEqual(
+            target.sizePolicy().horizontalPolicy(), before_policy.horizontalPolicy()
+        )
+        self.assertEqual(
+            target.sizePolicy().verticalPolicy(), before_policy.verticalPolicy()
+        )
+        win.close()
+
+    def test_report_plot_capture_normalizes_high_dpi_before_centering(self):
+        import tempfile
+
+        from PyQt6.QtGui import QColor, QImage, QPixmap
+
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            REPORT_PLOT_CAPTURE_SIZE,
+        )
+
+        source = QPixmap(600, 300)
+        source.fill(QColor("#ff0000"))
+        source.setDevicePixelRatio(1.5)
+
+        class _CaptureTarget:
+            def grab(self) -> QPixmap:
+                return QPixmap(source)
+
+        win = MainWindow()
+        win.wave_plot = _CaptureTarget()  # type: ignore[assignment]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "high_dpi_capture.png"
+            win._save_report_plot_capture(path, REPORT_PLOT_CAPTURE_SIZE)
+            image = QImage(str(path))
+
+        self.assertFalse(image.isNull())
+        self.assertEqual(image.width(), 1280)
+        self.assertEqual(image.height(), 960)
+        self.assertEqual(image.pixelColor(640, 159), QColor("#11121f"))
+        self.assertEqual(image.pixelColor(640, 160), QColor("#ff0000"))
+        self.assertEqual(image.pixelColor(640, 799), QColor("#ff0000"))
+        self.assertEqual(image.pixelColor(640, 800), QColor("#11121f"))
+        win.close()
+
+    def test_report_plot_capture_reports_png_save_failure(self):
+        import tempfile
+
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            REPORT_PLOT_CAPTURE_SIZE,
+        )
+
+        win = MainWindow()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_parent = Path(tmp) / "missing" / "capture.png"
+            with self.assertRaisesRegex(RuntimeError, "截图保存失败"):
+                win._save_report_plot_capture(
+                    missing_parent,
+                    REPORT_PLOT_CAPTURE_SIZE,
+                )
+        win.close()
+
+    def test_parameter_window_solver_is_bounded_and_reserves_post_event_room(self):
+        from dpt_extractor.gui.waveform_plot import (
+            PARAM_FOCUS_ANCHOR_FRACTION,
+            _solve_parameter_x_window,
+        )
+
+        x0, x1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            5.0,
+            (4.9, 5.6),
+            base_span_us=2.0,
+            guard_us=0.0,
+        )
+        self.assertAlmostEqual(x1 - x0, 2.0, places=9)
+        self.assertAlmostEqual(
+            (5.0 - x0) / (x1 - x0), PARAM_FOCUS_ANCHOR_FRACTION, places=9
+        )
+
+        expanded0, expanded1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            5.0,
+            (4.0, 7.0),
+            base_span_us=2.0,
+            guard_us=0.0,
+        )
+        self.assertLessEqual(expanded0, 4.0)
+        self.assertGreaterEqual(expanded1, 7.0)
+        self.assertAlmostEqual(
+            (5.0 - expanded0) / (expanded1 - expanded0),
+            PARAM_FOCUS_ANCHOR_FRACTION,
+            places=9,
+        )
+
+        left0, left1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            0.1,
+            (0.0, 1.0),
+            base_span_us=2.0,
+            guard_us=0.0,
+        )
+        self.assertAlmostEqual(left0, 0.0, places=9)
+        self.assertGreaterEqual(left1, 1.0)
+
+        right0, right1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            9.5,
+            (9.4, 10.0),
+            base_span_us=2.0,
+            guard_us=0.0,
+        )
+        self.assertLessEqual(right0, 9.4)
+        self.assertAlmostEqual(right1, 10.0, places=9)
+
+        short0, short1 = _solve_parameter_x_window(
+            (2.0, 3.5),
+            2.5,
+            (2.1, 3.4),
+            base_span_us=2.0,
+            guard_us=0.0,
+        )
+        self.assertAlmostEqual(short0, 2.0, places=9)
+        self.assertAlmostEqual(short1, 3.5, places=9)
 
     def test_short_report_skips_desat_screenshot_without_value_or_channel(self):
         from dpt_extractor.export.report_template import SHORT_REPORT_IMAGE_PARAMS
@@ -4359,6 +4546,50 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertAlmostEqual(td_iv[1], tr_iv[0], places=3)
         self.assertAlmostEqual(ton_iv[1], tr_iv[1], places=3)
 
+    @unittest.skipUnless(
+        all(case[0].exists() for case in WANGLIHUI_SLOW_TURN_ON_CASES),
+        "wanglihui slow turn-on samples missing",
+    )
+    def test_wanglihui_slow_turn_on_uses_stable_pulse_platform_after_ch3_inversion(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        for sample_path, expected_td, expected_tr in WANGLIHUI_SLOW_TURN_ON_CASES:
+            with self.subTest(sample=sample_path.name):
+                win = MainWindow()
+                try:
+                    win._load_file(str(sample_path))
+                    self.assertIsNotNone(win.result)
+                    assert win.result is not None
+                    # 该批 UH 文件的 CH3 探头方向保存反了；必须走与通道设置
+                    # 面板相同的反相信号路径，随后同步重算。
+                    self.assertFalse(win.wave_plot.channel_inversion_enabled("CH3"))
+                    win.wave_plot.set_channel_inversion_enabled("CH3", True)
+                    QApplication.processEvents()
+
+                    self.assertIn("CH3", win.bundle.meta.channel_display_inversions)
+                    on = win.result.turn_on
+                    self.assertAlmostEqual(on.td_on, expected_td, delta=0.25)
+                    self.assertAlmostEqual(on.tr, expected_tr, delta=0.25)
+                    self.assertAlmostEqual(on.ton, on.td_on + on.tr, places=6)
+
+                    for name, expected_ns in (
+                        ("Td_on", expected_td),
+                        ("Tr", expected_tr),
+                    ):
+                        win._on_value_clicked("开通", name)
+                        QApplication.processEvents()
+                        self.assertIsNotNone(win.wave_plot._cursor_a)
+                        self.assertIsNotNone(win.wave_plot._cursor_b)
+                        cursor_ns = abs(
+                            float(win.wave_plot._cursor_b.value())
+                            - float(win.wave_plot._cursor_a.value())
+                        ) * 1000.0
+                        self.assertAlmostEqual(cursor_ns, expected_ns, delta=0.25)
+                finally:
+                    win.close()
+
     def test_dvdt_interaction_mode(self):
         from dpt_extractor.gui.main_window import MainWindow
 
@@ -4560,10 +4791,13 @@ class TestWaveformPlotSmoke(unittest.TestCase):
     @unittest.skipUnless(
         SONG_SMC_HT_WL_1048.exists(), "songzhenxi SMC HT WL 1048A sample missing"
     )
-    def test_switching_parameter_focus_keeps_gate_edge_two_divisions_from_left(self):
+    def test_switching_parameter_focus_is_bounded_and_reserves_post_event_room(self):
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.gui.main_window import MainWindow
-        from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_DEFAULT_US_PER_DIV
+        from dpt_extractor.gui.waveform_plot import (
+            PARAM_FOCUS_ANCHOR_FRACTION,
+            PARAM_FOCUS_DEFAULT_US_PER_DIV,
+        )
 
         plot, bundle, profile, result = self._load_and_plot(SONG_SMC_HT_WL_1048)
         win = MainWindow()
@@ -4575,27 +4809,41 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         win.result_table.set_result(result)
 
         def assert_focus(section: str, name: str) -> None:
+            interval = win._parameter_interval_us(section, name)
+            self.assertIsNotNone(interval)
             win._on_value_clicked(section, name)
             xr = plot.current_x_range_us()
             self.assertIsNotNone(xr)
             x0, x1 = xr
-            edge_us = win._switching_focus_anchor_us(section)
+            edge_us = (
+                min(interval)
+                if section == "反向恢复"
+                else win._switching_focus_anchor_us(section)
+            )
             self.assertIsNotNone(edge_us)
             assert edge_us is not None
             if section == "关断过程":
                 ref = win._turn_off_timing_instants().t_v90_s
-            else:
+            elif section == "开通":
                 ref = win._turn_on_timing_instants().t_v10_s
-            self.assertIsNotNone(ref)
-            assert ref is not None
-            ref_us = float(ref * 1e6)
-            self.assertGreaterEqual(ref_us - edge_us, -1e-9)
-            self.assertLessEqual(ref_us - edge_us, 0.250001)
-            self.assertAlmostEqual(
-                x0, edge_us - 2.0 * PARAM_FOCUS_DEFAULT_US_PER_DIV, delta=0.02
-            )
+            else:
+                ref = None
+            if ref is not None:
+                ref_us = float(ref * 1e6)
+                self.assertGreaterEqual(ref_us - edge_us, -1e-9)
+                self.assertLessEqual(ref_us - edge_us, 0.250001)
+            self.assertIsNotNone(plot._full_x_range)
+            assert plot._full_x_range is not None
+            full_x0, full_x1 = plot._full_x_range
+            self.assertGreaterEqual(x0, full_x0 - 1e-6)
+            self.assertLessEqual(x1, full_x1 + 1e-6)
             self.assertAlmostEqual(
                 x1 - x0, PARAM_FOCUS_DEFAULT_US_PER_DIV * 10.0, delta=0.02
+            )
+            self.assertAlmostEqual(
+                (edge_us - x0) / (x1 - x0),
+                PARAM_FOCUS_ANCHOR_FRACTION,
+                delta=0.02,
             )
             if plot._cursor_a is not None and plot._cursor_b is not None:
                 a = float(plot._cursor_a.value())
@@ -4606,6 +4854,293 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         assert_focus("关断过程", "Eoff")
         assert_focus("开通", "Eon")
         assert_focus("反向恢复", "di/dt")
+        win.close()
+
+    def test_restored_trr_refocuses_and_restored_err_keeps_current_view(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_ANCHOR_FRACTION
+
+        plot, bundle, profile, result = self._load_and_plot(UH)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+        calls: list[tuple[float, tuple[float, ...]]] = []
+        original_focus = plot.focus_parameter_window_us
+
+        def _record_focus(
+            anchor_us: float,
+            *required_times_us: float,
+            anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
+        ) -> None:
+            calls.append((float(anchor_us), tuple(map(float, required_times_us))))
+            original_focus(
+                anchor_us,
+                *required_times_us,
+                anchor_fraction=anchor_fraction,
+            )
+
+        plot.focus_parameter_window_us = _record_focus
+        try:
+            win._on_value_clicked("反向恢复", "Trr")
+            plot._emit_trr_measure_changed()
+            self.assertIsNotNone(win._manual_trr_measure)
+            assert win._manual_trr_measure is not None
+            saved_trr_a = float(win._manual_trr_measure[2])
+            plot.focus_interval_us(float(bundle.t[0] * 1e6), float(bundle.t[1] * 1e6))
+            calls.clear()
+            win._on_value_clicked("反向恢复", "Trr")
+            QApplication.processEvents()
+            self.assertTrue(calls)
+            self.assertAlmostEqual(calls[-1][0], saved_trr_a, places=6)
+
+            win._on_value_clicked("反向恢复", "Err")
+            plot._emit_energy_loss_changed()
+            saved_err = win._manual_energy.get(("反向恢复", "Err"))
+            self.assertIsNotNone(saved_err)
+            assert saved_err is not None
+            plot.focus_interval_us(float(bundle.t[0] * 1e6), float(bundle.t[1] * 1e6))
+            before_err_view = plot.current_x_range_us()
+            calls.clear()
+            win._on_value_clicked("反向恢复", "Err")
+            QApplication.processEvents()
+            self.assertFalse(calls)
+            after_err_view = plot.current_x_range_us()
+            self.assertIsNotNone(before_err_view)
+            self.assertIsNotNone(after_err_view)
+            assert before_err_view is not None and after_err_view is not None
+            self.assertAlmostEqual(after_err_view[0], before_err_view[0], places=6)
+            self.assertAlmostEqual(after_err_view[1], before_err_view[1], places=6)
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        UH.exists() and WANGLIHUI_UL_400_1070.exists(),
+        "upper/lower DPT samples missing",
+    )
+    def test_all_dpt_parameter_views_stay_bounded_with_right_side_room(self):
+        from copy import deepcopy
+
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_ANCHOR_FRACTION
+
+        params = (
+            *(
+                ("关断过程", name)
+                for name in (
+                    "ΔVce",
+                    "Ic_off_max",
+                    "Vce_off_max",
+                    "dv/dt",
+                    "di/dt",
+                    "Ls_off",
+                    "Toff",
+                    "Td_off",
+                    "Tf",
+                    "串扰电压",
+                    "Pmax",
+                    "Eoff",
+                )
+            ),
+            *(
+                ("开通", name)
+                for name in (
+                    "ΔVce",
+                    "Ic_on_max",
+                    "Vce_on_max",
+                    "开通电流",
+                    "dv/dt",
+                    "di/dt",
+                    "Ls_on",
+                    "Ton",
+                    "Td_on",
+                    "Tr",
+                    "串扰电压",
+                    "Pmax",
+                    "Eon",
+                )
+            ),
+            *(
+                ("反向恢复", name)
+                for name in ("Irr", "Trr", "Vrr", "dv/dt", "di/dt", "Pdmax", "Err")
+            ),
+        )
+
+        for sample_path in (UH, WANGLIHUI_UL_400_1070):
+            plot, bundle, profile, result = self._load_and_plot(sample_path)
+            result_before_focus = deepcopy(result)
+            win = MainWindow()
+            win.bundle = bundle
+            win.profile = profile
+            win.result = result
+            win.cfg = load_config()
+            win.wave_plot = plot
+            win.result_table.set_result(result)
+            focus_calls: list[tuple[float, tuple[float, ...], float]] = []
+            original_focus = plot.focus_parameter_window_us
+
+            def _record_focus(
+                anchor_us: float,
+                *required_times_us: float,
+                anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
+            ) -> None:
+                focus_calls.append(
+                    (
+                        float(anchor_us),
+                        tuple(float(value) for value in required_times_us),
+                        float(anchor_fraction),
+                    )
+                )
+                original_focus(
+                    anchor_us,
+                    *required_times_us,
+                    anchor_fraction=anchor_fraction,
+                )
+
+            plot.focus_parameter_window_us = _record_focus
+            self.assertIsNotNone(plot._full_x_range)
+            assert plot._full_x_range is not None
+            full_x0, full_x1 = plot._full_x_range
+            full_span = full_x1 - full_x0
+
+            for section, name in params:
+                with self.subTest(sample=sample_path.name, section=section, name=name):
+                    self.assertFalse(result.is_metric_unavailable(section, name))
+                    focus_calls.clear()
+                    win._on_value_clicked(section, name)
+                    QApplication.processEvents()
+                    self.assertTrue(focus_calls, "参数点击未调用局部视图构图")
+                    xr = plot.current_x_range_us()
+                    self.assertIsNotNone(xr)
+                    assert xr is not None
+                    x0, x1 = xr
+                    span = x1 - x0
+                    self.assertGreater(span, 0.0)
+                    self.assertGreaterEqual(x0, full_x0 - 1e-6)
+                    self.assertLessEqual(x1, full_x1 + 1e-6)
+                    self.assertGreaterEqual(span, min(2.0, full_span) - 0.02)
+
+                    anchor_us, required_times, anchor_fraction = focus_calls[-1]
+                    if x0 > full_x0 + 0.02 and x1 < full_x1 - 0.02:
+                        self.assertAlmostEqual(
+                            (anchor_us - x0) / span,
+                            anchor_fraction,
+                            delta=0.025,
+                        )
+                    for required_time in required_times:
+                        self.assertGreaterEqual(required_time, x0 - 1e-6)
+                        self.assertLessEqual(required_time, x1 + 1e-6)
+                    if plot._cursor_a is not None and plot._cursor_b is not None:
+                        a = float(plot._cursor_a.value())
+                        b = float(plot._cursor_b.value())
+                        self.assertGreaterEqual(min(a, b), x0 - 1e-6)
+                        self.assertLessEqual(max(a, b), x1 + 1e-6)
+            self.assertEqual(result, result_before_focus)
+            win.close()
+
+    def test_report_capture_rejects_tiny_or_solid_waveform_grab(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from PyQt6.QtCore import QSize
+        from PyQt6.QtGui import QColor, QPixmap
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            tiny = QPixmap(1, 1)
+            tiny.fill(QColor("#11121f"))
+            solid = QPixmap(640, 480)
+            solid.fill(QColor("#11121f"))
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "capture.png"
+                with patch.object(win.wave_plot, "grab", return_value=tiny):
+                    with self.assertRaisesRegex(RuntimeError, "区域过小"):
+                        win._save_report_plot_capture(out, QSize(1280, 960))
+                with patch.object(win.wave_plot, "grab", return_value=solid):
+                    with self.assertRaisesRegex(RuntimeError, "空白或纯色背景"):
+                        win._save_report_plot_capture(out, QSize(1280, 960))
+        finally:
+            win.close()
+
+    def test_full_report_capture_sequence_writes_every_png_without_window_resize(self):
+        import tempfile
+
+        from PyQt6.QtCore import QEvent, QObject
+        from PyQt6.QtGui import QImage
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow, REPORT_PLOT_CAPTURE_SIZE
+
+        _unused_plot, bundle, profile, result = self._load_and_plot(UH)
+        _unused_plot.close()
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = load_config()
+        win.result_table.set_result(result)
+        win.wave_plot.plot_waveforms(bundle, profile, result)
+        win.resize(1100, 760)
+        win.show()
+        QApplication.processEvents()
+
+        class _ResizeCounter(QObject):
+            def __init__(self) -> None:
+                super().__init__()
+                self.resize_count = 0
+                self.move_count = 0
+
+            def eventFilter(self, watched, event) -> bool:  # noqa: N802
+                if event.type() == QEvent.Type.Resize:
+                    self.resize_count += 1
+                elif event.type() == QEvent.Type.Move:
+                    self.move_count += 1
+                return False
+
+        window_events = _ResizeCounter()
+        waveform_events = _ResizeCounter()
+        win.installEventFilter(window_events)
+        win.wave_plot.installEventFilter(waveform_events)
+        before_window_geometry = win.geometry()
+        before_waveform_geometry = win.wave_plot.geometry()
+        before_minimum = win.wave_plot.minimumSize()
+        before_maximum = win.wave_plot.maximumSize()
+        before_x, before_y = win.wave_plot.plot.getPlotItem().getViewBox().viewRange()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            images = win._capture_report_images(Path(tmp))
+            self.assertEqual(len(images), len(win._report_image_params()))
+            for path in images.values():
+                image = QImage(str(path))
+                self.assertFalse(image.isNull(), path.name)
+                self.assertEqual(image.size(), REPORT_PLOT_CAPTURE_SIZE, path.name)
+                self.assertGreater(path.stat().st_size, 0, path.name)
+
+        after_x, after_y = win.wave_plot.plot.getPlotItem().getViewBox().viewRange()
+        self.assertEqual(win.geometry(), before_window_geometry)
+        self.assertEqual(win.wave_plot.geometry(), before_waveform_geometry)
+        self.assertEqual(win.wave_plot.minimumSize(), before_minimum)
+        self.assertEqual(win.wave_plot.maximumSize(), before_maximum)
+        self.assertEqual(window_events.resize_count, 0)
+        self.assertEqual(window_events.move_count, 0)
+        self.assertEqual(waveform_events.resize_count, 0)
+        self.assertEqual(waveform_events.move_count, 0)
+        self.assertAlmostEqual(after_x[0], before_x[0], places=6)
+        self.assertAlmostEqual(after_x[1], before_x[1], places=6)
+        self.assertAlmostEqual(after_y[0], before_y[0], places=6)
+        self.assertAlmostEqual(after_y[1], before_y[1], places=6)
         win.close()
 
     def test_param_focus_x_scale_memory(self):

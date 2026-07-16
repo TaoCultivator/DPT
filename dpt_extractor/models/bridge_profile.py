@@ -138,7 +138,7 @@ def make_short_circuit_profile(phase: str, bridge: str) -> BridgeProfile:
     )
     return replace(
         base,
-        name=f"{phase.lower}_{bridge}_short_circuit",
+        name=f"{phase.lower()}_{bridge}_short_circuit",
         display_name=f"{base.display_name} 短路",
         **channels,
     )

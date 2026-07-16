@@ -2856,12 +2856,28 @@ def _err_positive_soft_recovery_early_cross_t(
 
     return _first_level_cross_after_time(
         t,
-        np.abs(np.asarray(irr, dtype=np.float64)),
-        abs(float(ha)),
+        np.asarray(irr, dtype=np.float64),
+        float(ha),
         float(t[seed_idx]) + 14e-9,
         dt,
         window_ns=120.0,
     )
+
+
+def _err_positive_soft_recovery_ha_signal_floor(
+    peak: float,
+) -> float:
+    """Minimum resolvable Ha before the positive soft-recovery shortcut is safe.
+
+    A near-zero local Top can be smaller than the ringing/noise band. In that
+    case every zero crossing looks like a valid Irr/Ha intersection and the
+    shortcut can cut the main recovery packet hundreds of nanoseconds early.
+    Keep the accepted soft-recovery class, but require Ha to reach one percent
+    of the recovery peak first. Across the original songzhenxi corpus the bad
+    near-zero case is 0.0134%, while every verified early-entry case is at least
+    2.51%, so this guard does not reclassify the accepted waveform family.
+    """
+    return 0.01 * abs(float(peak))
 
 
 def _err_recovery_settled_base(
@@ -3107,16 +3123,11 @@ def _err_irr_ha_level_series(
     *,
     force_signed: bool = False,
 ) -> tuple[np.ndarray, float]:
-    k0 = max(0, min(int(ipk_global), len(irr) - 1))
-    peak = float(irr[k0]) if len(irr) else 0.0
-    use_mag = not force_signed and peak > 0.0 and float(ha) > 0.0
-    y = (
-        np.abs(np.asarray(irr, dtype=np.float64))
-        if use_mag
-        else np.asarray(irr, dtype=np.float64)
-    )
-    level = abs(float(ha)) if use_mag else float(ha)
-    return y, level
+    # Err 光标 A 表示逻辑 Irr 与 Ha 的真实交点。即使恢复电流正峰值、
+    # Ha 也为正，也不能在 |Irr| 上求交，否则 A 可能卡在 -Ha 处。
+    # 保留 force_signed 参数以兼容现有调用方；当前语义始终使用有符号波形。
+    del ipk_global, force_signed
+    return np.asarray(irr, dtype=np.float64), float(ha)
 
 
 def _err_true_irr_ha_cross_t(
@@ -3428,8 +3439,7 @@ def _err_irr_fall_cross_ha_t(
 ) -> float | None:
     """IRM 主峰后恢复沿与 Ha 的第一个真实交点（秒）。
 
-    上桥软恢复：Irr 为正、Ha 为尾段带符号平台时，示波器读数为 |Irr| 与 |Ha|，
-    按幅值穿越；硬恢复/下桥负向过冲仍用带符号 Irr 穿越。
+    光标 A 始终按逻辑 Irr 与带符号 Ha 求交，避免正 Ha 被卡到 -Ha。
     """
     k0 = max(0, int(ipk_global))
     k1 = max(k0 + 1, min(int(i_end), len(irr) - 1))
@@ -3694,7 +3704,14 @@ def err_energy_markers(
             )
             if guarded_t is not None and guarded_t < t_a_irr - 20e-9:
                 t_a_irr = float(guarded_t)
-    if peak > 0.0 and ha > 0.0 and abs(float(peak)) >= 120.0:
+    soft_recovery_ha_floor = _err_positive_soft_recovery_ha_signal_floor(
+        peak,
+    )
+    if (
+        peak > 0.0
+        and ha >= soft_recovery_ha_floor
+        and abs(float(peak)) >= 120.0
+    ):
         early_soft_t = _err_positive_soft_recovery_early_cross_t(
             t,
             irr_full,

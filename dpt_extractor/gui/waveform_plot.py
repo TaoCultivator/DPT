@@ -656,6 +656,8 @@ DISP_HALF_DIV = 5.0  # 纵向显示半高（格），总高 10 格（同示波�
 HORIZONTAL_DIV_COUNT = 10.0  # 横向整格数（与 _update_x_ticks 一致）
 X_NS_PER_DIV = 50  # 水平标度 ns/格 步进（滚轮与显示量化）
 PARAM_FOCUS_DEFAULT_US_PER_DIV = 0.2  # 点击参数局部放大默认 200 ns/div
+PARAM_FOCUS_ANCHOR_FRACTION = 0.28  # 事件左留约 28%，右留约 72% 观察振荡长尾
+PARAM_FOCUS_REQUIRED_GUARD_US = 0.02  # A/B 等必要内容离视窗边缘至少约 20ns
 VERT_VIEW_MARGIN = 0.10  # 纵向上下各留 10% 空白
 PLOT_AXIS_LABEL_EDGE_INSET = 0.0
 PLOT_AXIS_LABEL_END_GUARD = 0.008
@@ -916,6 +918,94 @@ def _quantize_x_us_per_div(scale_us: float) -> float:
     if scale_us < 1000.0:
         return float(max(1, int(round(scale_us))))
     return round(scale_us / 1000.0, 2) * 1000.0
+
+
+def _ceil_x_us_per_div(scale_us: float) -> float:
+    """向上取水平标度档位，避免必要内容因四舍五入被裁掉。"""
+    scale_us = abs(float(scale_us))
+    if scale_us <= 0:
+        return MIN_X_SPAN_US / HORIZONTAL_DIV_COUNT
+    if scale_us <= 1.0:
+        ns = scale_us * 1000.0
+        steps = int(np.ceil((ns - 1e-9) / X_NS_PER_DIV))
+        return max(X_NS_PER_DIV, steps * X_NS_PER_DIV) / 1000.0
+    if scale_us < 1000.0:
+        return float(max(1, int(np.ceil(scale_us - 1e-12))))
+    return float(np.ceil((scale_us - 1e-9) / 10.0) * 10.0)
+
+
+def _solve_parameter_x_window(
+    full_range: tuple[float, float] | None,
+    anchor_us: float,
+    required_times_us: tuple[float, ...] = (),
+    *,
+    base_span_us: float = PARAM_FOCUS_DEFAULT_US_PER_DIV * HORIZONTAL_DIV_COUNT,
+    anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
+    guard_us: float = PARAM_FOCUS_REQUIRED_GUARD_US,
+) -> tuple[float, float]:
+    """求解有界参数局部视窗；优先保证完整数据范围与必要时刻可见。"""
+    bounds: tuple[float, float] | None = None
+    if full_range is not None:
+        f0, f1 = (float(full_range[0]), float(full_range[1]))
+        if np.isfinite(f0) and np.isfinite(f1) and f1 > f0:
+            bounds = (f0, f1)
+
+    required = [float(value) for value in required_times_us if np.isfinite(value)]
+    anchor = float(anchor_us)
+    if not np.isfinite(anchor):
+        if required:
+            anchor = 0.5 * (min(required) + max(required))
+        elif bounds is not None:
+            anchor = 0.5 * (bounds[0] + bounds[1])
+        else:
+            anchor = 0.0
+
+    if bounds is not None:
+        f0, f1 = bounds
+        anchor = float(np.clip(anchor, f0, f1))
+        required = [float(np.clip(value, f0, f1)) for value in required]
+    required.append(anchor)
+
+    fraction = float(np.clip(anchor_fraction, 0.05, 0.95))
+    guard = max(0.0, float(guard_us))
+    req_lo = min(required)
+    req_hi = max(required)
+    guarded_lo = req_lo - guard
+    guarded_hi = req_hi + guard
+    if bounds is not None:
+        guarded_lo = max(bounds[0], guarded_lo)
+        guarded_hi = min(bounds[1], guarded_hi)
+
+    span = max(MIN_X_SPAN_US, abs(float(base_span_us)))
+    span = max(
+        span,
+        max(0.0, anchor - guarded_lo) / fraction,
+        max(0.0, guarded_hi - anchor) / (1.0 - fraction),
+    )
+    span = _ceil_x_us_per_div(span / HORIZONTAL_DIV_COUNT) * HORIZONTAL_DIV_COUNT
+    if bounds is not None:
+        span = min(span, bounds[1] - bounds[0])
+
+    ideal_x0 = anchor - fraction * span
+    if bounds is None:
+        domain_lo, domain_hi = -np.inf, np.inf
+    else:
+        domain_lo = bounds[0]
+        domain_hi = bounds[1] - span
+
+    # x0 必须同时满足完整波形边界和 [guarded_lo, guarded_hi] 可见。
+    feasible_lo = max(domain_lo, guarded_hi - span)
+    feasible_hi = min(domain_hi, guarded_lo)
+    if feasible_lo <= feasible_hi + 1e-12:
+        x0 = float(np.clip(ideal_x0, feasible_lo, feasible_hi))
+    else:
+        # 完整波形比所需保护区还窄时退化为全范围；绝不越过数据边界。
+        x0 = float(np.clip(ideal_x0, domain_lo, domain_hi))
+    x1 = x0 + span
+    if bounds is not None:
+        x0 = max(bounds[0], x0)
+        x1 = min(bounds[1], x1)
+    return float(x0), float(x1)
 
 
 def _x_wheel_step_us(scale_us: float) -> float:
@@ -8483,22 +8573,47 @@ class WaveformPlot(QWidget):
                 center_us + scale_us * HORIZONTAL_DIV_COUNT * 0.5,
             )
 
-    def focus_anchor_left_divs_us(
-        self, anchor_us: float, *, left_divs: float = 2.0
+    def focus_parameter_window_us(
+        self,
+        anchor_us: float,
+        *required_times_us: float,
+        anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
     ) -> None:
-        """局部放大时把事件锚点放在左侧若干格，给右侧振荡留观察空间。"""
-        scale_us = self._param_focus_x_scale_us()
-        left_divs = float(np.clip(float(left_divs), 0.0, HORIZONTAL_DIV_COUNT))
-        center_us = float(anchor_us) + (HORIZONTAL_DIV_COUNT * 0.5 - left_divs) * scale_us
-        self._apply_x_us_per_div(scale_us, center_us=center_us)
-        self._apply_disp_yrange()
+        """按事件锚点构造参数视窗，默认左留约 28%、右留约 72%。"""
+        base_span = self._param_focus_x_scale_us() * HORIZONTAL_DIV_COUNT
+        x0, x1 = _solve_parameter_x_window(
+            self._full_x_range,
+            float(anchor_us),
+            tuple(float(value) for value in required_times_us),
+            base_span_us=base_span,
+            anchor_fraction=anchor_fraction,
+        )
+        scale_us = _exact_x_us_per_div(x1 - x0)
+        self._x_target_us_per_div = scale_us
+        self._x_us_per_div = scale_us
         vb = self.plot.getPlotItem().getViewBox()
+        self._x_scale_updating = True
+        try:
+            vb.setXRange(x0, x1, padding=0.0)
+            self._sync_x_scale_readout(scale_us)
+        finally:
+            self._x_scale_updating = False
+        self._apply_disp_yrange()
         try:
             xr = vb.viewRange()[0]
             self._last_x_window = (float(xr[0]), float(xr[1]))
         except Exception:
-            span = scale_us * HORIZONTAL_DIV_COUNT
-            self._last_x_window = (
-                center_us - span * 0.5,
-                center_us + span * 0.5,
-            )
+            self._last_x_window = (float(x0), float(x1))
+
+    def focus_anchor_left_divs_us(
+        self,
+        anchor_us: float,
+        *,
+        left_divs: float = HORIZONTAL_DIV_COUNT * PARAM_FOCUS_ANCHOR_FRACTION,
+    ) -> None:
+        """局部放大时把事件锚点放在左侧若干格，给右侧振荡留观察空间。"""
+        left_divs = float(np.clip(float(left_divs), 0.0, HORIZONTAL_DIV_COUNT))
+        self.focus_parameter_window_us(
+            anchor_us,
+            anchor_fraction=left_divs / HORIZONTAL_DIV_COUNT,
+        )

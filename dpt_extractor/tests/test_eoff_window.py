@@ -174,6 +174,17 @@ SONG_SMC_RT_VL_1048 = SONG_SMC_RT / "VL_750V_1048A_000.tss"
 SONG_SMC_HT_UH_1048 = SONG_SMC_HT / "UH_750V_1048A_000.tss"
 SONG_SMC_HT_WH_1048 = SONG_SMC_HT / "WH_750V_1048A_000.tss"
 SONG_SMC_HT_WL_1048 = SONG_SMC_HT / "WL_750V_1048A_000.tss"
+SONG_SMC_HT_VH_403 = SONG_SMC_HT / "tss" / "VH_600V_403A_000.tss"
+SONG_SMC_LT_VL_806 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "LT"
+    / "VL_750V_806A_000.tss"
+)
 GCU_LT_UH_500 = (
     ROOT
     / "示例文件"
@@ -744,7 +755,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(mk.ha_v, 60.0)
         # Hb 为带符号正向导通 Vd 平台（≈0）
         self.assertLess(abs(mk.hb_a), 10.0)
-        _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "any")
+        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
         e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
         self.assertGreater(e, 0.2)
@@ -1439,7 +1450,80 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(mk.t_start * 1e6, 19.35)
         self.assertAlmostEqual(mk.t_end * 1e6, 18.809, delta=0.020)
         self.assertGreater(2.0 * base.amp, 40.0)
-        _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "any")
+        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_VH_403.exists(), "songzhenxi SMC HT VH 403A sample missing"
+    )
+    def test_smc_ht_vh_403_err_a_uses_signed_irr_crossing(self):
+        bundle = load_waveform(SONG_SMC_HT_VH_403)
+        profile = guess_profile_from_path(str(SONG_SMC_HT_VH_403))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        mk = err_energy_markers(
+            t,
+            irr,
+            vd,
+            rr0,
+            rr1,
+            bundle.dt,
+            i_search_end=segs.turn_on[1],
+            vge=bundle.get(profile.vge),
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
+            dc_current=result.idc,
+        )
+        energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+
+        self.assertAlmostEqual(mk.t_start * 1e6, 11.11115, delta=0.010)
+        self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.02)
+        self.assertAlmostEqual(energy, 6.19172, delta=0.02)
+
+    @unittest.skipUnless(
+        SONG_SMC_LT_VL_806.exists(), "songzhenxi SMC LT VL 806A sample missing"
+    )
+    def test_smc_lt_vl_806_near_zero_ha_waits_for_stable_gate(self):
+        bundle = load_waveform(SONG_SMC_LT_VL_806)
+        profile = guess_profile_from_path(str(SONG_SMC_LT_VL_806))
+        self.assertTrue(profile.irr_from_ic_minus_il)
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        irr = bundle_reverse_recovery_current(bundle, profile)
+        vd = bundle.get(profile.v_diode)
+        rr0, rr1 = segs.reverse_recovery
+        ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
+        base = _err_recovery_settled_base(irr, ipk, bundle.dt, segs.turn_on[1])
+        mk = err_energy_markers(
+            t,
+            irr,
+            vd,
+            rr0,
+            rr1,
+            bundle.dt,
+            i_search_end=segs.turn_on[1],
+            vge=bundle.get(profile.vge),
+            pulse1_off=segs.pulse1_off,
+            pulse2_on=segs.pulse2_on,
+            pulse2_off=segs.pulse2_off,
+            dc_current=result.idc,
+            lower_bridge_irr_from_ic_minus_il=profile.irr_from_ic_minus_il,
+        )
+        energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
+
+        self.assertLess(abs(mk.ha_v), 0.1)
+        self.assertGreaterEqual(mk.t_start, float(t[base.start_idx]) - 2e-9)
+        self.assertAlmostEqual(mk.t_start * 1e6, 16.129918, delta=0.010)
+        self.assertAlmostEqual(mk.t_end * 1e6, 15.426712, delta=0.010)
+        self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.02)
+        self.assertAlmostEqual(energy, 12.048084, delta=0.08)
 
     @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
     def test_loss_cursor_legacy_mode_restores_previous_err_a(self):

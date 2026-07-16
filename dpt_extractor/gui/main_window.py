@@ -10,7 +10,7 @@ from typing import Callable
 import numpy as np
 
 from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, Qt, QSettings, QTimer, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QPalette, QPixmap, QResizeEvent
+from PyQt6.QtGui import QColor, QCloseEvent, QPainter, QPalette, QPixmap, QResizeEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -3286,13 +3286,29 @@ class MainWindow(QMainWindow):
         return float(self.bundle.t[idx] * 1e6)
 
     def _focus_switching_local_view(
-        self, section: str, fallback_t0_us: float, fallback_t1_us: float
+        self,
+        section: str,
+        fallback_t0_us: float,
+        fallback_t1_us: float,
+        *,
+        anchor_us: float | None = None,
     ) -> None:
-        anchor_us = self._switching_focus_anchor_us(section)
+        # 关断/开通以门极事件为 28% 锚点；反向恢复则必须以当前参数的
+        # 实际 A/窗口起点为锚点，否则 Vge 边沿会把主要振荡挤到屏幕中部，
+        # 右侧反向恢复尾部在报告截图中显示不足。
+        if anchor_us is None:
+            if section == "反向恢复":
+                anchor_us = min(float(fallback_t0_us), float(fallback_t1_us))
+            else:
+                anchor_us = self._switching_focus_anchor_us(section)
         if anchor_us is None:
             self.wave_plot.focus_interval_us(fallback_t0_us, fallback_t1_us)
             return
-        self.wave_plot.focus_anchor_left_divs_us(anchor_us, left_divs=2.0)
+        self.wave_plot.focus_parameter_window_us(
+            anchor_us,
+            fallback_t0_us,
+            fallback_t1_us,
+        )
 
     def _turn_off_rise_us(self) -> float | None:
         """关断 Vce 主抬升脚时刻（µs）：段内 Vce<=on_hi 的最大 dV/dt 点。"""
@@ -3599,7 +3615,7 @@ class MainWindow(QMainWindow):
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
-        if restored is None:
+        if restored is None or section == "反向恢复":
             self._focus_switching_local_view(section, search_t0, search_t1)
         elif res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
             ta_us = res0.t_pct_a_s * 1e6
@@ -4094,7 +4110,7 @@ class MainWindow(QMainWindow):
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
-        if manual is None:
+        if manual is None or section == "反向恢复":
             self._focus_switching_local_view(section, search_t0, search_t1)
         elif res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
             ta_us = res0.t_pct_a_s * 1e6
@@ -4176,7 +4192,7 @@ class MainWindow(QMainWindow):
             move_v = float(vce[move_idx])
         move_t_us = float(t[move_idx] * 1e6)
 
-        self.wave_plot.focus_interval_us(float(t[i0] * 1e6), float(t[i1] * 1e6))
+        self._focus_switching_local_view("开通", top_t_us, move_t_us)
 
         def _on_cursor_change(_fx_t: float, _fx_v: float, _mv_t: float, _mv_v: float, delta: float) -> None:
             # delta 已是两光标电压差绝对值（A、B 对称）
@@ -4257,7 +4273,7 @@ class MainWindow(QMainWindow):
         else:
             top_idx = int(search[np.argmin(np.abs(vce[search] - v_top))])
         top_t_us = float(t[top_idx] * 1e6)
-        self.wave_plot.focus_interval_us(float(t[off0] * 1e6), float(t[off1] * 1e6))
+        self._focus_switching_local_view("关断过程", peak_t_us, top_t_us)
 
         def _on_cursor_change(_fx_t: float, _fx_v: float, _mv_t: float, _mv_v: float, delta: float) -> None:
             # delta 已是两光标电压差绝对值（A、B 对称）
@@ -4397,7 +4413,10 @@ class MainWindow(QMainWindow):
             return True
 
         matched = _power_peak(t0_us, t1_us)
-        self.wave_plot.focus_interval_us(t0_us, t1_us)
+        if restored is None or section == "反向恢复":
+            self._focus_switching_local_view(section, t0_us, t1_us)
+        else:
+            self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_interval_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
@@ -4516,11 +4535,15 @@ class MainWindow(QMainWindow):
             tb_us = markers.t_end * 1e6
             ha_a, hb_v = markers.ha_v, markers.hb_a
 
+        # 首次进入 Err 时将恢复区放到推荐位置；已经存在手动 energy
+        # 光标时，用户可能刚刚平移/缩放到要复核的局部区域。二次点击只恢复
+        # 光标和交互状态，不应覆盖当前 X 轴视图。
         if restored is None and legacy is None:
             self._focus_switching_local_view(
                 "反向恢复",
                 min(ta_us, tb_us) - 0.15,
                 max(ta_us, tb_us) + 0.15,
+                anchor_us=min(ta_us, tb_us),
             )
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
@@ -4786,10 +4809,7 @@ class MainWindow(QMainWindow):
         def _on_irr_interval(t0_us: float, t1_us: float) -> None:
             _apply_irr_interval(t0_us, t1_us, remember=True)
 
-        if restored is None:
-            self._focus_switching_local_view("反向恢复", t0_us, t1_us)
-        else:
-            self.wave_plot.focus_interval_us(t0_us, t1_us)
+        self._focus_switching_local_view("反向恢复", t0_us, t1_us)
         self.wave_plot.enable_irr_peak_interaction(t0_us, t1_us, _on_irr_interval)
         _apply_irr_interval(t0_us, t1_us, remember=restored is not None)
 
@@ -4860,10 +4880,12 @@ class MainWindow(QMainWindow):
                 f"反向恢复 Trr={trr_ns:.3f}ns (A={ta_us:.3f}µs B={tb_us:.3f}µs Ha={ha:.2f}A)"
             )
 
-        if saved is None:
-            self._focus_switching_local_view("反向恢复", t0_us, t1_us)
-        else:
-            self.wave_plot.focus_interval_us(t0_us, t1_us)
+        self._focus_switching_local_view(
+            "反向恢复",
+            ta_us,
+            max(tb_us, t1_us),
+            anchor_us=ta_us,
+        )
         self.wave_plot.enable_trr_measure_interaction(
             t0_us,
             t1_us,
@@ -4957,7 +4979,10 @@ class MainWindow(QMainWindow):
             if self.result is not None:
                 ha0 = float(self.result.turn_on.turn_on_current)
 
-        self.wave_plot.focus_interval_us(t_a_us, t_b_us)
+        if restored is None:
+            self._focus_switching_local_view("开通", t_a_us, t_b_us)
+        else:
+            self.wave_plot.focus_interval_us(t_a_us, t_b_us)
         self.wave_plot.enable_turn_on_current_interaction(
             t_a_us,
             t_search_hi,
@@ -5017,7 +5042,10 @@ class MainWindow(QMainWindow):
 
         restored = self._manual_intervals.get((section, name))
         t0_us, t1_us = restored if restored is not None else interval
-        self.wave_plot.focus_interval_us(t0_us, t1_us)
+        if restored is None:
+            self._focus_switching_local_view(section, t0_us, t1_us)
+        else:
+            self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_crosstalk_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
@@ -5285,8 +5313,12 @@ class MainWindow(QMainWindow):
             else None
         )
         t0_us, t1_us = restored if restored is not None else interval
-        if not is_short_circuit_param and restored is None and manual_extreme is None:
-            self.wave_plot.focus_interval_us(t0_us, t1_us)
+        if (
+            not is_short_circuit_param
+            and manual_extreme is None
+            and (restored is None or section == "反向恢复")
+        ):
+            self._focus_switching_local_view(section, t0_us, t1_us)
         self.wave_plot.enable_interval_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
@@ -6063,6 +6095,7 @@ class MainWindow(QMainWindow):
             segs.pulse2_on,
             self.bundle.dt,
             self.cfg,
+            pulse2_off=segs.pulse2_off,
         )
 
     def _turn_off_timing_instants(self):
@@ -6860,21 +6893,101 @@ class MainWindow(QMainWindow):
 
     def _save_report_plot_capture(self, path: Path, size: QSize) -> None:
         target = self.wave_plot
-        old_min = target.minimumSize()
-        old_max = target.maximumSize()
-        old_policy = target.sizePolicy()
+        if size.width() <= 0 or size.height() <= 0:
+            raise ValueError("报告截图尺寸必须大于 0")
+
+        # 直接抓取当前可见波形，再仅在内存中缩放/留边。不要通过 setFixedSize
+        # 改变布局；报告逐参数截图期间只允许波形视窗变化，主窗口几何尺寸必须稳定。
+        source = target.grab()
+        if source.isNull() or source.width() <= 0 or source.height() <= 0:
+            raise RuntimeError("报告波形截图失败：未能获取可见波形")
+        if source.width() < 320 or source.height() < 200:
+            raise RuntimeError(
+                "报告波形截图失败：可见波形区域过小，无法确认光标和波形内容"
+            )
+
+        # 防止隐藏/未完成绘制的控件产生尺寸正常但实际只有纯色背景的 PNG。
+        # 缩到小预览后抽样即可，避免报告逐参数截图时增加明显开销。
+        preview = source.scaled(
+            QSize(64, 48),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        ).toImage()
+        sampled_colors: dict[tuple[int, int, int], int] = {}
+        min_luma, max_luma = 255, 0
+        opaque_samples = 0
+        for py in range(preview.height()):
+            for px in range(preview.width()):
+                color = preview.pixelColor(px, py)
+                if color.alpha() == 0:
+                    continue
+                rgb = (color.red(), color.green(), color.blue())
+                sampled_colors[rgb] = sampled_colors.get(rgb, 0) + 1
+                opaque_samples += 1
+                luma = (54 * rgb[0] + 183 * rgb[1] + 19 * rgb[2]) // 256
+                min_luma = min(min_luma, luma)
+                max_luma = max(max_luma, luma)
+        # 不能把“颜色种类少”直接等同为空白：正常未载入波形的完整控件只有
+        # 少量主题色，高 DPI 测试替身也可能是单一的非背景色。仅当画面近乎
+        # 纯色，并且主色确实是波形控件的已知背景色时才判为空白。
+        dominant_rgb = (
+            max(sampled_colors.items(), key=lambda item: item[1])[0]
+            if sampled_colors
+            else None
+        )
+        dominant_ratio = (
+            sampled_colors[dominant_rgb] / opaque_samples
+            if dominant_rgb is not None and opaque_samples > 0
+            else 1.0
+        )
+        luma_span = max_luma - min_luma if opaque_samples > 0 else 0
+        nearly_solid = (
+            opaque_samples == 0
+            or dominant_ratio >= 0.995
+            or (len(sampled_colors) <= 4 and luma_span <= 8)
+        )
+        blank_backgrounds = (
+            (0, 0, 0),
+            (17, 18, 31),  # WaveformPlotRoot
+            (21, 21, 21),  # overview plot
+            (16, 17, 26),  # channel strip
+        )
+
+        def _near_blank_background(rgb: tuple[int, int, int] | None) -> bool:
+            if rgb is None:
+                return True
+            return any(
+                max(abs(rgb[idx] - bg[idx]) for idx in range(3)) <= 4
+                for bg in blank_backgrounds
+            )
+
+        if nearly_solid and _near_blank_background(dominant_rgb):
+            raise RuntimeError(
+                "报告波形截图失败：截图仅包含空白或纯色背景，请等待波形绘制完成"
+            )
+        # grab() 在高 DPI 屏幕上携带设备像素比；报告 PNG 以固定物理像素输出，
+        # 合成前归一到 DPR=1，避免 125%/150% 缩放时内容再次缩小并偏离中心。
+        source.setDevicePixelRatio(1.0)
+
+        canvas = QPixmap(size)
+        canvas.fill(QColor("#11121f"))
+        scaled = source.scaled(
+            size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = (size.width() - scaled.width()) // 2
+        y = (size.height() - scaled.height()) // 2
+        painter = QPainter(canvas)
         try:
-            target.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            target.setFixedSize(size)
-            QApplication.processEvents()
-            target.grab().save(str(path), "PNG")
+            painter.drawPixmap(x, y, scaled)
         finally:
-            target.setMinimumSize(old_min)
-            target.setMaximumSize(old_max)
-            target.setSizePolicy(old_policy)
-            if self.wave_plot._zoom_toggle_btn.isVisible():
-                self.wave_plot._position_zoom_toggle_button()
-            QApplication.processEvents()
+            painter.end()
+
+        if not canvas.save(str(path), "PNG"):
+            raise RuntimeError(f"报告波形截图保存失败：{path.name}")
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise RuntimeError(f"报告波形截图不完整：{path.name}")
 
     def _capture_report_images(self, directory: Path) -> dict[tuple[str, str], Path]:
         if self.result is None:

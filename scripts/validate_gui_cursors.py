@@ -26,6 +26,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
 
+from dpt_extractor.gui.waveform_plot import (  # noqa: E402
+    PARAM_FOCUS_ANCHOR_FRACTION,
+)
 from dpt_extractor.models.waveform import (  # noqa: E402
     bundle_reverse_recovery_current,
     bundle_total_current,
@@ -34,6 +37,11 @@ from dpt_extractor.utils.sample_corpus import discover_sample_waveforms  # noqa:
 
 # 每个交互参数：(section, name)。Vce_off_max 等走 generic interval（带横向峰）。
 INTERACTIVE_PARAMS = [
+    ("关断过程", "Ls_off"),
+    ("关断过程", "Toff"),
+    ("关断过程", "Td_off"),
+    ("关断过程", "Tf"),
+    ("关断过程", "Pmax"),
     ("关断过程", "dv/dt"),
     ("关断过程", "di/dt"),
     ("关断过程", "Eoff"),
@@ -49,11 +57,17 @@ INTERACTIVE_PARAMS = [
     ("开通", "Ic_on_max"),
     ("开通", "Vce_on_max"),
     ("开通", "串扰电压"),
+    ("开通", "Ls_on"),
+    ("开通", "Ton"),
+    ("开通", "Td_on"),
+    ("开通", "Tr"),
+    ("开通", "Pmax"),
     ("反向恢复", "Irr"),
     ("反向恢复", "Trr"),
     ("反向恢复", "Vrr"),
     ("反向恢复", "dv/dt"),
     ("反向恢复", "di/dt"),
+    ("反向恢复", "Pdmax"),
     ("反向恢复", "Err"),
 ]
 
@@ -90,6 +104,27 @@ def _is_short_circuit_sample(path: Path) -> bool:
     if parts & _SHORT_CIRCUIT_DIR_TOKENS:
         return True
     return bool(_SHORT_CIRCUIT_FILENAME_RE.search(path.stem))
+
+
+def _sample_trace_id(path: Path, root: Path = ROOT) -> str:
+    """Return an unambiguous, human-readable sample path for audit output."""
+    try:
+        resolved_path = path.resolve()
+        resolved_root = root.resolve()
+        return str(resolved_path.relative_to(resolved_root))
+    except (OSError, ValueError):
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
+
+
+def _group_rows_by_sample(rows: list[tuple]) -> dict[str, list[tuple]]:
+    """Group rows by their traceable sample id, never by basename alone."""
+    grouped: dict[str, list[tuple]] = {}
+    for row in rows:
+        grouped.setdefault(row[0], []).append(row)
+    return grouped
 
 
 class Capture:
@@ -131,6 +166,7 @@ class Capture:
             return inner
 
         for meth in (
+            "focus_parameter_window_us",
             "enable_dvdt_interaction",
             "apply_dvdt_ab_times",
             "enable_energy_loss_interaction",
@@ -148,8 +184,95 @@ class Capture:
             setattr(wave_plot, meth, wrap(meth, orig))
 
 
+def _capture_error_details(calls: dict[str, dict]) -> list[str]:
+    """Return every exception swallowed by a capture wrapper.
+
+    The wrapper intentionally keeps the audit process alive so one bad cursor
+    does not hide the rest of the matrix.  Consequently, callers must promote
+    every recorded exception to FAIL instead of trusting the method's fallback
+    return value.
+    """
+    return [
+        f"{name}: {call['error']}"
+        for name, call in calls.items()
+        if call.get("error")
+    ]
+
+
+def _captured_parameter_focus(
+    calls: dict[str, dict],
+) -> tuple[float, tuple[float, ...], float] | None:
+    """Read the actual focus call used by the UI, without re-deriving its anchor."""
+    call = calls.get("focus_parameter_window_us")
+    if call is None:
+        return None
+    bound = call.get("bound", {})
+    if "anchor_us" not in bound:
+        return None
+    required = tuple(float(value) for value in bound.get("required_times_us", ()))
+    return (
+        float(bound["anchor_us"]),
+        required,
+        float(bound.get("anchor_fraction", PARAM_FOCUS_ANCHOR_FRACTION)),
+    )
+
+
+def _is_wanglihui_u_sample(path: Path) -> bool:
+    parts = [part.casefold() for part in path.parts]
+    return any(
+        parts[index] == "wanglihui" and parts[index + 1] == "u"
+        for index in range(len(parts) - 1)
+    )
+
+
+def _ensure_wanglihui_u_ch3_ui_inversion(mw, QApplication, path: Path) -> str:
+    """Apply the wanglihui/U CH3 inversion through the same state path as the UI.
+
+    UH sources start with the display toggle off, so enabling it emits
+    ``channelInversionChanged`` and MainWindow recalculates synchronously.  UL
+    sources already carry CH3 source/display inversion metadata; toggling those
+    again would double-flip the probe.  In that case keep the enabled UI state
+    and explicitly recalculate once.
+    """
+    if not _is_wanglihui_u_sample(path) or mw.bundle is None:
+        return ""
+
+    source_before = set(mw.bundle.meta.source_channel_inversions)
+    result_before = mw.result
+    was_enabled = bool(mw.wave_plot.channel_inversion_enabled("CH3"))
+    if was_enabled:
+        # The source-inverted UL path is already checked in the UI.  Recompute
+        # from that state without toggling it off/on (which would double-flip).
+        mw._recalculate(reset_manual=False)
+    else:
+        # This is the real Channel Settings action.  Its signal updates bundle
+        # display metadata and invokes MainWindow._recalculate.
+        mw.wave_plot.set_channel_inversion_enabled("CH3", True)
+    QApplication.processEvents()
+
+    if set(mw.bundle.meta.source_channel_inversions) != source_before:
+        raise AssertionError("CH3 UI 反相不应改写 source_channel_inversions")
+    if not mw.wave_plot.channel_inversion_enabled("CH3"):
+        raise AssertionError("CH3 UI 反相未保持启用")
+    if "CH3" not in mw.bundle.meta.channel_display_inversions:
+        raise AssertionError("CH3 display inversion 未写入波形状态")
+    if mw.result is None or mw.result is result_before:
+        raise AssertionError("CH3 display inversion 后 MainWindow 未完成重算")
+
+    source_mode = "source已反相，未二次翻转" if "CH3" in source_before else "UI手动反相"
+    return f"CH3反相=开启（{source_mode}，已重算）"
+
+
 def _abs_range(arr: np.ndarray, i0: int, i1: int) -> tuple[float, float]:
     seg = np.abs(np.asarray(arr[i0 : i1 + 1], dtype=np.float64))
+    if len(seg) == 0:
+        return 0.0, 0.0
+    return float(np.min(seg)), float(np.max(seg))
+
+
+def _signed_range(arr: np.ndarray, i0: int, i1: int) -> tuple[float, float]:
+    seg = np.asarray(arr[i0 : i1 + 1], dtype=np.float64)
+    seg = seg[np.isfinite(seg)]
     if len(seg) == 0:
         return 0.0, 0.0
     return float(np.min(seg)), float(np.max(seg))
@@ -166,21 +289,128 @@ def _in_window(t_us: float, t: np.ndarray, i0: int, i1: int, pad_us: float = 0.5
 
 
 def _level_on_channel(level: float, arr: np.ndarray, i0: int, i1: int) -> bool:
-    lo, hi = _abs_range(arr, i0, i1)
-    tol = max(8.0, 0.08 * hi)
-    return (lo - tol) <= abs(float(level)) <= (hi + tol)
+    lo, hi = _signed_range(arr, i0, i1)
+    tol = max(8.0, 0.08 * max(abs(lo), abs(hi)))
+    return (lo - tol) <= float(level) <= (hi + tol)
+
+
+ERR_A_INTERP_MIN_ATOL_A = 1e-6
+ERR_A_INTERP_ULP_FACTOR = 32.0
+ERR_A_NEAR_ZERO_PEAK_RATIO = 0.01
+ERR_A_SETTLED_GATE_MARGIN_S = 2e-9
+
+
+def _err_a_interpolation_atol(
+    t: np.ndarray,
+    irr: np.ndarray,
+    t_a_s: float,
+    ha_a: float,
+) -> float:
+    """Return a float/interpolation-only tolerance for signed Err A auditing."""
+    times = np.asarray(t, dtype=np.float64)
+    values = np.asarray(irr, dtype=np.float64)
+    if len(times) < 2 or len(values) != len(times):
+        return ERR_A_INTERP_MIN_ATOL_A
+
+    k = int(np.searchsorted(times, float(t_a_s), side="right")) - 1
+    k = max(0, min(k, len(times) - 2))
+    t0, t1 = float(times[k]), float(times[k + 1])
+    y0, y1 = float(values[k]), float(values[k + 1])
+    dt = abs(t1 - t0)
+    slope_a_per_s = abs(y1 - y0) / dt if dt > 0.0 else 0.0
+
+    # A time is passed through seconds -> microseconds -> seconds before this
+    # audit. Bound that round-trip and np.interp arithmetic by local ULPs, then
+    # map the time error through the local segment slope. The 1 µA floor is only
+    # a defensive allowance for float serialization; it is still far below any
+    # waveform/amplitude tolerance and cannot hide a meaningful sign reversal.
+    time_ulp_s = max(
+        abs(float(np.spacing(t0))),
+        abs(float(np.spacing(t1))),
+        abs(float(np.spacing(float(t_a_s)))),
+    )
+    value_ulp_a = max(
+        abs(float(np.spacing(y0))),
+        abs(float(np.spacing(y1))),
+        abs(float(np.spacing(float(ha_a)))),
+    )
+    numeric_atol_a = ERR_A_INTERP_ULP_FACTOR * (
+        value_ulp_a + slope_a_per_s * time_ulp_s
+    )
+    return max(ERR_A_INTERP_MIN_ATOL_A, float(numeric_atol_a))
+
+
+def _err_a_signed_intersection_check(
+    ha_a: float,
+    t_a_s: float,
+    t: np.ndarray,
+    irr: np.ndarray,
+) -> tuple[bool, float, float]:
+    """Check that Err A is the real signed Irr/Ha interpolation crossing."""
+    irr_at_a = float(np.interp(float(t_a_s), t, irr))
+    atol_a = _err_a_interpolation_atol(t, irr, t_a_s, ha_a)
+    opposite_sign = (
+        abs(float(ha_a)) > atol_a
+        and abs(irr_at_a) > atol_a
+        and np.signbit(float(ha_a)) != np.signbit(irr_at_a)
+    )
+    matches = not opposite_sign and abs(float(ha_a) - irr_at_a) <= atol_a
+    return matches, irr_at_a, atol_a
+
+
+def _err_a_requires_settled_gate(peak_a: float, ha_a: float) -> bool:
+    """Mirror the production guard for a near-zero positive Err Ha."""
+    peak = float(peak_a)
+    ha = float(ha_a)
+    return (
+        peak > 0.0
+        and ha > 0.0
+        and ha < ERR_A_NEAR_ZERO_PEAK_RATIO * abs(peak)
+    )
+
+
+def _err_a_settled_gate_check(
+    peak_a: float,
+    ha_a: float,
+    t_a_s: float,
+    settled_start_s: float,
+) -> bool:
+    """Require near-zero positive-Ha A at/after the settled envelope gate."""
+    if not _err_a_requires_settled_gate(peak_a, ha_a):
+        return True
+    return float(t_a_s) + ERR_A_SETTLED_GATE_MARGIN_S >= float(settled_start_s)
 
 
 def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
+    sample_id = _sample_trace_id(path)
     mw = MainWindow()
     mw._load_file(str(path))
+    if mw.bundle is None or mw.result is None or mw.result.segments is None:
+        detail = mw.statusBar().currentMessage() if mw.statusBar() is not None else "参数未计算"
+        mw.close()
+        return [(sample_id, "加载", "自动提取", "INFO", detail)]
+    try:
+        inversion_note = _ensure_wanglihui_u_ch3_ui_inversion(
+            mw, QApplication, path
+        )
+    except Exception as exc:  # noqa: BLE001
+        mw.close()
+        return [
+            (
+                sample_id,
+                "通道设置",
+                "CH3反相",
+                "FAIL",
+                f"真实 UI 反相/重算失败: {exc!r}",
+            )
+        ]
     bundle = mw.bundle
     profile = mw.profile
     result = mw.result
     if bundle is None or result is None or result.segments is None:
-        detail = mw.statusBar().currentMessage() if mw.statusBar() is not None else "参数未计算"
+        detail = "通道状态更新后参数未计算"
         mw.close()
-        return [(path.name, "加载", "自动提取", "INFO", detail)]
+        return [(sample_id, "通道设置", "CH3反相", "FAIL", detail)]
     t = bundle.t
     segs = result.segments
     chan = {
@@ -201,13 +431,60 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
     }
     irr_ref = float(result.reverse_recovery.irr)
 
+    if _is_wanglihui_u_sample(path):
+        on0, on1 = segs.turn_on
+        ic_on = np.asarray(chan["ic"][on0 : on1 + 1], dtype=np.float64)
+        ic_p10, ic_p90 = np.percentile(ic_on, [10.0, 90.0])
+        from dpt_extractor.metrics.irr_measure import irr_parameter_peak_index
+
+        irr_peak_idx = int(
+            irr_parameter_peak_index(
+                np.asarray(chan["irr"], dtype=np.float64),
+                segs.reverse_recovery[0],
+                segs.reverse_recovery[1],
+                segs.pulse2_on,
+                segs.turn_on[0],
+                segs.turn_on[1],
+            )
+        )
+        signed_irr_peak = float(chan["irr"][irr_peak_idx])
+        setup_problems: list[str] = []
+        if not (ic_p90 > max(20.0, abs(float(ic_p10)))):
+            setup_problems.append(
+                f"Ic 导通趋势极性异常: P10={ic_p10:.1f}, P90={ic_p90:.1f}"
+            )
+        if not (signed_irr_peak > 0.0):
+            setup_problems.append(
+                f"Irr 尖峰应为正向: idx={irr_peak_idx}, y={signed_irr_peak:.1f}"
+            )
+        if irr_ref > 1.0 and not np.isclose(
+            signed_irr_peak,
+            irr_ref,
+            rtol=0.15,
+            atol=8.0,
+        ):
+            setup_problems.append(
+                f"Irr 有符号尖峰={signed_irr_peak:.1f} 与结果={irr_ref:.1f}不符"
+            )
+        if setup_problems:
+            mw.close()
+            return [
+                (
+                    sample_id,
+                    "通道设置",
+                    "CH3反相",
+                    "FAIL",
+                    f"{inversion_note} | " + "; ".join(setup_problems),
+                )
+            ]
+
     cap = Capture()
     cap.install(mw.wave_plot)
 
     rows: list[tuple] = []
 
     def record(section, name, status, detail):
-        rows.append((path.name, section, name, status, detail))
+        rows.append((sample_id, section, name, status, detail))
 
     for section, name in INTERACTIVE_PARAMS:
         if result.single_pulse_mode and section in {"开通", "反向恢复"}:
@@ -222,6 +499,15 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             record(section, name, "FAIL", f"异常: {exc!r}")
             continue
         calls = cap.calls
+        capture_errors = _capture_error_details(calls)
+        if capture_errors:
+            record(
+                section,
+                name,
+                "FAIL",
+                "捕获到 GUI 调用异常: " + "; ".join(capture_errors),
+            )
+            continue
         problems: list[str] = []
 
         def check_channel(actual, expected, label):
@@ -244,9 +530,9 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             else:
                 w0, w1 = s0, s1
             if not _level_on_channel(level, chan[ch], w0, w1):
-                lo, hi = _abs_range(chan[ch], w0, w1)
+                lo, hi = _signed_range(chan[ch], w0, w1)
                 problems.append(
-                    f"{label}={level:.2f} 不在{ch}|值|[{lo:.1f},{hi:.1f}]"
+                    f"{label}={level:.2f} 不在{ch}有符号范围[{lo:.1f},{hi:.1f}]"
                 )
 
         if name in ("dv/dt", "di/dt"):
@@ -318,6 +604,47 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             check_time(tb, "B", (s0, on1))
             check_level(ha_a, "irr", "Ha", ha_win)
             check_level(hb_v, "v_diode", "Hb", hb_win)
+            err_a_matches, irr_at_a, err_a_atol = _err_a_signed_intersection_check(
+                ha_a,
+                ta * 1e-6,
+                t,
+                chan["irr"],
+            )
+            peak_a = float(chan["irr"][ipk])
+            if _err_a_requires_settled_gate(peak_a, ha_a):
+                from dpt_extractor.metrics.iec_windows import (
+                    _err_recovery_settled_base,
+                )
+
+                settled = _err_recovery_settled_base(
+                    np.asarray(chan["irr"], dtype=np.float64),
+                    ipk,
+                    bundle.dt,
+                    on1,
+                )
+                settled_start_s = float(t[settled.start_idx])
+                if not _err_a_settled_gate_check(
+                    peak_a,
+                    ha_a,
+                    ta * 1e-6,
+                    settled_start_s,
+                ):
+                    problems.append(
+                        f"近零正Ha的A={ta:.6f}us 早于恢复稳定门"
+                        f"={settled_start_s * 1e6:.6f}us"
+                        f"（允许提前{ERR_A_SETTLED_GATE_MARGIN_S * 1e9:.1f}ns）"
+                    )
+            vd_at_b = float(np.interp(tb * 1e-6, t, chan["v_diode"]))
+            if not err_a_matches:
+                problems.append(
+                    f"Ha 符号/落点={ha_a:.6f} 与 irr(A)={irr_at_a:.6f}不符"
+                    f" (差值={abs(float(ha_a) - irr_at_a):.6g}A,"
+                    f" 插值容差={err_a_atol:.6g}A)"
+                )
+            if not np.isclose(hb_v, vd_at_b, rtol=0.08, atol=8.0):
+                problems.append(
+                    f"Hb 符号/落点={hb_v:.2f} 与 Vd(B)={vd_at_b:.2f}不符"
+                )
             detail = f"Ha(irr)={ha_a:.2f} Hb(vd)={hb_v:.2f} A={ta:.3f} B={tb:.3f}"
 
         elif name == "Irr":
@@ -329,9 +656,29 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             hb_val = hb_call["bound"].get("y") if hb_call else float("nan")
             ch = hb_call["bound"].get("channel") if hb_call else None
             check_channel(ch, "irr", "Hb")
+            from dpt_extractor.metrics.irr_measure import irr_parameter_peak_index
+
+            expected_idx = int(
+                irr_parameter_peak_index(
+                    np.asarray(chan["irr"], dtype=np.float64),
+                    segs.reverse_recovery[0],
+                    segs.reverse_recovery[1],
+                    segs.pulse2_on,
+                    segs.turn_on[0],
+                    segs.turn_on[1],
+                )
+            )
+            expected_signed = float(chan["irr"][expected_idx])
+            if not np.isfinite(float(hb_val)) or not np.isclose(
+                float(hb_val), expected_signed, rtol=0.15, atol=8.0
+            ):
+                problems.append(
+                    f"Irr峰 Hb={float(hb_val):.1f} 与有符号尖峰"
+                    f"={expected_signed:.1f}不符"
+                )
             if irr_ref > 1.0 and not (0.5 * irr_ref <= abs(hb_val) <= 1.3 * irr_ref):
                 problems.append(f"Irr峰|Hb|={abs(hb_val):.1f} 与提取Irr={irr_ref:.1f}不符")
-            detail = f"ch={ch} |Hb|={abs(hb_val):.1f} irr_ref={irr_ref:.1f}"
+            detail = f"ch={ch} Hb={float(hb_val):.1f} irr_ref={irr_ref:.1f}"
 
         elif name == "Trr":
             c = calls.get("enable_trr_measure_interaction")
@@ -349,7 +696,16 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 problems.append(f"Trr尖峰|Hb|={abs(hb_a):.1f} 与提取Irr={irr_ref:.1f}不符")
             if peak_idx is not None and not (s0 <= int(peak_idx) <= s1):
                 problems.append(f"peak_idx={peak_idx}不在反向恢复段")
-            detail = f"Ha={ha_a:.2f} |Hb|={abs(hb_a):.1f} A={ta:.3f} B={tb:.3f} pk={peak_idx}"
+            check_level(ha_a, "irr", "Ha")
+            check_level(hb_a, "irr", "Hb")
+            if peak_idx is not None and 0 <= int(peak_idx) < len(chan["irr"]):
+                expected_signed = float(chan["irr"][int(peak_idx)])
+                if not np.isclose(hb_a, expected_signed, rtol=0.15, atol=8.0):
+                    problems.append(
+                        f"Trr Hb={hb_a:.1f} 与 peak_idx 有符号值"
+                        f"={expected_signed:.1f}不符"
+                    )
+            detail = f"Ha={ha_a:.2f} Hb={hb_a:.1f} A={ta:.3f} B={tb:.3f} pk={peak_idx}"
 
         elif name == "开通电流":
             c = calls.get("enable_turn_on_current_interaction")
@@ -365,7 +721,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 problems.append(f"Ha({ha0:.1f})应>Hb({hb0:.1f})")
             detail = f"Hb={hb0:.2f} Ha={ha0:.1f} A={t_a:.3f} B={t_b:.3f}"
 
-        elif name == "ΔVce":
+        elif name in {"ΔVce", "Ls_on", "Ls_off"}:
             c = calls.get("enable_delta_vce_interaction")
             if c is None:
                 record(section, name, "FAIL", "未触发 enable_delta_vce_interaction")
@@ -376,6 +732,30 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             check_time(move_t, "B")
             check_level(fixed_v, "vce", "Ha")
             detail = f"ch=vce A={fixed_t:.3f} B={move_t:.3f} Va={fixed_v:.1f}"
+
+        elif name in {"Pmax", "Pdmax"}:
+            c = calls.get("enable_interval_interaction")
+            if c is None:
+                record(section, name, "FAIL", "未触发功率区间交互")
+                continue
+            b = c["bound"]
+            ta, tb = b["start_t_us"], b["end_t_us"]
+            power_segment = (
+                (s0, seg_idx["turn_on"][1])
+                if section == "反向恢复"
+                else (s0, s1)
+            )
+            check_time(ta, "A", power_segment)
+            check_time(tb, "B", power_segment)
+            peak = calls.get("set_interval_peak_horizontal")
+            peak_text = ""
+            if peak is not None:
+                peak_y = peak["bound"].get("y")
+                if peak_y is None or not np.isfinite(float(peak_y)):
+                    problems.append(f"功率峰值无效: {peak_y}")
+                else:
+                    peak_text = f" peak={float(peak_y):.1f}"
+            detail = f"A={ta:.3f} B={tb:.3f}{peak_text}"
 
         elif name == "串扰电压":
             c = calls.get("enable_crosstalk_interaction")
@@ -393,35 +773,89 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
         else:  # generic max: Ic_off_max / Vce_off_max / Ic_on_max / Vce_on_max / Vrr
             c = calls.get("set_interval_peak_horizontal")
             if c is None:
-                record(section, name, "INFO", "无横向峰（纯区间/时间参数）")
-                continue
-            b = c["bound"]
-            peak_y = b.get("y")
-            ch = b.get("channel")
-            win = None
-            if b.get("t0_us") is not None and b.get("t1_us") is not None:
-                win = (b["t0_us"], b["t1_us"])
-            expected = {
-                "Ic_off_max": "ic",
-                "Vce_off_max": "vce",
-                "Ic_on_max": "ic",
-                "Vce_on_max": "vce",
-                "Vrr": "v_diode",
-            }.get(name)
-            check_channel(ch, expected, "峰")
-            check_level(peak_y, ch, "峰值", win)
-            base = calls.get("set_interval_base_horizontal")
-            min_y = None
-            if base is None:
-                problems.append("未设置Hb最小值参考线")
+                interval_call = calls.get("enable_interval_interaction")
+                if interval_call is None:
+                    record(section, name, "FAIL", "未触发通用参数区间交互")
+                    continue
+                ib = interval_call["bound"]
+                ta, tb = ib["start_t_us"], ib["end_t_us"]
+                check_time(ta, "A")
+                check_time(tb, "B")
+                detail = f"纯区间 A={ta:.3f} B={tb:.3f}"
             else:
-                bb = base["bound"]
-                min_y = bb.get("y")
-                min_ch = bb.get("channel")
-                check_channel(min_ch, expected, "Hb最小值")
-                check_level(min_y, min_ch, "Hb最小值", win)
-            min_txt = "" if min_y is None else f" HbMin={min_y:.1f}"
-            detail = f"ch={ch} 峰={peak_y:.1f}{min_txt} win={win}"
+                b = c["bound"]
+                peak_y = b.get("y")
+                ch = b.get("channel")
+                win = None
+                if b.get("t0_us") is not None and b.get("t1_us") is not None:
+                    win = (b["t0_us"], b["t1_us"])
+                expected = {
+                    "Ic_off_max": "ic",
+                    "Vce_off_max": "vce",
+                    "Ic_on_max": "ic",
+                    "Vce_on_max": "vce",
+                    "Vrr": "v_diode",
+                }.get(name)
+                check_channel(ch, expected, "峰")
+                check_level(peak_y, ch, "峰值", win)
+                base = calls.get("set_interval_base_horizontal")
+                min_y = None
+                if base is None:
+                    problems.append("未设置Hb最小值参考线")
+                else:
+                    bb = base["bound"]
+                    min_y = bb.get("y")
+                    min_ch = bb.get("channel")
+                    check_channel(min_ch, expected, "Hb最小值")
+                    check_level(min_y, min_ch, "Hb最小值", win)
+                min_txt = "" if min_y is None else f" HbMin={min_y:.1f}"
+                detail = f"ch={ch} 峰={peak_y:.1f}{min_txt} win={win}"
+
+        xr = mw.wave_plot.current_x_range_us()
+        full_x = mw.wave_plot._full_x_range
+        captured_focus = _captured_parameter_focus(calls)
+        if xr is None or full_x is None:
+            problems.append("参数局部视窗不可用")
+        else:
+            x0, x1 = (float(xr[0]), float(xr[1]))
+            full_x0, full_x1 = (float(full_x[0]), float(full_x[1]))
+            span = x1 - x0
+            full_span = full_x1 - full_x0
+            if x0 < full_x0 - 1e-6 or x1 > full_x1 + 1e-6:
+                problems.append(
+                    f"视窗[{x0:.3f},{x1:.3f}]越出完整范围"
+                    f"[{full_x0:.3f},{full_x1:.3f}]"
+                )
+            if span < min(2.0, full_span) - 0.02:
+                problems.append(f"局部视窗过窄: {span:.3f}us")
+            if captured_focus is not None:
+                anchor_us, required_times_us, expected_fraction = captured_focus
+                for required_us in required_times_us:
+                    if required_us < x0 - 1e-6 or required_us > x1 + 1e-6:
+                        problems.append(
+                            f"focus 必需时刻={required_us:.3f} 不在视窗"
+                            f"[{x0:.3f},{x1:.3f}]"
+                        )
+                if x0 > full_x0 + 0.02 and x1 < full_x1 - 0.02:
+                    fraction = (anchor_us - x0) / max(span, 1e-12)
+                    if abs(fraction - expected_fraction) > 0.025:
+                        problems.append(
+                            f"真实 focus 锚点比例={fraction:.3f}，"
+                            f"调用期望约{expected_fraction:.3f}"
+                        )
+                detail += (
+                    f" focus_anchor={anchor_us:.3f}"
+                    f" required={required_times_us}"
+                )
+            if mw.wave_plot._cursor_a is not None and mw.wave_plot._cursor_b is not None:
+                cursor_a = float(mw.wave_plot._cursor_a.value())
+                cursor_b = float(mw.wave_plot._cursor_b.value())
+                if min(cursor_a, cursor_b) < x0 - 1e-6 or max(cursor_a, cursor_b) > x1 + 1e-6:
+                    problems.append(
+                        f"A/B={cursor_a:.3f}/{cursor_b:.3f} 不在视窗"
+                        f"[{x0:.3f},{x1:.3f}]"
+                    )
+            detail += f" view=[{x0:.3f},{x1:.3f}]"
 
         status = "OK" if not problems else "FAIL"
         if problems:
@@ -479,9 +913,7 @@ def run_all() -> list[tuple]:
 def main() -> None:
     all_rows = run_all()
     fails = [r for r in all_rows if r[3] == "FAIL"]
-    by_file: dict[str, list[tuple]] = {}
-    for r in all_rows:
-        by_file.setdefault(r[0], []).append(r)
+    by_file = _group_rows_by_sample(all_rows)
 
     for fn, rows in by_file.items():
         n_ok = sum(1 for r in rows if r[3] == "OK")

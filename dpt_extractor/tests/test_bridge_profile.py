@@ -3,6 +3,7 @@ import unittest
 from dpt_extractor.models.bridge_profile import (
     guess_profile_from_path,
     has_bridge_hint_from_path,
+    make_short_circuit_profile,
     make_profile,
     all_profiles,
 )
@@ -17,6 +18,22 @@ class TestBridgeProfile(unittest.TestCase):
     def test_profile_name_is_lowercase_string(self):
         self.assertEqual(make_profile("U", "upper").name, "u_upper")
         self.assertEqual(make_profile("W", "lower").name, "w_lower")
+
+    def test_short_circuit_profile_name_is_stable_lowercase_string(self):
+        expected_names = {
+            ("U", "upper"): "u_upper_short_circuit",
+            ("U", "lower"): "u_lower_short_circuit",
+            ("V", "upper"): "v_upper_short_circuit",
+            ("V", "lower"): "v_lower_short_circuit",
+            ("W", "upper"): "w_upper_short_circuit",
+            ("W", "lower"): "w_lower_short_circuit",
+        }
+        for (phase, bridge), expected in expected_names.items():
+            with self.subTest(phase=phase, bridge=bridge):
+                self.assertEqual(
+                    make_short_circuit_profile(phase, bridge).name,
+                    expected,
+                )
 
     def test_guess_from_filename(self):
         self.assertEqual(guess_profile_from_path("UH_480V_800A.tss").code, "UH")

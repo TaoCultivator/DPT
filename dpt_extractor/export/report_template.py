@@ -974,6 +974,29 @@ def _shift_range_rows(rng: CellRange, row_delta: int) -> CellRange:
     )
 
 
+def _shift_image_anchors_for_insert(
+    ws: Worksheet,
+    insert_row: int,
+    amount: int,
+) -> None:
+    """Keep existing drawing anchors aligned when waveform rows are inserted."""
+    for image in getattr(ws, "_images", []):
+        anchor = image.anchor
+        if isinstance(anchor, str):
+            row, col = coordinate_to_tuple(anchor)
+            if row >= insert_row:
+                image.anchor = f"{get_column_letter(col)}{row + amount}"
+            continue
+
+        start = getattr(anchor, "_from", None)
+        if start is None or int(start.row) + 1 < insert_row:
+            continue
+        start.row = int(start.row) + amount
+        end = getattr(anchor, "to", None)
+        if end is not None:
+            end.row = int(end.row) + amount
+
+
 def _insert_dpt_waveform_block(ws: Worksheet, insert_row: int) -> None:
     source_row = max(1, insert_row - DPT_WAVEFORM_BLOCK_STRIDE)
     amount = DPT_WAVEFORM_BLOCK_STRIDE
@@ -991,6 +1014,7 @@ def _insert_dpt_waveform_block(ws: Worksheet, insert_row: int) -> None:
 
     if insert_row <= ws.max_row:
         ws.insert_rows(insert_row, amount)
+        _shift_image_anchors_for_insert(ws, insert_row, amount)
     for offset in range(amount):
         row_to_copy = source_row + offset
         if row_to_copy > max_row_before and offset >= DPT_WAVEFORM_BLOCK_ROWS:
@@ -1070,6 +1094,8 @@ def _dpt_waveform_block_has_data_match(
     phase_temp_label: str,
     condition_label: str | None,
     temperature_labels: TemperatureLabels | None = None,
+    *,
+    require_condition_signature: bool = True,
 ) -> bool:
     phase_temp = _phase_temp_parts(phase_temp_label, temperature_labels)
     if phase_temp is None:
@@ -1084,9 +1110,13 @@ def _dpt_waveform_block_has_data_match(
             continue
         if not _temperature_cell_matches(group.temp, temp_code, temperature_labels):
             continue
-        if condition_signature and not _condition_signature_matches(
-            condition_signature,
-            _condition_signature(group.condition),
+        if (
+            require_condition_signature
+            and condition_signature
+            and not _condition_signature_matches(
+                condition_signature,
+                _condition_signature(group.condition),
+            )
         ):
             continue
         for row in range(group.start_row, group.end_row):
@@ -1981,11 +2011,19 @@ def _clear_duplicate_dpt_waveform_blocks(
             setpoints,
             condition_signature,
         ):
-            if _dpt_waveform_block_has_data_match(
+            if not _condition_matches_setpoints(
+                condition_label,
+                setpoints,
+            ) and _dpt_waveform_block_has_data_match(
                 data_ws,
                 str(phase_label),
                 str(condition_label or ""),
                 temperature_labels,
+                # A merged group condition is updated before duplicate cleanup.
+                # Preserve another V/I block whose numeric data row still exists,
+                # even when that earlier block carries a different Rg/Cg signature.
+                # The fallback must not preserve the same V/I with a stale signature.
+                require_condition_signature=False,
             ):
                 continue
         _clear_dpt_waveform_block_payload(ws, anchor_row)

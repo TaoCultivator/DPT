@@ -742,7 +742,17 @@ def extract_all(
     delta_vce_on = _turn_on_delta_vce(vce, on0, on1, dt, vce_top_on)
     ls_on = delta_vce_on / didt_on_v if didt_on_v > 1e-9 else 0.0
 
-    td_on, tr, ton = turn_on_timings(t, vge, ic, on0, on1, edges.pulse2_on, dt, cfg)
+    td_on, tr, ton = turn_on_timings(
+        t,
+        vge,
+        ic,
+        on0,
+        on1,
+        edges.pulse2_on,
+        dt,
+        cfg,
+        pulse2_off=edges.pulse2_off,
+    )
     # 按用户示波器口径：t1=Ic离开base，t2=Vce回落到base（与关断窗口定义对称）
     win_on_scope = eon_window_scope_example(
         t,

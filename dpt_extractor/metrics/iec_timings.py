@@ -471,6 +471,8 @@ def turn_on_timing_instants(
     on_idx: int,
     dt: float,
     cfg: AppConfig,
+    *,
+    pulse2_off: int | None = None,
 ) -> TurnOnTimingInstants:
     """Td_on (10%Vge→10%Ic), Tr (10%Ic→90%Ic), Ton (10%Vge→90%Ic)."""
     th = cfg.thresholds
@@ -498,6 +500,54 @@ def turn_on_timing_instants(
         start_i90 = max(0, min(start_i90, len(ts) - 2))
     t_i90 = crossing_time(ts, ic_s, i_90, "rising", start=start_i90)
 
+    # 保留历史 500 ns 快速路径。慢开通样例可能尚未在该窗口内到达稳定
+    # 导通平台，导致局部 95% 分位被误当作 Icm，甚至令 10% 阈值低于
+    # 开通前电流。仅当旧路径缺少任一 Ic 交点时，才用第二脉冲稳定平台
+    # 作为 Icm 并扩展搜索到 pulse2_off；这样不会漂移原本可正常测量的样例。
+    if (
+        (t_i10 is None or t_i90 is None)
+        and pulse2_off is not None
+        and int(pulse2_off) > on_idx + 5
+    ):
+        extended_end = min(len(t), max(w1, int(pulse2_off)))
+        if extended_end > w0 + 5:
+            stable_icm = turn_on_ic_top(ic, on_idx, int(pulse2_off), dt)
+            if np.isfinite(stable_icm) and stable_icm > 0.0:
+                extended_ts = t[w0:extended_end]
+                extended_ic = smooth(
+                    np.abs(ic[w0:extended_end]),
+                    dt,
+                    cfg.smoothing.detect_window_ns,
+                )
+                fallback_i10 = crossing_time(
+                    extended_ts,
+                    extended_ic,
+                    th.low_pct * stable_icm,
+                    "rising",
+                )
+                fallback_i90 = None
+                if fallback_i10 is not None:
+                    fallback_start_i90 = int(
+                        np.searchsorted(extended_ts, fallback_i10, side="left")
+                    )
+                    fallback_start_i90 = max(
+                        0, min(fallback_start_i90, len(extended_ts) - 2)
+                    )
+                    fallback_i90 = crossing_time(
+                        extended_ts,
+                        extended_ic,
+                        th.high_pct * stable_icm,
+                        "rising",
+                        start=fallback_start_i90,
+                    )
+                if (
+                    fallback_i10 is not None
+                    and fallback_i90 is not None
+                    and fallback_i90 > fallback_i10
+                ):
+                    t_i10 = fallback_i10
+                    t_i90 = fallback_i90
+
     # IEC60747-9 / ZF：Td_on=10%Vge→10%Icm，Tr=10%Icm→90%Icm，Ton=10%Vge→90%Icm ⇒ Ton=Td_on+Tr
     td_on = abs(t_i10 - t_v10) * 1e9 if t_v10 and t_i10 else 0.0
     tr = abs(t_i90 - t_i10) * 1e9 if t_i10 and t_i90 else 0.0
@@ -517,8 +567,20 @@ def turn_on_timings(
     on_idx: int,
     dt: float,
     cfg: AppConfig,
+    *,
+    pulse2_off: int | None = None,
 ) -> tuple[float, float, float]:
-    inst = turn_on_timing_instants(t, vge, ic, i0, i1, on_idx, dt, cfg)
+    inst = turn_on_timing_instants(
+        t,
+        vge,
+        ic,
+        i0,
+        i1,
+        on_idx,
+        dt,
+        cfg,
+        pulse2_off=pulse2_off,
+    )
     return inst.td_on_ns, inst.tr_ns, inst.ton_ns
 
 

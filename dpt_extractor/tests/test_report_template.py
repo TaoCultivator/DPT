@@ -610,6 +610,320 @@ class TestReportTemplateWriter(unittest.TestCase):
             ]
             self.assertEqual(image_rows, [55])
 
+    def test_dpt_template_clears_same_setpoint_stale_signature_block(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CONDITION,
+            COL_CURRENT,
+            COL_VOLTAGE,
+        )
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "same_setpoint_stale_signature.xlsx"
+            image = td_path / "scope_4x3.png"
+            _write_rgb_png(image, (1280, 960))
+
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            for col in (1, 2, COL_CONDITION):
+                data.merge_cells(
+                    start_row=5,
+                    start_column=col,
+                    end_row=8,
+                    end_column=col,
+                )
+            data["A5"] = "UH"
+            data["B5"] = "25℃"
+            data.cell(
+                5,
+                COL_CONDITION,
+                "Rg_on = 5.6 ohm\nRg_off = 7.5 ohm\nCg = 22 nf",
+            )
+            data.cell(5, COL_VOLTAGE, 750)
+            data.cell(5, COL_CURRENT, 805)
+
+            wave = wb.create_sheet("U相_双脉冲波形")
+            for base, condition in (
+                (1, "750V_805A_Rg_on5.6_Rg_off7.5_Cg22"),
+                (54, "750V_805A_Rg_on3.3_Rg_off3.6_Cg10"),
+            ):
+                wave.merge_cells(
+                    start_row=base,
+                    start_column=1,
+                    end_row=base + 16,
+                    end_column=8,
+                )
+                wave.cell(base, 1, "UH_RT")
+                wave.merge_cells(
+                    start_row=base + 17,
+                    start_column=1,
+                    end_row=base + 33,
+                    end_column=8,
+                )
+                wave.cell(base + 17, 1, condition)
+                wave.merge_cells(
+                    start_row=base + 34,
+                    start_column=1,
+                    end_row=base + 50,
+                    end_column=8,
+                )
+                wave.cell(base + 34, 1, "总概览图")
+                wave.merge_cells(
+                    start_row=base,
+                    start_column=10,
+                    end_row=base,
+                    end_column=17,
+                )
+                wave.cell(base, 10, "△Vce（V）")
+                wave.merge_cells(
+                    start_row=base + 1,
+                    start_column=10,
+                    end_row=base + 16,
+                    end_column=17,
+                )
+            stale_image = XLImage(str(image))
+            stale_image.anchor = "J55"
+            wave.add_image(stale_image)
+            wb.save(report)
+
+            summary = write_report_template(
+                ExtractResult(
+                    source_path=str(
+                        Path("samples")
+                        / "RT"
+                        / "Rg_on5.6_Rg_off7.5_Cg22_UH_750V_805A_000.tss"
+                    ),
+                    profile_code="UH",
+                ),
+                report,
+                images={("关断过程", "ΔVce"): image},
+            )
+
+            saved_wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(summary.waveform_anchor_row, 1)
+            self.assertEqual(
+                saved_wave.cell(18, 1).value,
+                "750V_805A_Rg_on5.6_Rg_off7.5_Cg22",
+            )
+            self.assertIsNone(saved_wave.cell(54, 1).value)
+            self.assertIsNone(saved_wave.cell(71, 1).value)
+            self.assertIsNone(saved_wave.cell(88, 1).value)
+            self.assertEqual(len(saved_wave._images), 1)
+            self.assertEqual(saved_wave._images[0].anchor._from.row + 1, 2)
+
+    def test_dpt_different_gate_conditions_keep_images_in_both_current_orders(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CONDITION,
+            COL_CURRENT,
+            COL_VOLTAGE,
+        )
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        cases = (
+            (
+                (805, "Rg_on3.3_Rg_off3.6_Cg10"),
+                (1050, "Rg_on5.6_Rg_off7.5_Cg22"),
+            ),
+            (
+                (1050, "Rg_on5.6_Rg_off7.5_Cg22"),
+                (805, "Rg_on3.3_Rg_off3.6_Cg10"),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            image = td_path / "scope_4x3.png"
+            _write_rgb_png(image, (1280, 960))
+
+            for case_index, order in enumerate(cases):
+                with self.subTest(order=order):
+                    report = td_path / f"different_gate_conditions_{case_index}.xlsx"
+                    wb = Workbook()
+                    data = wb.active
+                    data.title = "U相_双脉冲数据"
+                    for col in (1, 2, COL_CONDITION):
+                        data.merge_cells(
+                            start_row=5,
+                            start_column=col,
+                            end_row=8,
+                            end_column=col,
+                        )
+                    data["A5"] = "UH"
+                    data["B5"] = "25℃"
+                    data.cell(
+                        5,
+                        COL_CONDITION,
+                        "Rg_on =  ohm\nRg_off =  ohm\nCg =  nf",
+                    )
+
+                    wave = wb.create_sheet("U相_双脉冲波形")
+                    for base in (1, 54):
+                        wave.merge_cells(
+                            start_row=base,
+                            start_column=1,
+                            end_row=base + 16,
+                            end_column=8,
+                        )
+                        wave.merge_cells(
+                            start_row=base + 17,
+                            start_column=1,
+                            end_row=base + 33,
+                            end_column=8,
+                        )
+                        wave.merge_cells(
+                            start_row=base + 34,
+                            start_column=1,
+                            end_row=base + 50,
+                            end_column=8,
+                        )
+                        wave.merge_cells(
+                            start_row=base,
+                            start_column=10,
+                            end_row=base,
+                            end_column=17,
+                        )
+                        wave.cell(base, 10, "△Vce（V）")
+                        wave.merge_cells(
+                            start_row=base + 1,
+                            start_column=10,
+                            end_row=base + 16,
+                            end_column=17,
+                        )
+                    wb.save(report)
+
+                    for current, condition in order:
+                        write_report_template(
+                            ExtractResult(
+                                source_path=str(
+                                    Path("samples")
+                                    / "RT"
+                                    / f"{condition}_UH_750V_{current}A_000.tss"
+                                ),
+                                profile_code="UH",
+                            ),
+                            report,
+                            images={("关断过程", "ΔVce"): image},
+                        )
+
+                    saved = load_workbook(report)
+                    saved_data = saved["U相_双脉冲数据"]
+                    saved_wave = saved["U相_双脉冲波形"]
+                    self.assertEqual(
+                        [saved_data.cell(row, COL_VOLTAGE).value for row in (5, 6)],
+                        [750, 750],
+                    )
+                    self.assertEqual(
+                        [saved_data.cell(row, COL_CURRENT).value for row in (5, 6)],
+                        [item[0] for item in order],
+                    )
+                    self.assertEqual(len(saved_wave._images), 2)
+                    self.assertEqual(
+                        sorted(image.anchor._from.row + 1 for image in saved_wave._images),
+                        [2, 55],
+                    )
+                    for base, (current, condition) in zip((1, 54), order):
+                        label = str(saved_wave.cell(base + 17, 1).value)
+                        self.assertEqual(label, f"750V_{current}A_{condition}")
+
+    def test_dpt_waveform_insert_shifts_existing_image_anchors(self):
+        from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_VOLTAGE
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "insert_with_existing_images.xlsx"
+            image = td_path / "scope_4x3.png"
+            _write_rgb_png(image, (1280, 960))
+
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            for start, phase in ((5, "UH"), (9, "UL")):
+                for col in (1, 2, 3):
+                    data.merge_cells(
+                        start_row=start,
+                        start_column=col,
+                        end_row=start + 3,
+                        end_column=col,
+                    )
+                data.cell(start, 1, phase)
+                data.cell(start, 2, "25℃")
+
+            wave = wb.create_sheet("U相_双脉冲波形")
+            for base, phase in ((1, "UH_RT"), (54, "UL_RT")):
+                wave.merge_cells(
+                    start_row=base,
+                    start_column=1,
+                    end_row=base + 16,
+                    end_column=8,
+                )
+                wave.cell(base, 1, phase)
+                wave.merge_cells(
+                    start_row=base + 17,
+                    start_column=1,
+                    end_row=base + 33,
+                    end_column=8,
+                )
+                wave.cell(base + 17, 1, "750V_805A")
+                wave.merge_cells(
+                    start_row=base + 34,
+                    start_column=1,
+                    end_row=base + 50,
+                    end_column=8,
+                )
+                wave.cell(base + 34, 1, "总概览图")
+                wave.merge_cells(
+                    start_row=base,
+                    start_column=10,
+                    end_row=base,
+                    end_column=17,
+                )
+                wave.cell(base, 10, "△Vce（V）")
+                wave.merge_cells(
+                    start_row=base + 1,
+                    start_column=10,
+                    end_row=base + 16,
+                    end_column=17,
+                )
+            wb.save(report)
+
+            for phase, current in (("UH", 1050), ("UL", 805), ("UH", 805)):
+                write_report_template(
+                    ExtractResult(
+                        source_path=str(
+                            Path("samples")
+                            / "RT"
+                            / f"{phase}_750V_{current}A_000.tss"
+                        ),
+                        profile_code=phase,
+                    ),
+                    report,
+                    images={("关断过程", "ΔVce"): image},
+                )
+
+            saved = load_workbook(report)
+            saved_data = saved["U相_双脉冲数据"]
+            saved_wave = saved["U相_双脉冲波形"]
+            self.assertEqual(saved_data.cell(5, COL_VOLTAGE).value, 750)
+            self.assertEqual(saved_data.cell(5, COL_CURRENT).value, 1050)
+            self.assertEqual(saved_data.cell(6, COL_CURRENT).value, 805)
+            self.assertEqual(saved_data.cell(9, COL_CURRENT).value, 805)
+            self.assertEqual(
+                [saved_wave.cell(base, 1).value for base in (1, 54, 107)],
+                ["UH_25℃", "UH_25℃", "UL_25℃"],
+            )
+            self.assertEqual(len(saved_wave._images), 3)
+            self.assertEqual(
+                sorted(image.anchor._from.row + 1 for image in saved_wave._images),
+                [2, 55, 108],
+            )
+
     def test_dpt_condition_rows_survive_narrow_left_blocks_and_overview_images(self):
         from dpt_extractor.export.mcu2506_layout import COL_OFF
         from dpt_extractor.export.report_template import (
