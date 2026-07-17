@@ -152,7 +152,10 @@ from dpt_extractor.utils.signal import crossing_time, smooth, threshold_value
 from dpt_extractor.metrics.plateau_level import turn_on_vce_on_max_window_indices
 from dpt_extractor.models.test_mode import MODE_UI_LABELS, TestMode, parse_test_mode
 from dpt_extractor.pipeline.extract import _turn_on_delta_vce_knee_point
-from dpt_extractor.pipeline.pulse_sequence import dpt_export_results
+from dpt_extractor.pipeline.pulse_sequence import (
+    dpt_export_pulse_pairs,
+    dpt_export_results,
+)
 from dpt_extractor.pipeline.run_extract import run_extraction
 from dpt_extractor.pipeline.short_circuit_extract import (
     find_desat_voltage_channel,
@@ -996,6 +999,23 @@ class _ReportPrepareSignals(QObject):
     failed = pyqtSignal(int, str)
 
 
+def _report_image_result_index(
+    results: list[ExtractResult],
+    current_result: ExtractResult,
+) -> int:
+    current_pair = (
+        int(current_result.off_pulse_index),
+        int(current_result.on_pulse_index),
+    )
+    for index, result in enumerate(results):
+        if (
+            int(result.off_pulse_index),
+            int(result.on_pulse_index),
+        ) == current_pair:
+            return index
+    return 0
+
+
 class _ReportPrepareTask(QRunnable):
     """在后台准备报告数据行，避免多脉冲重复提取阻塞界面。"""
 
@@ -1006,6 +1026,9 @@ class _ReportPrepareTask(QRunnable):
         profile: BridgeProfile,
         cfg: AppConfig,
         current_result: ExtractResult,
+        temperature_code: str | None = None,
+        temperature_labels: dict[str, str] | None = None,
+        phase_code: str | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -1013,6 +1036,9 @@ class _ReportPrepareTask(QRunnable):
         self.profile = profile
         self.cfg = deepcopy(cfg)
         self.current_result = deepcopy(current_result)
+        self.temperature_code = temperature_code
+        self.temperature_labels = dict(temperature_labels or {})
+        self.phase_code = phase_code
         self.signals = _ReportPrepareSignals()
 
     def run(self) -> None:
@@ -1062,6 +1088,10 @@ class _ReportCaptureState:
     capture_start: int
     capture_span: int
     capture_size: QSize
+    temperature_code: str
+    temperature_labels: dict[str, str]
+    phase_code: str
+    image_result_index: int
     index: int = 0
     images: dict[tuple[str, str], Path] | None = None
 
@@ -1076,6 +1106,9 @@ class _ReportWriteTask(QRunnable):
         tempdir: tempfile.TemporaryDirectory,
         target_screen_width_px: int | None,
         temperature_labels: dict[str, str],
+        temperature_code: str | None = None,
+        phase_code: str | None = None,
+        image_result_index: int = 0,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -1085,6 +1118,9 @@ class _ReportWriteTask(QRunnable):
         self.tempdir = tempdir
         self.target_screen_width_px = target_screen_width_px
         self.temperature_labels = dict(temperature_labels)
+        self.temperature_code = temperature_code
+        self.phase_code = phase_code
+        self.image_result_index = int(image_result_index)
         self.signals = _ReportWriteSignals()
 
     def run(self) -> None:
@@ -1096,6 +1132,9 @@ class _ReportWriteTask(QRunnable):
                 images=self.images,
                 target_screen_width_px=self.target_screen_width_px,
                 temperature_labels=self.temperature_labels,
+                temperature_code=self.temperature_code,
+                phase_code=self.phase_code,
+                image_result_index=self.image_result_index,
                 progress_callback=lambda value, total, label: self.signals.progress.emit(
                     self.request_id,
                     value,
@@ -1283,7 +1322,9 @@ class MainWindow(QMainWindow):
         for code in TEMP_CONDITION_DEFAULTS:
             self.combo_temp.addItem(code, code)
         _configure_combo_popup(self.combo_temp)
-        self.combo_temp.setToolTip("工况温度标记，仅用于界面显示")
+        self.combo_temp.setToolTip(
+            "当前报告温度工况；加载时按路径识别，手动选择后以当前选择为准"
+        )
         self.combo_temp.currentIndexChanged.connect(self._on_temperature_changed)
 
         self.spin_temp_value = TemperatureSpinBox()
@@ -1294,7 +1335,9 @@ class MainWindow(QMainWindow):
         self.spin_temp_value.setSuffix(" ℃")
         self.spin_temp_value.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         self.spin_temp_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.spin_temp_value.setToolTip("自定义当前温度数值，单位固定为 ℃")
+        self.spin_temp_value.setToolTip(
+            "自定义当前工况温度；写入报告时采用，单位固定为 ℃"
+        )
         self.spin_temp_value.setValue(self._temperature_values["RT"])
         self.spin_temp_value.valueChanged.connect(self._on_temperature_value_changed)
 
@@ -1569,6 +1612,21 @@ class MainWindow(QMainWindow):
             code: _format_temperature_label(value)
             for code, value in self._temperature_values.items()
         }
+
+    def _current_temperature_code(self) -> str:
+        code = str(self.combo_temp.currentData() or "RT").strip().upper()
+        return code if code in TEMP_CONDITION_DEFAULTS else "RT"
+
+    def _current_report_phase_code(self) -> str:
+        phase = str(self.combo_phase.currentData() or "U").strip().upper()
+        bridge = str(self.combo_bridge.currentData() or "upper").strip().lower()
+        suffix = "L" if bridge == "lower" else "H"
+        code = f"{phase}{suffix}"
+        valid = {f"{item}{side}" for item in PHASES for side in ("H", "L")}
+        if code in valid:
+            return code
+        fallback = str(self.profile.code or "UH").strip().upper()
+        return fallback if fallback in valid else "UH"
 
     def _show_first_run_license_notice(self) -> None:
         app = QApplication.instance()
@@ -7523,6 +7581,10 @@ class MainWindow(QMainWindow):
         results: list[ExtractResult],
         *,
         request_id: int | None = None,
+        temperature_code: str | None = None,
+        temperature_labels: dict[str, str] | None = None,
+        phase_code: str | None = None,
+        image_result_index: int | None = None,
     ) -> None:
         if self.result is None:
             _safe_cleanup_tempdir(tempdir)
@@ -7552,6 +7614,26 @@ class MainWindow(QMainWindow):
             capture_start=capture_start,
             capture_span=max(1, REPORT_PROGRESS_CAPTURE_DONE - capture_start),
             capture_size=self._report_plot_capture_size(),
+            temperature_code=(
+                temperature_code
+                if temperature_code in TEMP_CONDITION_DEFAULTS
+                else self._current_temperature_code()
+            ),
+            temperature_labels=dict(
+                temperature_labels
+                if temperature_labels is not None
+                else self._temperature_display_labels()
+            ),
+            phase_code=(
+                str(phase_code).strip().upper()
+                if phase_code is not None
+                else self._current_report_phase_code()
+            ),
+            image_result_index=(
+                int(image_result_index)
+                if image_result_index is not None
+                else _report_image_result_index(results, self.result)
+            ),
             images={},
         )
         self._set_report_progress(
@@ -7615,6 +7697,10 @@ class MainWindow(QMainWindow):
                     images,
                     results,
                     request_id=request_id,
+                    temperature_code=state.temperature_code,
+                    temperature_labels=state.temperature_labels,
+                    phase_code=state.phase_code,
+                    image_result_index=state.image_result_index,
                 )
                 return
 
@@ -7797,18 +7883,28 @@ class MainWindow(QMainWindow):
             self.profile,
             self.cfg,
             self.result,
+            temperature_code=self._current_temperature_code(),
+            temperature_labels=self._temperature_display_labels(),
+            phase_code=self._current_report_phase_code(),
         )
         result_snapshot = task.current_result
         if not self._report_progress_active:
             self._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告文件...")
-        prepare_total = max(
-            1,
-            int(result_snapshot.detected_pulse_count or 0) - 1
-            if not result_snapshot.short_circuit_mode
+        prepare_total = 1
+        if (
+            not result_snapshot.short_circuit_mode
             and not result_snapshot.single_pulse_mode
             and int(result_snapshot.detected_pulse_count or 0) > 2
-            else 1,
-        )
+        ):
+            prepare_total = len(
+                dpt_export_pulse_pairs(
+                    int(result_snapshot.detected_pulse_count),
+                    include_pair=(
+                        int(result_snapshot.off_pulse_index),
+                        int(result_snapshot.on_pulse_index),
+                    ),
+                )
+            )
         self._set_report_progress(
             REPORT_PROGRESS_TEMPLATE_DONE,
             REPORT_PROGRESS_TOTAL,
@@ -7854,7 +7950,7 @@ class MainWindow(QMainWindow):
         request_id: int,
         results: list[ExtractResult],
     ) -> None:
-        self._report_prepare_tasks.pop(request_id, None)
+        task = self._report_prepare_tasks.pop(request_id, None)
         if request_id != self._report_request_id:
             return
         self._set_report_progress(
@@ -7869,6 +7965,18 @@ class MainWindow(QMainWindow):
                 tempdir,
                 results,
                 request_id=request_id,
+                temperature_code=(
+                    task.temperature_code if task is not None else None
+                ),
+                temperature_labels=(
+                    task.temperature_labels if task is not None else None
+                ),
+                phase_code=(task.phase_code if task is not None else None),
+                image_result_index=(
+                    _report_image_result_index(results, task.current_result)
+                    if task is not None
+                    else None
+                ),
             )
             tempdir = None
         except Exception as exc:
@@ -7920,6 +8028,10 @@ class MainWindow(QMainWindow):
         results: list[ExtractResult],
         *,
         request_id: int | None = None,
+        temperature_code: str | None = None,
+        temperature_labels: dict[str, str] | None = None,
+        phase_code: str | None = None,
+        image_result_index: int | None = None,
     ) -> None:
         if not results or self._report_output_path is None:
             _safe_cleanup_tempdir(tempdir)
@@ -7936,7 +8048,26 @@ class MainWindow(QMainWindow):
             images,
             tempdir,
             self._report_target_screen_width_px(),
-            self._temperature_display_labels(),
+            (
+                temperature_labels
+                if temperature_labels is not None
+                else self._temperature_display_labels()
+            ),
+            (
+                temperature_code
+                if temperature_code in TEMP_CONDITION_DEFAULTS
+                else self._current_temperature_code()
+            ),
+            (
+                str(phase_code).strip().upper()
+                if phase_code is not None
+                else self._current_report_phase_code()
+            ),
+            (
+                int(image_result_index)
+                if image_result_index is not None
+                else _report_image_result_index(results, self.result or results[0])
+            ),
         )
         task.signals.progress.connect(self._on_report_write_progress)
         task.signals.finished.connect(self._on_report_write_finished)

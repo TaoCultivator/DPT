@@ -2318,7 +2318,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         )
         selected: list[tuple[str, str]] = []
         saved: list[tuple[str, int]] = []
-        writer_calls: list[tuple[int, int]] = []
+        writer_calls: list[tuple[int, int, str, str, int]] = []
         win._report_image_params = lambda: params  # type: ignore[method-assign]
         win._on_value_clicked = (  # type: ignore[method-assign]
             lambda section, name: selected.append((section, name))
@@ -2328,10 +2328,29 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             path.write_bytes(b"captured")
             saved.append((path.name, len(selected)))
 
-        def fake_start_writer(tempdir, images, _results, *, request_id=None):
+        def fake_start_writer(
+            tempdir,
+            images,
+            _results,
+            *,
+            request_id=None,
+            temperature_code=None,
+            temperature_labels=None,
+            phase_code=None,
+            image_result_index=None,
+        ):
             self.assertEqual(len(images), len(params))
             self.assertTrue(all(path.read_bytes() == b"captured" for path in images.values()))
-            writer_calls.append((int(request_id or 0), len(images)))
+            self.assertEqual(temperature_labels["LT"], "-40℃")
+            writer_calls.append(
+                (
+                    int(request_id or 0),
+                    len(images),
+                    str(temperature_code),
+                    str(phase_code),
+                    int(image_result_index),
+                )
+            )
             tempdir.cleanup()
 
         win._save_report_plot_capture = fake_save  # type: ignore[method-assign]
@@ -2340,6 +2359,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         before_plot = win.wave_plot.geometry()
         tempdir = tempfile.TemporaryDirectory()
         win._report_request_id = 41
+        win._set_temperature_code("LT")
         win._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告截图...")
         win._start_report_capture_sequence(
             tempdir,
@@ -2354,7 +2374,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(len(saved), len(params))
         self.assertEqual(selected, list(params[1:]))
         self.assertEqual([count for _name, count in saved], [0, 1, 2])
-        self.assertEqual(writer_calls, [(41, len(params))])
+        self.assertEqual(writer_calls, [(41, len(params), "LT", "UH", 0)])
         self.assertIsNone(win._report_capture_state)
         self.assertEqual(win.report_progress.value(), REPORT_PROGRESS_CAPTURE_DONE)
         self.assertEqual(win.geometry(), before_window)

@@ -82,6 +82,81 @@ class TestReportTaskProgress(unittest.TestCase):
         self.assertEqual(len(finished), 1)
         self.assertEqual(tempdir.cleanup_calls, 1)
 
+    def test_report_write_task_passes_frozen_page_conditions(self):
+        from dpt_extractor.gui.main_window import _ReportWriteTask
+        from dpt_extractor.models.results import ExtractResult
+
+        received: dict[str, object] = {}
+        tempdir = _RecordingTempdir()
+
+        def fake_write(*_args, **kwargs):
+            received.update(kwargs)
+            return object()
+
+        task = _ReportWriteTask(
+            15,
+            ExtractResult(),
+            Path("report.xlsx"),
+            {},
+            tempdir,  # type: ignore[arg-type]
+            None,
+            {"RT": "25℃", "HT": "150℃", "LT": "-40℃"},
+            "LT",
+            "UL",
+            0,
+        )
+
+        with patch(
+            "dpt_extractor.gui.main_window.write_report_template",
+            side_effect=fake_write,
+        ):
+            task.run()
+
+        self.assertEqual(received["temperature_code"], "LT")
+        self.assertEqual(received["phase_code"], "UL")
+        self.assertEqual(received["image_result_index"], 0)
+
+    def test_main_window_snapshots_selected_report_conditions_when_report_starts(self):
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult
+
+        class _Pool:
+            def __init__(self) -> None:
+                self.tasks: list[object] = []
+
+            def start(self, task: object) -> None:
+                self.tasks.append(task)
+
+        win = MainWindow()
+        original_pool = win._load_pool
+        pool = _Pool()
+        try:
+            win._load_pool = pool  # type: ignore[assignment]
+            win.result = ExtractResult(
+                source_path=str(
+                    Path("colleague") / "U_L" / "UH_750V_1048A_000.tss"
+                ),
+                profile_code="UH",
+            )
+            win._set_profile_combos(make_profile("U", "lower"))
+            win._set_temperature_code("LT")
+            win._start_report_prepare_task()
+
+            self.assertEqual(len(pool.tasks), 1)
+            self.assertEqual(pool.tasks[0].phase_code, "UL")
+            self.assertEqual(pool.tasks[0].temperature_code, "LT")
+            self.assertEqual(pool.tasks[0].temperature_labels["LT"], "-40℃")
+            win._set_profile_combos(make_profile("U", "upper"))
+            win._set_temperature_code("RT")
+            self.assertEqual(pool.tasks[0].phase_code, "UL")
+            self.assertEqual(pool.tasks[0].temperature_code, "LT")
+        finally:
+            win._report_prepare_tasks.clear()
+            win._release_report_operation()
+            win._load_pool = original_pool
+            win.close()
+
     def test_cleanup_failure_cannot_suppress_success_terminal_signal(self):
         from dpt_extractor.gui.main_window import _ReportWriteTask
         from dpt_extractor.models.results import ExtractResult

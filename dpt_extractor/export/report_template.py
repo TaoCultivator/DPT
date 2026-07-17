@@ -342,6 +342,21 @@ def _infer_phase_code(path: str, result: ExtractResult) -> str:
     return ""
 
 
+def _resolve_phase_code(
+    path: str,
+    result: ExtractResult,
+    phase_code: str | None = None,
+) -> str:
+    """Use the frozen report-page phase/bridge before path inference."""
+
+    if phase_code is None:
+        return _infer_phase_code(path, result)
+    code = str(phase_code).strip().upper()
+    if code not in PHASE_CODES:
+        raise ValueError(f"不支持的相位/桥臂代码：{phase_code}")
+    return code
+
+
 def _infer_temp_code(path: str) -> str:
     for part in reversed(_path_parts(path)):
         stem = Path(part).stem.upper()
@@ -355,6 +370,17 @@ def _infer_temp_code(path: str) -> str:
         if re.search(r"(?<!\d)-?40(?:℃|C|DEG)?(?!\d)", stem):
             return "LT"
     return "RT"
+
+
+def _resolve_temp_code(path: str, temperature_code: str | None = None) -> str:
+    """Use an explicit UI/report condition before falling back to path inference."""
+
+    if temperature_code is None:
+        return _infer_temp_code(path)
+    code = str(temperature_code).strip().upper()
+    if code not in TEMP_LABELS:
+        raise ValueError(f"不支持的温度工况代码：{temperature_code}")
+    return code
 
 
 def _phase_sheet_prefix(phase_code: str) -> str:
@@ -837,13 +863,13 @@ def _prepare_dpt_data_rows(
     data_ws: Worksheet,
     target: _DptDataTarget,
     results: Sequence[ExtractResult],
-) -> list[int]:
+) -> list[_DptDataTarget]:
     """Reserve consecutive report rows without overwriting unrelated conditions."""
     if not results:
         return []
-    setpoints = _dpt_setpoint_match(results[0])
-    rows = [target.row]
+    targets = [target]
     for offset in range(1, len(results)):
+        setpoints = _dpt_setpoint_match(results[offset])
         row = target.row + offset
         group = _dpt_group_containing(data_ws, target.group_start_row)
         needs_insert = group is None or row >= group.end_row
@@ -851,8 +877,16 @@ def _prepare_dpt_data_rows(
             needs_insert = not _data_row_matches_setpoints(data_ws, row, setpoints)
         if needs_insert:
             row = _insert_dpt_data_row(data_ws, target.group_start_row, row)
-        rows.append(row)
-    return rows
+        targets.append(
+            _DptDataTarget(
+                row=row,
+                group_index=target.group_index,
+                group_start_row=target.group_start_row,
+                row_offset=row - target.group_start_row,
+                inserted_row=needs_insert,
+            )
+        )
+    return targets
 
 
 def _find_dpt_data_target(
@@ -1161,6 +1195,7 @@ def _ensure_dpt_waveform_anchor(
     existing_label = _dpt_waveform_label(ws, anchor_row)
     existing_parts = _phase_temp_parts(existing_label, temperature_labels)
     existing_matches_target = existing_parts == (phase_code.upper(), temp_code)
+    inserted_row_occupied = target.inserted_row and bool(existing_label)
     mismatched_live_block = (
         existing_label
         and not existing_matches_target
@@ -1177,6 +1212,7 @@ def _ensure_dpt_waveform_anchor(
     )
     if (
         anchor_row + DPT_WAVEFORM_BLOCK_ROWS - 1 > ws.max_row
+        or inserted_row_occupied
         or mismatched_live_block
     ):
         _insert_dpt_waveform_block(ws, anchor_row)
@@ -1189,6 +1225,29 @@ def _ensure_dpt_waveform_anchor(
     )
     _set_range_value(ws, _left_merged_range_at(ws, anchor_row + 34), "总概览图")
     return anchor_row
+
+
+def _sync_dpt_waveform_insertions(
+    ws: Worksheet,
+    data_ws: Worksheet,
+    targets: Sequence[_DptDataTarget],
+) -> None:
+    """Mirror every inserted data row with one waveform block insertion."""
+
+    for target in sorted(
+        (item for item in targets if item.inserted_row),
+        key=lambda item: (item.group_index, item.row),
+    ):
+        group_base = _dpt_waveform_group_base(data_ws, target.group_index)
+        row_index = _dpt_waveform_row_index(
+            data_ws,
+            target.group_start_row,
+            target.row,
+        )
+        _insert_dpt_waveform_block(
+            ws,
+            group_base + row_index * DPT_WAVEFORM_BLOCK_STRIDE,
+        )
 
 
 def _set_value(ws: Worksheet, row: int, col: int, value) -> None:
@@ -1991,6 +2050,7 @@ def _clear_duplicate_dpt_waveform_blocks(
     setpoints: _DptSetpointMatch,
     condition_signature: Mapping[str, float] | None = None,
     temperature_labels: TemperatureLabels | None = None,
+    protected_anchor_rows: set[int] | None = None,
 ) -> None:
     if target_anchor_row is None:
         return
@@ -1998,7 +2058,7 @@ def _clear_duplicate_dpt_waveform_blocks(
     label_by_row = {rng.min_row: value for rng, value in labels}
     for phase_rng, phase_label in labels:
         anchor_row = phase_rng.min_row
-        if anchor_row == target_anchor_row:
+        if anchor_row == target_anchor_row or anchor_row in (protected_anchor_rows or set()):
             continue
         if _phase_temp_parts(phase_label, temperature_labels) != (
             phase_code.upper(),
@@ -2442,10 +2502,17 @@ def write_report_template(
     target_screen_width_px: int | None = None,
     progress_callback: ReportProgressCallback | None = None,
     temperature_labels: TemperatureLabels | None = None,
+    temperature_code: str | None = None,
+    phase_code: str | None = None,
+    image_result_index: int | None = None,
 ) -> ReportWriteSummary:
     path = Path(report_path)
     results = _as_report_results(result)
     result0 = results[0]
+    active_index = 0 if image_result_index is None else int(image_result_index)
+    if active_index < 0 or active_index >= len(results):
+        raise ValueError(f"报告截图结果索引越界：{active_index}")
+    image_result = results[active_index]
     progress_total = max(6, 6 + len(images or {}))
 
     def emit(step: int, label: str) -> None:
@@ -2468,8 +2535,8 @@ def write_report_template(
     wb = load_workbook(path)
     emit(1, "读取报告模板")
     image_map: ImageMap = images or {}
-    phase_code = _infer_phase_code(result0.source_path, result0)
-    temp_code = _infer_temp_code(result0.source_path)
+    phase_code = _resolve_phase_code(result0.source_path, result0, phase_code)
+    temp_code = _resolve_temp_code(result0.source_path, temperature_code)
 
     if result0.short_circuit_mode:
         if len(results) != 1:
@@ -2535,29 +2602,45 @@ def write_report_template(
         temp_code,
         temperature_labels,
     )
-    condition_signature = _condition_signature(result0.source_path)
+    condition_signature = _condition_signature(image_result.source_path)
     _sync_dpt_condition_cell(data_ws, target.group_start_row, condition_signature)
-    data_rows = _prepare_dpt_data_rows(data_ws, target, results)
+    data_targets = _prepare_dpt_data_rows(data_ws, target, results)
+    data_rows = [item.row for item in data_targets]
     data_row = data_rows[0]
     for row, row_result in zip(data_rows, results):
         _write_dpt_data(data_ws, row, row_result)
     _normalize_dpt_data_temperature_cells(data_ws, temperature_labels)
     emit(2, "写入报告数据")
-    vdc, idc = _match_setpoints(result0)
-    setpoints = _dpt_setpoint_match(result0)
+    if waveform_ws is not None:
+        _sync_dpt_waveform_insertions(waveform_ws, data_ws, data_targets)
+    setpoints = _dpt_setpoint_match(image_result)
+    waveform_anchor_rows: list[int] = []
+    if waveform_ws is not None:
+        for row_target, row_result in zip(data_targets, results):
+            stable_target = _DptDataTarget(
+                row=row_target.row,
+                group_index=row_target.group_index,
+                group_start_row=row_target.group_start_row,
+                row_offset=row_target.row_offset,
+                inserted_row=False,
+            )
+            row_vdc, row_idc = _match_setpoints(row_result)
+            waveform_anchor_rows.append(
+                _ensure_dpt_waveform_anchor(
+                    waveform_ws,
+                    data_ws,
+                    stable_target,
+                    phase_code,
+                    temp_code,
+                    row_vdc,
+                    row_idc,
+                    _condition_signature(row_result.source_path),
+                    temperature_labels,
+                )
+            )
     waveform_anchor_row = (
-        _ensure_dpt_waveform_anchor(
-            waveform_ws,
-            data_ws,
-            target,
-            phase_code,
-            temp_code,
-            vdc,
-            idc,
-            condition_signature,
-            temperature_labels,
-        )
-        if waveform_ws is not None
+        waveform_anchor_rows[active_index]
+        if waveform_anchor_rows
         else None
     )
     if waveform_ws is not None:
@@ -2570,13 +2653,14 @@ def write_report_template(
             setpoints,
             condition_signature,
             temperature_labels,
+            protected_anchor_rows=set(waveform_anchor_rows),
         )
     images_written = (
         _write_dpt_images(
             waveform_ws,
             waveform_anchor_row,
             image_map,
-            result0,
+            image_result,
             progress_callback=emit_image,
             temperature_labels=temperature_labels,
         )
