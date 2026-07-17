@@ -546,6 +546,28 @@ def turn_off_didt_measurement_context(
         pct_b,
         edge,
     )
+    # Slow/low-current turn-off can finish after the Vge-derived fall window.
+    # Keep that window as the primary search so established complete cases do
+    # not drift, but extend to the declared parameter-local end when either
+    # percentage intersection is missing.  A numerical fallback without a
+    # real A/B pair is not suitable for GUI cursor verification.
+    if (
+        (crossing.t_pct_a_s is None or crossing.t_pct_b_s is None)
+        and search1 < i1
+    ):
+        extended = didt_between_base_top(
+            t,
+            ic,
+            search0,
+            i1,
+            base_a,
+            top_a,
+            pct_a,
+            pct_b,
+            edge,
+        )
+        if extended.t_pct_a_s is not None and extended.t_pct_b_s is not None:
+            crossing = extended
     used_fallback = crossing.didt < 1e-6
     if used_fallback:
         fallback = didt_max(t, ic, search0, search1 + 1, dt, cfg)

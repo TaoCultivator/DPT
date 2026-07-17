@@ -538,10 +538,8 @@ def extract_all(
     )
     if fall_win is not None:
         ic_f0, ic_f1 = fall_win
-        ic_off_max = float(np.max(np.abs(ic[ic_f0 : ic_f1 + 1])))
     else:
         ic_f0, ic_f1 = off0, off1
-        ic_off_max = float(np.max(np.abs(ic[off0:off1])))
 
     slope_active = default_slope_ranges()
     slope_active.update(cfg.slope_ranges)
@@ -577,6 +575,10 @@ def extract_all(
         off_di_p1,
         edge=off_di.ic_direction,
     )
+    # One canonical source keeps Ic_off_max, the displayed Ha/Top, percentage
+    # thresholds, GUI cursors and report values identical even on the fallback
+    # interval path where no dedicated Vge fall window is available.
+    ic_off_max = float(off_didt_context.top_a)
     didt_o = float(off_didt_context.crossing.didt)
 
     # 关断尖峰相关量基于 Vce Top（尖峰减 Top）
@@ -623,14 +625,8 @@ def extract_all(
         vce_off_max=vce_off_max,
         dvdt=dvdt_o,
         didt=didt_o,
-        dvdt_range=(
-            f"{off_dv.label()}·Top={off_dvdt_context.top_v:.2f}V"
-            f"·Base={off_dvdt_context.base_v:.2f}V"
-        ),
-        didt_range=(
-            f"{off_di.label()}·Top={off_didt_context.top_a:.2f}A"
-            f"·Base={off_didt_context.base_a:.2f}A"
-        ),
+        dvdt_range=off_dv.label(),
+        didt_range=off_di.label(),
         ls_off=ls_off,
         toff=toff,
         td_off=td_off,

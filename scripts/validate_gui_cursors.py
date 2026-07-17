@@ -218,6 +218,42 @@ def _captured_parameter_focus(
     )
 
 
+def _parameter_focus_geometry_problem(
+    view_range_us: tuple[float, float],
+    full_range_us: tuple[float, float],
+    captured_focus: tuple[float, tuple[float, ...], float] | None,
+    *,
+    tolerance_us: float = 0.025,
+) -> str | None:
+    """Verify the real view against the same bounded focus policy used by UI.
+
+    The requested anchor fraction is a preferred composition. Earlier required
+    times may move the anchor right, while the solver still caps that movement
+    so the post-event observation area cannot disappear. Re-solving the policy
+    is therefore stricter and more accurate than requiring an exact 12% ratio.
+    """
+    if captured_focus is None:
+        return None
+    anchor_us, required_times_us, anchor_fraction = captured_focus
+    expected_x0, expected_x1 = _solve_parameter_x_window(
+        full_range_us,
+        anchor_us,
+        required_times_us,
+        anchor_fraction=anchor_fraction,
+    )
+    actual_x0, actual_x1 = map(float, view_range_us)
+    tol = max(0.0, float(tolerance_us))
+    if (
+        abs(actual_x0 - expected_x0) <= tol
+        and abs(actual_x1 - expected_x1) <= tol
+    ):
+        return None
+    return (
+        f"参数 focus 构图偏离策略: 实际[{actual_x0:.3f},{actual_x1:.3f}]us，"
+        f"期望[{expected_x0:.3f},{expected_x1:.3f}]us"
+    )
+
+
 _COMPACT_AB_FOCUS_PARAMS = {
     ("关断过程", "dv/dt"),
     ("关断过程", "di/dt"),
@@ -1094,13 +1130,13 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                             f"focus 必需时刻={required_us:.3f} 不在视窗"
                             f"[{x0:.3f},{x1:.3f}]"
                         )
-                if x0 > full_x0 + 0.02 and x1 < full_x1 - 0.02:
-                    fraction = (anchor_us - x0) / max(span, 1e-12)
-                    if abs(fraction - expected_fraction) > 0.025:
-                        problems.append(
-                            f"真实 focus 锚点比例={fraction:.3f}，"
-                            f"调用期望约{expected_fraction:.3f}"
-                        )
+                geometry_problem = _parameter_focus_geometry_problem(
+                    (x0, x1),
+                    (full_x0, full_x1),
+                    captured_focus,
+                )
+                if geometry_problem is not None:
+                    problems.append(geometry_problem)
                 detail += (
                     f" focus_anchor={anchor_us:.3f}"
                     f" required={required_times_us}"

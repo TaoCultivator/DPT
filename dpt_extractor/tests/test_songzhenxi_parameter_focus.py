@@ -129,6 +129,11 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                         self.assertAlmostEqual(span_us, 2.0, places=6)
 
                         anchor_us, required_times_us, _requested_fraction = focus_calls[-1]
+                        if section == "反向恢复":
+                            expected_anchor = win._switching_focus_anchor_us(section)
+                            self.assertIsNotNone(expected_anchor)
+                            assert expected_anchor is not None
+                            self.assertAlmostEqual(anchor_us, expected_anchor, places=6)
                         anchor_position = (anchor_us - x0) / span_us
                         self.assertGreaterEqual(anchor_position, 0.10)
                         self.assertLessEqual(anchor_position, 0.15)
@@ -139,12 +144,12 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                             cursor_position = (cursor_us - x0) / span_us
                             self.assertGreaterEqual(
                                 cursor_position,
-                                0.095,
+                                0.04 if section == "反向恢复" else 0.095,
                                 f"{label} 光标过于靠左: {cursor_position:.3%}",
                             )
                             self.assertLessEqual(
                                 cursor_position,
-                                0.65,
+                                0.80 if section == "反向恢复" else 0.65,
                                 f"{label} 光标过于靠右: {cursor_position:.3%}",
                             )
 
@@ -164,7 +169,7 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                             )
                             self.assertLessEqual(
                                 required_position,
-                                0.65,
+                                0.90 if section == "反向恢复" else 0.65,
                                 f"必要守卫点过于靠右: {required_position:.3%}",
                             )
 

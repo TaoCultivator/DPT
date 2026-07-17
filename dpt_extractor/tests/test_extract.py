@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -160,6 +161,26 @@ class TestExtractWH(unittest.TestCase):
         self.assertGreater(on.td_on, 200)
         self.assertGreater(on.tr, 30)
         self.assertGreater(on.ton, 300)
+
+    @unittest.skipUnless(WH.exists(), "WH sample missing")
+    def test_missing_vge_fall_window_reuses_didt_top_as_ic_off_max(self):
+        bundle = load_waveform(WH)
+        cfg = load_config()
+        with patch(
+            "dpt_extractor.pipeline.extract.turn_off_ic_fall_window",
+            return_value=None,
+        ):
+            result = extract_all(bundle, UPPER_BRIDGE, cfg)
+
+        assert result.segments is not None
+        ic = bundle_total_current(bundle, UPPER_BRIDGE)
+        start = max(
+            int(result.segments.pulse1_on) + 1,
+            int(result.segments.turn_off[0]),
+        )
+        end = min(int(result.segments.turn_off[1]), len(ic) - 1)
+        expected = float(np.max(np.abs(ic[start : end + 1])))
+        self.assertAlmostEqual(result.turn_off.ic_off_max, expected, places=12)
 
 
 class TestExtractWL(unittest.TestCase):

@@ -69,6 +69,17 @@ SONG_SMC_HT_WL_1048 = (
     / "tss"
     / "WL_750V_1048A_000.tss"
 )
+SONG_SMC_RT_UH_1048 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UH_750V_1048A_000.tss"
+)
 SONG_DCU_RT_WL_480_1000 = (
     ROOT
     / "示例文件"
@@ -93,6 +104,13 @@ WANGLIHUI_UL_400_1070 = (
     / "wanglihui"
     / "U"
     / "UL_400V_1070A_Rgon1.1R_Rgof5R_000.tss"
+)
+WANGLIHUI_UL_486_985 = (
+    ROOT
+    / "示例文件"
+    / "wanglihui"
+    / "U"
+    / "UL_486V_985A_Rgon1.1R_Rgof5R_000.tss"
 )
 WANGLIHUI_SLOW_TURN_ON_CASES = (
     (
@@ -1802,7 +1820,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(win.report_progress.detail_text(), "准备截图")
         self.assertEqual(
             win.report_progress.eta_caption_text(),
-            "当前阶段预计剩余",
+            "剩余",
         )
 
         win._set_report_progress(3, 5, "截图 3/5")
@@ -1822,6 +1840,134 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(win.report_progress.percent_text(), "100.0%")
         self.assertEqual(win.report_progress.detail_text(), "完成")
         win.close()
+
+    def test_report_progress_panel_compacts_without_widget_overlap(self):
+        from dpt_extractor.gui.main_window import ReportProgressPanel
+
+        panel = ReportProgressPanel()
+        try:
+            cases = (
+                (320, "tiny", True, True),
+                (420, "compact", True, False),
+                (560, "medium", False, False),
+                (760, "full", False, False),
+            )
+            for width, mode, detail_hidden, caption_hidden in cases:
+                panel._apply_density_for_width(width)
+                panel.resize(width, 30)
+                layout = panel.layout()
+                assert layout is not None
+                layout.setGeometry(panel.rect())
+
+                self.assertEqual(panel._density_mode, mode)
+                self.assertEqual(panel._detail_label.isHidden(), detail_hidden)
+                self.assertEqual(panel._eta_caption.isHidden(), caption_hidden)
+                self.assertEqual(
+                    panel.eta_caption_text(),
+                    "当前阶段预计剩余" if mode == "full" else "剩余",
+                )
+
+                ordered = (
+                    panel._stage_label,
+                    panel._sep_a,
+                    panel._detail_label,
+                    panel._sep_b,
+                    panel._bar,
+                    panel._percent_label,
+                    panel._sep_c,
+                    panel._eta_caption,
+                    panel._eta_label,
+                )
+                visible = [widget for widget in ordered if not widget.isHidden()]
+                for left, right in zip(visible, visible[1:]):
+                    self.assertLess(
+                        left.geometry().right(),
+                        right.geometry().left(),
+                        f"{mode}: {left.objectName()} overlaps {right.objectName()}",
+                    )
+                self.assertLess(
+                    visible[-1].geometry().right(),
+                    panel.contentsRect().right(),
+                    f"{mode}: last progress widget exceeds the panel boundary",
+                )
+
+            panel._apply_density_for_width(420)
+            panel.resize(420, 30)
+            panel.begin(100, "准备报告截图...", stage="报告写入")
+
+            class _FixedEta:
+                @staticmethod
+                def observe(*_args):
+                    return None
+
+                @staticmethod
+                def eta_ms():
+                    return 754_000.0
+
+            panel._eta_estimator = _FixedEta()
+            panel.update_progress(
+                100,
+                100,
+                "插入报告图片 19/19",
+                eta_phase="embed_images",
+                eta_completed=19,
+                eta_total=19,
+            )
+            layout = panel.layout()
+            assert layout is not None
+            layout.invalidate()
+            layout.setGeometry(panel.rect())
+
+            self.assertEqual(panel.percent_text(), "99.9%")
+            self.assertEqual(panel.eta_text(), "12m 34s")
+            self.assertIn("报告写入：插入报告图片 19/19", panel.toolTip())
+            self.assertIn("当前阶段预计剩余", panel.toolTip())
+            self.assertIn("12m 34s", panel.toolTip())
+            self.assertEqual(panel.accessibleDescription(), panel.toolTip())
+            visible = [widget for widget in ordered if not widget.isHidden()]
+            for left, right in zip(visible, visible[1:]):
+                self.assertLess(left.geometry().right(), right.geometry().left())
+            self.assertLess(
+                visible[-1].geometry().right(),
+                panel.contentsRect().right(),
+            )
+        finally:
+            panel.close()
+
+    def test_main_window_restored_progress_panel_has_no_overlap(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win.resize(1280, 830)
+        win.show()
+        try:
+            self.app.processEvents()
+            panel = win.report_progress
+            self.assertLess(panel.width(), 470)
+            self.assertEqual(panel._density_mode, "compact")
+
+            ordered = (
+                panel._stage_label,
+                panel._sep_a,
+                panel._detail_label,
+                panel._sep_b,
+                panel._bar,
+                panel._percent_label,
+                panel._sep_c,
+                panel._eta_caption,
+                panel._eta_label,
+            )
+            visible = [widget for widget in ordered if widget.isVisible()]
+            for left, right in zip(visible, visible[1:]):
+                self.assertLess(
+                    left.geometry().right(),
+                    right.geometry().left(),
+                    f"{left.objectName()} overlaps {right.objectName()}",
+                )
+        finally:
+            win.close()
+            win.deleteLater()
+            self.app.processEvents()
 
     def test_progress_eta_uses_completed_units_and_failure_keeps_last_value(self):
         from dpt_extractor.gui.main_window import MainWindow
@@ -2451,6 +2597,33 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             (5.0 - expanded0) / (expanded1 - expanded0),
             PARAM_FOCUS_ANCHOR_FRACTION,
         )
+
+        # A required point before the preferred 12% anchor must shift the
+        # composition right instead of inflating a valid 200 ns/div window.
+        conflict0, conflict1 = _solve_parameter_x_window(
+            (0.0, 30.0),
+            14.451282777854443,
+            (14.012719999925231, 15.776319999917897),
+            base_span_us=2.0,
+            guard_us=0.02,
+        )
+        self.assertAlmostEqual(conflict1 - conflict0, 2.0, places=9)
+        self.assertLessEqual(conflict0, 14.012719999925231 - 0.02)
+        self.assertGreaterEqual(conflict1, 15.776319999917897 + 0.02)
+        self.assertGreater(
+            (14.451282777854443 - conflict0) / (conflict1 - conflict0),
+            PARAM_FOCUS_ANCHOR_FRACTION,
+        )
+
+        far_left0, far_left1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            5.0,
+            (3.4, 5.5),
+            base_span_us=2.0,
+            guard_us=0.0,
+        )
+        self.assertLessEqual((5.0 - far_left0) / (far_left1 - far_left0), 0.65)
+        self.assertGreaterEqual(far_left1 - 5.0, 0.35 * (far_left1 - far_left0))
 
         left0, left1 = _solve_parameter_x_window(
             (0.0, 10.0),
@@ -5177,21 +5350,12 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             xr = plot.current_x_range_us()
             self.assertIsNotNone(xr)
             x0, x1 = xr
-            edge_us = (
-                min(
-                    float(plot._cursor_a.value()),
-                    float(plot._cursor_b.value()),
-                )
-                if section == "反向恢复"
-                and plot._cursor_a is not None
-                and plot._cursor_b is not None
-                else win._switching_focus_anchor_us(section)
-            )
+            edge_us = win._switching_focus_anchor_us(section)
             self.assertIsNotNone(edge_us)
             assert edge_us is not None
             if section == "关断过程":
                 ref = win._turn_off_timing_instants().t_v90_s
-            elif section == "开通":
+            elif section in {"开通", "反向恢复"}:
                 ref = win._turn_on_timing_instants().t_v10_s
             else:
                 ref = None
@@ -5222,6 +5386,48 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         assert_focus("开通", "Eon")
         assert_focus("反向恢复", "di/dt")
         win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_RT_UH_1048.exists(), "songzhenxi SMC RT UH 1048A sample missing"
+    )
+    def test_crosstalk_first_and_second_click_both_use_200ns_per_div(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow
+
+        plot, bundle, profile, result = self._load_and_plot(SONG_SMC_RT_UH_1048)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+        key = ("关断过程", "串扰电压")
+        try:
+            win._on_value_clicked(*key)
+            QApplication.processEvents()
+            first = plot.current_x_range_us()
+            self.assertIsNotNone(first)
+            assert first is not None
+            self.assertAlmostEqual(first[1] - first[0], 2.0, places=6)
+            self.assertEqual(plot._x_scale_edit.text(), "200 ns/div")
+            self.assertNotIn(key, win._manual_intervals)
+
+            win._on_value_clicked(*key)
+            QApplication.processEvents()
+            second = plot.current_x_range_us()
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertAlmostEqual(second[1] - second[0], 2.0, places=6)
+            self.assertAlmostEqual(second[0], first[0], places=6)
+            self.assertAlmostEqual(second[1], first[1], places=6)
+            self.assertEqual(plot._x_scale_edit.text(), "200 ns/div")
+            self.assertNotIn(key, win._manual_intervals)
+        finally:
+            win.close()
+            plot.close()
 
     @unittest.skipUnless(
         SONG_DCU_RT_WL_480_1000.exists() and SONG_SMC_HT_WL_1048.exists(),
@@ -5381,7 +5587,13 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             win._on_value_clicked("反向恢复", "Trr")
             QApplication.processEvents()
             self.assertTrue(calls)
-            self.assertAlmostEqual(calls[-1][0], saved_trr_a, places=6)
+            expected_anchor = win._switching_focus_anchor_us("反向恢复")
+            self.assertIsNotNone(expected_anchor)
+            assert expected_anchor is not None
+            self.assertAlmostEqual(calls[-1][0], expected_anchor, places=6)
+            self.assertTrue(
+                any(abs(value - saved_trr_a) <= 1e-6 for value in calls[-1][1])
+            )
 
             win._on_value_clicked("反向恢复", "Err")
             plot._emit_energy_loss_changed()
@@ -5513,11 +5725,15 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     self.assertGreaterEqual(span, min(2.0, full_span) - 0.02)
 
                     anchor_us, required_times, anchor_fraction = focus_calls[-1]
+                    if section == "反向恢复":
+                        expected_anchor = win._switching_focus_anchor_us(section)
+                        self.assertIsNotNone(expected_anchor)
+                        assert expected_anchor is not None
+                        self.assertAlmostEqual(anchor_us, expected_anchor, places=6)
                     if x0 > full_x0 + 0.02 and x1 < full_x1 - 0.02:
-                        self.assertAlmostEqual(
+                        self.assertGreaterEqual(
                             (anchor_us - x0) / span,
-                            anchor_fraction,
-                            delta=0.025,
+                            anchor_fraction - 0.025,
                         )
                     for required_time in required_times:
                         self.assertGreaterEqual(required_time, x0 - 1e-6)
@@ -5953,6 +6169,80 @@ class TestMainWindowSmoke(unittest.TestCase):
                 ha,
                 delta=0.5,
             )
+        win.close()
+
+    @unittest.skipUnless(WANGLIHUI_UL_486_985.exists(), "wanglihui UL sample missing")
+    def test_derived_irr_trr_cursor_card_uses_internal_current_trace(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        win = MainWindow()
+        win._load_file(str(WANGLIHUI_UL_486_985))
+        self.assertTrue(win.profile.irr_from_ic_minus_il)
+
+        plot = win.wave_plot
+        plot._on_legend_double_clicked("CH1")
+        self.assertEqual(plot._highlighted_key, "CH1")
+
+        win._on_value_clicked("反向恢复", "Trr")
+        logical_irr = plot._display_key_for_channel("irr")
+        self.assertEqual(logical_irr, "LOGIC_IRR")
+        self.assertIn(logical_irr, plot._trace_raw)
+        self.assertNotIn(logical_irr, plot._trace_items)
+        self.assertAlmostEqual(win.result.reverse_recovery.trr, 287.322921, delta=0.01)
+
+        def assert_bound_to_logical_irr() -> None:
+            self.assertEqual(plot._active_channel, "irr")
+            self.assertEqual(plot._cursor_source_channel(), logical_irr)
+            self.assertEqual(plot._axis_channel(), logical_irr)
+            readout = plot._cursor_a_t_label.textItem.toPlainText()
+            self.assertIn("Irr", readout)
+            self.assertIn("A", readout)
+            self.assertNotIn("VGE", readout.upper())
+            top_readout = plot._readout_label.text()
+            self.assertIn("Irr", top_readout)
+            self.assertIn("A", top_readout)
+            self.assertNotIn("VGE", top_readout.upper())
+
+        # A pre-existing visible-channel highlight must not steal the Trr axis.
+        self.assertEqual(plot._highlighted_key, "CH1")
+        assert_bound_to_logical_irr()
+
+        # In-mode single/double clicks may still raise/highlight CH1 visually,
+        # but LOGIC_IRR has no selectable channel box and must remain bound.
+        plot._on_legend_clicked("CH1")
+        self.assertEqual(plot._raised_key, "CH1")
+        assert_bound_to_logical_irr()
+        plot._on_legend_double_clicked("CH1")
+        self.assertEqual(plot._highlighted_key, "CH1")
+        assert_bound_to_logical_irr()
+
+        irr = bundle_reverse_recovery_current(win.bundle, win.profile)
+        for marker, cursor in (
+            (plot._cursor_a_wave_marker, plot._cursor_a),
+            (plot._cursor_b_wave_marker, plot._cursor_b),
+        ):
+            marker_x, marker_y = marker.getData()
+            self.assertEqual(len(marker_x), 1)
+            self.assertEqual(len(marker_y), 1)
+            t_us = float(cursor.value())
+            self.assertAlmostEqual(float(marker_x[0]), t_us, places=6)
+            expected = float(np.interp(t_us * 1e-6, win.bundle.t, irr))
+            actual = plot._from_disp("irr", float(marker_y[0]))
+            self.assertAlmostEqual(actual, expected, delta=0.75)
+
+        # Leaving Trr must bind the next generic parameter explicitly instead
+        # of carrying the unselectable internal Irr source into interval mode.
+        win._on_value_clicked("关断过程", "Toff")
+        self.assertEqual(plot._interactive_mode, "interval")
+        self.assertEqual(plot._active_channel, "ic")
+        self.assertIsNone(plot._raw_only_logical_readout_channel())
+        plot._on_legend_clicked("CH2")
+        self.assertEqual(plot._active_channel, "CH2")
+        self.assertEqual(plot._cursor_source_channel(), "CH2")
+        self.assertEqual(plot._axis_channel(), "CH2")
         win.close()
 
     def test_smc_rt_eoff_ha_intersects_vce_a_cursor(self):

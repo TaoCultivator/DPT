@@ -16,7 +16,7 @@ SLOPE_ROW_KEYS: dict[tuple[str, str], str] = {
 SlopePreset = tuple[str, float, float] | tuple[str, float, float, str] | tuple[str, float, float, str, str]
 
 SLOPE_RANGE_PRESETS: dict[str, list[SlopePreset]] = {
-    # 关断 di/dt：阈值相对关断前电流 Top（100% Ic），非切换尖峰
+    # 关断 di/dt：阈值相对当前关断窗最大电流（与 Ic_off_max 同口径）
     "off_didt": [
         ("90%→10%", 90.0, 10.0, "top", "fall"),
         ("90%→50%", 90.0, 50.0, "top", "fall"),

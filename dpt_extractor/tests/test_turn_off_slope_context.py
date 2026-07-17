@@ -31,6 +31,28 @@ SONG_DCU_RT_WL_480_1000 = (
     / "tss"
     / "WL_480V_1000A_000.tss"
 )
+SONG_SMC_RT_UH_1048 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UH_750V_1048A_000.tss"
+)
+SONG_DCU_LT_WH_480_100 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2506"
+    / "DCU"
+    / "SMC"
+    / "LT"
+    / "tss"
+    / "WH_480V_100A_000.tss"
+)
 
 
 class TestTurnOffSlopeSyntheticContext(unittest.TestCase):
@@ -94,14 +116,14 @@ class TestTurnOffSlopeSyntheticContext(unittest.TestCase):
         )
         self.assertGreater(crossing.dvdt, 0.0)
 
-    def test_didt_uses_stable_band_centers_not_peak_or_p95(self) -> None:
+    def test_didt_top_uses_current_maximum_from_the_fall_window(self) -> None:
         indices = np.arange(len(self.t))
         ic = np.where(indices % 2 == 0, 979.5, 980.5).astype(np.float64)
         ic[900:911] = np.linspace(ic[899], 8.0, 12)[1:]
         ic[911:] = np.where(indices[911:] % 2 == 0, 7.5, 8.5)
 
-        # A peak and an undershoot remain in the broader local record. Neither
-        # is allowed to redefine the actual pre/post-fall stable bands.
+        # Peaks outside the declared fall window must not redefine the current
+        # maximum used by this parameter; Base remains the local settled band.
         ic[400] = 1000.0
         ic[650] = 1200.0
         ic[850] = 0.0
@@ -124,13 +146,15 @@ class TestTurnOffSlopeSyntheticContext(unittest.TestCase):
             edge="fall",
         )
 
-        self.assertAlmostEqual(context.top_a, (979.5 + 980.5) / 2.0, places=12)
+        self.assertAlmostEqual(
+            context.top_a,
+            float(np.max(np.abs(ic[800:1001]))),
+            places=12,
+        )
+        self.assertAlmostEqual(context.top_a, 980.5, places=12)
         self.assertAlmostEqual(context.base_a, (7.5 + 8.5) / 2.0, places=12)
         local = ic[i0 : i1 + 1]
         self.assertNotAlmostEqual(context.top_a, float(np.max(local)), places=6)
-        self.assertNotAlmostEqual(
-            context.top_a, float(np.percentile(local, 95.0)), places=6
-        )
         self.assertNotAlmostEqual(context.base_a, float(np.min(local)), places=6)
         self.assertFalse(context.used_fallback)
 
@@ -262,20 +286,16 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
 
         self.assertAlmostEqual(result.turn_off.dvdt, dv_context.crossing.dvdt, places=12)
         self.assertAlmostEqual(result.turn_off.didt, di_context.crossing.didt, places=12)
-        self.assertEqual(
-            result.turn_off.dvdt_range,
-            f"{dv_range.label()}·Top={dv_context.top_v:.2f}V"
-            f"·Base={dv_context.base_v:.2f}V",
-        )
-        self.assertEqual(
-            result.turn_off.didt_range,
-            f"{di_range.label()}·Top={di_context.top_a:.2f}A"
-            f"·Base={di_context.base_a:.2f}A",
-        )
+        self.assertEqual(result.turn_off.dvdt_range, dv_range.label())
+        self.assertEqual(result.turn_off.didt_range, di_range.label())
+        self.assertNotIn("Top=", result.turn_off.dvdt_range)
+        self.assertNotIn("Base=", result.turn_off.dvdt_range)
+        self.assertNotIn("Top=", result.turn_off.didt_range)
+        self.assertNotIn("Base=", result.turn_off.didt_range)
 
         self.assertAlmostEqual(dv_context.top_v, 472.0234375, places=6)
         self.assertAlmostEqual(dv_context.base_v, 5.984375, places=6)
-        self.assertAlmostEqual(di_context.top_a, 980.59375, places=6)
+        self.assertAlmostEqual(di_context.top_a, 1002.15625, places=6)
         self.assertAlmostEqual(di_context.base_a, 8.03125, places=6)
         self.assertFalse(dv_context.used_fallback)
         self.assertFalse(di_context.used_fallback)
@@ -293,14 +313,131 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         self.assertEqual(gui_dv, dv_context)
         self.assertEqual(gui_di, di_context)
 
-        # Peak current and loss/overshoot metrics remain independent outputs.
+        # The default Ha/Top is the exact same current maximum shown in the
+        # Ic_off_max row; Base remains the settled post-fall level.
         self.assertAlmostEqual(result.turn_off.ic_off_max, 1002.15625, places=6)
-        self.assertNotAlmostEqual(
-            result.turn_off.ic_off_max, di_context.top_a, places=6
-        )
-        self.assertGreater(result.turn_off.ic_off_max, di_context.top_a)
+        self.assertAlmostEqual(result.turn_off.ic_off_max, di_context.top_a, places=6)
         self.assertAlmostEqual(result.turn_off.eoff, 56.49762867, places=6)
         self.assertAlmostEqual(result.turn_off.delta_vce, 194.609375, places=6)
+
+    def test_all_slope_range_cells_keep_only_percentage_labels_after_interaction(self) -> None:
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.metrics.slopes import DidtCrossingResult, DvdtCrossingResult
+
+        window = MainWindow()
+        self.addCleanup(window.close)
+        window._load_file(str(SONG_DCU_RT_WL_480_1000))
+        self.assertIsNotNone(window.result)
+        assert window.result is not None
+
+        dv = DvdtCrossingResult(1.0, None, None, 0.1, 0.9)
+        di = DidtCrossingResult(1.0, None, None, 0.9, 0.1, 1.0, 0.1)
+        for section in ("关断过程", "开通", "反向恢复"):
+            window._apply_dvdt_result(section, dv, 999.0, 7.0, 1.0, 2.0)
+            window._apply_didt_result(section, di, 888.0, 6.0, 1.0, 2.0)
+
+        result = window.result
+        expected = {
+            ("关断过程", "dv/dt"): window._slope_ranges["off_dvdt"].label(),
+            ("关断过程", "di/dt"): window._slope_ranges["off_didt"].label(),
+            ("开通", "dv/dt"): window._slope_ranges["on_dvdt"].label(),
+            ("开通", "di/dt"): window._slope_ranges["on_didt"].label(),
+            ("反向恢复", "dv/dt"): window._slope_ranges["rr_dvdt"].label(),
+            ("反向恢复", "di/dt"): window._slope_ranges["rr_didt"].label(),
+        }
+        actual = {
+            ("关断过程", "dv/dt"): result.turn_off.dvdt_range,
+            ("关断过程", "di/dt"): result.turn_off.didt_range,
+            ("开通", "dv/dt"): result.turn_on.dvdt_range,
+            ("开通", "di/dt"): result.turn_on.didt_range,
+            ("反向恢复", "dv/dt"): result.reverse_recovery.dvdt_range,
+            ("反向恢复", "di/dt"): result.reverse_recovery.didt_range,
+        }
+        self.assertEqual(actual, expected)
+        for text in actual.values():
+            self.assertNotRegex(text, r"Top=|Base=|Ha=|Hb=|H0=")
+
+        window.result_table.set_result(result)
+        for row, meta in enumerate(window.result_table._row_meta):
+            if meta not in expected:
+                continue
+            item = window.result_table.table.item(row, 3)
+            self.assertIsNotNone(item)
+            assert item is not None
+            self.assertEqual(item.text(), expected[meta])
+
+    def test_reported_uh_1048_case_uses_ic_off_max_for_default_ha(self) -> None:
+        if not SONG_SMC_RT_UH_1048.exists():
+            self.skipTest(f"missing {SONG_SMC_RT_UH_1048}")
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        window = MainWindow()
+        self.addCleanup(window.close)
+        window._load_file(str(SONG_SMC_RT_UH_1048))
+        self.assertIsNotNone(window.result)
+        assert window.result is not None
+        interval = window._parameter_interval_us("关断过程", "di/dt")
+        self.assertIsNotNone(interval)
+        assert interval is not None
+        context = window._turn_off_didt_context(*interval)
+        self.assertIsNotNone(context)
+        assert context is not None
+
+        self.assertAlmostEqual(window.result.turn_off.ic_off_max, 1050.84375, places=6)
+        self.assertAlmostEqual(context.top_a, window.result.turn_off.ic_off_max, places=9)
+        self.assertAlmostEqual(window.result.turn_off.didt, 11.620718, places=6)
+
+        window._on_value_clicked("关断过程", "di/dt")
+        QApplication.processEvents()
+        state = window.wave_plot.read_didt_slope_state("ic")
+        self.assertIsNotNone(state)
+        assert state is not None
+        gui_ha, _gui_hb, _zero = state
+        self.assertAlmostEqual(gui_ha, window.result.turn_off.ic_off_max, places=9)
+        self.assertEqual(window.result.turn_off.didt_range, "90%→10%")
+
+    def test_low_current_turn_off_extends_search_until_both_real_crossings(self) -> None:
+        if not SONG_DCU_LT_WH_480_100.exists():
+            self.skipTest(f"missing {SONG_DCU_LT_WH_480_100}")
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        window = MainWindow()
+        self.addCleanup(window.close)
+        window._load_file(str(SONG_DCU_LT_WH_480_100))
+        self.assertIsNotNone(window.result)
+        assert window.result is not None
+        interval = window._parameter_interval_us("关断过程", "di/dt")
+        self.assertIsNotNone(interval)
+        assert interval is not None
+        context = window._turn_off_didt_context(*interval)
+        self.assertIsNotNone(context)
+        assert context is not None
+
+        self.assertFalse(context.used_fallback)
+        self.assertIsNotNone(context.crossing.t_pct_a_s)
+        self.assertIsNotNone(context.crossing.t_pct_b_s)
+        self.assertAlmostEqual(window.result.turn_off.didt, 0.773031568, places=6)
+
+        window._on_value_clicked("关断过程", "di/dt")
+        QApplication.processEvents()
+        self.assertIsNotNone(window.wave_plot._cursor_a)
+        self.assertIsNotNone(window.wave_plot._cursor_b)
+        assert window.wave_plot._cursor_a is not None
+        assert window.wave_plot._cursor_b is not None
+        self.assertAlmostEqual(
+            float(window.wave_plot._cursor_a.value()),
+            float(context.crossing.t_pct_a_s) * 1e6,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(window.wave_plot._cursor_b.value()),
+            float(context.crossing.t_pct_b_s) * 1e6,
+            places=6,
+        )
 
 
 if __name__ == "__main__":

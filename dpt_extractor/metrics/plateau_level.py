@@ -856,36 +856,25 @@ def turn_off_didt_base_top_levels(
     fall_end: int,
     dt: float,
 ) -> tuple[float, float]:
-    """关断 di/dt 的本地 Base/Top 稳定带中心。
+    """关断 di/dt 的本地 Base 与最大电流 Top。
 
-    Top 使用真实关断前约 250ns 导通平台的 ``(max + min) / 2``，
-    不再使用峰值或 P95；Base 使用主下降沿后的本地安静回落平台。
+    Top 与 ``Ic_off_max`` 共用真实关断电流下降窗内的 ``max(abs(Ic))``；
+    Base 使用主下降沿后的本地安静回落平台。
     返回顺序为 ``(Base, Top)``，便于直接生成百分比参考电平。
     """
     ic = np.asarray(ic, dtype=np.float64)
     n = len(ic)
     if n < 2:
         return 0.0, 0.0
-    dt_s = max(float(dt), 1e-15)
+    _ = off_idx, dt
     pulse1_on = max(0, min(int(pulse1_on), n - 2))
     local_start = max(0, min(int(local_start), n - 2))
     local_end = max(local_start + 1, min(int(local_end), n - 1))
-    off_idx = max(pulse1_on + 1, min(int(off_idx), n - 1))
     fall_start = max(pulse1_on + 1, min(int(fall_start), n - 2))
     fall_end = max(fall_start + 1, min(int(fall_end), n - 1))
 
-    top_end = max(
-        pulse1_on + 10,
-        min(off_idx - int(40e-9 / dt_s), fall_start, n - 1),
-    )
-    top_start = max(pulse1_on, top_end - int(250e-9 / dt_s))
-    if top_end <= top_start + 5:
-        top_start = pulse1_on
-        top_end = max(top_start + 1, min(fall_start, off_idx, n - 1))
-    top_seg = ic[top_start:top_end]
-    if len(top_seg) == 0:
-        top_seg = ic[pulse1_on:off_idx]
-    top = _plateau_mid_without_isolated_spikes(top_seg)
+    top_seg = ic[fall_start : fall_end + 1]
+    top = float(np.max(np.abs(top_seg))) if len(top_seg) else 0.0
 
     local_seg = ic[local_start : local_end + 1]
     if len(local_seg) >= 2:

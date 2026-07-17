@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -318,12 +319,14 @@ class ReportProgressPanel(QFrame):
         self._finished_ok = False
         self._task_started = False
         self._eta_estimator = UnitRateEstimator()
+        self._density_mode = ""
 
         self._timer = QTimer(self)
         self._timer.setInterval(200)
         self._timer.timeout.connect(self._refresh_readout)
 
         lay = QHBoxLayout(self)
+        lay.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         lay.setContentsMargins(10, 0, 10, 0)
         lay.setSpacing(8)
 
@@ -334,12 +337,12 @@ class ReportProgressPanel(QFrame):
         self._detail_label.setMinimumWidth(62)
         self._detail_label.setMaximumWidth(180)
 
-        sep_a = QLabel("|")
-        sep_a.setObjectName("reportProgressSeparator")
-        sep_b = QLabel("|")
-        sep_b.setObjectName("reportProgressSeparator")
-        sep_c = QLabel("|")
-        sep_c.setObjectName("reportProgressSeparator")
+        self._sep_a = QLabel("|")
+        self._sep_a.setObjectName("reportProgressSeparator")
+        self._sep_b = QLabel("|")
+        self._sep_b.setObjectName("reportProgressSeparator")
+        self._sep_c = QLabel("|")
+        self._sep_c.setObjectName("reportProgressSeparator")
 
         self._bar = QProgressBar()
         self._bar.setObjectName("reportProgressTrack")
@@ -350,6 +353,7 @@ class ReportProgressPanel(QFrame):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
         )
+        self._bar.setMinimumWidth(36)
 
         self._percent_label = QLabel("0.0%")
         self._percent_label.setObjectName("reportProgressPercent")
@@ -367,21 +371,67 @@ class ReportProgressPanel(QFrame):
         self._eta_caption.setObjectName("reportProgressEtaCaption")
 
         lay.addWidget(self._stage_label)
-        lay.addWidget(sep_a)
+        lay.addWidget(self._sep_a)
         lay.addWidget(self._detail_label)
-        lay.addWidget(sep_b)
+        lay.addWidget(self._sep_b)
         lay.addWidget(self._bar, stretch=1)
         lay.addWidget(self._percent_label)
-        lay.addWidget(sep_c)
+        lay.addWidget(self._sep_c)
         lay.addWidget(self._eta_caption)
         lay.addWidget(self._eta_label)
-        self.setToolTip(
-            "百分比表示整个后台任务进度；预计剩余时间仅按当前同质阶段估算"
-        )
+        self.setAccessibleName("任务进度")
         self.reset_idle()
+        # Start from the smallest valid layout so the parent can allocate a
+        # restored-window width before the first real resize event arrives.
+        self._apply_density_for_width(0)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._apply_density_for_width(event.size().width())
+
+    def _apply_density_for_width(self, width: int) -> None:
+        """Keep the progress readout non-overlapping at restored window widths."""
+
+        width = max(0, int(width))
+        if width < 340:
+            mode = "tiny"
+        elif width < 470:
+            mode = "compact"
+        elif width < 620:
+            mode = "medium"
+        else:
+            mode = "full"
+        if mode == self._density_mode:
+            return
+        self._density_mode = mode
+
+        full = mode == "full"
+        medium = mode == "medium"
+        tiny = mode == "tiny"
+        show_detail = full or medium
+        show_separators = full
+
+        self._detail_label.setVisible(show_detail)
+        for separator in (self._sep_a, self._sep_b, self._sep_c):
+            separator.setVisible(show_separators)
+        self._eta_caption.setVisible(not tiny)
+        self._eta_caption.setText("当前阶段预计剩余" if full else "剩余")
+
+        layout = self.layout()
+        if layout is not None:
+            margin = 6 if tiny else 8 if not full else 10
+            layout.setContentsMargins(margin, 0, margin, 0)
+            layout.setSpacing(4 if tiny else 6 if not full else 8)
+
+        self._detail_label.setMinimumWidth(50 if medium else 62)
+        self._detail_label.setMaximumWidth(108 if medium else 180)
+        self._percent_label.setMinimumWidth(56 if tiny else 62 if not full else 74)
+        self._eta_label.setMinimumWidth(46 if tiny else 48 if not full else 50)
+        self._bar.setMinimumWidth(32 if tiny else 44 if not full else 52)
 
     def set_stage(self, stage: str) -> None:
         self._stage_label.setText(str(stage or "任务进度"))
+        self._refresh_tooltip()
 
     def begin(self, total: int, label: str, *, stage: str = "任务进度") -> None:
         self._busy = False
@@ -599,25 +649,35 @@ class ReportProgressPanel(QFrame):
         self._bar.setValue(int(round(percent * 1000.0)))
         self._percent_label.setText(f"{percent:0.1f}%")
         if percent >= 100.0 and not self._running and self._finished_ok:
-            self._eta_label.setText("0 ms")
-            return
-        if not self._running:
-            self._eta_label.setText("—")
-            return
-        if self._busy or not self._eta_active:
-            self._eta_label.setText("估算中")
-            return
-        eta_ms = self._eta_estimator.eta_ms()
-        if eta_ms is None or eta_ms <= 0.0:
-            self._eta_label.setText("估算中")
-        elif eta_ms < 1000.0:
-            # GUI repaint and queued worker callbacks make millisecond digits
-            # look much more precise than they are.  Preserve the useful
-            # "finishing within a second" signal without presenting false
-            # precision; exact ``0 ms`` remains reserved for success.
-            self._eta_label.setText("<1 s")
+            eta_text = "0 ms"
+        elif not self._running:
+            eta_text = "—"
+        elif self._busy or not self._eta_active:
+            eta_text = "估算中"
         else:
-            self._eta_label.setText(format_duration_ms(eta_ms))
+            eta_ms = self._eta_estimator.eta_ms()
+            if eta_ms is None or eta_ms <= 0.0:
+                eta_text = "估算中"
+            elif eta_ms < 1000.0:
+                # GUI repaint and queued worker callbacks make millisecond digits
+                # look much more precise than they are.  Preserve the useful
+                # "finishing within a second" signal without presenting false
+                # precision; exact ``0 ms`` remains reserved for success.
+                eta_text = "<1 s"
+            else:
+                eta_text = format_duration_ms(eta_ms)
+        self._eta_label.setText(eta_text)
+        self._refresh_tooltip()
+
+    def _refresh_tooltip(self) -> None:
+        detail = self._format.strip() or self._detail_label.text().strip() or "待命"
+        description = (
+            f"{self.stage_text()}：{detail}\n"
+            f"进度 {self.percent_text()}；当前阶段预计剩余 {self.eta_text()}\n"
+            "百分比表示整个后台任务进度；预计剩余时间仅按当前同质阶段估算"
+        )
+        self.setToolTip(description)
+        self.setAccessibleDescription(description)
 
     @staticmethod
     def _format_duration_ms(ms: float) -> str:
@@ -3641,14 +3701,11 @@ class MainWindow(QMainWindow):
         *,
         anchor_us: float | None = None,
     ) -> None:
-        # 关断/开通以门极事件为约 12% 锚点；反向恢复则必须以当前参数的
-        # 实际 A/窗口起点为锚点，否则 Vge 边沿会把主要振荡挤到屏幕中部，
-        # 右侧反向恢复尾部在报告截图中显示不足。
+        # 三类过程都以对应门极切换起点作为首选锚点。反向恢复发生在第二
+        # 脉冲开通过程内，因此沿用开通构图：保留左侧开通过程，同时让恢复
+        # 主瓣、振铃和右侧稳定段落在窗口主体内。
         if anchor_us is None:
-            if section == "反向恢复":
-                anchor_us = min(float(fallback_t0_us), float(fallback_t1_us))
-            else:
-                anchor_us = self._switching_focus_anchor_us(section)
+            anchor_us = self._switching_focus_anchor_us(section)
         if anchor_us is None:
             self.wave_plot.focus_interval_us(fallback_t0_us, fallback_t1_us)
             return
@@ -3873,11 +3930,7 @@ class MainWindow(QMainWindow):
         val = float(res.dvdt)
         row_key = SLOPE_ROW_KEYS.get((section, "dv/dt"))
         sr = self._slope_ranges.get(row_key) if row_key else None
-        range_disp = (
-            f"{sr.label()}·Top={top_v:.2f}V·Base={base_v:.2f}V"
-            if sr
-            else f"Top={top_v:.2f}V·Base={base_v:.2f}V"
-        )
+        range_disp = sr.label() if sr else ""
         if section == "关断过程":
             self.result.turn_off.dvdt = val
             self.result.turn_off.dvdt_range = range_disp
@@ -4352,29 +4405,8 @@ class MainWindow(QMainWindow):
         val = float(res.didt)
         row_key = SLOPE_ROW_KEYS.get((section, "di/dt"))
         sr = self._slope_ranges.get(row_key) if row_key else None
-        unit = "A"
-        if section == "反向恢复" and res.idm is not None:
-            irm = res.irm if res.irm is not None else 0.0
-            is_if_irm = sr and sr.ic_reference == "if_irm"
-            if is_if_irm and zero_a is not None:
-                range_disp = (
-                    f"{sr.label() if sr else ''}·H0={zero_a:.2f}{unit}"
-                    f"·Ha={top_a:.2f}{unit}·Hb={base_a:.2f}{unit}"
-                    if sr
-                    else f"H0={zero_a:.2f}{unit}·Ha={top_a:.2f}{unit}·Hb={base_a:.2f}{unit}"
-                )
-            else:
-                range_disp = (
-                    f"{sr.label() if sr else ''}·Ha={top_a:.2f}{unit}·Hb={base_a:.2f}{unit}"
-                    if sr
-                    else f"Ha={top_a:.2f}{unit}·Hb={base_a:.2f}{unit}"
-                )
-        else:
-            range_disp = (
-                f"{sr.label()}·Top={top_a:.2f}{unit}·Base={base_a:.2f}{unit}"
-                if sr
-                else f"Top={top_a:.2f}{unit}·Base={base_a:.2f}{unit}"
-            )
+        is_if_irm = bool(sr and sr.ic_reference == "if_irm")
+        range_disp = sr.label() if sr else ""
         if section == "关断过程":
             self.result.turn_off.didt = val
             self.result.turn_off.didt_range = range_disp
@@ -4848,6 +4880,11 @@ class MainWindow(QMainWindow):
             on_change=lambda ta, tb: _apply_power_peak(ta, tb, remember=True),
             show_horizontal_peak=matched is not None,
             mode="power_peak",
+            channel=(
+                matched[0]
+                if matched is not None
+                else self._channel_for_param(section, metric_name)
+            ),
         )
         if matched is None:
             self.statusBar().showMessage(
@@ -4968,7 +5005,6 @@ class MainWindow(QMainWindow):
                 "反向恢复",
                 min(ta_us, tb_us) - 0.15,
                 max(ta_us, tb_us) + 0.15,
-                anchor_us=min(ta_us, tb_us),
             )
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
@@ -5309,7 +5345,6 @@ class MainWindow(QMainWindow):
             "反向恢复",
             ta_us,
             max(tb_us, t1_us),
-            anchor_us=ta_us,
         )
         self.wave_plot.enable_trr_measure_interaction(
             t0_us,
@@ -5437,7 +5472,12 @@ class MainWindow(QMainWindow):
             idx = int(np.searchsorted(t, ts, side="left"))
             return max(0, min(idx, len(t) - 1))
 
-        def _on_interval_change(t0_us: float, t1_us: float) -> None:
+        def _on_interval_change(
+            t0_us: float,
+            t1_us: float,
+            *,
+            remember: bool = True,
+        ) -> None:
             i0 = _idx_from_t_us(min(t0_us, t1_us))
             i1 = _idx_from_t_us(max(t0_us, t1_us))
             if i1 <= i0 + 1:
@@ -5448,8 +5488,9 @@ class MainWindow(QMainWindow):
             cs.crosstalk_vmin = float(vmin)
             cs.crosstalk_v = float(vmax)
             ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
-            self._touch_manual_waveform_source()
-            self._manual_intervals[(section, name)] = (ta, tb)
+            if remember:
+                self._touch_manual_waveform_source()
+                self._manual_intervals[(section, name)] = (ta, tb)
             self.wave_plot.set_interval_minmax_horizontal(
                 float(vmin),
                 float(vmax),
@@ -5476,7 +5517,7 @@ class MainWindow(QMainWindow):
             end_t_us=t1_us,
             on_change=_on_interval_change,
         )
-        _on_interval_change(t0_us, t1_us)
+        _on_interval_change(t0_us, t1_us, remember=False)
 
     def _enable_short_circuit_current_interaction(self, name: str) -> None:
         """短路 Imax/Tsc：默认按短路规范布置，手动拖动时横纵光标独立。"""
@@ -5748,6 +5789,7 @@ class MainWindow(QMainWindow):
             start_t_us=t0_us,
             end_t_us=t1_us,
             on_change=_on_interval_change,
+            channel=self._channel_for_param(section, name),
             on_horizontal_change=(
                 _on_horizontal_extreme_change if name in _MAX_INTERVAL_NAMES else None
             ),

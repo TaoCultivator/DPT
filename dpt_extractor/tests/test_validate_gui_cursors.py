@@ -15,6 +15,7 @@ from scripts.validate_gui_cursors import (
     _err_a_signed_intersection_check,
     _group_rows_by_sample,
     _level_on_channel,
+    _parameter_focus_geometry_problem,
     _sample_trace_id,
     _audit_turn_off_slope_context_consistency,
     _unnecessary_ab_focus_expansion,
@@ -286,6 +287,34 @@ class TestCursorAuditCapture(unittest.TestCase):
             _captured_parameter_focus(capture.calls),
             (10.25, (10.5, 12.75), 0.31),
         )
+
+    def test_focus_geometry_accepts_required_time_shift_from_preferred_anchor(self) -> None:
+        problem = _parameter_focus_geometry_problem(
+            (13.99272, 15.99272),
+            (0.0, 30.0),
+            (
+                14.451282777854443,
+                (14.012719999925231, 15.776319999917897),
+                0.12,
+            ),
+        )
+
+        self.assertIsNone(problem)
+
+    def test_focus_geometry_rejects_view_that_ignores_required_time_shift(self) -> None:
+        problem = _parameter_focus_geometry_problem(
+            (14.21128, 16.21128),
+            (0.0, 30.0),
+            (
+                14.451282777854443,
+                (14.012719999925231, 15.776319999917897),
+                0.12,
+            ),
+        )
+
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("构图偏离策略", problem)
 
     def test_cursor_a_b_audit_rejects_search_window_overexpansion(self) -> None:
         problem = _unnecessary_ab_focus_expansion(

@@ -657,6 +657,7 @@ HORIZONTAL_DIV_COUNT = 10.0  # 横向整格数（与 _update_x_ticks 一致）
 X_NS_PER_DIV = 50  # 水平标度 ns/格 步进（滚轮与显示量化）
 PARAM_FOCUS_DEFAULT_US_PER_DIV = 0.2  # 点击参数局部放大默认 200 ns/div
 PARAM_FOCUS_ANCHOR_FRACTION = 0.12  # 左留约 1.2 格保住前态/切换起点，其余尽量展示右侧振铃
+PARAM_FOCUS_MAX_ANCHOR_FRACTION = 0.65  # 必需早时刻冲突时仍至少给右侧保留约 3.5 格
 PARAM_FOCUS_REQUIRED_GUARD_US = 0.02  # A/B 等必要内容离视窗边缘至少约 20ns
 VERT_VIEW_MARGIN = 0.10  # 纵向上下各留 10% 空白
 PLOT_AXIS_LABEL_EDGE_INSET = 0.0
@@ -976,11 +977,16 @@ def _solve_parameter_x_window(
         guarded_lo = max(bounds[0], guarded_lo)
         guarded_hi = min(bounds[1], guarded_hi)
 
-    span = max(MIN_X_SPAN_US, abs(float(base_span_us)))
+    # ``anchor_fraction`` is the preferred composition, not a reason to widen
+    # an otherwise valid 200 ns/div view.  First size the window only from the
+    # requested baseline and the hard required-time envelope; if the preferred
+    # anchor position conflicts with A/B visibility, shift the window instead.
     span = max(
-        span,
-        max(0.0, anchor - guarded_lo) / fraction,
+        MIN_X_SPAN_US,
+        abs(float(base_span_us)),
+        max(0.0, guarded_hi - guarded_lo),
         max(0.0, guarded_hi - anchor) / (1.0 - fraction),
+        max(0.0, anchor - guarded_lo) / PARAM_FOCUS_MAX_ANCHOR_FRACTION,
     )
     span = _ceil_x_us_per_div(span / HORIZONTAL_DIV_COUNT) * HORIZONTAL_DIV_COUNT
     if bounds is not None:
@@ -2865,6 +2871,12 @@ class WaveformPlot(QWidget):
         return True
 
     def _axis_channel(self) -> str | None:
+        raw_only_logical = self._raw_only_logical_readout_channel()
+        if (
+            raw_only_logical is not None
+            and raw_only_logical not in self._hidden_channels
+        ):
+            return raw_only_logical
         if (
             self._highlighted_key is not None
             and self._highlighted_key in self._trace_items
@@ -2872,7 +2884,10 @@ class WaveformPlot(QWidget):
         ):
             return self._highlighted_key
         ch = self._readout_channel()
-        if ch in self._trace_items and ch not in self._hidden_channels:
+        if (
+            (ch in self._trace_items or ch in self._trace_raw)
+            and ch not in self._hidden_channels
+        ):
             return ch
         for key in self._trace_items:
             if key not in self._hidden_channels:
@@ -4892,7 +4907,22 @@ class WaveformPlot(QWidget):
     def _active_channel_can_follow_selection(self) -> bool:
         if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
             return False
-        return self._interactive_mode != "turn_on_current"
+        if self._interactive_mode == "turn_on_current":
+            return False
+        return self._raw_only_logical_readout_channel() is None
+
+    def _raw_only_logical_readout_channel(self) -> str | None:
+        """Return a bound internal Ic/Irr source that has no selectable trace box."""
+        if self._interactive_mode == "global":
+            return None
+        channel = self._readout_channel()
+        if (
+            channel in LOGICAL_CURRENT_TRACE_KEYS.values()
+            and channel in self._trace_raw
+            and channel not in self._trace_items
+        ):
+            return channel
+        return None
 
     def _apply_trace_selection_style(self) -> None:
         for k, item in self._trace_items.items():
@@ -5214,7 +5244,15 @@ class WaveformPlot(QWidget):
 
     def _cursor_source_channel(self) -> str | None:
         ch = self._readout_channel()
-        if ch in self._trace_items and ch not in self._hidden_channels:
+        # Derived logical currents (for example lower-bridge Irr=Ic-IL) are
+        # intentionally kept out of the persistent channel strip, but their
+        # full-resolution data still drives parameter cursors.  Treat those
+        # internal traces as valid readout sources; otherwise the cursor card
+        # falls back to the first visible source channel (usually CH1/Vge).
+        if (
+            (ch in self._trace_items or ch in self._trace_raw)
+            and ch not in self._hidden_channels
+        ):
             return ch
         if (
             self._highlighted_key is not None
@@ -6537,7 +6575,7 @@ class WaveformPlot(QWidget):
             return
         # Ha/Hb/Δy 按当前活动通道的真实单位显示
         ch = self._readout_channel()
-        if ch not in self._trace_items:
+        if ch not in self._trace_items and ch not in self._trace_raw:
             ch = self._axis_channel() or ch
         unit = self._unit_for_channel(ch)
         ha = self._from_disp(ch, ha_div)
@@ -6896,6 +6934,7 @@ class WaveformPlot(QWidget):
         show_horizontal_peak: bool = False,
         *,
         mode: str = "interval",
+        channel: str | None = None,
         on_horizontal_change=None,
     ) -> None:
         if end_t_us < start_t_us:
@@ -6919,6 +6958,8 @@ class WaveformPlot(QWidget):
             }
             else "interval"
         )
+        if channel:
+            self._active_channel = str(channel)
         self._interval_max_hline_enabled = bool(show_horizontal_peak)
         self._interval_peak_on_hb = False
 
