@@ -1168,6 +1168,21 @@ class ResultTable(QWidget):
         if result.short_circuit_mode:
             sc = result.short_circuit
             vdc_disp = result.vdc_set if result.vdc_set is not None else result.vdc
+            imax_disp = (
+                MISSING_VALUE_TEXT
+                if result.is_metric_unavailable("短路过程", "短路电流Imax")
+                else f"{sc.ic_max:.1f}"
+            )
+            tsc_disp = (
+                MISSING_VALUE_TEXT
+                if result.is_metric_unavailable("短路过程", "短路时间Tsc")
+                else f"{sc.tsc:.3f}"
+            )
+            esc_dut_disp = (
+                MISSING_VALUE_TEXT
+                if result.is_metric_unavailable("短路过程", "短路能量Esc_本管")
+                else _fmt(sc.esc_dut)
+            )
             esc_other_disp = (
                 MISSING_VALUE_TEXT
                 if result.is_metric_unavailable("短路过程", "短路能量Esc_对管")
@@ -1178,10 +1193,10 @@ class ResultTable(QWidget):
                 f"<div style='color:#d7e2dc;font-size:14px;font-weight:700'>{_summary_title(result, self._temp_labels)}</div>"
                 "<table style='margin-top:3px' cellspacing='0' cellpadding='0'><tr>"
                 + _summary_metric_html("Udc", f"{vdc_disp:.1f}", "V", "#4fdbe8")
-                + _summary_metric_html("Imax", f"{sc.ic_max:.1f}", "A", "#f2d06b")
-                + _summary_metric_html("Tsc", f"{sc.tsc:.3f}", "us", "#f4a261")
+                + _summary_metric_html("Imax", imax_disp, "A", "#f2d06b")
+                + _summary_metric_html("Tsc", tsc_disp, "us", "#f4a261")
                 + "</tr><tr>"
-                + _summary_metric_html("Esc 本管", _fmt(sc.esc_dut), "J", "#8fd17f")
+                + _summary_metric_html("Esc 本管", esc_dut_disp, "J", "#8fd17f")
                 + _summary_metric_html("Esc 对管", esc_other_disp, "J", "#7cc7e8")
                 + "</tr></table></div>"
             )
@@ -1580,6 +1595,17 @@ class ResultTable(QWidget):
         self.set_value_text(
             section, name, format_metric_display(section, name, value)
         )
+
+    def set_metric_unavailable(
+        self, section: str, name: str, unavailable: bool
+    ) -> None:
+        """Update one metric's missing-state without rebuilding the table."""
+
+        key = (section, name)
+        if unavailable:
+            self._unavailable_metrics.add(key)
+        else:
+            self._unavailable_metrics.discard(key)
 
     def set_value_text(self, section: str, name: str, text: str) -> None:
         """Update one result-cell text without rebuilding the whole table."""

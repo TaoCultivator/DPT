@@ -907,7 +907,13 @@ def _low_current_main_foot_rising_crossing(
     foot_frac: float,
     max_delay_ns: float,
 ) -> tuple[int, float] | None:
-    """Low-current visual foot: avoid baseline noise crossings before the visible edge."""
+    """Use a low-current foot only to gate the main edge, then return Ic=Base.
+
+    The small percentage foot is useful for rejecting pre-edge ripple, but it is
+    not the declared Ha level.  Once that foot is found, project the cursor back
+    to the nearest preceding raw rising crossing of ``base_level`` so the final
+    A cursor remains a real waveform/Ha intersection.
+    """
     if len(t_seg) < 2:
         return None
     tt = np.asarray(t_seg, dtype=np.float64)
@@ -915,18 +921,38 @@ def _low_current_main_foot_rising_crossing(
     span = abs(float(edge_top) - float(base_level))
     if span < 20.0:
         return None
-    level = float(base_level) + float(foot_frac) * span
-    start_t = float(current_t) - max(float(dt), 1e-15)
-    end_t = float(current_t) + max_delay_ns * 1e-9
-    lo = max(0, min(int(np.searchsorted(tt, start_t, side="left")), len(yy) - 2))
-    hi = max(lo, min(int(np.searchsorted(tt, end_t, side="right")), len(yy) - 2))
+
+    foot_level = float(base_level) + float(foot_frac) * span
+    sample_dt = max(float(dt), 1e-15)
+    start_t = float(current_t) - sample_dt
+    end_t = float(current_t) + float(max_delay_ns) * 1e-9
+    lo = max(
+        0,
+        min(int(np.searchsorted(tt, start_t, side="left")), len(yy) - 2),
+    )
+    hi = max(
+        lo,
+        min(int(np.searchsorted(tt, end_t, side="right")), len(yy) - 2),
+    )
+
+    foot_ix: int | None = None
+    foot_t: float | None = None
     for k in range(lo, hi + 1):
         y0, y1 = float(yy[k]), float(yy[k + 1])
-        if y0 <= level < y1 and y1 > y0:
-            t_cross = _level_crossing_time(tt, yy, int(k), level)
-            if t_cross > float(current_t) + 8e-9:
-                return int(k), float(t_cross)
-            return None
+        if y0 <= foot_level < y1 and y1 > y0:
+            candidate_t = _level_crossing_time(tt, yy, int(k), foot_level)
+            foot_ix = int(k)
+            foot_t = float(candidate_t)
+            break
+    if foot_ix is None or foot_t is None:
+        return None
+
+    for k in range(foot_ix, lo - 1, -1):
+        y0, y1 = float(yy[k]), float(yy[k + 1])
+        if y0 <= float(base_level) < y1 and y1 > y0:
+            base_t = _level_crossing_time(tt, yy, int(k), float(base_level))
+            if base_t <= foot_t + sample_dt:
+                return int(k), float(base_t)
     return None
 
 
@@ -1529,6 +1555,29 @@ def _main_edge_level_crossing(
                 return int(raw_ix), _eoff_crossing_time_us(
                     tt, yy, int(raw_ix), lvl, direction
                 )
+            # Slow/low-current edges can place the real Base crossing outside
+            # the narrow pre-trigger window.  Expand only the raw crossing
+            # search, retaining the sustained-edge gate so platform noise
+            # cannot win.  A fitted foot is not a valid oscilloscope cursor.
+            full_hi = min(k_trigger, len(yy) - 2)
+            if first_sustained_rise and not _use_legacy_loss_cursor_mode():
+                raw_ix = _first_sustained_rise_crossing(
+                    yy,
+                    lvl,
+                    anchor,
+                    full_hi,
+                    k_trigger,
+                    dt,
+                    span,
+                )
+            else:
+                raw_ix = _crossing_pair_index(
+                    yy, lvl, direction, anchor, full_hi
+                )
+            if raw_ix is not None:
+                return int(raw_ix), _eoff_crossing_time_us(
+                    tt, yy, int(raw_ix), lvl, direction
+                )
         else:
             raw_lo = max(anchor, k_trigger)
             raw_hi = min(
@@ -1541,6 +1590,13 @@ def _main_edge_level_crossing(
                     return int(kk), _eoff_crossing_time_us(
                         tt, yy, int(kk), lvl, direction
                     )
+            raw_ix = _crossing_pair_index(
+                yy, lvl, direction, max(anchor, k_trigger), len(yy) - 2
+            )
+            if raw_ix is not None:
+                return int(raw_ix), _eoff_crossing_time_us(
+                    tt, yy, int(raw_ix), lvl, direction
+                )
 
     band = np.flatnonzero((yy[fit_lo : fit_hi + 1] >= low) & (yy[fit_lo : fit_hi + 1] <= high))
     if len(band) < 4:
@@ -1895,20 +1951,6 @@ def eoff_energy_markers(
                 pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
             )
 
-    if low_current_eoff and not _use_legacy_loss_cursor_mode():
-        visual_foot = _low_current_main_foot_rising_crossing(
-            t_sw,
-            v_seg,
-            ha_v,
-            float(v_top),
-            float(t_start),
-            dt,
-            foot_frac=0.010,
-            max_delay_ns=180.0,
-        )
-        if visual_foot is not None:
-            i_start_local, t_start = visual_foot
-
     fall_anchor = max(i_start_local + 1, int(np.searchsorted(t_sw, t_start, side="left")))
     i_end_local, t_end = _eoff_ic_fall_crossing_at_main_fall(
         t_sw, i_seg, hb_a, fall_anchor, dt, float(i_top)
@@ -1931,7 +1973,11 @@ def eoff_energy_markers(
     if (
         float(i_top) >= 500.0
         and float(raw_ha_v) - float(ha_v) > 3.0
-        and float(raw_t_start) < float(t_start)
+        and (
+            float(raw_t_start) < float(t_start)
+            or float(t_start)
+            < float(raw_t_start) - max(8e-9, 8.0 * max(float(dt), 1e-15))
+        )
     ):
         ha_v = float(raw_ha_v)
         i_start_local = int(raw_i_start_local)
@@ -2017,7 +2063,14 @@ def eon_energy_markers(
             hb_v = float(hb_tail)
             win1 = post_tail_end
 
-    sw0 = max(w0, i0, on_ref - int(200e-9 / dt))
+    # ``turn_on[0]`` can start a little after a slow/low-current Ic foot has
+    # already crossed the signed Ha platform.  Cutting the search at i0 then
+    # leaves no raw Ha intersection and the main-edge helper can only return a
+    # fitted pseudo-foot.  Keep the event-local scope bound, but admit the
+    # final 200 ns of the stable pre-on context so A can remain a real raw
+    # waveform/platform crossing.  The sustained-edge gate below still rejects
+    # earlier platform noise whenever a crossing exists on the main edge.
+    sw0 = max(w0, on_ref - int(200e-9 / dt))
     if win1 <= sw0 + 2:
         win1 = min(len(t) - 1, max(i1, sw0 + int(350e-9 / dt)))
     # 带符号：下桥导通前基线为负，A=Ic 上升沿与 Ha 交点须在真实波形上
@@ -2026,7 +2079,12 @@ def eon_energy_markers(
     t_sw = t[sw0 : win1 + 1]
     local_on = on_ref - sw0
 
-    anchor = max(0, local_on - int(15e-9 / dt))
+    # The segment already starts no more than 200 ns before the detected
+    # switching event.  Low-current/slow edges can cross the pre-on Ha platform
+    # tens of nanoseconds before ``on_ref``; anchoring at on_ref-15 ns skips the
+    # only real intersection and forces a fitted pseudo-foot.  Search the whole
+    # bounded local segment and let the sustained-edge gate reject noise.
+    anchor = 0
     i_start_local, t_start = _eon_ic_rise_crossing_at_main_rise(
         t_sw, i_seg, ha_ic, anchor, dt, float(i_top)
     )
@@ -2035,7 +2093,7 @@ def eon_energy_markers(
         t_start = float(t_sw[i_start_local])
 
     if abs(float(i_top)) < 180.0 and not _use_legacy_loss_cursor_mode():
-        visual_foot = _low_current_main_foot_rising_crossing(
+        main_edge_crossing = _low_current_main_foot_rising_crossing(
             t_sw,
             i_seg,
             ha_ic,
@@ -2045,8 +2103,8 @@ def eon_energy_markers(
             foot_frac=0.030,
             max_delay_ns=90.0,
         )
-        if visual_foot is not None:
-            i_start_local, t_start = visual_foot
+        if main_edge_crossing is not None:
+            i_start_local, t_start = main_edge_crossing
 
     i_end_local, t_end = _eon_vce_hb_fall_crossing_at_main_fall(
         t_sw, v_seg, hb_v, i_start_local, dt, float(v_top)

@@ -15,6 +15,7 @@ from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_to_tuple
 from openpyxl.utils.units import pixels_to_EMU
+from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.cell_range import CellRange
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -46,6 +47,26 @@ TEMP_LABELS = {
     "LT": ("-40℃", -40),
 }
 TemperatureLabels = Mapping[str, str | int | float]
+
+_TEMPERATURE_IDENTITY_MAGIC = "DPT temperature identities v1"
+_TEMPERATURE_IDENTITY_NAME_PREFIX = "_DPT_TEMP_IDENTITY_"
+
+
+class _TemperatureIdentityLabels(dict[str, str | int | float]):
+    """Current labels plus the last labels persisted in this report file."""
+
+    def __init__(
+        self,
+        current: TemperatureLabels | None = None,
+        *,
+        previous: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(current or {})
+        self.previous = {
+            str(code).strip().upper(): value
+            for code, value in (previous or {}).items()
+            if str(code).strip().upper() in TEMP_LABELS
+        }
 
 DPT_OVERVIEW_IMAGE_PARAM = ("总概览图", "全局")
 
@@ -233,6 +254,63 @@ def _normalized_temperature_labels(
     return labels
 
 
+def _read_report_temperature_identities(wb) -> dict[str, object]:
+    """Read stable RT/HT/LT identities saved by an earlier report write."""
+
+    identities: dict[str, object] = {}
+    for code in TEMP_LABELS:
+        name = f"{_TEMPERATURE_IDENTITY_NAME_PREFIX}{code}"
+        defined_name = wb.defined_names.get(name)
+        if (
+            defined_name is None
+            or defined_name.description != _TEMPERATURE_IDENTITY_MAGIC
+        ):
+            continue
+        raw = str(defined_name.attr_text or "")
+        if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+            identities[code] = raw[1:-1].replace('""', '"')
+    return identities
+
+
+def _temperature_identity_labels_for_workbook(
+    wb,
+    temperature_labels: TemperatureLabels | None,
+) -> _TemperatureIdentityLabels:
+    return _TemperatureIdentityLabels(
+        temperature_labels,
+        previous=_read_report_temperature_identities(wb),
+    )
+
+
+def _write_report_temperature_identities(
+    wb,
+    temperature_labels: TemperatureLabels | None,
+) -> None:
+    """Persist stable codes without adding or changing report worksheets."""
+
+    labels = _normalized_temperature_labels(temperature_labels)
+    for code in TEMP_LABELS:
+        name = f"{_TEMPERATURE_IDENTITY_NAME_PREFIX}{code}"
+        existing = wb.defined_names.get(name)
+        if (
+            existing is not None
+            and existing.description != _TEMPERATURE_IDENTITY_MAGIC
+        ):
+            raise ValueError(
+                f"报告已存在保留名称“{name}”，"
+                "无法安全保存温度工况身份"
+            )
+        display = labels[code][0].replace('"', '""')
+        wb.defined_names.add(
+            DefinedName(
+                name=name,
+                description=_TEMPERATURE_IDENTITY_MAGIC,
+                hidden=True,
+                attr_text=f'"{display}"',
+            )
+        )
+
+
 def _temperature_code_from_token(
     token: object,
     temperature_labels: TemperatureLabels | None = None,
@@ -240,21 +318,33 @@ def _temperature_code_from_token(
     labels = _normalized_temperature_labels(temperature_labels)
     text = str(token or "").strip()
     code_text = text.upper()
-    if code_text in labels:
+    if code_text in TEMP_LABELS:
         return code_text
     canonical = _canonical_temperature_text(text)
+    candidates: set[str] = set()
     for code, (display, _value) in labels.items():
         if canonical == _canonical_temperature_text(display):
-            return code
+            candidates.add(code)
+    previous = getattr(temperature_labels, "previous", {})
+    for code, display in previous.items():
+        if canonical == _canonical_temperature_text(display):
+            candidates.add(code)
     value = _parse_temperature_number(text)
-    if value is None:
-        return None
-    for code, (_display, expected) in labels.items():
-        if abs(value - expected) < 0.05:
-            return code
-    for code, (_display, expected) in TEMP_LABELS.items():
-        if abs(value - float(expected)) < 0.05:
-            return code
+    if value is not None:
+        for code, (_display, expected) in labels.items():
+            if abs(value - expected) < 0.05:
+                candidates.add(code)
+        for code, display in previous.items():
+            previous_value = _parse_temperature_number(display)
+            if previous_value is not None and abs(value - previous_value) < 0.05:
+                candidates.add(code)
+        for code, (_display, expected) in TEMP_LABELS.items():
+            if abs(value - float(expected)) < 0.05:
+                candidates.add(code)
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    # Duplicate/custom labels are ambiguous by definition.  Failing the
+    # lookup is safer than silently writing another RT/HT/LT condition.
     return None
 
 
@@ -941,8 +1031,11 @@ def _find_dpt_data_target(
         _sync_dpt_condition_cell(data_ws, group.start_row, source_condition)
         return target
 
-    row = 5
-    return _DptDataTarget(row=row, group_index=0, group_start_row=row, row_offset=0)
+    display_temp = _temperature_display(temp_code, temperature_labels)
+    raise ValueError(
+        f"报告模板工作表“{data_ws.title}”缺少工况组："
+        f"{phase_code.upper()} / {display_temp}；为避免写入错误行，已停止写入"
+    )
 
 
 def _normalize_dpt_data_temperature_cells(
@@ -2152,8 +2245,8 @@ def _insert_image(
     display_size: tuple[int, int] | None = None,
 ) -> None:
     path = Path(image_path)
-    if not path.exists():
-        return
+    if not path.is_file():
+        raise FileNotFoundError(f"报告图片不存在或不是文件：{path}")
     _remove_images_in_range(ws, rng)
     ws.cell(rng.min_row, rng.min_col).value = None
     image = XLImage(str(path))
@@ -2202,6 +2295,19 @@ def _write_dpt_images(
         "on": anchor_row + 17,
         "rr": anchor_row + 34,
     }
+    # A report write replaces the complete image state of the active
+    # condition.  Clear every slot in that condition first so a missing or
+    # unavailable metric cannot leave a picture from an earlier write.
+    overview_target = _left_merged_range_at(ws, anchor_row + 34)
+    _remove_images_in_range(ws, overview_target)
+    parameter_targets: dict[tuple[str, str], CellRange] = {}
+    for key, (block, header_text) in _DPT_IMAGE_HEADERS.items():
+        header = _find_header_range(ws, block_rows[block], header_text)
+        if header is None:
+            continue
+        target = _picture_range_below(ws, header, rows=16)
+        parameter_targets[key] = target
+        _remove_images_in_range(ws, target)
     written = 0
     overview_items: list[tuple[str | Path, CellRange]] = []
     overview_path = (
@@ -2210,22 +2316,16 @@ def _write_dpt_images(
         else None
     )
     if overview_path is not None:
-        target = _left_merged_range_at(ws, anchor_row + 34)
-        overview_items.append((overview_path, target))
+        overview_items.append((overview_path, overview_target))
     regular_items: list[tuple[str | Path, CellRange]] = []
     for key, image_path in images.items():
         if key == DPT_OVERVIEW_IMAGE_PARAM:
             continue
         if key not in allowed_params:
             continue
-        spec = _DPT_IMAGE_HEADERS.get(key)
-        if spec is None:
+        target = parameter_targets.get(key)
+        if target is None:
             continue
-        block, header_text = spec
-        header = _find_header_range(ws, block_rows[block], header_text)
-        if header is None:
-            continue
-        target = _picture_range_below(ws, header, rows=16)
         regular_items.append((image_path, target))
     overview_display_size = _prepare_uniform_image_slots(
         ws,
@@ -2275,13 +2375,10 @@ def _short_target_row(
     temp_code: str,
     temperature_labels: TemperatureLabels | None = None,
 ) -> int:
-    first_phase_row: int | None = None
     for row in range(5, ws.max_row + 1):
         phase = str(ws.cell(row, 2).value or "").upper()
         if phase != phase_code.upper():
             continue
-        if first_phase_row is None:
-            first_phase_row = row
         row_temp = _merged_value(ws, row, 1)
         if _temperature_cell_matches(row_temp, temp_code, temperature_labels):
             _set_merged_cell_value(
@@ -2291,14 +2388,11 @@ def _short_target_row(
                 _temperature_display(temp_code, temperature_labels),
             )
             return row
-    row = first_phase_row or 5
-    _set_merged_cell_value(
-        ws,
-        row,
-        1,
-        _temperature_display(temp_code, temperature_labels),
+    display_temp = _temperature_display(temp_code, temperature_labels)
+    raise ValueError(
+        f"报告模板工作表“{ws.title}”缺少短路工况行："
+        f"{phase_code.upper()} / {display_temp}；为避免写入错误行，已停止写入"
     )
-    return row
 
 
 def _normalize_short_temperature_cells(
@@ -2443,18 +2537,25 @@ def _write_short_images(
         _normalize_short_picture_text(ws, temperature_labels)
         return 0
     _write_short_picture_conditions(ws, anchor_row, result)
+    # As with DPT reports, the active short-circuit condition owns a complete
+    # set of slots.  Remove its prior pictures before filtering this run's
+    # unavailable or missing images; other condition blocks remain untouched.
+    parameter_targets: dict[tuple[str, str], CellRange] = {}
+    for key, header_text in _SHORT_IMAGE_HEADERS.items():
+        header = _find_header_range(ws, anchor_row, header_text)
+        if header is None:
+            continue
+        target = _picture_range_below(ws, header, rows=9)
+        parameter_targets[key] = target
+        _remove_images_in_range(ws, target)
     written = 0
     items: list[tuple[str | Path, CellRange]] = []
     for key, image_path in images.items():
         if result.is_metric_unavailable(*key):
             continue
-        header_text = _SHORT_IMAGE_HEADERS.get(key)
-        if header_text is None:
+        target = parameter_targets.get(key)
+        if target is None:
             continue
-        header = _find_header_range(ws, anchor_row, header_text)
-        if header is None:
-            continue
-        target = _picture_range_below(ws, header, rows=9)
         items.append((image_path, target))
     all_parameter_slots = _all_picture_ranges_by_headers(
         ws,
@@ -2492,6 +2593,41 @@ def _as_report_results(result: ExtractResult | Sequence[ExtractResult]) -> list[
     if any(row.short_circuit_mode != first_mode for row in rows):
         raise ValueError("不能混合写入双脉冲和短路测试结果")
     return rows
+
+
+def _expected_dpt_image_keys(
+    images: ImageMap,
+    result: ExtractResult,
+) -> tuple[tuple[str, str], ...]:
+    allowed = set(dpt_report_image_params_for_result(result))
+    return tuple(key for key in images if key in allowed)
+
+
+def _expected_short_image_keys(
+    images: ImageMap,
+    result: ExtractResult,
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        key
+        for key in images
+        if key in _SHORT_IMAGE_HEADERS and not result.is_metric_unavailable(*key)
+    )
+
+
+def _require_complete_report_images(
+    report_kind: str,
+    expected_keys: Sequence[tuple[str, str]],
+    images_written: int,
+) -> None:
+    expected_count = len(expected_keys)
+    if images_written == expected_count:
+        return
+    expected_text = "、".join(f"{section}/{name}" for section, name in expected_keys)
+    raise ValueError(
+        f"{report_kind}报告图片写入不完整：应写入 {expected_count} 张，"
+        f"实际写入 {images_written} 张。请检查模板中的工况图片块和参数标题。"
+        f"待写图片：{expected_text}"
+    )
 
 
 def write_report_template(
@@ -2534,6 +2670,10 @@ def write_report_template(
     emit(0, "打开报告文件")
     wb = load_workbook(path)
     emit(1, "读取报告模板")
+    temperature_labels = _temperature_identity_labels_for_workbook(
+        wb,
+        temperature_labels,
+    )
     image_map: ImageMap = images or {}
     phase_code = _resolve_phase_code(result0.source_path, result0, phase_code)
     temp_code = _resolve_temp_code(result0.source_path, temperature_code)
@@ -2556,6 +2696,9 @@ def write_report_template(
         _write_short_data(data_ws, data_row, result)
         _normalize_short_temperature_cells(data_ws, temperature_labels)
         emit(2, "写入报告数据")
+        expected_image_keys = _expected_short_image_keys(image_map, result)
+        if expected_image_keys and picture_sheet not in wb.sheetnames:
+            raise ValueError(f"报告模板缺少工作表：{picture_sheet}，无法写入报告图片")
         images_written = 0
         anchor_row = None
         if picture_sheet in wb.sheetnames:
@@ -2566,6 +2709,11 @@ def write_report_template(
                 temp_code,
                 temperature_labels,
             )
+            if expected_image_keys and anchor_row is None:
+                raise ValueError(
+                    f"报告模板工作表“{picture_sheet}”缺少图片工况块："
+                    f"{_phase_temp_label(phase_code, temp_code, temperature_labels)}"
+                )
             images_written = _write_short_images(
                 image_ws,
                 anchor_row,
@@ -2574,8 +2722,14 @@ def write_report_template(
                 progress_callback=emit_image,
                 temperature_labels=temperature_labels,
             )
+        _require_complete_report_images(
+            "短路",
+            expected_image_keys,
+            images_written,
+        )
         _normalize_report_temperature_labels(wb, temperature_labels)
         _set_report_open_zoom(wb, target_screen_width_px)
+        _write_report_temperature_identities(wb, temperature_labels)
         emit(progress_total - 1, "保存报告文件")
         wb.save(path)
         return ReportWriteSummary(
@@ -2594,6 +2748,9 @@ def write_report_template(
         raise ValueError(f"报告模板缺少工作表：{data_sheet}")
     data_ws = wb[data_sheet]
     _ensure_dpt_data_power_columns(data_ws)
+    expected_image_keys = _expected_dpt_image_keys(image_map, image_result)
+    if expected_image_keys and waveform_sheet not in wb.sheetnames:
+        raise ValueError(f"报告模板缺少工作表：{waveform_sheet}，无法写入报告图片")
     waveform_ws = wb[waveform_sheet] if waveform_sheet in wb.sheetnames else None
     target = _find_dpt_data_target(
         result0,
@@ -2643,6 +2800,11 @@ def write_report_template(
         if waveform_anchor_rows
         else None
     )
+    if expected_image_keys and waveform_anchor_row is None:
+        raise ValueError(
+            f"报告模板工作表“{waveform_sheet}”缺少图片工况块："
+            f"{_phase_temp_label(phase_code, temp_code, temperature_labels)}"
+        )
     if waveform_ws is not None:
         _clear_duplicate_dpt_waveform_blocks(
             waveform_ws,
@@ -2667,8 +2829,14 @@ def write_report_template(
         if waveform_ws is not None
         else 0
     )
+    _require_complete_report_images(
+        "双脉冲",
+        expected_image_keys,
+        images_written,
+    )
     _normalize_report_temperature_labels(wb, temperature_labels)
     _set_report_open_zoom(wb, target_screen_width_px)
+    _write_report_temperature_identities(wb, temperature_labels)
     emit(progress_total - 1, "保存报告文件")
     wb.save(path)
     return ReportWriteSummary(

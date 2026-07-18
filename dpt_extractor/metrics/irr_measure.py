@@ -244,13 +244,6 @@ def _trr_cross_indices_at_ha(
         if y1 >= y2 and y1 > level_w >= y2:
             jb = j
             break
-    if jb is None and peak_w > max(5.0, 3.0 * abs(level_w)):
-        lvl = abs(level_w)
-        for j in range(ipk, jf):
-            y1, y2 = abs(float(work[j])), abs(float(work[j + 1]))
-            if float(work[j]) >= float(work[j + 1]) and y1 > lvl >= y2:
-                jb = j
-                break
     return ja, jb
 
 
@@ -320,10 +313,11 @@ def trr_crossings_at_ha(
         return None
 
     ta = _interp_cross_time(ts, seg, ja, level)
-    if float(seg[ipk]) > 0.0 and level <= 0.0 and jb is not None:
-        tb = _interp_cross_time(ts, np.abs(seg), jb, abs(level))
-    else:
-        tb = _interp_cross_time(ts, seg, jb, level)
+    # A/B/Ha share the same signed logical Irr source.  Interpolating B on
+    # abs(Irr) when a positive lobe returns to a slightly negative Ha creates
+    # a plausible time that is not an intersection of the displayed waveform
+    # and horizontal cursor.
+    tb = _interp_cross_time(ts, seg, jb, level)
     if tb <= ta:
         return None
     return ta, tb, i0 + ipk

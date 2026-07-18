@@ -20,7 +20,7 @@ from dpt_extractor.metrics.iec_timings import (
     turn_on_vce_top_from_ic_rise,
     turn_off_timings,
     turn_on_ic_rise_window,
-    turn_on_timings,
+    turn_on_timing_instants,
 )
 from dpt_extractor.metrics.iec_windows import (
     eoff_window_scope_example,
@@ -33,13 +33,12 @@ from dpt_extractor.metrics.iec_windows import (
 )
 from dpt_extractor.metrics.energy import peak_power_kw
 from dpt_extractor.metrics.irr_measure import irr_parameter_peak_value
+from dpt_extractor.metrics.plateau_level import turn_off_delta_vce_blocking_top
 from dpt_extractor.metrics.slopes import (
-    didt_diode_recovery,
-    didt_max,
-    didt_on,
-    dvdt_diode_recovery,
-    dvdt_max,
-    dvdt_on,
+    rr_dvdt_measurement_context,
+    rr_didt_measurement_context,
+    turn_on_dvdt_measurement_context,
+    turn_on_didt_measurement_context,
     turn_off_didt_measurement_context,
     turn_off_dvdt_measurement_context,
 )
@@ -64,6 +63,11 @@ _REVERSE_RECOVERY_CURRENT_METRICS: set[MetricKey] = {
     ("反向恢复", "di/dt"),
     ("反向恢复", "Pdmax"),
     ("反向恢复", "Err"),
+}
+_TURN_ON_TIMING_METRICS: set[MetricKey] = {
+    ("开通", "Ton"),
+    ("开通", "Td_on"),
+    ("开通", "Tr"),
 }
 
 
@@ -525,6 +529,14 @@ def extract_all(
 
     # --- Turn-off ---
     vce_off_max = float(np.max(vce[off0:off1]))
+    if single_pulse:
+        # With no inter-pulse DUT blocking plateau, vdc may legitimately come
+        # from the opposite device's bus-voltage channel.  ΔVce/Ls_off cursors
+        # must nevertheless remain on one DUT Vce waveform, so use the DUT's
+        # own post-off ~200 ns stable-band centre as the local reference.
+        single_top = turn_off_delta_vce_blocking_top(vce, off0, off1, dt)
+        if np.isfinite(single_top) and 0.0 < single_top < vce_off_max:
+            vce_off_top = float(single_top)
     fall_win = turn_off_ic_fall_window(
         t,
         vge,
@@ -574,6 +586,7 @@ def extract_all(
         off_di_p0,
         off_di_p1,
         edge=off_di.ic_direction,
+        next_pulse_on=edges.next_pulse_on,
     )
     # One canonical source keeps Ic_off_max, the displayed Ha/Top, percentage
     # thresholds, GUI cursors and report values identical even on the fallback
@@ -702,44 +715,55 @@ def extract_all(
     ic_on_max = _turn_on_ic_max_in_base_window(
         ic, vce, on0, on1, dt, ic_top_on, vce_top_on
     )
-    turn_on_current = _turn_on_current_top_after_rr_end(
-        t, ic, irr, v_diode, on0, on1, dt
-    )
     # 开通斜率：在完整开通段内按 Top 百分比找穿越（Vge 上升窗不含 Vce 跌落/电流上升）
-    dvdt_on_v = dvdt_on(
+    on_dvdt_context = turn_on_dvdt_measurement_context(
         t,
         vce,
         vce_top_on,
         on0,
-        on1 + 1,
+        on1,
+        dt,
         cfg,
-        pct_hi=on_dv_hi,
-        pct_lo=on_dv_lo,
-        vce_top=vce_top_on,
+        on_dv_hi,
+        on_dv_lo,
     )
-    if dvdt_on_v < 1e-6:
-        dvdt_on_v = dvdt_max(t, vce, on0, on1 + 1, dt, cfg)
-    didt_on_v = didt_on(
+    dvdt_on_v = float(on_dvdt_context.crossing.dvdt)
+    on_didt_context = turn_on_didt_measurement_context(
         t,
         ic,
         on0,
-        on1 + 1,
-        cfg,
-        pct_start=on_di_p0,
-        pct_end=on_di_p1,
-        ic_reference=on_di.ic_reference,
-        ic_direction=on_di.ic_direction,
-        icm_override=ic_top_on,
-        search_from_peak=False,
+        on1,
+        dt,
+        on_di_p0,
+        on_di_p1,
+        edge=on_di.ic_direction,
+        event_end_idx=edges.pulse2_off,
     )
-    if didt_on_v < 1e-6:
-        didt_on_v = didt_max(t, ic, on0, on1 + 1, dt, cfg)
+    turn_on_current = float(on_didt_context.top_a)
+    didt_on_v = float(on_didt_context.crossing.didt)
+    on_didt_available = (
+        not on_didt_context.used_fallback
+        and on_didt_context.crossing.t_pct_a_s is not None
+        and on_didt_context.crossing.t_pct_b_s is not None
+        and didt_on_v > 1e-9
+    )
+    if not on_didt_available:
+        unavailable.update({("开通", "di/dt"), ("开通", "Ls_on")})
+    on_current_available = (
+        np.isfinite(turn_on_current)
+        and on_didt_context.top_window is not None
+        and on_didt_context.top_window[0] >= 0
+        and on_didt_context.top_window[1] >= on_didt_context.top_window[0]
+    )
+    if not on_current_available:
+        unavailable.add(("开通", "开通电流"))
+        turn_on_current = 0.0
 
     # 开通杂散电感：Ls_on = 开通 ΔVce / (开通 di/dt)，与 Ls_off 口径对称（ΔVce 可光标卡值）
     delta_vce_on = _turn_on_delta_vce(vce, on0, on1, dt, vce_top_on)
-    ls_on = delta_vce_on / didt_on_v if didt_on_v > 1e-9 else 0.0
+    ls_on = delta_vce_on / didt_on_v if on_didt_available else 0.0
 
-    td_on, tr, ton = turn_on_timings(
+    on_timing = turn_on_timing_instants(
         t,
         vge,
         ic,
@@ -750,6 +774,13 @@ def extract_all(
         cfg,
         pulse2_off=edges.pulse2_off,
     )
+    td_on = float(on_timing.td_on_ns)
+    tr = float(on_timing.tr_ns)
+    ton = float(on_timing.ton_ns)
+    if on_timing.t_i10_s is None or on_timing.t_i90_s is None:
+        unavailable.update(_TURN_ON_TIMING_METRICS)
+    elif on_timing.t_v10_s is None:
+        unavailable.update({("开通", "Ton"), ("开通", "Td_on")})
     # 按用户示波器口径：t1=Ic离开base，t2=Vce回落到base（与关断窗口定义对称）
     win_on_scope = eon_window_scope_example(
         t,
@@ -807,27 +838,44 @@ def extract_all(
     di_a, di_b = rr_di.as_fractions()
     pct_lo = min(dv_a, dv_b)
     pct_hi = max(dv_a, dv_b)
-    pct_hi_di = max(di_a, di_b)
-    pct_lo_di = min(di_a, di_b)
-    dvdt_rr = (
-        dvdt_diode_recovery(t, v_diode, rr_s0, rr_s1, pct_lo=pct_lo, pct_hi=pct_hi)
+    rr_dvdt_context = (
+        rr_dvdt_measurement_context(
+            t,
+            v_diode,
+            rr_s0,
+            rr_s1,
+            dt,
+            cfg,
+            pct_lo,
+            pct_hi,
+            fallback_i0=rr0,
+            fallback_i1=rr1,
+        )
         if v_diode is not None
+        else None
+    )
+    dvdt_rr = (
+        float(rr_dvdt_context.crossing.dvdt)
+        if rr_dvdt_context is not None
         else 0.0
     )
     rr_measure = rr_di.ic_reference if rr_di.ic_reference in ("idm", "if_irm") else "idm"
-    didt_rr = didt_diode_recovery(
+    rr_didt_context = rr_didt_measurement_context(
         t,
         irr,
         rr_s0,
         rr_s1,
-        pct_hi=pct_hi_di,
-        pct_lo=pct_lo_di,
+        dt,
+        cfg,
+        di_a,
+        di_b,
         measure=rr_measure,
+        rr_i0=rr0,
+        rr_i1=rr1,
+        fallback_i0=rr0,
+        fallback_i1=rr1,
     )
-    if v_diode is not None and dvdt_rr < 1e-6:
-        dvdt_rr = dvdt_max(t, v_diode, rr0, rr1, dt, cfg)
-    if didt_rr < 1e-6:
-        didt_rr = didt_max(t, irr, rr0, rr1, dt, cfg)
+    didt_rr = float(rr_didt_context.crossing.didt)
     # Trr 与 GUI 默认卡尺共用同一套 Ha/A/B 主恢复瓣交点逻辑
     trr = reverse_recovery_trr(
         t,

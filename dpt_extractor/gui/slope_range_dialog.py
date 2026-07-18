@@ -78,7 +78,13 @@ class SlopeRangeDialog(QDialog):
 
         elif ic_reference == "idm":
 
-            hint_text = "IDM 算法：Ha=0、Hb=IDM，沿换流前下降沿在两者之间按百分比穿越。"
+            hint_text = (
+
+                "IDM 算法：Ha=恢复尾稳定基准、Hb=带符号 IDM，"
+
+                "按归一化主换流沿在两者之间查找百分比穿越。"
+
+            )
 
         else:
 

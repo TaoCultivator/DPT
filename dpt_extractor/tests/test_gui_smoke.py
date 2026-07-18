@@ -80,6 +80,17 @@ SONG_SMC_RT_UH_1048 = (
     / "tss"
     / "UH_750V_1048A_000.tss"
 )
+SONG_SMC_HT_20260717_UH_1048 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260717"
+    / "SMC"
+    / "HT"
+    / "UH_750V_1048A_000.tss"
+)
+OTHER_360A = ROOT / "示例文件" / "其他数据" / "360A.tss"
 SONG_DCU_RT_WL_480_1000 = (
     ROOT
     / "示例文件"
@@ -90,6 +101,28 @@ SONG_DCU_RT_WL_480_1000 = (
     / "RT"
     / "tss"
     / "WL_480V_1000A_000.tss"
+)
+SONG_DCU_LT_WH_450_800 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2506"
+    / "DCU"
+    / "SMC"
+    / "LT"
+    / "tss"
+    / "WH_450V_800A_000.tss"
+)
+SONG_DCU_LT_WH_530_800 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2506"
+    / "DCU"
+    / "SMC"
+    / "LT"
+    / "tss"
+    / "WH_530V_800A_000.tss"
 )
 WANGLIHUI_UH_400_1070 = (
     ROOT
@@ -111,6 +144,36 @@ WANGLIHUI_UL_486_985 = (
     / "wanglihui"
     / "U"
     / "UL_486V_985A_Rgon1.1R_Rgof5R_000.tss"
+)
+WANGLIHUI_UH_486_985 = (
+    ROOT
+    / "示例文件"
+    / "wanglihui"
+    / "U"
+    / "UH_486V_985A_Rgon2.88R_Rgoff6.21R_000.tss"
+)
+WANGLIHUI_UH_486_985_FAST = (
+    ROOT
+    / "示例文件"
+    / "wanglihui"
+    / "U"
+    / "UH_486V_985A_Rgon1.515R_Rgoff6.346R_000.tss"
+)
+SHORT_VH_750 = (
+    ROOT
+    / "示例文件"
+    / "likangkang"
+    / "NED34jixian"
+    / "short"
+    / "750v-vh-short-25c_000.tss"
+)
+LIKANG_UH_930_REVERSED_TD_ON = (
+    ROOT
+    / "示例文件"
+    / "likangkang"
+    / "NED34jixian"
+    / "uh"
+    / "915v-uh-930a-10.8us-25c_000.tss"
 )
 WANGLIHUI_SLOW_TURN_ON_CASES = (
     (
@@ -242,6 +305,432 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot = WaveformPlot()
         plot.plot_waveforms(bundle, profile, None)
         return plot
+
+    def test_interval_cursor_endpoints_can_bind_different_waveforms(self):
+        plot = self._make_synthetic_plot()
+        try:
+            plot.enable_interval_interaction(
+                0.2,
+                0.8,
+                lambda *_args: None,
+                channel="ic",
+                a_channel="vge",
+                b_channel="vce",
+            )
+            plot.set_cursor_type("waveform")
+            plot._update_readout()
+            self.assertEqual(plot._interval_a_channel, "vge")
+            self.assertEqual(plot._interval_b_channel, "vce")
+            assert plot._cursor_a is not None and plot._cursor_b is not None
+            assert plot._cursor_a_wave_marker is not None
+            assert plot._cursor_b_wave_marker is not None
+            a_sample = plot._sample_cursor_channel(
+                "vge", float(plot._cursor_a.value())
+            )
+            b_sample = plot._sample_cursor_channel(
+                "vce", float(plot._cursor_b.value())
+            )
+            self.assertIsNotNone(a_sample)
+            self.assertIsNotNone(b_sample)
+            assert a_sample is not None and b_sample is not None
+            _ax, ay = plot._cursor_a_wave_marker.getData()
+            _bx, by = plot._cursor_b_wave_marker.getData()
+            self.assertAlmostEqual(float(ay[0]), a_sample[1], places=9)
+            self.assertAlmostEqual(float(by[0]), b_sample[1], places=9)
+            active_before = plot._active_channel
+            unrelated = plot._display_key_for_channel("il")
+            plot._raise_trace(unrelated)
+            plot._highlight_trace(unrelated)
+            self.assertEqual(plot._active_channel, active_before)
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "vge")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "vce")
+            plot._hidden_channels.add(plot._display_key_for_channel("vce"))
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "vge")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "vce")
+        finally:
+            plot.close()
+
+    def test_shared_interval_source_survives_unrelated_trace_highlight(self):
+        plot = self._make_synthetic_plot()
+        try:
+            plot.enable_interval_interaction(
+                0.2,
+                0.8,
+                lambda *_args: None,
+                channel="ic",
+            )
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "ic")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
+            unrelated = plot._display_key_for_channel("vce")
+            plot._raise_trace(unrelated)
+            plot._highlight_trace(unrelated)
+            self.assertEqual(plot._active_channel, "ic")
+            self.assertEqual(plot._interval_ab_channel, "ic")
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "ic")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
+        finally:
+            plot.close()
+
+    def test_semantic_interval_keeps_reversed_ab_roles_and_channels(self):
+        plot = self._make_synthetic_plot()
+        emitted = []
+        try:
+            plot.enable_interval_interaction(
+                0.8,
+                0.2,
+                lambda *values: emitted.append(values),
+                mode="semantic_interval",
+                channel="ic",
+                a_channel="vge",
+                b_channel="ic",
+            )
+            assert plot._cursor_a is not None and plot._cursor_b is not None
+            self.assertAlmostEqual(float(plot._cursor_a.value()), 0.8, places=9)
+            self.assertAlmostEqual(float(plot._cursor_b.value()), 0.2, places=9)
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "vge")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
+            plot._on_any_cursor_moved()
+            self.assertEqual(emitted[-1], (0.8, 0.2))
+        finally:
+            plot.close()
+
+    def test_energy_cursor_endpoints_keep_their_semantic_waveforms(self):
+        plot = self._make_synthetic_plot()
+        try:
+            cases = (
+                ("vce", "ic", "vce", "ic"),
+                ("ic", "vce", "ic", "vce"),
+                ("irr", "v_diode", "irr", "v_diode"),
+            )
+            for a_channel, b_channel, ha_channel, hb_channel in cases:
+                with self.subTest(
+                    a=a_channel,
+                    b=b_channel,
+                    ha=ha_channel,
+                    hb=hb_channel,
+                ):
+                    plot.enable_energy_loss_interaction(
+                        0.1,
+                        0.9,
+                        0.2,
+                        0.8,
+                        500.0,
+                        100.0,
+                        lambda *_args: None,
+                        a_channel=a_channel,
+                        b_channel=b_channel,
+                        ha_channel=ha_channel,
+                        hb_channel=hb_channel,
+                        sync_cursors_from_levels=False,
+                    )
+                    self.assertEqual(
+                        plot._cursor_endpoint_channel("a"), a_channel
+                    )
+                    self.assertEqual(
+                        plot._cursor_endpoint_channel("b"), b_channel
+                    )
+                    self.assertEqual(
+                        plot._horizontal_cursor_binding("ha"),
+                        (ha_channel, True),
+                    )
+                    self.assertEqual(
+                        plot._horizontal_cursor_binding("hb"),
+                        (hb_channel, True),
+                    )
+                    unrelated = plot._display_key_for_channel("il")
+                    plot._raise_trace(unrelated)
+                    plot._highlight_trace(unrelated)
+                    self.assertEqual(
+                        plot._cursor_endpoint_channel("a"), a_channel
+                    )
+                    self.assertEqual(
+                        plot._cursor_endpoint_channel("b"), b_channel
+                    )
+        finally:
+            plot.close()
+
+    def test_err_energy_signed_levels_match_labels_readout_and_callback(self):
+        emitted = []
+        plot = self._make_synthetic_plot()
+        try:
+            plot.enable_energy_loss_interaction(
+                0.0,
+                1.0,
+                0.2,
+                0.8,
+                -25.0,
+                -12.0,
+                lambda *values: emitted.append(values),
+                a_channel="irr",
+                b_channel="v_diode",
+                ha_channel="irr",
+                hb_channel="v_diode",
+                fall_a_mode="err_irr",
+                rise_b_mode="err_vd",
+                peak_channels=("irr", "v_diode"),
+                sync_cursors_from_levels=False,
+            )
+            plot.set_cursor_type("both")
+            plot._update_readout()
+            assert plot._cursor_ha_v_label is not None
+            ha_label = plot._cursor_ha_v_label.textItem.toPlainText()
+            top_readout = plot._readout_label.text()
+            self.assertIn("-25", ha_label)
+            self.assertIn("-25.00A", top_readout)
+            self.assertIn("-12.00V", top_readout)
+
+            plot._emit_energy_loss_changed()
+            self.assertEqual(len(emitted), 1)
+            self.assertAlmostEqual(emitted[-1][2], -25.0, places=9)
+            self.assertAlmostEqual(emitted[-1][3], -12.0, places=9)
+
+            # Other Irr amplitude modes keep their historical magnitude semantics.
+            plot.enable_energy_loss_interaction(
+                0.0,
+                1.0,
+                0.2,
+                0.8,
+                -25.0,
+                12.0,
+                lambda *values: emitted.append(values),
+                a_channel="irr",
+                ha_channel="irr",
+                sync_cursors_from_levels=False,
+            )
+            plot.set_cursor_type("both")
+            plot._update_readout()
+            self.assertIn("+25.00A", plot._readout_label.text())
+            plot._emit_energy_loss_changed()
+            self.assertAlmostEqual(emitted[-1][2], 25.0, places=9)
+        finally:
+            plot.close()
+
+    def test_energy_manual_endpoint_markers_sample_semantic_waveforms(self):
+        cases = (
+            ("Eoff", "vce", "ic", None),
+            ("Eon", "ic", "vce", None),
+            ("Err", "irr", "v_diode", "err_irr"),
+        )
+        for name, a_channel, b_channel, fall_a_mode in cases:
+            plot = self._make_synthetic_plot()
+            try:
+                with self.subTest(parameter=name):
+                    plot.enable_energy_loss_interaction(
+                        0.0,
+                        1.0,
+                        0.2,
+                        0.8,
+                        7777.0,
+                        -3333.0,
+                        lambda *_args: None,
+                        a_channel=a_channel,
+                        b_channel=b_channel,
+                        ha_channel=a_channel,
+                        hb_channel=b_channel,
+                        fall_a_mode=fall_a_mode,
+                        sync_cursors_from_levels=False,
+                    )
+                    plot.set_cursor_type("both")
+                    assert plot._cursor_a is not None and plot._cursor_b is not None
+                    plot._cursor_a.setValue(0.37)
+                    plot._cursor_b.setValue(0.63)
+                    plot._update_readout()
+
+                    if name == "Err":
+                        logical_irr = plot._display_key_for_channel("irr")
+                        self.assertEqual(logical_irr, "LOGIC_IRR")
+                        self.assertIn(logical_irr, plot._trace_raw)
+                        self.assertNotIn(logical_irr, plot._trace_items)
+
+                    for end, channel, cursor, marker in (
+                        ("a", a_channel, plot._cursor_a, plot._cursor_a_wave_marker),
+                        ("b", b_channel, plot._cursor_b, plot._cursor_b_wave_marker),
+                    ):
+                        self.assertIsNotNone(marker, end)
+                        expected = plot._sample_cursor_channel(
+                            channel, float(cursor.value())
+                        )
+                        self.assertIsNotNone(expected, end)
+                        assert marker is not None and expected is not None
+                        marker_x, marker_y = marker.getData()
+                        self.assertEqual(len(marker_x), 1, end)
+                        self.assertEqual(len(marker_y), 1, end)
+                        self.assertAlmostEqual(
+                            float(marker_x[0]), float(cursor.value()), places=9
+                        )
+                        self.assertAlmostEqual(
+                            float(marker_y[0]), float(expected[1]), places=9
+                        )
+            finally:
+                plot.close()
+
+    def test_apply_power_peak_binding_transitions_are_atomic(self):
+        plot = self._make_synthetic_plot()
+        try:
+            vce_key = plot._display_key_for_channel("vce")
+            ic_key = plot._display_key_for_channel("ic")
+            plot._set_math_formula("MATH2", f"{vce_key} * {ic_key}")
+            plot._set_math_formula("MATH9", f"0.9 * {vce_key} * {ic_key}")
+            plot.enable_interval_interaction(
+                0.2,
+                0.8,
+                lambda *_args: None,
+                show_horizontal_peak=True,
+                mode="power_peak",
+                channel="MATH2",
+                a_channel="MATH2",
+                b_channel="MATH2",
+            )
+            plot.set_cursor_type("both")
+
+            def assert_matched(channel, peak_value, peak_t_us):
+                self.assertEqual(plot._cursor_endpoint_channel("a"), channel)
+                self.assertEqual(plot._cursor_endpoint_channel("b"), channel)
+                self.assertEqual(plot._interval_ab_channel, channel)
+                self.assertEqual(plot._active_channel, channel)
+                self.assertEqual(
+                    plot._horizontal_cursor_binding("ha"), (channel, True)
+                )
+                self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
+                self.assertTrue(plot._interval_max_hline_enabled)
+                self.assertEqual(plot._cursor_aux_channel, channel)
+                self.assertAlmostEqual(plot._cursor_aux_t_us, peak_t_us, places=9)
+                self.assertAlmostEqual(plot._cursor_aux_value, peak_value, places=9)
+
+            plot.apply_power_peak_binding(
+                boundary_a_channel="vce",
+                boundary_b_channel="ic",
+                peak_channel="MATH2",
+                peak_value=123.0,
+                peak_t_us=0.41,
+            )
+            assert_matched("MATH2", 123.0, 0.41)
+
+            # MATH2 -> no eligible power trace.
+            plot.apply_power_peak_binding(
+                boundary_a_channel="vce", boundary_b_channel="ic"
+            )
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "vce")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
+            self.assertEqual(plot._interval_ab_channel, "vce")
+            self.assertEqual(plot._active_channel, "vce")
+            self.assertFalse(plot._horizontal_cursor_binding("ha")[1])
+            self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
+            self.assertFalse(plot._interval_max_hline_enabled)
+            self.assertIsNone(plot._cursor_aux_channel)
+            self.assertIsNone(plot._cursor_aux_t_us)
+            self.assertIsNone(plot._cursor_aux_value)
+
+            # No trace -> MATH9, then a direct MATH2 -> MATH9 switch.
+            plot.apply_power_peak_binding(
+                boundary_a_channel="vce",
+                boundary_b_channel="ic",
+                peak_channel="MATH9",
+                peak_value=456.0,
+                peak_t_us=0.52,
+            )
+            assert_matched("MATH9", 456.0, 0.52)
+            plot.apply_power_peak_binding(
+                boundary_a_channel="vce",
+                boundary_b_channel="ic",
+                peak_channel="MATH2",
+                peak_value=321.0,
+                peak_t_us=0.43,
+            )
+            plot.apply_power_peak_binding(
+                boundary_a_channel="vce",
+                boundary_b_channel="ic",
+                peak_channel="MATH9",
+                peak_value=654.0,
+                peak_t_us=0.57,
+            )
+            assert_matched("MATH9", 654.0, 0.57)
+        finally:
+            plot.close()
+
+    def test_slope_cursor_endpoints_keep_the_logical_waveform_role(self):
+        plot = self._make_synthetic_plot()
+        try:
+            plot.enable_dvdt_interaction(
+                0.1,
+                0.9,
+                100.0,
+                0.0,
+                "irr",
+                lambda *_args: None,
+                mode="didt",
+            )
+            plot.apply_dvdt_ab_times(0.3, 0.7)
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "irr")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "irr")
+            unrelated = plot._display_key_for_channel("vce")
+            plot._raise_trace(unrelated)
+            plot._highlight_trace(unrelated)
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "irr")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "irr")
+        finally:
+            plot.close()
+
+    def test_short_current_keeps_logical_ic_after_visible_channel_selection(self):
+        plot = self._make_synthetic_plot()
+        emitted = []
+        try:
+            plot.enable_short_current_interaction(
+                0.1,
+                0.9,
+                0.2,
+                0.8,
+                100.0,
+                500.0,
+                lambda *values: emitted.append(values),
+                channel="CH1",
+            )
+            self.assertEqual(plot._active_channel, "ic")
+            self.assertEqual(plot._slope_channel, "ic")
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("ic", True))
+            self.assertEqual(plot._horizontal_cursor_binding("hb"), ("ic", True))
+
+            vge_key = plot._display_key_for_channel("vge")
+            self.assertNotEqual(vge_key, plot._display_key_for_channel("ic"))
+            plot._on_legend_clicked(vge_key)
+            self.assertEqual(plot._active_channel, "ic")
+            plot._on_legend_double_clicked(vge_key)
+            self.assertEqual(plot._active_channel, "ic")
+
+            plot._emit_short_current_changed()
+            self.assertEqual(len(emitted), 1)
+            self.assertAlmostEqual(emitted[0][2], 100.0, places=9)
+            self.assertAlmostEqual(emitted[0][3], 500.0, places=9)
+        finally:
+            plot.close()
+
+    def test_mixed_boundary_parameter_cursor_channel_matrix(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            expected = {
+                ("开通", "Ton"): ("vge", "ic"),
+                ("开通", "Td_on"): ("vge", "ic"),
+                ("开通", "Tr"): ("ic", "ic"),
+                ("关断过程", "Toff"): ("vge", "ic"),
+                ("关断过程", "Td_off"): ("vge", "ic"),
+                ("关断过程", "Tf"): ("ic", "ic"),
+                ("关断过程", "Ic_off_max"): ("vge", "vge"),
+                ("关断过程", "Vce_off_max"): ("vce", "vce"),
+                ("开通", "Vce_on_max"): ("vge", "vce"),
+                ("反向恢复", "Vrr"): ("v_diode", "v_diode"),
+                ("开通", "Ic_on_max"): ("ic", "vce"),
+                ("短路过程", "应力Vpeak_本管"): ("vge", "vge"),
+                ("短路过程", "应力Vpeak_对管"): ("vge", "vge"),
+            }
+            for key, channels in expected.items():
+                with self.subTest(parameter=key):
+                    self.assertEqual(
+                        win._cursor_endpoint_channels_for_param(*key), channels
+                    )
+        finally:
+            win.close()
 
     def test_channel_box_mouse_gestures(self):
         try:
@@ -386,6 +875,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             t0_us=0.2,
             t1_us=0.8,
         )
+        # The auxiliary Ha-Hb connector is meaningful only after both
+        # horizontal lines are explicitly bound to comparable quantities.
+        plot.set_interval_base_horizontal(-0.25, channel="vce")
 
         point = plot._peak_plot_point_in_window("vce", 0.2, 0.8)
         self.assertIsNotNone(point)
@@ -2080,12 +2572,53 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
     def test_load_progress_bar_updates(self):
         from dpt_extractor.gui.main_window import MainWindow, TASK_PROGRESS_TOTAL
+        from dpt_extractor.gui.task_progress import UnitRateEstimator
 
+        now = [0.0]
         win = MainWindow()
         win._load_request_id = 7
         win._begin_task_progress("数据导入", TASK_PROGRESS_TOTAL, "准备读取原始数据...")
+        win.report_progress._eta_estimator = UnitRateEstimator(lambda: now[0])
         self.assertEqual(win.report_progress.stage_text(), "数据导入")
         self.assertEqual(win.report_progress.detail_text(), "准备读取")
+
+        win._on_background_load_progress(
+            7,
+            0,
+            TASK_PROGRESS_TOTAL,
+            "读取波形通道",
+            "load-waveform-channels",
+            0,
+            4,
+        )
+        self.assertEqual(win.report_progress.percent_text(), "1.0%")
+        self.assertEqual(win.report_progress.eta_text(), "估算中")
+
+        now[0] = 1.0
+        win._on_background_load_progress(
+            7,
+            8750,
+            TASK_PROGRESS_TOTAL,
+            "读取波形通道 1/4",
+            "load-waveform-channels",
+            1,
+            4,
+        )
+        self.assertEqual(win.report_progress.percent_text(), "8.8%")
+        self.assertEqual(win.report_progress.eta_text(), "估算中")
+
+        now[0] = 2.0
+        win._on_background_load_progress(
+            7,
+            17500,
+            TASK_PROGRESS_TOTAL,
+            "读取波形通道 2/4",
+            "load-waveform-channels",
+            2,
+            4,
+        )
+        self.assertEqual(win.report_progress.percent_text(), "17.5%")
+        self.assertEqual(win.report_progress.eta_text(), "2.0 s")
 
         win._on_background_load_progress(
             7,
@@ -2096,12 +2629,75 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(win.report_progress.value(), 35000)
         self.assertEqual(win.report_progress.percent_text(), "35.0%")
         self.assertEqual(win.report_progress.detail_text(), "识别通道")
+        self.assertEqual(win.report_progress.eta_text(), "估算中")
 
         win._finish_task_progress("导入完成 100%", ok=True, stage="数据导入")
         self.assertEqual(win.report_progress.value(), 100)
         self.assertEqual(win.report_progress.percent_text(), "100.0%")
         self.assertEqual(win.report_progress.detail_text(), "导入完成")
+        self.assertEqual(win.report_progress.eta_text(), "0 ms")
         win.close()
+
+    def test_waveform_load_task_forwards_homogeneous_eta_signal_fields(self):
+        from unittest.mock import patch
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import _WaveformLoadTask
+
+        events: list[tuple[int, int, int, str, str, int, int]] = []
+        finished: list[tuple[int, object]] = []
+        task = _WaveformLoadTask(7, "sample.tss", load_config())
+        task.signals.progress.connect(
+            lambda request_id, value, total, label, phase, completed, unit_total: events.append(
+                (
+                    int(request_id),
+                    int(value),
+                    int(total),
+                    str(label),
+                    str(phase),
+                    int(completed),
+                    int(unit_total),
+                )
+            )
+        )
+        task.signals.finished.connect(
+            lambda request_id, outcome: finished.append((int(request_id), outcome))
+        )
+        expected_outcome = object()
+
+        def fake_compute(path, cfg, progress_callback):
+            self.assertEqual(path, "sample.tss")
+            progress_callback(
+                8750,
+                100000,
+                "读取波形通道 1/4",
+                "load-waveform-channels",
+                1,
+                4,
+            )
+            return expected_outcome
+
+        with patch(
+            "dpt_extractor.gui.main_window._compute_waveform_load_outcome",
+            side_effect=fake_compute,
+        ):
+            task.run()
+
+        self.assertEqual(
+            events,
+            [
+                (
+                    7,
+                    8750,
+                    100000,
+                    "读取波形通道 1/4",
+                    "load-waveform-channels",
+                    1,
+                    4,
+                )
+            ],
+        )
+        self.assertEqual(finished, [(7, expected_outcome)])
 
     def test_report_write_progress_caps_until_finished(self):
         from PyQt6.QtCore import QTimer
@@ -2988,8 +3584,11 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         n = 300
         t = np.linspace(0.0, 1e-6, n)
         profile = make_profile("U", "upper")
-        irr = np.linspace(100.0, 700.0, n)
-        il = np.linspace(20.0, 320.0, n)
+        # Upper-bridge raw Irr has a negative dominant commutation platform;
+        # IL is positive and larger, so the imported CH3+CH4 Math is also the
+        # numerically authoritative logical Ic (not merely a formula-name hit).
+        irr = -np.linspace(100.0, 700.0, n)
+        il = np.linspace(200.0, 1200.0, n)
         math_ic = irr + il
         bundle = WaveformBundle(
             t=t,
@@ -3271,6 +3870,54 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         plot._set_math_formula("MATH2", "CH3")
         np.testing.assert_allclose(plot._trace_raw["MATH2"], -raw)
         plot.close()
+
+    def test_user_math_formula_refreshes_before_inversion_export(self):
+        import numpy as np
+
+        from dpt_extractor.gui.waveform_plot import WaveformPlot
+
+        bundle, profile = self._make_synthetic_bundle()
+        raw = np.asarray(bundle.channels["CH3"], dtype=np.float64).copy()
+        plot = WaveformPlot()
+        plot.plot_waveforms(bundle, profile, None)
+        plot._set_math_formula("MATH2", "CH3")
+        np.testing.assert_allclose(plot._trace_raw["MATH2"], raw)
+
+        plot.set_channel_inversion_enabled("CH3", True)
+
+        np.testing.assert_allclose(plot._trace_raw["MATH2"], -raw)
+        exported, _expr, _scale, _offset = plot.export_user_math_channels()[
+            "MATH2"
+        ]
+        np.testing.assert_allclose(exported, -raw)
+        plot.close()
+
+    def test_static_waveform_curve_cache_survives_trace_data_refresh(self):
+        import numpy as np
+        from PyQt6.QtWidgets import QGraphicsItem
+
+        plot = self._make_synthetic_plot()
+        try:
+            for item in plot._trace_items.values():
+                self.assertEqual(
+                    item.curve.cacheMode(),
+                    QGraphicsItem.CacheMode.DeviceCoordinateCache,
+                )
+
+            item = plot._trace_items["CH3"]
+            before = np.asarray(item.curve.getData()[1], dtype=np.float64).copy()
+            plot._set_channel_offset(
+                "CH3",
+                float(plot._disp_offset["CH3"]) + 0.5,
+            )
+            after = np.asarray(item.curve.getData()[1], dtype=np.float64)
+            self.assertFalse(np.array_equal(after, before))
+            self.assertEqual(
+                item.curve.cacheMode(),
+                QGraphicsItem.CacheMode.DeviceCoordinateCache,
+            )
+        finally:
+            plot.close()
 
     def test_channel_settings_panel_control_bounds_are_compact(self):
         from PyQt6.QtCore import QPoint, QRect
@@ -4509,6 +5156,164 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn("Δ a/ Δ t:", wave_delta)
         self.assertFalse(plot._h_cursor_a.isVisible())
 
+    def test_interval_horizontal_lines_keep_independent_channels_and_units(self):
+        """Esc may use MATH/Ic, while Desat keeps a same-channel Δ readout."""
+
+        plot = self._make_synthetic_plot()
+        try:
+            plot._set_math_formula("MATH2", "CH2 * CH3")
+            self.assertEqual(plot._unit_for_channel("MATH2"), "W")
+            captured: list[tuple[float, float]] = []
+            plot.set_horizontal_cursor_handler(
+                lambda ha, hb: captured.append((float(ha), float(hb)))
+            )
+
+            plot.enable_interval_interaction(
+                0.2,
+                0.8,
+                lambda *_args: None,
+                show_horizontal_peak=True,
+                channel="MATH2",
+            )
+            plot.set_interval_peak_horizontal(0.0, channel="MATH2")
+            plot.set_interval_base_horizontal(12.5, channel="ic")
+
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("MATH2", True))
+            self.assertEqual(plot._horizontal_cursor_binding("hb"), ("ic", True))
+            self.assertFalse(plot._horizontal_quantities_comparable())
+            self.assertTrue(plot._h_cursor_a.isVisible())
+            self.assertTrue(plot._h_cursor_b.isVisible())
+            self.assertFalse(plot._cursor_hb_ha_delta_label.isVisible())
+            self.assertIn(
+                "MATH2", plot._cursor_ha_v_label.textItem.toPlainText()
+            )
+            self.assertNotIn("Δy", plot._readout_label.text())
+            plot._h_cursor_a.setPos(float(plot._h_cursor_a.value()) + 0.1)
+            self.app.processEvents()
+            self.assertEqual(captured, [])
+
+            plot.enable_interval_interaction(
+                0.2,
+                0.8,
+                lambda *_args: None,
+                show_horizontal_peak=True,
+                channel="vce",
+            )
+            plot.set_interval_peak_horizontal(400.0, channel="vce")
+            plot.set_interval_base_horizontal(40.0, channel="vce")
+
+            self.assertTrue(plot._horizontal_quantities_comparable())
+            self.assertTrue(plot._cursor_hb_ha_delta_label.isVisible())
+            self.assertIn("Δy", plot._readout_label.text())
+        finally:
+            plot.close()
+
+    def test_power_peak_uses_only_a_valid_ha_and_clears_when_trace_is_missing(self):
+        plot = self._make_synthetic_plot()
+        try:
+            plot._set_math_formula("MATH2", "CH2 * CH3")
+            plot.enable_interval_interaction(
+                0.2,
+                0.8,
+                lambda *_args: None,
+                show_horizontal_peak=True,
+                mode="power_peak",
+                channel="MATH2",
+            )
+            self.assertFalse(plot._h_cursor_a.isVisible())
+            self.assertFalse(plot._h_cursor_b.isVisible())
+
+            plot.set_interval_peak_horizontal(0.0, channel="MATH2")
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("MATH2", True))
+            self.assertTrue(plot._h_cursor_a.isVisible())
+            self.assertFalse(plot._h_cursor_b.isVisible())
+            self.assertFalse(plot._cursor_hb_ha_delta_label.isVisible())
+
+            plot.enable_interval_interaction(
+                0.2,
+                0.8,
+                lambda *_args: None,
+                show_horizontal_peak=False,
+                mode="power_peak",
+                channel="vce",
+            )
+            self.assertEqual(plot._horizontal_cursor_binding("ha")[1], False)
+            self.assertEqual(plot._horizontal_cursor_binding("hb")[1], False)
+            self.assertFalse(plot._h_cursor_a.isVisible())
+            self.assertFalse(plot._h_cursor_b.isVisible())
+
+            plot.disable_interactive_cursors()
+            self.assertTrue(plot._h_cursor_a.isVisible())
+            self.assertTrue(plot._h_cursor_b.isVisible())
+        finally:
+            plot.close()
+
+    def test_hiding_an_active_parameter_source_exits_card_mode(self):
+        plot = self._make_synthetic_plot()
+        try:
+            plot._set_math_formula("MATH2", "CH2 * CH3")
+            plot.enable_interval_interaction(
+                0.2,
+                0.8,
+                lambda *_args: None,
+                show_horizontal_peak=True,
+                mode="power_peak",
+                channel="MATH2",
+                a_channel="MATH2",
+                b_channel="MATH2",
+            )
+            plot.set_interval_peak_horizontal(0.0, channel="MATH2")
+            self.assertEqual(plot._interactive_mode, "power_peak")
+
+            plot._toggle_channel_visibility("MATH2")
+
+            self.assertEqual(plot._interactive_mode, "global")
+            self.assertIn("MATH2", plot._hidden_channels)
+        finally:
+            plot.close()
+
+    def test_active_slope_horizontal_levels_flip_once_with_display_inversion(self):
+        plot = self._make_synthetic_plot()
+        try:
+            plot.enable_dvdt_interaction(
+                0.1,
+                0.9,
+                600.0,
+                -80.0,
+                "ic",
+                lambda *_args: None,
+                mode="didt",
+            )
+            before_ha = plot._from_disp("ic", float(plot._h_cursor_a.value()))
+            before_hb = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+            source = plot._display_key_for_channel("ic")
+
+            plot.set_channel_inversion_enabled(source, True)
+            self.assertAlmostEqual(
+                plot._from_disp("ic", float(plot._h_cursor_a.value())),
+                -before_ha,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                plot._from_disp("ic", float(plot._h_cursor_b.value())),
+                -before_hb,
+                places=9,
+            )
+
+            plot.set_channel_inversion_enabled(source, False)
+            self.assertAlmostEqual(
+                plot._from_disp("ic", float(plot._h_cursor_a.value())),
+                before_ha,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                plot._from_disp("ic", float(plot._h_cursor_b.value())),
+                before_hb,
+                places=9,
+            )
+        finally:
+            plot.close()
+
     def test_cursor_readout_overlays_stay_on_plot_edges(self):
         from PyQt6.QtCore import QPointF
 
@@ -4879,6 +5684,33 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertFalse(any(h._highlighted for h in plot._zero_handles.values()))
         self.assertFalse(any(h._dimmed for h in plot._zero_handles.values()))
 
+    def test_real_channel_box_double_click_can_clear_existing_highlight(self):
+        try:
+            from PyQt6.QtTest import QTest
+        except ImportError:
+            self.skipTest("QtTest is not available")
+        from PyQt6.QtCore import Qt
+
+        plot, _, _, _ = self._load_and_plot(WH)
+        try:
+            plot.show()
+            self.app.processEvents()
+            box = plot._channel_boxes["CH1"]
+
+            # Exercise Qt's real event sequence.  It includes ordinary press
+            # handling before the double-click event, which previously erased
+            # the state needed for the second gesture to toggle highlight off.
+            QTest.mouseDClick(box, Qt.MouseButton.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(plot._highlighted_key, "CH1")
+
+            QTest.mouseDClick(box, Qt.MouseButton.LeftButton)
+            self.app.processEvents()
+            self.assertIsNone(plot._highlighted_key)
+            self.assertEqual(plot._raised_key, "CH1")
+        finally:
+            plot.close()
+
     def test_channel_visibility_toggle(self):
         plot, _, _, _ = self._load_and_plot(WH)
         key = "CH2"
@@ -5102,6 +5934,41 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertAlmostEqual(ton_iv[1], tr_iv[1], places=3)
 
     @unittest.skipUnless(
+        LIKANG_UH_930_REVERSED_TD_ON.exists(),
+        "likangkang reversed Td_on sample missing",
+    )
+    def test_reversed_tdon_keeps_vge_a_and_ic_b_semantics(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._load_file(str(LIKANG_UH_930_REVERSED_TD_ON))
+            QApplication.processEvents()
+            inst = win._turn_on_timing_instants()
+            self.assertIsNotNone(inst.t_v10_s)
+            self.assertIsNotNone(inst.t_i10_s)
+            assert inst.t_v10_s is not None and inst.t_i10_s is not None
+            self.assertGreater(inst.t_v10_s, inst.t_i10_s)
+
+            win._on_value_clicked("开通", "Td_on")
+            QApplication.processEvents()
+            assert win.wave_plot._cursor_a is not None
+            assert win.wave_plot._cursor_b is not None
+            self.assertEqual(win.wave_plot._interactive_mode, "semantic_interval")
+            self.assertAlmostEqual(
+                float(win.wave_plot._cursor_a.value()), inst.t_v10_s * 1e6, places=6
+            )
+            self.assertAlmostEqual(
+                float(win.wave_plot._cursor_b.value()), inst.t_i10_s * 1e6, places=6
+            )
+            self.assertEqual(win.wave_plot._cursor_endpoint_channel("a"), "vge")
+            self.assertEqual(win.wave_plot._cursor_endpoint_channel("b"), "ic")
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
         all(case[0].exists() for case in WANGLIHUI_SLOW_TURN_ON_CASES),
         "wanglihui slow turn-on samples missing",
     )
@@ -5163,6 +6030,11 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertFalse(plot._cursor_b.movable)
         self.assertTrue(plot._h_cursor_a.movable)
         self.assertTrue(plot._h_cursor_b.movable)
+        win._show_stored_metric_status("关断过程", "dv/dt")
+        self.assertIn(
+            "拖动 Ha/Hb 后 A/B 自动跟随重算",
+            win.statusBar().currentMessage(),
+        )
         interval = win._parameter_interval_us("关断过程", "dv/dt")
         self.assertIsNotNone(interval)
         search_t0, search_t1 = interval
@@ -5238,12 +6110,93 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         ls_before = float(result.turn_on.ls_on)
         win._on_value_clicked("开通", "Ls_on")
         self.assertEqual(plot._interactive_mode, "delta_vce")
+        self.assertEqual(plot._cursor_endpoint_channel("a"), "vce")
+        self.assertEqual(plot._cursor_endpoint_channel("b"), "vce")
+        self.assertEqual(plot._horizontal_cursor_binding("ha"), ("vce", True))
+        self.assertEqual(plot._horizontal_cursor_binding("hb"), ("vce", True))
+        self.assertFalse(plot._active_channel_can_follow_selection())
         self.assertTrue(plot._cursor_a.movable)
         self.assertTrue(plot._h_cursor_a.movable)
         ha_disp = float(plot._h_cursor_a.value())
         plot._h_cursor_a.setPos(ha_disp + 5.0)
         plot._on_horizontal_cursor_moved()
         self.assertNotEqual(float(result.turn_on.ls_on), ls_before)
+
+    @unittest.skipUnless(
+        SONG_DCU_LT_WH_450_800.exists(),
+        "songzhenxi LT WH 450V/800A sample missing",
+    )
+    def test_turn_off_delta_vce_b_uses_blocking_platform_raw_crossing(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        plot, bundle, profile, result = self._load_and_plot(SONG_DCU_LT_WH_450_800)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = __import__(
+            "dpt_extractor.config.loader", fromlist=["load_config"]
+        ).load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+        win._on_value_clicked("关断过程", "ΔVce")
+        self.assertEqual(plot._interactive_mode, "delta_vce")
+        b_us = float(plot._cursor_b.value())
+        hb_v = plot._from_disp("vce", float(plot._h_cursor_b.value()))
+        self.assertAlmostEqual(
+            float(np.interp(b_us * 1e-6, bundle.t, bundle.get(profile.vce))),
+            hb_v,
+            places=6,
+        )
+        self.assertGreater(b_us, float(bundle.t[result.segments.turn_off[1]] * 1e6))
+
+    @unittest.skipUnless(
+        SONG_DCU_LT_WH_530_800.exists(),
+        "songzhenxi single-pulse LT WH 530V/800A sample missing",
+    )
+    def test_single_pulse_delta_vce_uses_dut_stable_band_midpoint(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.metrics.plateau_level import (
+            turn_off_delta_vce_blocking_top,
+        )
+
+        plot, bundle, profile, result = self._load_and_plot(SONG_DCU_LT_WH_530_800)
+        self.assertTrue(result.single_pulse_mode)
+        assert result.segments is not None
+        off0, off1 = result.segments.turn_off
+        vce = bundle.get(profile.vce)
+        expected_hb = turn_off_delta_vce_blocking_top(
+            vce, off0, off1, bundle.dt
+        )
+        self.assertAlmostEqual(expected_hb, 536.125, places=6)
+        self.assertAlmostEqual(
+            result.turn_off.delta_vce,
+            result.turn_off.vce_off_max - expected_hb,
+            places=9,
+        )
+
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = __import__(
+            "dpt_extractor.config.loader", fromlist=["load_config"]
+        ).load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+        win._on_value_clicked("关断过程", "ΔVce")
+        b_us = float(plot._cursor_b.value())
+        hb_v = plot._from_disp("vce", float(plot._h_cursor_b.value()))
+        self.assertAlmostEqual(hb_v, expected_hb, places=6)
+        self.assertAlmostEqual(
+            float(np.interp(b_us * 1e-6, bundle.t, vce)),
+            hb_v,
+            places=6,
+        )
 
     def test_didt_interaction_mode(self):
         from dpt_extractor.gui.main_window import MainWindow
@@ -5268,6 +6221,91 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         res = win._compute_didt_base_top("关断过程", search_t0, search_t1, ha_a, hb_a)
         self.assertGreater(res.didt, 0.0)
         self.assertIsNotNone(res.t_pct_a_s)
+
+    def test_turn_off_didt_levels_cannot_leak_into_turn_on(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        plot, bundle, profile, result = self._load_and_plot(WH)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = __import__(
+            "dpt_extractor.config.loader", fromlist=["load_config"]
+        ).load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+
+        win._enable_didt_interaction("关断过程")
+        assert plot._h_cursor_a is not None and plot._h_cursor_b is not None
+        plot._h_cursor_a.setPos(plot._to_disp("ic", 123.456))
+        plot._h_cursor_b.setPos(plot._to_disp("ic", -78.9))
+
+        on_interval = win._parameter_interval_us("开通", "di/dt")
+        assert on_interval is not None
+        expected = win._turn_on_didt_context(*on_interval)
+        assert expected is not None
+        win._enable_didt_interaction("开通")
+
+        actual_top = plot._from_disp("ic", float(plot._h_cursor_a.value()))
+        actual_base = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+        self.assertAlmostEqual(actual_top, expected.top_a, places=9)
+        self.assertAlmostEqual(actual_base, expected.base_a, places=9)
+        self.assertNotAlmostEqual(actual_top, 123.456, places=3)
+        self.assertEqual(win._active_slope_param, ("开通", "di/dt"))
+        win.close()
+
+    def test_invalid_manual_didt_clears_stale_ab_and_recovers_once_valid(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        plot, bundle, profile, result = self._load_and_plot(WH)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = __import__(
+            "dpt_extractor.config.loader", fromlist=["load_config"]
+        ).load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+        win._enable_didt_interaction("开通")
+        self.assertTrue(plot._slope_ab_valid)
+        self.assertTrue(plot._cursor_a.isVisible())
+        callback = plot._interactive_on_change
+        self.assertIsNotNone(callback)
+        on_interval = win._parameter_interval_us("开通", "di/dt")
+        assert on_interval is not None
+        context = win._turn_on_didt_context(*on_interval)
+        assert context is not None
+
+        callback(0.0, 0.0)
+        self.assertFalse(plot._slope_ab_valid)
+        self.assertFalse(plot._cursor_a.isVisible())
+        self.assertFalse(plot._cursor_b.isVisible())
+        self.assertTrue(result.is_metric_unavailable("开通", "di/dt"))
+        self.assertTrue(result.is_metric_unavailable("开通", "Ls_on"))
+
+        callback(context.top_a, context.base_a)
+        self.assertTrue(plot._slope_ab_valid)
+        self.assertTrue(plot._cursor_a.isVisible())
+        self.assertTrue(plot._cursor_b.isVisible())
+        self.assertFalse(result.is_metric_unavailable("开通", "di/dt"))
+        self.assertFalse(result.is_metric_unavailable("开通", "Ls_on"))
+        win.close()
+
+    def test_valid_cursor_readout_does_not_reapply_visibility_on_every_update(self):
+        from unittest.mock import Mock
+
+        plot, _bundle, _profile, _result = self._load_and_plot(WH)
+        plot._interactive_mode = "didt"
+        plot._slope_ab_valid = True
+        plot._parameter_cursor_context_suppressed = False
+        original = plot._apply_cursor_visibility
+        original()
+        plot._apply_cursor_visibility = Mock(wraps=original)
+        for _ in range(8):
+            plot._update_readout(update_axis=False)
+        self.assertEqual(plot._apply_cursor_visibility.call_count, 0)
 
     def test_rr_didt_interaction_no_crash(self):
         from dpt_extractor.gui.main_window import MainWindow
@@ -5297,15 +6335,21 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         search_t0, search_t1 = interval
         base_a = win._default_didt_base_a("反向恢复", search_t0, search_t1)
         top_a = win._default_didt_top_a("反向恢复", search_t0, search_t1)
-        self.assertLess(top_a, -900.0)
-        self.assertGreater(base_a, -100.0)
-        self.assertLess(base_a, 150.0)
+        # IDM 水平卡尺语义：Ha=恢复尾部基线，Hb=带符号正向平台。
+        self.assertGreater(top_a, -100.0)
+        self.assertLess(top_a, 150.0)
+        self.assertLess(base_a, -900.0)
         res = win._compute_didt_base_top(
             "反向恢复", search_t0, search_t1, top_a, base_a
         )
         self.assertGreater(res.didt, 1.0)
         self.assertIsNotNone(res.t_pct_a_s)
         self.assertIsNotNone(res.t_pct_b_s)
+        assert res.t_pct_a_s is not None and res.t_pct_b_s is not None
+        self.assertLess(res.t_pct_a_s, res.t_pct_b_s)
+        self.assertAlmostEqual(
+            res.didt, result.reverse_recovery.didt_irr, places=9
+        )
 
     def test_slope_horizontal_drag_does_not_refocus_view(self):
         from PyQt6.QtWidgets import QApplication
@@ -5991,6 +7035,631 @@ class TestMainWindowSmoke(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
+    @unittest.skipUnless(SHORT_VH_750.exists(), "short-circuit sample missing")
+    def test_invalid_manual_short_energy_window_does_not_store_nan(self) -> None:
+        from unittest.mock import patch
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.test_mode import TestMode
+
+        win = MainWindow()
+        try:
+            mode_index = win.combo_test_mode.findData(TestMode.SHORT_CIRCUIT.value)
+            self.assertGreaterEqual(mode_index, 0)
+            win.combo_test_mode.setCurrentIndex(mode_index)
+            win._apply_test_mode_ui()
+            win._load_file(str(SHORT_VH_750), background=False)
+            self.assertIsNotNone(win.result)
+            assert win.result is not None and win.result.segments is not None
+            i0, i1 = win.result.segments.turn_off
+            sc = win.result.short_circuit
+
+            for name, value_attr, source_attr in (
+                ("短路能量Esc_本管", "esc_dut", "energy_dut_channel"),
+                ("短路能量Esc_对管", "esc_other", "energy_other_channel"),
+            ):
+                with self.subTest(name=name):
+                    win.result.unavailable_metrics.discard(("短路过程", name))
+                    setattr(sc, value_attr, 1.25)
+                    setattr(sc, source_attr, "ORIGINAL")
+                    with patch(
+                        "dpt_extractor.gui.main_window.short_circuit_energy_value",
+                        return_value=(float("nan"), "INVALID"),
+                    ):
+                        value = win._recompute_param_from_interval(
+                            "短路过程", name, i0, i1
+                        )
+
+                    self.assertIsNone(value)
+                    self.assertEqual(getattr(sc, value_attr), 1.25)
+                    self.assertEqual(getattr(sc, source_attr), "ORIGINAL")
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_20260717_UH_1048.exists() and SONG_SMC_RT_UH_1048.exists(),
+        "songzhenxi 20260717 HT / 20260506 RT UH samples missing",
+    )
+    def test_songzhenxi_rr_didt_pipeline_context_gui_and_overlay_are_identical(
+        self,
+    ) -> None:
+        """重点 UH 样例必须由一份 RR context 同时驱动表值、卡尺和读数框。"""
+        import numpy as np
+        from PyQt6.QtCore import QPointF
+
+        from dpt_extractor.gui.main_window import MainWindow, REPORT_PROGRESS_TOTAL
+        from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
+        from dpt_extractor.metrics.slopes import (
+            _rr_quiet_local_platform_window,
+            _rr_spike_guarded_extreme_index,
+        )
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        cases = (
+            (SONG_SMC_HT_20260717_UH_1048, 5.485001520939264),
+            (SONG_SMC_RT_UH_1048, 6.3621142660389545),
+        )
+        for sample_path, expected_didt in cases:
+            with self.subTest(sample=str(sample_path)):
+                win = MainWindow()
+                try:
+                    win._load_file(str(sample_path))
+                    self.assertIsNotNone(win.bundle)
+                    self.assertIsNotNone(win.result)
+                    assert win.bundle is not None and win.result is not None
+
+                    interval = win._parameter_interval_us("反向恢复", "di/dt")
+                    self.assertIsNotNone(interval)
+                    assert interval is not None
+                    context = win._rr_didt_context(*interval)
+                    self.assertIsNotNone(context)
+                    assert context is not None
+                    crossing = context.crossing
+                    self.assertFalse(context.used_fallback)
+                    self.assertEqual(context.polarity, -1)
+                    self.assertAlmostEqual(
+                        win.result.reverse_recovery.didt_irr,
+                        expected_didt,
+                        places=9,
+                    )
+                    self.assertAlmostEqual(crossing.didt, expected_didt, places=9)
+                    self.assertIsNotNone(crossing.t_pct_a_s)
+                    self.assertIsNotNone(crossing.t_pct_b_s)
+                    assert crossing.t_pct_a_s is not None
+                    assert crossing.t_pct_b_s is not None
+                    self.assertLess(crossing.t_pct_a_s, crossing.t_pct_b_s)
+
+                    # GUI 的 IDM 水平语义为 Ha=尾部基线、Hb=带符号正向平台。
+                    gui_ha = win._default_didt_top_a("反向恢复", *interval)
+                    gui_hb = win._default_didt_base_a("反向恢复", *interval)
+                    self.assertEqual(gui_ha, context.base_a)
+                    self.assertEqual(gui_hb, context.forward_a)
+                    manual = win._compute_didt_base_top(
+                        "反向恢复", *interval, gui_ha, gui_hb
+                    )
+                    self.assertEqual(manual.didt, crossing.didt)
+                    self.assertEqual(manual.t_pct_a_s, crossing.t_pct_a_s)
+                    self.assertEqual(manual.t_pct_b_s, crossing.t_pct_b_s)
+
+                    win._on_value_clicked("反向恢复", "di/dt")
+                    self.app.processEvents()
+                    plot = win.wave_plot
+                    self.assertAlmostEqual(
+                        float(plot._cursor_a.value()),
+                        crossing.t_pct_a_s * 1e6,
+                        places=9,
+                    )
+                    self.assertAlmostEqual(
+                        float(plot._cursor_b.value()),
+                        crossing.t_pct_b_s * 1e6,
+                        places=9,
+                    )
+                    self.assertAlmostEqual(
+                        plot._from_disp("irr", float(plot._h_cursor_a.value())),
+                        context.base_a,
+                        places=12,
+                    )
+                    self.assertAlmostEqual(
+                        plot._from_disp("irr", float(plot._h_cursor_b.value())),
+                        context.forward_a,
+                        places=12,
+                    )
+
+                    if sample_path == SONG_SMC_HT_20260717_UH_1048:
+                        rr0, rr1 = win.result.segments.reverse_recovery
+                        irr = bundle_reverse_recovery_current(
+                            win.bundle, win.profile
+                        )
+                        peak_idx = rr0 + int(
+                            err_recovery_peak_index(
+                                irr[rr0 : rr1 + 1], win.bundle.dt
+                            )
+                        )
+                        peak_t = float(win.bundle.t[peak_idx])
+                        platform_i0 = int(
+                            np.searchsorted(
+                                win.bundle.t,
+                                peak_t - 0.6e-6,
+                                side="left",
+                            )
+                        )
+                        platform_i1 = int(
+                            np.searchsorted(
+                                win.bundle.t,
+                                peak_t - 0.2e-6,
+                                side="right",
+                            )
+                        )
+                        source_region = irr[platform_i0:platform_i1]
+                        stable_platform = _rr_quiet_local_platform_window(
+                            source_region,
+                            win.bundle.dt,
+                            min_ns=200.0,
+                        )
+                        guarded_min = _rr_spike_guarded_extreme_index(
+                            stable_platform, maximum=False
+                        )
+                        guarded_max = _rr_spike_guarded_extreme_index(
+                            stable_platform, maximum=True
+                        )
+                        expected_forward = 0.5 * (
+                            float(stable_platform[guarded_min])
+                            + float(stable_platform[guarded_max])
+                        )
+                        self.assertEqual(
+                            expected_forward,
+                            -968.0624999999999,
+                        )
+                        self.assertEqual(context.forward_a, expected_forward)
+                        # Selecting the result-table row must place the visible
+                        # lower horizontal cursor at that exact physical level.
+                        table_cursor_forward = plot._from_disp(
+                            "irr", float(plot._h_cursor_b.value())
+                        )
+                        self.assertAlmostEqual(
+                            table_cursor_forward,
+                            expected_forward,
+                            places=12,
+                        )
+
+                        def _assert_forward_line_matches_platform_pixel() -> None:
+                            physical = plot._from_disp(
+                                "irr", float(plot._h_cursor_b.value())
+                            )
+                            self.assertAlmostEqual(
+                                physical,
+                                expected_forward,
+                                places=12,
+                            )
+                            vb = plot.plot.getPlotItem().getViewBox()
+                            line_y = float(
+                                vb.mapViewToScene(
+                                    QPointF(0.0, float(plot._h_cursor_b.value()))
+                                ).y()
+                            )
+                            platform_y = float(
+                                vb.mapViewToScene(
+                                    QPointF(
+                                        0.0,
+                                        plot._to_disp("irr", expected_forward),
+                                    )
+                                ).y()
+                            )
+                            self.assertAlmostEqual(line_y, platform_y, delta=0.25)
+
+                        # Changing the real CH3 position or A/div must reproject
+                        # the already selected signed platform level instead of
+                        # changing its physical value or leaving the line behind.
+                        irr_key = plot._display_key_for_channel("irr")
+                        self.assertIn(irr_key, plot._trace_items)
+                        _assert_forward_line_matches_platform_pixel()
+                        plot._set_channel_offset(
+                            irr_key,
+                            float(plot._disp_offset[irr_key]) + 0.75,
+                        )
+                        _assert_forward_line_matches_platform_pixel()
+                        plot._set_channel_scale(
+                            irr_key,
+                            float(plot._disp_scale[irr_key]) * 1.25,
+                        )
+                        _assert_forward_line_matches_platform_pixel()
+
+                        # Exercise the production report-capture state rather
+                        # than merely reusing the live table selection.  The
+                        # level sampled at the instant the RR di/dt PNG would be
+                        # written must remain the same frozen-page value.
+                        import tempfile
+
+                        captured_report_levels: list[float] = []
+                        writer_finished: list[bool] = []
+                        win._report_image_params = lambda: (  # type: ignore[method-assign]
+                            ("反向恢复", "di/dt"),
+                        )
+
+                        def fake_capture(path, _size):
+                            captured_report_levels.append(
+                                plot._from_disp(
+                                    "irr", float(plot._h_cursor_b.value())
+                                )
+                            )
+                            path.write_bytes(b"rr-didt-capture")
+
+                        def fake_writer(tempdir, images, _results, **_kwargs):
+                            self.assertEqual(
+                                tuple(images), (("反向恢复", "di/dt"),)
+                            )
+                            writer_finished.append(True)
+                            tempdir.cleanup()
+
+                        win._save_report_plot_capture = fake_capture  # type: ignore[method-assign]
+                        win._start_report_write_task = fake_writer  # type: ignore[method-assign]
+                        tempdir = tempfile.TemporaryDirectory()
+                        win._report_request_id = 77
+                        win._begin_report_progress(
+                            REPORT_PROGRESS_TOTAL,
+                            "准备报告截图...",
+                        )
+                        win._start_report_capture_sequence(
+                            tempdir,
+                            [win.result],
+                            request_id=77,
+                        )
+                        for _ in range(30):
+                            self.app.processEvents()
+                            if writer_finished:
+                                break
+                        if not writer_finished:
+                            tempdir.cleanup()
+                        self.assertEqual(writer_finished, [True])
+                        self.assertEqual(len(captured_report_levels), 1)
+                        self.assertAlmostEqual(
+                            captured_report_levels[0],
+                            expected_forward,
+                            places=12,
+                        )
+
+                    irr = bundle_reverse_recovery_current(win.bundle, win.profile)
+                    raw_a = float(
+                        np.interp(crossing.t_pct_a_s, win.bundle.t, irr)
+                    )
+                    raw_b = float(
+                        np.interp(crossing.t_pct_b_s, win.bundle.t, irr)
+                    )
+                    self.assertAlmostEqual(raw_a, crossing.th_a, places=9)
+                    self.assertAlmostEqual(raw_b, crossing.th_b, places=9)
+
+                    # 斜率框用 A/B 的百分比交点差，不得误用完整 Ha↔Hb 跨度。
+                    expected_delta = abs(raw_b - raw_a)
+                    expected_rate = expected_delta / (
+                        (crossing.t_pct_b_s - crossing.t_pct_a_s) * 1e6
+                    )
+                    readout = (
+                        plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+                    )
+                    self.assertIn(f"{expected_delta:.3f} A", readout)
+                    self.assertIn(f"{expected_rate:.2f} MA/s", readout)
+                    self.assertNotIn(
+                        f"{abs(context.forward_a - context.base_a):.3f} A",
+                        readout,
+                    )
+                finally:
+                    win.close()
+
+    @unittest.skipUnless(
+        WANGLIHUI_UH_486_985.exists() and WANGLIHUI_UH_486_985_FAST.exists(),
+        "wanglihui UH 486V 985A samples missing",
+    )
+    def test_wanglihui_rr_didt_survives_manual_ch3_inversion(self) -> None:
+        """通道设置反相后应重算同一物理斜率，不能坍缩到近零噪声。"""
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        cases = (
+            (
+                WANGLIHUI_UH_486_985,
+                10.938162389246163,
+                -956.671875,
+                12.515625,
+            ),
+            (
+                WANGLIHUI_UH_486_985_FAST,
+                13.397852675728164,
+                -954.65625,
+                15.4453125,
+            ),
+        )
+        for sample_path, expected_didt, expected_forward, expected_base in cases:
+            with self.subTest(sample=sample_path.name):
+                win = MainWindow()
+                try:
+                    win._load_file(str(sample_path))
+                    self.assertIsNotNone(win.bundle)
+                    self.assertIsNotNone(win.result)
+                    assert win.bundle is not None and win.result is not None
+                    irr_before = bundle_reverse_recovery_current(
+                        win.bundle, win.profile
+                    ).copy()
+                    source_inversions = set(
+                        win.bundle.meta.source_channel_inversions
+                    )
+                    self.assertFalse(
+                        win.wave_plot.channel_inversion_enabled("CH3")
+                    )
+                    win._on_value_clicked("反向恢复", "di/dt")
+                    self.app.processEvents()
+                    self.assertEqual(win.wave_plot._interactive_mode, "didt")
+
+                    # Reproduce the real interaction order that previously kept
+                    # stale signed levels alive: adjust/save this card first,
+                    # then invert its physical source without loading a new file.
+                    interval_before = win._parameter_interval_us(
+                        "反向恢复", "di/dt"
+                    )
+                    self.assertIsNotNone(interval_before)
+                    assert interval_before is not None
+                    context_before = win._rr_didt_context(*interval_before)
+                    self.assertIsNotNone(context_before)
+                    assert context_before is not None
+                    stale_top = float(context_before.base_a + 7.0)
+                    stale_base = float(context_before.forward_a + 7.0)
+                    win._save_manual_didt(
+                        ("反向恢复", "di/dt"),
+                        "idm",
+                        float(interval_before[0]),
+                        float(interval_before[1]),
+                        stale_top,
+                        stale_base,
+                    )
+                    self.assertIn(
+                        ("反向恢复", "di/dt"), win._manual_didt
+                    )
+
+                    win.wave_plot.set_channel_inversion_enabled("CH3", True)
+                    self.app.processEvents()
+                    self.assertTrue(
+                        win.wave_plot.channel_inversion_enabled("CH3")
+                    )
+                    self.assertIn(
+                        "CH3", win.bundle.meta.channel_display_inversions
+                    )
+                    self.assertEqual(
+                        set(win.bundle.meta.source_channel_inversions),
+                        source_inversions,
+                    )
+                    irr_after = bundle_reverse_recovery_current(
+                        win.bundle, win.profile
+                    )
+                    # 上桥逻辑 Irr 会补偿显示反相以避免二次翻转；真实通道
+                    # 设置已写入元数据，但参与计算的物理方向应保持不变。
+                    np.testing.assert_allclose(irr_after, irr_before)
+
+                    interval = win._parameter_interval_us("反向恢复", "di/dt")
+                    self.assertIsNotNone(interval)
+                    assert interval is not None
+                    context = win._rr_didt_context(*interval)
+                    self.assertIsNotNone(context)
+                    assert context is not None
+                    self.assertFalse(context.used_fallback)
+                    self.assertEqual(context.polarity, -1)
+                    self.assertAlmostEqual(
+                        context.crossing.didt, expected_didt, places=9
+                    )
+                    self.assertAlmostEqual(
+                        context.forward_a, expected_forward, places=9
+                    )
+                    self.assertAlmostEqual(
+                        context.base_a, expected_base, places=9
+                    )
+                    self.assertGreater(
+                        abs(context.forward_a - context.base_a), 500.0
+                    )
+                    self.assertEqual(
+                        win.result.reverse_recovery.didt_irr,
+                        context.crossing.didt,
+                    )
+                    # The saved pre-transform state is invalid.  Because it had
+                    # made this card eligible for automatic re-entry, the card
+                    # must now be active with freshly calculated levels rather
+                    # than the stale values above.
+                    self.assertNotIn(
+                        ("反向恢复", "di/dt"), win._manual_didt
+                    )
+                    self.assertEqual(win.wave_plot._interactive_mode, "didt")
+                    self.assertAlmostEqual(
+                        win.wave_plot._from_disp(
+                            "irr", float(win.wave_plot._h_cursor_a.value())
+                        ),
+                        context.base_a,
+                        places=9,
+                    )
+                    self.assertAlmostEqual(
+                        win.wave_plot._from_disp(
+                            "irr", float(win.wave_plot._h_cursor_b.value())
+                        ),
+                        context.forward_a,
+                        places=9,
+                    )
+                    self.assertNotAlmostEqual(context.base_a, stale_top, places=6)
+                    self.assertNotAlmostEqual(
+                        context.forward_a, stale_base, places=6
+                    )
+                    self.assertIsNotNone(context.crossing.t_pct_a_s)
+                    self.assertIsNotNone(context.crossing.t_pct_b_s)
+                    assert context.crossing.t_pct_a_s is not None
+                    assert context.crossing.t_pct_b_s is not None
+                    self.assertLess(
+                        context.crossing.t_pct_a_s,
+                        context.crossing.t_pct_b_s,
+                    )
+                    rr0, rr1 = win.result.segments.reverse_recovery
+                    recovery_peak = rr0 + int(
+                        np.argmax(irr_after[rr0 : rr1 + 1])
+                    )
+                    self.assertGreater(
+                        float(win.bundle.t[recovery_peak]),
+                        context.crossing.t_pct_b_s,
+                    )
+                finally:
+                    win.close()
+
+    @unittest.skipUnless(
+        WANGLIHUI_UH_486_985.exists(),
+        "wanglihui UH 486V 985A sample missing",
+    )
+    def test_active_rr_didt_drops_manual_levels_before_ch3_inversion_reentry(self) -> None:
+        """An active card must re-enter from the post-inversion auto context."""
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._load_file(str(WANGLIHUI_UH_486_985))
+            win._on_value_clicked("反向恢复", "di/dt")
+            self.app.processEvents()
+            interval = win._parameter_interval_us("反向恢复", "di/dt")
+            self.assertIsNotNone(interval)
+            assert interval is not None
+            key = ("反向恢复", "di/dt")
+            bad_top, bad_base = 321.0, -123.0
+            win._save_manual_didt(
+                key,
+                "idm",
+                interval[0],
+                interval[1],
+                bad_top,
+                bad_base,
+            )
+            plot = win.wave_plot
+            plot._interactive_syncing = True
+            try:
+                plot._h_cursor_a.setPos(plot._to_disp("irr", bad_top))
+                plot._h_cursor_b.setPos(plot._to_disp("irr", bad_base))
+            finally:
+                plot._interactive_syncing = False
+
+            plot.set_channel_inversion_enabled("CH3", True)
+            self.app.processEvents()
+
+            self.assertNotIn(key, win._manual_didt)
+            self.assertEqual(win._active_slope_param, key)
+            self.assertEqual(plot._interactive_mode, "didt")
+            context = win._rr_didt_context(*interval)
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertAlmostEqual(
+                plot._from_disp("irr", float(plot._h_cursor_a.value())),
+                context.base_a,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                plot._from_disp("irr", float(plot._h_cursor_b.value())),
+                context.forward_a,
+                places=9,
+            )
+            self.assertNotAlmostEqual(context.base_a, bad_top, places=3)
+            self.assertNotAlmostEqual(context.forward_a, bad_base, places=3)
+            self.assertAlmostEqual(
+                win.result.reverse_recovery.didt_irr,
+                context.crossing.didt,
+                places=9,
+            )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(SHORT_VH_750.exists(), "750V VH short sample missing")
+    def test_short_vpeak_and_esc_keep_independent_horizontal_channels(self) -> None:
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.test_mode import TestMode
+
+        win = MainWindow()
+        try:
+            mode_index = win.combo_test_mode.findData(TestMode.SHORT_CIRCUIT.value)
+            self.assertGreaterEqual(mode_index, 0)
+            win.combo_test_mode.setCurrentIndex(mode_index)
+            win._apply_test_mode_ui()
+            win._load_file(str(SHORT_VH_750), background=False)
+            self.assertIsNotNone(win.result)
+            assert win.result is not None
+            self.assertTrue(win.result.short_circuit_mode)
+
+            name = "应力Vpeak_本管"
+            win._on_value_clicked("短路过程", name)
+            plot = win.wave_plot
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("vce", True))
+            self.assertEqual(plot._horizontal_cursor_binding("hb"), ("vge", True))
+            self.assertEqual(plot._interval_a_channel, "vge")
+            self.assertEqual(plot._interval_b_channel, "vge")
+            self.assertFalse(plot._horizontal_quantities_comparable())
+            self.assertFalse(plot._cursor_hb_ha_delta_label.isVisible())
+
+            ha_before = plot._from_disp("vce", float(plot._h_cursor_a.value()))
+            hb_before = plot._from_disp("vge", float(plot._h_cursor_b.value()))
+            vce_key = plot._display_key_for_channel("vce")
+            vge_key = plot._display_key_for_channel("vge")
+            self.assertNotEqual(vce_key, vge_key)
+            plot._set_channel_scale(vce_key, 125.0)
+            plot._set_channel_offset(vce_key, 1.25)
+            plot._set_channel_scale(vge_key, 2.5)
+            plot._set_channel_offset(vge_key, -1.0)
+            self.assertAlmostEqual(
+                plot._from_disp("vce", float(plot._h_cursor_a.value())),
+                ha_before,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                plot._from_disp("vge", float(plot._h_cursor_b.value())),
+                hb_before,
+                places=9,
+            )
+            self.assertNotIn(("短路过程", name), win._manual_extreme_values)
+
+            manual_vpeak = 777.25
+            plot._h_cursor_a.setPos(plot._to_disp("vce", manual_vpeak))
+            self.app.processEvents()
+            self.assertEqual(
+                win._manual_extreme_values[("短路过程", name)],
+                (manual_vpeak, manual_vpeak),
+            )
+            self.assertAlmostEqual(
+                win.result.short_circuit.vpeak_dut,
+                manual_vpeak,
+                places=9,
+            )
+
+            # A second click must restore the manual Vce line; it must not be
+            # replaced by the automatic window peak or converted through Vge.
+            win._on_value_clicked("短路过程", name)
+            self.assertAlmostEqual(
+                plot._from_disp("vce", float(plot._h_cursor_a.value())),
+                manual_vpeak,
+                places=9,
+            )
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("vce", True))
+            self.assertEqual(plot._horizontal_cursor_binding("hb"), ("vge", True))
+
+            win._on_value_clicked("短路过程", "短路能量Esc_本管")
+            ha_channel, ha_valid = plot._horizontal_cursor_binding("ha")
+            hb_channel, hb_valid = plot._horizontal_cursor_binding("hb")
+            self.assertTrue(ha_valid)
+            self.assertTrue(hb_valid)
+            marker = win._short_circuit_energy_peak_marker(
+                "短路能量Esc_本管",
+                *win._short_circuit_ic_window_indices(),
+            )
+            self.assertIsNotNone(marker)
+            assert marker is not None
+            _peak, expected_energy_channel = marker
+            self.assertEqual(ha_channel, expected_energy_channel)
+            self.assertIn(ha_channel, plot._trace_items)
+            self.assertEqual(hb_channel, "ic")
+            self.assertEqual(plot._unit_for_channel(ha_channel), "J")
+            self.assertEqual(plot._unit_for_channel(hb_channel), "A")
+            self.assertFalse(plot._cursor_hb_ha_delta_label.isVisible())
+        finally:
+            win.close()
+
     def test_open_and_drag_cursor_recomputes_param(self):
         from dpt_extractor.gui.main_window import MainWindow
 
@@ -6020,6 +7689,8 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertIsNotNone(win.result.segments)
         vce_key = win.wave_plot._display_key_for_channel("vce")
         ic_key = win.wave_plot._display_key_for_channel("ic")
+        vd_key = win.wave_plot._display_key_for_channel("v_diode")
+        win.wave_plot._set_math_formula("MATH8", f"{vce_key} * {vd_key}")
         win.wave_plot._set_math_formula("MATH9", f"{vce_key} * {ic_key}")
         interval = win._parameter_interval_us("关断过程", "Pmax")
         self.assertIsNotNone(interval)
@@ -6031,6 +7702,10 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertEqual(plot._interactive_mode, "power_peak")
         self.assertTrue(plot._interval_max_hline_enabled)
         self.assertNotEqual(plot._interactive_mode, "energy_loss")
+        self.assertEqual(plot._horizontal_cursor_binding("ha"), ("MATH9", True))
+        self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
+        self.assertTrue(plot._h_cursor_a.isVisible())
+        self.assertFalse(plot._h_cursor_b.isVisible())
         self.assertAlmostEqual(float(plot._cursor_a.value()), interval[0], places=6)
         self.assertAlmostEqual(float(plot._cursor_b.value()), interval[1], places=6)
         aux_point = plot._cursor_auxiliary_point()
@@ -6047,13 +7722,406 @@ class TestMainWindowSmoke(unittest.TestCase):
         )
         win.close()
 
-    @unittest.skipUnless(SMC_RT_UL_403.exists(), "UL 403A sample missing")
+    def test_visible_power_trace_never_overrides_raw_pmax_value(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.result_table import format_metric_display
+        from dpt_extractor.gui.waveform_plot import _is_power_unit
+        from dpt_extractor.metrics.energy import peak_power_kw
+        from dpt_extractor.metrics.iec_windows import IntegrationWindow
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        win = MainWindow()
+        try:
+            win._load_file(str(WH))
+            plot = win.wave_plot
+            for key, item in plot._trace_items.items():
+                if _is_power_unit(plot._unit_for_channel(key)):
+                    plot._hidden_channels.add(key)
+                    item.hide()
+            vce_key = plot._display_key_for_channel("vce")
+            ic_key = plot._display_key_for_channel("ic")
+            plot._set_math_formula("MATH9", f"0.8 * {vce_key} * {ic_key}")
+
+            win._on_value_clicked("关断过程", "Pmax")
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "MATH9")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "MATH9")
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("MATH9", True))
+            self.assertIn("A/B/Ha 显示", win.statusBar().currentMessage())
+            self.assertIn("卡值按原始 V×I", win.statusBar().currentMessage())
+            assert plot._cursor_a is not None and plot._cursor_b is not None
+            ta = float(plot._cursor_a.value())
+            tb = float(plot._cursor_b.value()) - 0.02
+            plot._interactive_on_change(ta, tb)
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "MATH9")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "MATH9")
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("MATH9", True))
+            self.assertIn("卡值按原始 V×I", win.statusBar().currentMessage())
+
+            t = win.bundle.t
+            i0 = int(np.searchsorted(t, min(ta, tb) * 1e-6, side="left"))
+            i1 = int(np.searchsorted(t, max(ta, tb) * 1e-6, side="left"))
+            expected = peak_power_kw(
+                win.bundle.get(win.profile.vce),
+                bundle_total_current(win.bundle, win.profile),
+                IntegrationWindow(i0, i1, float(t[i0]), float(t[i1])),
+            )
+            self.assertAlmostEqual(win.result.turn_off.pmax, expected, places=9)
+            row = win.result_table._row_meta.index(("关断过程", "Pmax"))
+            self.assertEqual(
+                win.result_table.table.item(row, 4).text(),
+                format_metric_display("关断过程", "Pmax", expected),
+            )
+        finally:
+            win.close()
+
+    def test_scaled_power_math_never_rewrites_restored_power_card_values(self):
+        """Drag -> switch/re-enter must retain raw V×I for all power cards."""
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import _is_power_unit
+
+        win = MainWindow()
+        try:
+            win._load_file(str(WH))
+            plot = win.wave_plot
+            vce_key = plot._display_key_for_channel("vce")
+            ic_key = plot._display_key_for_channel("ic")
+            vd_key = plot._display_key_for_channel("v_diode")
+            irr_key = plot._display_key_for_channel("irr")
+            cases = (
+                (
+                    "关断过程",
+                    "Pmax",
+                    f"0.8 * {vce_key} * {ic_key}",
+                    lambda: float(win.result.turn_off.pmax),
+                    ("关断过程", "Eoff"),
+                ),
+                (
+                    "开通",
+                    "Pmax",
+                    f"0.8 * {vce_key} * {ic_key}",
+                    lambda: float(win.result.turn_on.pmax),
+                    ("开通", "Eon"),
+                ),
+                (
+                    "反向恢复",
+                    "Pdmax",
+                    f"0.8 * ABS({vd_key}) * ABS({irr_key})",
+                    lambda: float(win.result.reverse_recovery.pdmax),
+                    ("反向恢复", "Err"),
+                ),
+            )
+
+            for section, metric, formula, stored_value, switch_to in cases:
+                with self.subTest(section=section, metric=metric):
+                    plot._set_math_formula("MATH9", formula)
+                    for key, item in plot._trace_items.items():
+                        if key != "MATH9" and _is_power_unit(
+                            plot._unit_for_channel(key)
+                        ):
+                            plot._hidden_channels.add(key)
+                            item.hide()
+                    plot._hidden_channels.discard("MATH9")
+
+                    win._on_value_clicked(section, metric)
+                    self.assertEqual(plot._horizontal_cursor_binding("ha"), ("MATH9", True))
+                    assert plot._cursor_a is not None and plot._cursor_b is not None
+                    ta = float(plot._cursor_a.value())
+                    tb = float(plot._cursor_b.value()) - 0.02
+                    plot._interactive_on_change(ta, tb)
+                    raw_after_drag = stored_value()
+                    self.assertGreater(raw_after_drag, 0.0)
+                    aux = plot._cursor_auxiliary_point()
+                    self.assertIsNotNone(aux)
+                    assert aux is not None
+                    self.assertEqual(aux[0], "MATH9")
+                    math_peak_kw = abs(float(aux[2])) / 1000.0
+                    self.assertAlmostEqual(
+                        math_peak_kw / raw_after_drag,
+                        0.8,
+                        delta=0.02,
+                    )
+
+                    win._on_value_clicked(*switch_to)
+                    win._on_value_clicked(section, metric)
+                    self.assertAlmostEqual(stored_value(), raw_after_drag, places=9)
+                    self.assertEqual(plot._horizontal_cursor_binding("ha"), ("MATH9", True))
+                    self.assertIn("卡值按原始 V×I", win.statusBar().currentMessage())
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_20260717_UH_1048.exists(), "20260717 UH 1048A sample missing"
+    )
+    def test_non_slope_cards_clear_stale_slope_reactivation_before_recalculate(self):
+        """Pmax/Irr/Trr must not jump back to an earlier RR di/dt card."""
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._load_file(str(SONG_SMC_HT_20260717_UH_1048))
+            for section, metric, expected_mode in (
+                ("关断过程", "Pmax", "power_peak"),
+                ("反向恢复", "Irr", "irr_peak"),
+                ("反向恢复", "Trr", "trr_measure"),
+            ):
+                with self.subTest(section=section, metric=metric):
+                    win._on_value_clicked("反向恢复", "di/dt")
+                    self.assertEqual(
+                        win._active_slope_param,
+                        ("反向恢复", "di/dt"),
+                    )
+                    win._on_value_clicked(section, metric)
+                    self.assertIsNone(win._active_slope_param)
+                    self.assertEqual(win.wave_plot._interactive_mode, expected_mode)
+
+                    win._recalculate()
+                    self.assertNotEqual(win.wave_plot._interactive_mode, "didt")
+                    self.assertIsNone(win._active_slope_param)
+
+            win._on_value_clicked("反向恢复", "di/dt")
+            win.result.unavailable_metrics.add(("开通", "串扰电压"))
+            win._on_value_clicked("开通", "串扰电压")
+            self.assertIsNone(win._active_slope_param)
+            self.assertNotEqual(win.wave_plot._interactive_mode, "didt")
+            win._recalculate()
+            self.assertIsNone(win._active_slope_param)
+            self.assertNotEqual(win.wave_plot._interactive_mode, "didt")
+        finally:
+            win.close()
+
+    @unittest.skipUnless(OTHER_360A.exists(), "360A unavailable-card sample missing")
+    def test_recalculate_restores_unavailable_active_card_empty_cursor_context(self):
+        """An unavailable selected row must not regain global MATH cursors."""
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._load_file(str(OTHER_360A))
+            plot = win.wave_plot
+            key = ("关断过程", "串扰电压")
+            self.assertTrue(win.result.is_metric_unavailable(*key))
+
+            # Enter a real slope first to prove its state and bindings cannot
+            # leak through the unavailable card or the subsequent replot.
+            win._on_value_clicked("关断过程", "di/dt")
+            self.assertEqual(plot._interactive_mode, "didt")
+            win._on_value_clicked(*key)
+            self.assertEqual(plot._interactive_mode, "unavailable")
+            self.assertIsNone(win._active_slope_param)
+
+            win._recalculate()
+
+            self.assertTrue(win.result.is_metric_unavailable(*key))
+            self.assertEqual(win.result_table._active_metric, key)
+            self.assertEqual(plot._interactive_mode, "unavailable")
+            self.assertIsNone(plot._cursor_endpoint_channel("a"))
+            self.assertIsNone(plot._cursor_endpoint_channel("b"))
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("", False))
+            self.assertEqual(plot._horizontal_cursor_binding("hb"), ("", False))
+            self.assertFalse(plot._cursor_a.isVisible())
+            self.assertFalse(plot._cursor_b.isVisible())
+            self.assertFalse(plot._h_cursor_a.isVisible())
+            self.assertFalse(plot._h_cursor_b.isVisible())
+            self.assertEqual(plot._readout_label.text(), "")
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_20260717_UH_1048.exists(), "20260717 UH 1048A sample missing"
+    )
+    def test_recalculate_restores_valid_non_slope_card_cursor_semantics(self):
+        """The selected card must still own A/B/Ha/Hb after a replot."""
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import _is_power_unit
+
+        win = MainWindow()
+        try:
+            win._load_file(str(SONG_SMC_HT_20260717_UH_1048))
+            plot = win.wave_plot
+
+            def snapshot() -> dict[str, object]:
+                horizontal: dict[str, tuple[tuple[str, bool], bool, float | None]] = {}
+                for which, cursor in (
+                    ("ha", plot._h_cursor_a),
+                    ("hb", plot._h_cursor_b),
+                ):
+                    binding = plot._horizontal_cursor_binding(which)
+                    raw_value = (
+                        float(plot._from_disp(binding[0], float(cursor.value())))
+                        if binding[1]
+                        else None
+                    )
+                    horizontal[which] = (
+                        binding,
+                        bool(cursor.isVisible()),
+                        raw_value,
+                    )
+                return {
+                    "mode": plot._interactive_mode,
+                    "a": (
+                        plot._cursor_endpoint_channel("a"),
+                        bool(plot._cursor_a.isVisible()),
+                        float(plot._cursor_a.value()),
+                    ),
+                    "b": (
+                        plot._cursor_endpoint_channel("b"),
+                        bool(plot._cursor_b.isVisible()),
+                        float(plot._cursor_b.value()),
+                    ),
+                    "horizontal": horizontal,
+                    "readout": plot._readout_label.text(),
+                }
+
+            def assert_snapshot_equal(
+                before: dict[str, object], after: dict[str, object]
+            ) -> None:
+                self.assertEqual(after["mode"], before["mode"])
+                self.assertEqual(after["readout"], before["readout"])
+                for key in ("a", "b"):
+                    expected = before[key]
+                    actual = after[key]
+                    self.assertEqual(actual[:2], expected[:2])
+                    self.assertAlmostEqual(actual[2], expected[2], places=9)
+                expected_h = before["horizontal"]
+                actual_h = after["horizontal"]
+                for which in ("ha", "hb"):
+                    self.assertEqual(actual_h[which][:2], expected_h[which][:2])
+                    expected_value = expected_h[which][2]
+                    actual_value = actual_h[which][2]
+                    if expected_value is None:
+                        self.assertIsNone(actual_value)
+                    else:
+                        self.assertAlmostEqual(actual_value, expected_value, places=9)
+
+            cases = (
+                (
+                    ("反向恢复", "Irr"),
+                    "irr_peak",
+                    ("irr", "irr"),
+                    (("CH3", False), ("irr", True)),
+                ),
+                (
+                    ("反向恢复", "Trr"),
+                    "trr_measure",
+                    ("irr", "irr"),
+                    (("irr", True), ("irr", True)),
+                ),
+                (
+                    ("开通", "Eon"),
+                    "energy_loss",
+                    ("ic", "vce"),
+                    (("ic", True), ("vce", True)),
+                ),
+                (
+                    ("开通", "Vce_on_max"),
+                    "interval",
+                    ("vge", "vce"),
+                    (("vce", True), ("vce", True)),
+                ),
+            )
+            for key, mode, endpoints, horizontal_bindings in cases:
+                with self.subTest(section=key[0], metric=key[1]):
+                    win._on_value_clicked(*key)
+                    before = snapshot()
+                    self.assertEqual(before["mode"], mode)
+                    self.assertEqual(
+                        (before["a"][0], before["b"][0]), endpoints
+                    )
+                    self.assertEqual(
+                        (
+                            before["horizontal"]["ha"][0],
+                            before["horizontal"]["hb"][0],
+                        ),
+                        horizontal_bindings,
+                    )
+                    self.assertTrue(before["readout"])
+
+                    win._recalculate()
+
+                    self.assertEqual(win.result_table._active_metric, key)
+                    self.assertIsNone(win._active_slope_param)
+                    assert_snapshot_equal(before, snapshot())
+
+            # This target has no verified visible W/kW trace for turn-off
+            # power.  Pmax therefore binds A/B to its raw Vce/Ic loss
+            # boundaries and must not show unrelated horizontal lines.
+            key = ("关断过程", "Pmax")
+            win._on_value_clicked(*key)
+            before = snapshot()
+            self.assertEqual(before["mode"], "power_peak")
+            a_channel, b_channel = before["a"][0], before["b"][0]
+            ha_binding = before["horizontal"]["ha"][0]
+            hb_binding = before["horizontal"]["hb"][0]
+            self.assertEqual((a_channel, b_channel), ("vce", "ic"))
+            self.assertFalse(ha_binding[1])
+            self.assertFalse(hb_binding[1])
+            self.assertFalse(plot._h_cursor_a.isVisible())
+            self.assertFalse(plot._h_cursor_b.isVisible())
+            self.assertFalse(_is_power_unit(plot._unit_for_channel(a_channel)))
+            self.assertTrue(before["readout"])
+
+            win._recalculate()
+
+            self.assertEqual(win.result_table._active_metric, key)
+            self.assertIsNone(win._active_slope_param)
+            assert_snapshot_equal(before, snapshot())
+        finally:
+            win.close()
+
+    def test_pmax_without_a_visible_power_trace_has_no_horizontal_lines(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import _is_power_unit
+        from dpt_extractor.metrics.energy import peak_power_kw
+        from dpt_extractor.metrics.iec_windows import IntegrationWindow
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        win = MainWindow()
+        try:
+            win._load_file(str(WH))
+            plot = win.wave_plot
+            for key, item in plot._trace_items.items():
+                if _is_power_unit(plot._unit_for_channel(key)):
+                    plot._hidden_channels.add(key)
+                    item.hide()
+
+            win._on_value_clicked("关断过程", "Pmax")
+            self.assertEqual(plot._interactive_mode, "power_peak")
+            self.assertFalse(plot._horizontal_cursor_binding("ha")[1])
+            self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
+            self.assertFalse(plot._h_cursor_a.isVisible())
+            self.assertFalse(plot._h_cursor_b.isVisible())
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "vce")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
+
+            assert plot._cursor_a is not None and plot._cursor_b is not None
+            ta = float(plot._cursor_a.value())
+            tb = float(plot._cursor_b.value()) - 0.02
+            plot._interactive_on_change(ta, tb)
+            t = win.bundle.t
+            i0 = int(np.searchsorted(t, min(ta, tb) * 1e-6, side="left"))
+            i1 = int(np.searchsorted(t, max(ta, tb) * 1e-6, side="left"))
+            expected = peak_power_kw(
+                win.bundle.get(win.profile.vce),
+                bundle_total_current(win.bundle, win.profile),
+                IntegrationWindow(i0, i1, float(t[i0]), float(t[i1])),
+            )
+            self.assertAlmostEqual(win.result.turn_off.pmax, expected, places=9)
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_20260717_UH_1048.exists(), "20260717 UH 1048A sample missing"
+    )
     def test_reverse_recovery_pdmax_displays_absolute_power_peak(self):
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.gui.waveform_plot import _is_power_unit
 
         win = MainWindow()
-        win._load_file(str(SMC_RT_UL_403))
+        win._load_file(str(SONG_SMC_HT_20260717_UH_1048))
         self.assertIsNotNone(win.result)
         self.assertIsNotNone(win.result.segments)
         plot = win.wave_plot
@@ -6072,6 +8140,10 @@ class TestMainWindowSmoke(unittest.TestCase):
         win._on_value_clicked("反向恢复", "Pdmax")
 
         self.assertEqual(plot._interactive_mode, "power_peak")
+        self.assertTrue(plot._horizontal_cursor_binding("ha")[1])
+        self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
+        self.assertTrue(plot._h_cursor_a.isVisible())
+        self.assertFalse(plot._h_cursor_b.isVisible())
         aux_point = plot._cursor_auxiliary_point()
         self.assertIsNotNone(aux_point)
         assert aux_point is not None
@@ -6096,6 +8168,52 @@ class TestMainWindowSmoke(unittest.TestCase):
             delta=max(abs(peak_value) / 1000.0 * 1e-9, 1e-6),
         )
         win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_20260717_UH_1048.exists(), "20260717 UH 1048A sample missing"
+    )
+    def test_reverse_recovery_pdmax_without_power_trace_uses_raw_vd_irr(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.gui.waveform_plot import _is_power_unit
+        from dpt_extractor.metrics.energy import peak_power_kw
+        from dpt_extractor.metrics.iec_windows import IntegrationWindow
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        win = MainWindow()
+        try:
+            win._load_file(str(SONG_SMC_HT_20260717_UH_1048))
+            plot = win.wave_plot
+            for key, item in plot._trace_items.items():
+                if _is_power_unit(plot._unit_for_channel(key)):
+                    plot._hidden_channels.add(key)
+                    item.hide()
+
+            win._on_value_clicked("反向恢复", "Pdmax")
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "v_diode")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "irr")
+            self.assertFalse(plot._horizontal_cursor_binding("ha")[1])
+            self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
+            assert plot._cursor_a is not None and plot._cursor_b is not None
+            ta = float(plot._cursor_a.value())
+            tb = float(plot._cursor_b.value()) - 0.02
+            plot._interactive_on_change(ta, tb)
+
+            t = win.bundle.t
+            i0 = int(np.searchsorted(t, min(ta, tb) * 1e-6, side="left"))
+            i1 = int(np.searchsorted(t, max(ta, tb) * 1e-6, side="left"))
+            expected = peak_power_kw(
+                win.bundle.get(win.profile.v_diode),
+                bundle_reverse_recovery_current(win.bundle, win.profile),
+                IntegrationWindow(i0, i1, float(t[i0]), float(t[i1])),
+                absolute=True,
+            )
+            self.assertAlmostEqual(
+                win.result.reverse_recovery.pdmax, expected, places=9
+            )
+        finally:
+            win.close()
 
     def test_uh_eoff_cursor_uses_main_rise_not_pulse_off(self):
         """Eoff 进入时 A 应在主 Vce 抬升沿，而非关断沿或导通态噪声。"""
@@ -6253,16 +8371,20 @@ class TestMainWindowSmoke(unittest.TestCase):
             actual = plot._from_disp("irr", float(marker_y[0]))
             self.assertAlmostEqual(actual, expected, delta=0.75)
 
-        # Leaving Trr must bind the next generic parameter explicitly instead
-        # of carrying the unselectable internal Irr source into interval mode.
+        # Leaving Trr must bind Toff's two physical endpoints explicitly:
+        # A=Vge and B=Ic.  Channel clicks remain visual inspection gestures and
+        # cannot turn either endpoint into an unrelated CH trace.
         win._on_value_clicked("关断过程", "Toff")
-        self.assertEqual(plot._interactive_mode, "interval")
+        self.assertEqual(plot._interactive_mode, "semantic_interval")
         self.assertEqual(plot._active_channel, "ic")
         self.assertIsNone(plot._raw_only_logical_readout_channel())
+        self.assertEqual(plot._cursor_endpoint_channel("a"), "vge")
+        self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
         plot._on_legend_clicked("CH2")
-        self.assertEqual(plot._active_channel, "CH2")
-        self.assertEqual(plot._cursor_source_channel(), "CH2")
-        self.assertEqual(plot._axis_channel(), "CH2")
+        self.assertEqual(plot._raised_key, "CH2")
+        self.assertEqual(plot._active_channel, "ic")
+        self.assertEqual(plot._cursor_endpoint_channel("a"), "vge")
+        self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
         win.close()
 
     def test_smc_rt_eoff_ha_intersects_vce_a_cursor(self):

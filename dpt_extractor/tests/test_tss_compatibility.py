@@ -47,6 +47,35 @@ class TestFourTssCompatibility(unittest.TestCase):
       result = extract_all(bundle, profile, self.cfg)
       return profile, bundle, result
 
+  def test_tss_waveform_member_progress_is_monotonic_and_complete(self) -> None:
+      path = next((sample for sample in SAMPLES if sample.exists()), None)
+      if path is None:
+          self.skipTest("missing baseline TSS sample")
+
+      events: list[tuple[int, int, str]] = []
+      bundle = load_waveform(
+          path,
+          progress_callback=lambda completed, total, label: events.append(
+              (int(completed), int(total), str(label))
+          ),
+      )
+
+      self.assertGreater(len(bundle.channels), 0)
+      self.assertGreaterEqual(len(events), 2)
+      total = events[0][1]
+      self.assertGreater(total, 0)
+      self.assertEqual(events[0], (0, total, "读取波形通道"))
+      self.assertEqual(events[-1][0], total)
+      self.assertEqual(events[-1][1], total)
+      self.assertTrue(all(event_total == total for _, event_total, _ in events))
+      completed_values = [completed for completed, _, _ in events]
+      self.assertEqual(completed_values, sorted(completed_values))
+      self.assertEqual(completed_values, list(range(total + 1)))
+      self.assertTrue(
+          all("读取波形通道" in label for _, _, label in events),
+          events,
+      )
+
   def test_unhinted_360a_uses_lower_trend_validation_fallback(self) -> None:
       path = sample_tss("360A.tss")
       if not path.exists():

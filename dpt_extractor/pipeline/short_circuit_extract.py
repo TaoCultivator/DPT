@@ -182,6 +182,110 @@ def _crossing_in_range(
     return _interp_time(t, y, level, left, left + 1), left
 
 
+def _raw_pulse_base_crossings(
+    t: np.ndarray,
+    raw: np.ndarray,
+    base: float,
+    *,
+    pulse_sign: float,
+    peak_idx: int,
+    search0: int,
+    search1: int,
+    rise_anchor_s: float,
+    fall_anchor_s: float,
+) -> tuple[float, float] | None:
+    """Project a smoothed pulse detection onto raw Base intersections."""
+
+    values = np.asarray(raw, dtype=np.float64)
+    n = len(values)
+    if (
+        n != len(t)
+        or n == 0
+        or not np.isfinite(base)
+        or not np.isfinite(pulse_sign)
+        or not np.isfinite(rise_anchor_s)
+        or not np.isfinite(fall_anchor_s)
+    ):
+        return None
+    peak_idx = max(0, min(int(peak_idx), n - 1))
+    search0 = max(0, min(int(search0), peak_idx))
+    search1 = max(peak_idx, min(int(search1), n - 1))
+    if peak_idx <= search0 or search1 <= peak_idx:
+        return None
+
+    state = (1.0 if pulse_sign >= 0.0 else -1.0) * (values - float(base))
+    rise_left = state[search0:peak_idx]
+    rise_right = state[search0 + 1 : peak_idx + 1]
+    rise_hits = np.where(
+        (rise_left <= 0.0)
+        & (rise_right >= 0.0)
+        & ((rise_left < 0.0) | (rise_right > 0.0))
+    )[0]
+    fall_left = state[peak_idx:search1]
+    fall_right = state[peak_idx + 1 : search1 + 1]
+    fall_hits = np.where(
+        (fall_left >= 0.0)
+        & (fall_right <= 0.0)
+        & ((fall_left > 0.0) | (fall_right < 0.0))
+    )[0]
+    if len(rise_hits) == 0 or len(fall_hits) == 0:
+        return None
+
+    rise_indices = search0 + rise_hits
+    rise_times = np.asarray(
+        [
+            _interp_time(t, state, 0.0, int(idx), int(idx) + 1)
+            for idx in rise_indices
+        ],
+        dtype=np.float64,
+    )
+    # The smoothed detector supplies only the event anchor.  Select the raw
+    # crossing nearest it so baseline noise cannot steal an earlier A.
+    rise_choice = int(np.nanargmin(np.abs(rise_times - float(rise_anchor_s))))
+    t_a_s = float(rise_times[rise_choice])
+
+    fall_indices = peak_idx + fall_hits
+    local_dt = np.diff(np.asarray(t[search0 : search1 + 1], dtype=np.float64))
+    local_dt = local_dt[np.isfinite(local_dt) & (local_dt > 0.0)]
+    dt_est = float(np.nanmedian(local_dt)) if len(local_dt) else float("nan")
+    inactive_run = (
+        int(np.clip(np.ceil(5e-9 / dt_est), 2, 64))
+        if np.isfinite(dt_est) and dt_est > 0.0
+        else 2
+    )
+    inactive_tolerance = max(1e-12, 0.02 * max(float(state[peak_idx]), 0.0))
+    # Prefer a crossing followed by about 5 ns of inactive raw samples.  This
+    # rejects one- or two-point dropouts even at high sample rates.  The median
+    # low-state check tolerates ordinary noise around Base instead of requiring
+    # every raw point to remain on one side of the horizontal line.
+    sustained_fall_indices = np.asarray(
+        [
+            idx
+            for idx in fall_indices
+            if idx + inactive_run <= search1
+            and np.isfinite(state[idx + 1 : idx + 1 + inactive_run]).all()
+            and float(np.nanmedian(state[idx + 1 : idx + 1 + inactive_run]))
+            <= inactive_tolerance
+        ],
+        dtype=np.int64,
+    )
+    if len(sustained_fall_indices) == 0:
+        return None
+    fall_candidates = sustained_fall_indices
+    fall_times = np.asarray(
+        [
+            _interp_time(t, state, 0.0, int(idx), int(idx) + 1)
+            for idx in fall_candidates
+        ],
+        dtype=np.float64,
+    )
+    fall_choice = int(np.nanargmin(np.abs(fall_times - float(fall_anchor_s))))
+    t_b_s = float(fall_times[fall_choice])
+    if not np.isfinite(t_a_s) or not np.isfinite(t_b_s) or t_b_s <= t_a_s:
+        return None
+    return t_a_s, float(t_b_s)
+
+
 def short_circuit_current_cursors(
     t: np.ndarray,
     ic: np.ndarray,
@@ -256,8 +360,20 @@ def short_circuit_current_cursors(
             t_b_s = _interp_time(t, state, 0.0, idx, idx + 1)
             break
 
-    if t_b_s <= t_a_s:
+    raw_crossings = _raw_pulse_base_crossings(
+        t,
+        np.asarray(ic, dtype=np.float64),
+        float(hb),
+        pulse_sign=pulse_sign,
+        peak_idx=max_idx,
+        search0=search0,
+        search1=search1,
+        rise_anchor_s=t_a_s,
+        fall_anchor_s=t_b_s,
+    )
+    if raw_crossings is None:
         return None
+    t_a_s, t_b_s = raw_crossings
     ia = max(0, min(int(np.searchsorted(t, t_a_s, side="left")), n - 1))
     ib = max(ia, min(int(np.searchsorted(t, t_b_s, side="left")), n - 1))
     raw_seg = np.asarray(ic[ia : ib + 1], dtype=np.float64)
@@ -309,20 +425,21 @@ def short_circuit_current_percent_cursors(
     ib0 = max(ia0, min(int(base.i1), n - 1))
     seg = state[ia0 : ib0 + 1]
     if len(seg) == 0 or not np.isfinite(seg).any():
-        return base
+        return None
     peak_idx = ia0 + int(np.nanargmax(seg))
     peak_delta = float(max(np.nanmax(seg), pulse_sign * (base.ha_a - base.hb_a)))
     if not np.isfinite(peak_delta) or peak_delta <= 1e-12:
-        return base
+        return None
     target_state = peak_delta * pct / 100.0
     level = float(base.hb_a + pulse_sign * target_state)
+    anchor_pad = max(2, smooth_pts // 2 + 1)
 
     rise = _crossing_in_range(
         t,
         y_s,
         level,
         direction="rising" if pulse_sign > 0 else "falling",
-        start=ia0,
+        start=max(0, ia0 - anchor_pad),
         end=peak_idx,
     )
     fall = _crossing_in_range(
@@ -331,14 +448,24 @@ def short_circuit_current_percent_cursors(
         level,
         direction="falling" if pulse_sign > 0 else "rising",
         start=peak_idx,
-        end=ib0,
+        end=min(n - 1, ib0 + anchor_pad),
     )
     if rise is None or fall is None:
-        return base
-    t_a_s, _ = rise
-    t_b_s, _ = fall
-    if t_b_s <= t_a_s:
-        return base
+        return None
+    raw_crossings = _raw_pulse_base_crossings(
+        t,
+        np.asarray(ic, dtype=np.float64),
+        level,
+        pulse_sign=pulse_sign,
+        peak_idx=peak_idx,
+        search0=ia0,
+        search1=ib0,
+        rise_anchor_s=float(rise[0]),
+        fall_anchor_s=float(fall[0]),
+    )
+    if raw_crossings is None:
+        return None
+    t_a_s, t_b_s = raw_crossings
     ia = max(0, min(int(np.searchsorted(t, t_a_s, side="left")), n - 1))
     ib = max(ia, min(int(np.searchsorted(t, t_b_s, side="left")), n - 1))
     return ShortCircuitCurrentCursors(
@@ -445,6 +572,77 @@ def _energy_source_label(profile: BridgeProfile, other: bool) -> tuple[str, str,
     return voltage_channel, current_channel, f"{current_channel}*{voltage_channel}"
 
 
+def _integrate_vi_exact_window(
+    t: np.ndarray,
+    current: np.ndarray,
+    voltage: np.ndarray,
+    t_a_s: float,
+    t_b_s: float,
+) -> float | None:
+    """Integrate V*I on exact interpolated A/B endpoints, or fail closed."""
+
+    time = np.asarray(t, dtype=np.float64)
+    ic = np.asarray(current, dtype=np.float64)
+    v = np.asarray(voltage, dtype=np.float64)
+    n = len(time)
+    lo = float(t_a_s)
+    hi = float(t_b_s)
+    if (
+        n < 2
+        or len(ic) != n
+        or len(v) != n
+        or not np.isfinite(lo)
+        or not np.isfinite(hi)
+        or hi <= lo
+        or not np.isfinite(time[0])
+        or not np.isfinite(time[-1])
+        or not np.isfinite(time).all()
+        or np.any(np.diff(time) <= 0.0)
+        or lo < float(time[0])
+        or hi > float(time[-1])
+    ):
+        return None
+
+    left = max(0, int(np.searchsorted(time, lo, side="right")) - 1)
+    right = min(n - 1, int(np.searchsorted(time, hi, side="left")))
+    if right <= left:
+        return None
+    local_t = time[left : right + 1]
+    local_i = ic[left : right + 1]
+    local_v = v[left : right + 1]
+    if (
+        not np.isfinite(local_t).all()
+        or not np.isfinite(local_i).all()
+        or not np.isfinite(local_v).all()
+        or np.any(np.diff(local_t) <= 0.0)
+    ):
+        return None
+
+    inner = (local_t > lo) & (local_t < hi)
+    exact_t = np.concatenate(([lo], local_t[inner], [hi]))
+    exact_i = np.concatenate(
+        (
+            [np.interp(lo, local_t, local_i)],
+            local_i[inner],
+            [np.interp(hi, local_t, local_i)],
+        )
+    )
+    exact_v = np.concatenate(
+        (
+            [np.interp(lo, local_t, local_v)],
+            local_v[inner],
+            [np.interp(hi, local_t, local_v)],
+        )
+    )
+    power = exact_i * exact_v
+    if len(exact_t) < 2 or not np.isfinite(power).all():
+        return None
+    energy = float(np.trapezoid(power, exact_t))
+    if not np.isfinite(energy):
+        return None
+    return max(0.0, energy)
+
+
 def short_circuit_energy_value(
     bundle: WaveformBundle,
     profile: BridgeProfile,
@@ -453,10 +651,11 @@ def short_circuit_energy_value(
     *,
     other: bool = False,
     math_channel: str | None = None,
+    t_a_s: float | None = None,
+    t_b_s: float | None = None,
 ) -> tuple[float, str]:
-    """Return short-circuit energy in J using the specified V*I integration window."""
+    """Return short-circuit energy in J; invalid/incomplete windows return NaN."""
     n = bundle.n
-    i0, i1 = _clip_indices(i0, i1, n)
     voltage_channel, current_channel, source = _energy_source_label(profile, other)
     if math_channel is None:
         math_channel = find_energy_math_channel(bundle, voltage_channel, current_channel)
@@ -464,10 +663,15 @@ def short_circuit_energy_value(
     t = np.asarray(bundle.t, dtype=np.float64)
     ic = np.asarray(bundle_total_current(bundle, profile), dtype=np.float64)
     v = np.asarray(bundle.get(voltage_channel), dtype=np.float64)
-    if i1 <= i0:
-        return 0.0, math_channel or source
-    energy = float(np.trapezoid(ic[i0 : i1 + 1] * v[i0 : i1 + 1], t[i0 : i1 + 1]))
-    return max(0.0, energy), math_channel or source
+    if (t_a_s is None) != (t_b_s is None):
+        return float("nan"), math_channel or source
+    if t_a_s is None:
+        if n < 2 or int(i0) < 0 or int(i1) >= n or int(i1) <= int(i0):
+            return float("nan"), math_channel or source
+        t_a_s = float(t[int(i0)])
+        t_b_s = float(t[int(i1)])
+    energy = _integrate_vi_exact_window(t, ic, v, float(t_a_s), float(t_b_s))
+    return (float("nan") if energy is None else energy), math_channel or source
 
 
 def short_circuit_energy_peak_value(
@@ -586,7 +790,18 @@ def extract_short_circuit(
     t = bundle.t
     n = bundle.n
     if n == 0:
-        return ExtractResult(short_circuit_mode=True)
+        return ExtractResult(
+            short_circuit_mode=True,
+            unavailable_metrics={
+                ("短路过程", "短路电流Imax"),
+                ("短路过程", "短路时间Tsc"),
+                ("短路过程", "短路能量Esc_本管"),
+                ("短路过程", "应力Vpeak_本管"),
+                ("短路过程", "短路能量Esc_对管"),
+                ("短路过程", "应力Vpeak_对管"),
+                ("短路过程", "Desat动作时间"),
+            },
+        )
 
     vge = np.asarray(bundle.get(profile.vge), dtype=np.float64)
     vce = np.asarray(bundle.get(profile.vce), dtype=np.float64)
@@ -673,10 +888,15 @@ def extract_short_circuit(
                     peak_mode="max",
                 )
             if tsc_cursors is None:
-                tsc_cursors = current_cursors
-        tsc = float(max(0.0, (tsc_cursors.t_b_s - tsc_cursors.t_a_s) * 1e6))
-        tsc_start_us = float(tsc_cursors.t_a_s * 1e6)
-        tsc_end_us = float(tsc_cursors.t_b_s * 1e6)
+                unavailable.add(("短路过程", "短路时间Tsc"))
+        if tsc_cursors is None:
+            tsc = 0.0
+            tsc_start_us = None
+            tsc_end_us = None
+        else:
+            tsc = float(max(0.0, (tsc_cursors.t_b_s - tsc_cursors.t_a_s) * 1e6))
+            tsc_start_us = float(tsc_cursors.t_a_s * 1e6)
+            tsc_end_us = float(tsc_cursors.t_b_s * 1e6)
 
     dut_vpeak_cursors = short_circuit_vpeak_cursors(
         t,
@@ -704,29 +924,47 @@ def extract_short_circuit(
     vpeak_dut = (
         dut_vpeak_cursors.ha_a
         if dut_vpeak_cursors is not None
-        else float(np.nanmax(vce[gate0 : gate1 + 1]))
+        else float("nan")
     )
     vpeak_other = (
         other_vpeak_cursors.ha_a
         if other_vpeak_cursors is not None
-        else 0.0
+        else float("nan")
     )
+    if dut_vpeak_cursors is None:
+        unavailable.add(("短路过程", "应力Vpeak_本管"))
     if other_vpeak_cursors is None:
         unavailable.add(("短路过程", "应力Vpeak_对管"))
 
     if current_cursors is not None:
         esc_dut, e_dut_ch = short_circuit_energy_value(
-            bundle, profile, current_i0, current_i1, other=False
+            bundle,
+            profile,
+            current_i0,
+            current_i1,
+            other=False,
+            t_a_s=current_cursors.t_a_s,
+            t_b_s=current_cursors.t_b_s,
         )
+        if not np.isfinite(esc_dut):
+            unavailable.add(("短路过程", "短路能量Esc_本管"))
         if v_diode_arr is not None:
             esc_other, e_other_ch = short_circuit_energy_value(
-                bundle, profile, current_i0, current_i1, other=True
+                bundle,
+                profile,
+                current_i0,
+                current_i1,
+                other=True,
+                t_a_s=current_cursors.t_a_s,
+                t_b_s=current_cursors.t_b_s,
             )
+            if not np.isfinite(esc_other):
+                unavailable.add(("短路过程", "短路能量Esc_对管"))
         else:
-            esc_other, e_other_ch = 0.0, ""
+            esc_other, e_other_ch = float("nan"), ""
     else:
-        esc_dut, e_dut_ch = 0.0, ""
-        esc_other, e_other_ch = 0.0, ""
+        esc_dut, e_dut_ch = float("nan"), ""
+        esc_other, e_other_ch = float("nan"), ""
 
     desat_time: float | None = None
     desat_range = "预留"

@@ -26,6 +26,11 @@ class TestSlopeRangePresetMatch(unittest.TestCase):
         self.assertEqual(sr.label(), "50%IF→50%IRM")
         self.assertEqual(preset_index_for_range("rr_didt", sr), 2)
 
+    def test_rr_custom_range_keeps_user_a_b_order(self):
+        sr = SlopeRange(30.0, 70.0, ic_reference="idm", ic_direction="rise")
+        self.assertEqual(sr.as_fractions(), (0.3, 0.7))
+        self.assertEqual(sr.label(), "30%→70%")
+
 
 if __name__ == "__main__":
     unittest.main()

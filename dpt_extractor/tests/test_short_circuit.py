@@ -37,6 +37,36 @@ DDD_RT_VH = (
     / "RT"
     / "VH_750V_000.tss"
 )
+SONG_DL_LT_UL = (
+    SAMPLE_ROOT
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260506"
+    / "DL"
+    / "LT"
+    / "UL_750V_000.tss"
+)
+SONG_DL_LT_VL = SONG_DL_LT_UL.with_name("VL_750V_000.tss")
+SONG_DDD_LT_VH = (
+    SAMPLE_ROOT
+    / "songzhenxi"
+    / "KSU2577"
+    / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+    / "DDD"
+    / "LT"
+    / "VH_750V_000.tss"
+)
+SONG_DDD_HT_UH = SONG_DDD_LT_VH.parent.parent / "HT" / "UH_750V_000.tss"
+SONG_DDD_LT_UL = SONG_DDD_LT_VH.with_name("UL_750V_000.tss")
+SONG_LCG_DDD_RT_UL = (
+    SAMPLE_ROOT
+    / "songzhenxi"
+    / "KSU2577"
+    / "LCG660FF120I3A2-G1LEP202510090002"
+    / "DDD"
+    / "RT"
+    / "UL_750V_000.tss"
+)
 
 
 class TestShortCircuitLabelMapping(unittest.TestCase):
@@ -149,6 +179,267 @@ class TestShortCircuitLabelMapping(unittest.TestCase):
         self.assertAlmostEqual(peak, 3.0)
 
 
+class TestShortCircuitSyntheticRegressions(unittest.TestCase):
+    @staticmethod
+    def _short_bundle(*, flat_gate: bool = False, nan_vce: bool = False):
+        import numpy as np
+
+        from dpt_extractor.models.bridge_profile import make_short_circuit_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        dt = 10e-9
+        count = 200
+        t = np.arange(count, dtype=np.float64) * dt
+        gate = np.full(count, 15.0 if flat_gate else 0.0, dtype=np.float64)
+        if not flat_gate:
+            gate[50:130] = 15.0
+        current = np.zeros(count, dtype=np.float64)
+        current[50:130] = 100.0
+        vce = np.full(count, 600.0, dtype=np.float64)
+        if nan_vce:
+            vce[80] = np.nan
+        bundle = WaveformBundle(
+            t=t,
+            channels={
+                "CH1": gate,
+                "CH2": vce,
+                "CH3": current,
+                "CH5": np.full(count, 300.0, dtype=np.float64),
+                "CH6": np.zeros(count, dtype=np.float64),
+            },
+            meta=TekMetadata(sample_interval=dt),
+        )
+        return bundle, make_short_circuit_profile("U", "upper")
+
+    def test_raw_fall_crossing_uses_smooth_anchor_and_rejects_two_point_glitch(
+        self,
+    ):
+        import numpy as np
+
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_current_cursors,
+        )
+
+        dt = 1e-9
+        t = np.arange(2000, dtype=np.float64) * dt
+        current = np.zeros(2000, dtype=np.float64)
+        current[500:1300] = 100.0
+        current[900:902] = -20.0
+
+        cursors = short_circuit_current_cursors(
+            t,
+            current,
+            500,
+            1300,
+            dt,
+            smooth_ns=50.0,
+        )
+
+        self.assertIsNotNone(cursors)
+        assert cursors is not None
+        self.assertGreater(cursors.t_b_s, float(t[1200]))
+        self.assertAlmostEqual(cursors.t_b_s, float(t[1300]), places=15)
+        self.assertAlmostEqual(
+            float(np.interp(cursors.t_b_s, t, current)),
+            cursors.hb_a,
+            places=12,
+        )
+
+    def test_missing_raw_ten_percent_pair_returns_none_and_marks_tsc_unavailable(
+        self,
+    ):
+        import numpy as np
+        from unittest.mock import patch
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_10
+        from dpt_extractor.pipeline import short_circuit_extract as short_extract
+
+        bundle, profile = self._short_bundle()
+        raw_crossings = short_extract._raw_pulse_base_crossings
+
+        def reject_percent_crossings(*args, **kwargs):
+            level = float(args[2])
+            if abs(level) > 1.0:
+                return None
+            return raw_crossings(*args, **kwargs)
+
+        with patch.object(
+            short_extract,
+            "_raw_pulse_base_crossings",
+            side_effect=reject_percent_crossings,
+        ):
+            cursors = short_extract.short_circuit_current_percent_cursors(
+                bundle.t,
+                bundle.get(profile.ic),
+                50,
+                130,
+                bundle.dt,
+                percent=10.0,
+                smooth_ns=40.0,
+            )
+        self.assertIsNone(cursors)
+
+        cfg = load_config()
+        cfg.short_circuit_tsc_range = SHORT_CIRCUIT_TSC_RANGE_10
+        with patch.object(
+            short_extract,
+            "short_circuit_current_percent_cursors",
+            return_value=None,
+        ):
+            result = short_extract.extract_short_circuit(bundle, profile, cfg)
+
+        self.assertTrue(
+            result.is_metric_unavailable("短路过程", "短路时间Tsc")
+        )
+        self.assertEqual(result.short_circuit.tsc, 0.0)
+        self.assertIsNone(result.short_circuit.tsc_start_us)
+        self.assertIsNone(result.short_circuit.tsc_end_us)
+        self.assertFalse(result.is_metric_unavailable("短路过程", "短路电流Imax"))
+        self.assertTrue(np.isfinite(result.short_circuit.ic_max))
+
+    def test_energy_uses_exact_interpolated_endpoints_and_nan_fails_closed(self):
+        import numpy as np
+
+        from dpt_extractor.models.bridge_profile import make_short_circuit_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_energy_value,
+        )
+
+        profile = make_short_circuit_profile("U", "upper")
+        t = np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float64)
+        channels = {
+            "CH2": np.full(4, 3.0, dtype=np.float64),
+            "CH3": np.full(4, 2.0, dtype=np.float64),
+        }
+        bundle = WaveformBundle(
+            t=t,
+            channels=channels,
+            meta=TekMetadata(sample_interval=1.0),
+        )
+        energy, _source = short_circuit_energy_value(
+            bundle,
+            profile,
+            0,
+            3,
+            t_a_s=0.25,
+            t_b_s=2.75,
+        )
+        self.assertAlmostEqual(energy, 15.0, places=12)
+
+        invalid_interval, _source = short_circuit_energy_value(
+            bundle,
+            profile,
+            1,
+            1,
+        )
+        self.assertTrue(np.isnan(invalid_interval))
+
+        invalid_channels = dict(channels)
+        invalid_channels["CH2"] = np.asarray([3.0, np.nan, 3.0, 3.0])
+        invalid_bundle = WaveformBundle(
+            t=t,
+            channels=invalid_channels,
+            meta=TekMetadata(sample_interval=1.0),
+        )
+        invalid_energy, _source = short_circuit_energy_value(
+            invalid_bundle,
+            profile,
+            0,
+            3,
+            t_a_s=0.25,
+            t_b_s=2.75,
+        )
+        self.assertTrue(np.isnan(invalid_energy))
+
+    def test_invalid_energy_and_missing_gate_crossings_do_not_leak_fake_values(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.pipeline.short_circuit_extract import extract_short_circuit
+        from scripts.validate_tss_samples import (
+            _short_metric_state_problem,
+            _short_metric_text,
+        )
+
+        invalid_bundle, profile = self._short_bundle(nan_vce=True)
+        invalid_result = extract_short_circuit(invalid_bundle, profile, load_config())
+        self.assertTrue(
+            invalid_result.is_metric_unavailable("短路过程", "短路能量Esc_本管")
+        )
+        self.assertTrue(np.isnan(invalid_result.short_circuit.esc_dut))
+
+        flat_gate_bundle, profile = self._short_bundle(flat_gate=True)
+        flat_gate_result = extract_short_circuit(
+            flat_gate_bundle,
+            profile,
+            load_config(),
+        )
+        for name, value in (
+            ("应力Vpeak_本管", flat_gate_result.short_circuit.vpeak_dut),
+            ("应力Vpeak_对管", flat_gate_result.short_circuit.vpeak_other),
+        ):
+            self.assertTrue(
+                flat_gate_result.is_metric_unavailable("短路过程", name)
+            )
+            self.assertTrue(np.isnan(value))
+            self.assertEqual(
+                _short_metric_text(
+                    flat_gate_result,
+                    name,
+                    value,
+                    unit="V",
+                    precision=1,
+                ),
+                "-",
+            )
+
+        flat_gate_result.unavailable_metrics.discard(
+            ("短路过程", "应力Vpeak_本管")
+        )
+        self.assertEqual(
+            _short_metric_state_problem(
+                flat_gate_result,
+                "应力Vpeak_本管",
+                flat_gate_result.short_circuit.vpeak_dut,
+                label="VpeakDUT",
+                required=False,
+            ),
+            "VpeakDUT=nan",
+        )
+
+    def test_empty_short_waveform_marks_every_metric_unavailable(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.models.bridge_profile import make_short_circuit_profile
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+        from dpt_extractor.pipeline.short_circuit_extract import extract_short_circuit
+
+        bundle = WaveformBundle(
+            t=np.asarray([], dtype=np.float64),
+            channels={},
+            meta=TekMetadata(sample_interval=1e-9),
+        )
+        result = extract_short_circuit(
+            bundle,
+            make_short_circuit_profile("U", "upper"),
+            load_config(),
+        )
+
+        for name in (
+            "短路电流Imax",
+            "短路时间Tsc",
+            "短路能量Esc_本管",
+            "应力Vpeak_本管",
+            "短路能量Esc_对管",
+            "应力Vpeak_对管",
+            "Desat动作时间",
+        ):
+            self.assertTrue(result.is_metric_unavailable("短路过程", name), name)
+
+
 @unittest.skipUnless(DL_UH.exists() and DL_UL.exists(), "short-circuit DL samples missing")
 class TestShortCircuitExtract(unittest.TestCase):
     def _extract(self, path: Path):
@@ -212,10 +503,22 @@ class TestShortCircuitExtract(unittest.TestCase):
         assert dut_vce_cursors is not None
         assert other_vce_cursors is not None
         esc_dut_expected, _ = short_circuit_energy_value(
-            bundle, profile, cursors.i0, cursors.i1, other=False
+            bundle,
+            profile,
+            cursors.i0,
+            cursors.i1,
+            other=False,
+            t_a_s=cursors.t_a_s,
+            t_b_s=cursors.t_b_s,
         )
         esc_other_expected, _ = short_circuit_energy_value(
-            bundle, profile, cursors.i0, cursors.i1, other=True
+            bundle,
+            profile,
+            cursors.i0,
+            cursors.i1,
+            other=True,
+            t_a_s=cursors.t_a_s,
+            t_b_s=cursors.t_b_s,
         )
 
         self.assertTrue(result.short_circuit_mode)
@@ -462,6 +765,268 @@ class TestShortCircuitExtract(unittest.TestCase):
                 delta=1e-6,
                 msg=path.name,
             )
+
+@unittest.skipUnless(
+    all(path.exists() for path in (SONG_DL_LT_UL, SONG_DL_LT_VL, SONG_DDD_LT_VH)),
+    "slow-gate short-circuit samples missing",
+)
+class TestSlowGateVpeakRawCrossings(unittest.TestCase):
+    def test_slow_gate_vpeak_window_uses_raw_vge_base_crossings(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import (
+            as_short_circuit_profile,
+            guess_profile_from_path,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.pipeline.run_extract import run_extraction
+        from dpt_extractor.pipeline.short_circuit_extract import short_circuit_vpeak_cursors
+
+        expected_dut_peaks = {
+            SONG_DL_LT_UL: 1013.9375,
+            SONG_DL_LT_VL: 1013.3125,
+            SONG_DDD_LT_VH: 1026.0625,
+        }
+        for path, expected_peak in expected_dut_peaks.items():
+            with self.subTest(path=path):
+                cfg = load_config()
+                cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+                bundle = load_waveform(path)
+                profile = as_short_circuit_profile(guess_profile_from_path(path))
+                result = run_extraction(bundle, profile, cfg)
+                assert result.segments is not None
+                gate0, gate1 = result.segments.turn_off
+                vge = np.asarray(bundle.get(profile.vge), dtype=np.float64)
+
+                dut = short_circuit_vpeak_cursors(
+                    bundle.t,
+                    vge,
+                    bundle.get(profile.vce),
+                    gate0,
+                    gate1,
+                    bundle.dt,
+                    smooth_ns=cfg.smoothing.detect_window_ns,
+                )
+                other = short_circuit_vpeak_cursors(
+                    bundle.t,
+                    vge,
+                    bundle.get(profile.v_diode),
+                    gate0,
+                    gate1,
+                    bundle.dt,
+                    smooth_ns=cfg.smoothing.detect_window_ns,
+                )
+                self.assertIsNotNone(dut)
+                self.assertIsNotNone(other)
+                assert dut is not None and other is not None
+
+                for cursors in (dut, other):
+                    self.assertAlmostEqual(
+                        float(np.interp(cursors.t_a_s, bundle.t, vge)),
+                        cursors.hb_a,
+                        places=9,
+                    )
+                    self.assertAlmostEqual(
+                        float(np.interp(cursors.t_b_s, bundle.t, vge)),
+                        cursors.hb_a,
+                        places=9,
+                    )
+                    self.assertAlmostEqual(dut.t_a_s, other.t_a_s, places=15)
+                    self.assertAlmostEqual(dut.t_b_s, other.t_b_s, places=15)
+                    self.assertAlmostEqual(dut.hb_a, other.hb_a, places=12)
+
+                self.assertAlmostEqual(dut.ha_a, expected_peak, places=6)
+                self.assertAlmostEqual(
+                    result.short_circuit.vpeak_dut,
+                    expected_peak,
+                    places=6,
+                )
+                self.assertAlmostEqual(
+                    result.short_circuit.vpeak_other,
+                    other.ha_a,
+                    places=6,
+                )
+
+    @unittest.skipUnless(
+        all(path.exists() for path in (SONG_DDD_HT_UH, SONG_DDD_LT_UL)),
+        "raw-current short-circuit samples missing",
+    )
+    def test_short_current_window_uses_raw_ic_base_crossings(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import (
+            as_short_circuit_profile,
+            guess_profile_from_path,
+        )
+        from dpt_extractor.models.channel_mapping import (
+            apply_mapping,
+            infer_short_circuit_mapping_from_bundle,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.models.waveform import bundle_total_current
+        from dpt_extractor.pipeline.run_extract import run_extraction
+        from dpt_extractor.pipeline.short_circuit_extract import short_circuit_current_cursors
+
+        expected = {
+            # B is the raw Base intersection nearest the smoothed physical
+            # fall anchor.  The earlier first raw intersections are ringing
+            # dropouts while the local smoothed current is still 83.38 A and
+            # 68.85 A above Base, respectively.
+            SONG_DDD_HT_UH: (7697.8125, 2.7110327871688495),
+            SONG_DDD_LT_UL: (7540.625, 2.3329034965247444),
+        }
+        for path, (expected_peak, expected_tsc_us) in expected.items():
+            with self.subTest(path=path):
+                cfg = load_config()
+                cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+                bundle = load_waveform(path)
+                base_profile = guess_profile_from_path(path)
+                mapping = infer_short_circuit_mapping_from_bundle(
+                    bundle, base_profile.bridge
+                )
+                profile = as_short_circuit_profile(base_profile)
+                if mapping is not None:
+                    profile = apply_mapping(profile, mapping)
+                result = run_extraction(bundle, profile, cfg)
+                assert result.segments is not None
+                cursors = short_circuit_current_cursors(
+                    bundle.t,
+                    bundle_total_current(bundle, profile),
+                    *result.segments.turn_off,
+                    bundle.dt,
+                    smooth_ns=cfg.smoothing.detect_window_ns,
+                )
+                self.assertIsNotNone(cursors)
+                assert cursors is not None
+                ic = np.asarray(bundle_total_current(bundle, profile), dtype=np.float64)
+                self.assertAlmostEqual(
+                    float(np.interp(cursors.t_a_s, bundle.t, ic)),
+                    cursors.hb_a,
+                    places=8,
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(cursors.t_b_s, bundle.t, ic)),
+                    cursors.hb_a,
+                    places=8,
+                )
+                self.assertAlmostEqual(result.short_circuit.ic_max, expected_peak, places=6)
+                self.assertAlmostEqual(
+                    result.short_circuit.tsc,
+                    expected_tsc_us,
+                    places=9,
+                )
+
+    @unittest.skipUnless(
+        SONG_DDD_HT_UH.exists(),
+        "10-percent short-circuit sample missing",
+    )
+    def test_tsc_10_percent_uses_raw_current_threshold_crossings(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import (
+            as_short_circuit_profile,
+            guess_profile_from_path,
+        )
+        from dpt_extractor.models.channel_mapping import (
+            apply_mapping,
+            infer_short_circuit_mapping_from_bundle,
+        )
+        from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_10
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.models.waveform import bundle_total_current
+        from dpt_extractor.pipeline.run_extract import run_extraction
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_current_percent_cursors,
+        )
+
+        bundle = load_waveform(SONG_DDD_HT_UH)
+        base_profile = guess_profile_from_path(SONG_DDD_HT_UH)
+        mapping = infer_short_circuit_mapping_from_bundle(bundle, base_profile.bridge)
+        profile = as_short_circuit_profile(base_profile)
+        if mapping is not None:
+            profile = apply_mapping(profile, mapping)
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        cfg.short_circuit_tsc_range = SHORT_CIRCUIT_TSC_RANGE_10
+        result = run_extraction(bundle, profile, cfg)
+        assert result.segments is not None
+        ic = np.asarray(bundle_total_current(bundle, profile), dtype=np.float64)
+        cursors = short_circuit_current_percent_cursors(
+            bundle.t,
+            ic,
+            *result.segments.turn_off,
+            bundle.dt,
+            smooth_ns=cfg.smoothing.detect_window_ns,
+            percent=10.0,
+        )
+
+        self.assertIsNotNone(cursors)
+        assert cursors is not None
+        self.assertAlmostEqual(
+            float(np.interp(cursors.t_a_s, bundle.t, ic)),
+            cursors.hb_a,
+            places=8,
+        )
+        self.assertAlmostEqual(
+            float(np.interp(cursors.t_b_s, bundle.t, ic)),
+            cursors.hb_a,
+            places=8,
+        )
+        self.assertAlmostEqual(
+            result.short_circuit.tsc_start_us,
+            cursors.t_a_s * 1e6,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            result.short_circuit.tsc_end_us,
+            cursors.t_b_s * 1e6,
+            places=9,
+        )
+
+    @unittest.skipUnless(
+        SONG_LCG_DDD_RT_UL.exists(),
+        "flat-gate short-circuit sample missing",
+    )
+    def test_vpeak_without_vge_base_crossings_is_unavailable(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import (
+            as_short_circuit_profile,
+            guess_profile_from_path,
+        )
+        from dpt_extractor.models.channel_mapping import (
+            apply_mapping,
+            infer_short_circuit_mapping_from_bundle,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.pipeline.run_extract import run_extraction
+
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        bundle = load_waveform(SONG_LCG_DDD_RT_UL)
+        base_profile = guess_profile_from_path(SONG_LCG_DDD_RT_UL)
+        mapping = infer_short_circuit_mapping_from_bundle(bundle, base_profile.bridge)
+        profile = as_short_circuit_profile(base_profile)
+        if mapping is not None:
+            profile = apply_mapping(profile, mapping)
+        result = run_extraction(bundle, profile, cfg)
+
+        self.assertTrue(
+            result.is_metric_unavailable("短路过程", "应力Vpeak_本管")
+        )
+        self.assertTrue(
+            result.is_metric_unavailable("短路过程", "应力Vpeak_对管")
+        )
+        self.assertTrue(np.isnan(result.short_circuit.vpeak_dut))
+        self.assertTrue(np.isnan(result.short_circuit.vpeak_other))
 
 
 @unittest.skipUnless(DDD_UH.exists(), "short-circuit DDD sample missing")

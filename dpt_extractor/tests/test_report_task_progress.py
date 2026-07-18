@@ -157,6 +157,28 @@ class TestReportTaskProgress(unittest.TestCase):
             win._load_pool = original_pool
             win.close()
 
+    def test_prepare_completion_without_frozen_page_snapshot_fails_closed(self):
+        from dpt_extractor.gui.main_window import MainWindow, REPORT_PROGRESS_TOTAL
+        from dpt_extractor.models.results import ExtractResult
+
+        win = MainWindow()
+        win._report_request_id = 16
+        win._report_operation_active = True
+        win._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告文件...")
+
+        with (
+            patch.object(win, "_start_report_capture_sequence") as capture,
+            patch("dpt_extractor.gui.main_window.QMessageBox.critical") as critical,
+        ):
+            win._on_report_prepare_finished(16, [ExtractResult()])
+
+        capture.assert_not_called()
+        critical.assert_called_once()
+        self.assertFalse(win._report_operation_active)
+        self.assertEqual(win.report_progress.detail_text(), "失败")
+        self.assertEqual(win.report_progress.eta_text(), "—")
+        win.close()
+
     def test_cleanup_failure_cannot_suppress_success_terminal_signal(self):
         from dpt_extractor.gui.main_window import _ReportWriteTask
         from dpt_extractor.models.results import ExtractResult
@@ -306,6 +328,46 @@ class TestReportTaskProgress(unittest.TestCase):
         self.assertTrue(win.btn_write_report.isEnabled())
         win.close()
 
+    def test_report_unlock_skips_waveform_child_deleted_during_capture(self):
+        from PyQt6 import sip
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QPushButton
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        deleted_child = QPushButton("temporary capture control", win.wave_plot)
+        surviving_child = QPushButton("surviving control", win.wave_plot)
+        deleted_child.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        surviving_child.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+        self.assertTrue(win._try_begin_report_operation())
+        self.assertEqual(
+            surviving_child.focusPolicy(),
+            Qt.FocusPolicy.NoFocus,
+        )
+        self.assertTrue(
+            any(widget is deleted_child for widget, _ in win._report_focus_policies)
+        )
+
+        # Report-page restoration can destroy a PyQtGraph child before the
+        # report operation releases its interaction lock.  Keep the Python
+        # wrapper alive to reproduce the exact real-GUI traceback.
+        sip.delete(deleted_child)
+        self.assertTrue(sip.isdeleted(deleted_child))
+
+        win._release_report_operation()
+
+        self.assertFalse(win._report_operation_active)
+        self.assertFalse(win._report_interaction_locked)
+        self.assertEqual(win._report_focus_policies, [])
+        self.assertEqual(
+            surviving_child.focusPolicy(),
+            Qt.FocusPolicy.ClickFocus,
+        )
+        self.assertTrue(win.btn_write_report.isEnabled())
+        win.close()
+
     def test_duplicate_write_terminal_signal_is_ignored(self):
         from dpt_extractor.export.report_template import ReportWriteSummary
         from dpt_extractor.gui.main_window import MainWindow
@@ -335,6 +397,79 @@ class TestReportTaskProgress(unittest.TestCase):
         with patch("dpt_extractor.gui.main_window.QMessageBox.information") as info:
             win._on_report_write_finished(22, summary, 1.0)
         info.assert_not_called()
+        self.assertEqual(win.report_progress.detail_text(), "失败")
+        self.assertEqual(win.report_progress.eta_text(), "—")
+        win.close()
+
+    def test_report_terminal_status_replaces_busy_text_before_success_dialog(self):
+        from dpt_extractor.export.report_template import ReportWriteSummary
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._report_request_id = 31
+        win._report_tasks[31] = object()  # type: ignore[assignment]
+        win._try_begin_report_operation()
+        win._begin_report_progress(100000, "保存中")
+        summary = ReportWriteSummary(
+            report_path=Path("gui_verified_report.xlsx"),
+            data_sheet="V相_双脉冲数据",
+            data_row=13,
+        )
+        visible_at_dialog: list[str] = []
+
+        def record_success_dialog(*_args, **_kwargs):
+            visible_at_dialog.append(win.lbl_top_status.text())
+
+        with patch(
+            "dpt_extractor.gui.main_window.QMessageBox.information",
+            side_effect=record_success_dialog,
+        ):
+            win._on_report_write_finished(31, summary, 123.0)
+
+        self.assertEqual(
+            visible_at_dialog,
+            ["报告写入完成: gui_verified_report.xlsx"],
+        )
+        self.assertEqual(
+            win.statusBar().currentMessage(),
+            "报告写入完成: gui_verified_report.xlsx",
+        )
+        self.assertIn("V相_双脉冲数据", win.lbl_top_status.toolTip())
+        self.assertEqual(win.report_progress.detail_text(), "完成")
+        self.assertEqual(win.report_progress.percent_text(), "100.0%")
+        self.assertEqual(win.report_progress.eta_text(), "0 ms")
+        win.close()
+
+    def test_report_write_failure_keeps_error_dialog_and_terminal_status(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        win._report_request_id = 32
+        win._report_tasks[32] = object()  # type: ignore[assignment]
+        win._report_output_path = Path("failed_report.xlsx")
+        win._try_begin_report_operation()
+        win._begin_report_progress(100000, "保存中")
+        visible_at_dialog: list[str] = []
+
+        def record_error_dialog(*_args, **_kwargs):
+            visible_at_dialog.append(win.lbl_top_status.text())
+
+        with patch(
+            "dpt_extractor.gui.main_window.QMessageBox.critical",
+            side_effect=record_error_dialog,
+        ) as critical:
+            win._on_report_write_failed(32, "Excel 正在占用报告文件")
+
+        critical.assert_called_once()
+        self.assertEqual(
+            visible_at_dialog,
+            ["报告写入失败: failed_report.xlsx"],
+        )
+        self.assertEqual(
+            win.statusBar().currentMessage(),
+            "报告写入失败: failed_report.xlsx",
+        )
+        self.assertIn("Excel 正在占用报告文件", win.lbl_top_status.toolTip())
         self.assertEqual(win.report_progress.detail_text(), "失败")
         self.assertEqual(win.report_progress.eta_text(), "—")
         win.close()

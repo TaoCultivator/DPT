@@ -31,6 +31,7 @@ class SegmentIndices:
     pulse1_off: int = 0
     pulse2_on: int = 0
     pulse2_off: int = 0
+    next_pulse_on: int | None = None
 
 
 @dataclass

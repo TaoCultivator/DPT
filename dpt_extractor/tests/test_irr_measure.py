@@ -168,6 +168,46 @@ class TestIrrMeasure(unittest.TestCase):
 
         self.assertLess(ta, tb)
 
+    def test_positive_lobe_negative_ha_uses_signed_raw_crossings(self):
+        n = 240
+        t = np.linspace(0.0, 1.2e-6, n)
+        irr = np.full(n, -2.0)
+        irr[60:120] = np.linspace(-2.0, 120.0, 60)
+        irr[120:190] = np.linspace(120.0, -2.0, 70)
+
+        cross = trr_crossings_at_ha(
+            t,
+            irr,
+            0,
+            n - 1,
+            -1.5,
+            peak_idx=119,
+        )
+
+        self.assertIsNotNone(cross)
+        assert cross is not None
+        ta, tb, _ = cross
+        self.assertAlmostEqual(float(np.interp(ta, t, irr)), -1.5, places=10)
+        self.assertAlmostEqual(float(np.interp(tb, t, irr)), -1.5, places=10)
+
+    def test_trr_does_not_invent_abs_fallback_without_signed_b(self):
+        n = 240
+        t = np.linspace(0.0, 1.2e-6, n)
+        irr = np.full(n, 1.0)
+        irr[60:120] = np.linspace(1.0, 120.0, 60)
+        irr[120:190] = np.linspace(120.0, 1.0, 70)
+
+        cross = trr_crossings_at_ha(
+            t,
+            irr,
+            0,
+            n - 1,
+            -1.0,
+            peak_idx=119,
+        )
+
+        self.assertIsNone(cross)
+
 
 
     def test_uh_measured_tss(self):

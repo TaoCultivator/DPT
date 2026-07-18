@@ -32,6 +32,7 @@ from dpt_extractor.models.results import (
     ExtractResult,
     ReverseRecoveryResult,
     SegmentIndices,
+    ShortCircuitResult,
     TurnOffResult,
     TurnOnResult,
 )
@@ -171,6 +172,37 @@ class TestResultTableUi(unittest.TestCase):
             table.table.item(row, 4).foreground().color().name(),
             MISSING_TEXT_COLOR,
         )
+        table.close()
+
+    def test_short_summary_matches_unavailable_detail_rows(self) -> None:
+        table = ResultTable()
+        result = _sample_result()
+        result.short_circuit_mode = True
+        result.short_circuit = ShortCircuitResult(
+            ic_max=float("nan"),
+            tsc=float("nan"),
+            esc_dut=float("nan"),
+            esc_other=float("nan"),
+        )
+        unavailable = {
+            ("短路过程", "短路电流Imax"),
+            ("短路过程", "短路时间Tsc"),
+            ("短路过程", "短路能量Esc_本管"),
+            ("短路过程", "短路能量Esc_对管"),
+        }
+        result.unavailable_metrics.update(unavailable)
+        table.set_result(result)
+
+        summary_html = table.summary.text()
+        self.assertNotIn("nan", summary_html.lower())
+        self.assertEqual(summary_html.count(f"color:{MISSING_TEXT_COLOR}"), 4)
+        for _, name in unavailable:
+            row = _row_for(table, "短路过程", name)
+            self.assertEqual(table.table.item(row, 4).text(), MISSING_VALUE_TEXT)
+            self.assertEqual(
+                table.table.item(row, 4).foreground().color().name(),
+                MISSING_TEXT_COLOR,
+            )
         table.close()
 
     def test_main_window_skips_unavailable_metric_click_without_channel(self) -> None:

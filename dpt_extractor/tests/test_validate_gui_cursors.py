@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import unittest
+import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from scripts.validate_gui_cursors import (
     Capture,
+    DPT_ENDPOINT_CHANNELS,
+    DPT_HORIZONTAL_BINDINGS,
+    DPT_PARAMETER_CURSOR_ROLES,
+    GENERIC_MAX_ENDPOINT_CHANNELS,
+    IEC_TIMING_ENDPOINT_CHANNELS,
+    INTERACTIVE_PARAMS,
     _capture_error_details,
+    _audit_waveform_marker_bindings,
     _captured_parameter_focus,
+    _captured_cursor_bindings,
     _ensure_wanglihui_u_ch3_ui_inversion,
     _err_a_settled_gate_check,
     _err_a_signed_intersection_check,
@@ -17,8 +27,17 @@ from scripts.validate_gui_cursors import (
     _level_on_channel,
     _parameter_focus_geometry_problem,
     _sample_trace_id,
+    _selected_sample_waveforms,
+    _short_exact_vi_energy,
+    _short_unavailable_audit_status,
+    _ab_role_binding_problems,
+    _cursor_level_binding_problem,
+    _err_signed_cursor_text_problems,
     _audit_turn_off_slope_context_consistency,
     _unnecessary_ab_focus_expansion,
+    audit_short_circuit_file,
+    SHORT_CIRCUIT_PARAMS,
+    SHORT_CIRCUIT_REQUIRED_PARAMS,
 )
 
 
@@ -33,8 +52,11 @@ _CAPTURE_METHODS = (
     "enable_delta_vce_interaction",
     "enable_crosstalk_interaction",
     "enable_interval_interaction",
+    "enable_short_current_interaction",
     "set_interval_peak_horizontal",
     "set_interval_base_horizontal",
+    "set_interval_minmax_horizontal",
+    "disable_interactive_cursors",
 )
 
 
@@ -54,6 +76,35 @@ def _ok_method(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
 
 for _method_name in _CAPTURE_METHODS:
     setattr(_CapturePlot, _method_name, _ok_method)
+
+
+def _short_capture_method(
+    self,  # noqa: ANN001
+    search_t0_us: float,
+    search_t1_us: float,
+    t_a_us: float,
+    t_b_us: float,
+    hb: float,
+    ha: float,
+    on_change,  # noqa: ANN001
+    *,
+    channel: str = "ic",
+    emit_result_on_enter: bool = False,
+):
+    return (
+        search_t0_us,
+        search_t1_us,
+        t_a_us,
+        t_b_us,
+        hb,
+        ha,
+        on_change,
+        channel,
+        emit_result_on_enter,
+    )
+
+
+_CapturePlot.enable_short_current_interaction = _short_capture_method
 
 
 class TestTurnOffSlopeContextAudit(unittest.TestCase):
@@ -227,6 +278,443 @@ class TestTurnOffSlopeContextAudit(unittest.TestCase):
 
 
 class TestCursorAuditCapture(unittest.TestCase):
+    def test_waveform_marker_audit_captures_derived_sources_and_restores_mode(
+        self,
+    ) -> None:
+        class _Cursor:
+            def __init__(self, value: float) -> None:
+                self._value = float(value)
+
+            def value(self) -> float:
+                return self._value
+
+        class _Marker:
+            def __init__(self) -> None:
+                self.x = np.asarray([], dtype=np.float64)
+                self.y = np.asarray([], dtype=np.float64)
+                self.visible = False
+
+            def getData(self):
+                return self.x, self.y
+
+            def isVisible(self) -> bool:
+                return self.visible
+
+        class _DerivedMarkerPlot:
+            def __init__(
+                self,
+                *,
+                bad_a_x: bool = False,
+                bad_b_y: bool = False,
+            ) -> None:
+                self._cursor_type = "both"
+                self._trace_t_us = np.asarray([0.0, 1.0, 2.0])
+                self._raw = {
+                    "irr": np.asarray([-10.0, -20.0, -30.0]),
+                    "ic": np.asarray([2.0, 4.0, 6.0]),
+                }
+                self._cursor_a = _Cursor(0.5)
+                self._cursor_b = _Cursor(1.5)
+                self._cursor_a_wave_marker = _Marker()
+                self._cursor_b_wave_marker = _Marker()
+                self.bad_a_x = bool(bad_a_x)
+                self.bad_b_y = bool(bad_b_y)
+                self.refresh_modes = []
+                self.visibility_refreshes = 0
+
+            def cursor_type(self) -> str:
+                return self._cursor_type
+
+            @staticmethod
+            def _display_key_for_channel(channel: str) -> str:
+                return {"irr": "LOGIC_IRR", "ic": "LOGIC_IC"}[channel]
+
+            def _cursor_value_raw(self, channel: str):
+                return self._raw[channel]
+
+            @staticmethod
+            def _to_disp(channel: str, value: float) -> float:
+                offset = 1.0 if channel == "irr" else -2.0
+                return float(value) * 0.1 + offset
+
+            def _update_waveform_cursor_markers(self) -> None:
+                self.refresh_modes.append(self._cursor_type)
+                markers = (
+                    (
+                        "irr",
+                        self._cursor_a,
+                        self._cursor_a_wave_marker,
+                        self.bad_a_x,
+                        False,
+                    ),
+                    (
+                        "ic",
+                        self._cursor_b,
+                        self._cursor_b_wave_marker,
+                        False,
+                        self.bad_b_y,
+                    ),
+                )
+                for channel, cursor, marker, bad_x, bad_y in markers:
+                    if self._cursor_type != "waveform":
+                        marker.visible = False
+                        continue
+                    t_us = float(cursor.value())
+                    raw = float(np.interp(t_us, self._trace_t_us, self._raw[channel]))
+                    y = self._to_disp(channel, raw) + (1.0 if bad_y else 0.0)
+                    marker.x = np.asarray([t_us + (0.25 if bad_x else 0.0)])
+                    marker.y = np.asarray([y])
+                    marker.visible = True
+
+            def _apply_cursor_visibility(self) -> None:
+                self.visibility_refreshes += 1
+
+        plot = _DerivedMarkerPlot()
+        self.assertEqual(
+            _audit_waveform_marker_bindings(plot, ("irr", "ic")),
+            [],
+        )
+        self.assertEqual(plot._cursor_type, "both")
+        self.assertEqual(plot.refresh_modes, ["waveform", "both"])
+        self.assertEqual(plot.visibility_refreshes, 1)
+
+        bad_plot = _DerivedMarkerPlot(bad_b_y=True)
+        problems = _audit_waveform_marker_bindings(bad_plot, ("irr", "ic"))
+        self.assertTrue(
+            any("B(LOGIC_IC)标记Y" in problem for problem in problems),
+            problems,
+        )
+        self.assertEqual(bad_plot._cursor_type, "both")
+
+        bad_x_plot = _DerivedMarkerPlot(bad_a_x=True)
+        problems = _audit_waveform_marker_bindings(bad_x_plot, ("irr", "ic"))
+        self.assertTrue(
+            any("A(LOGIC_IRR)标记X" in problem for problem in problems),
+            problems,
+        )
+
+    def test_err_signed_text_audit_checks_top_and_beside_line_readouts(self) -> None:
+        class _Plot:
+            def __init__(self, top: str, ha: str, hb: str) -> None:
+                self._readout_label = SimpleNamespace(text=lambda: top)
+                self._cursor_ha_v_label = SimpleNamespace(
+                    textItem=SimpleNamespace(toPlainText=lambda: ha)
+                )
+                self._cursor_hb_v_label = SimpleNamespace(
+                    textItem=SimpleNamespace(toPlainText=lambda: hb)
+                )
+
+            @staticmethod
+            def _update_readout() -> None:
+                return None
+
+        correct = _Plot(
+            "<span>[Irr] Ha -12.50A</span> <span>[Vd] Hb +620.00V</span>",
+            "[Irr] Ha: -12.500 A",
+            "[Vd] Hb: 620.000 V",
+        )
+        self.assertEqual(
+            _err_signed_cursor_text_problems(correct, -12.5, 620.0),
+            [],
+        )
+
+        wrong = _Plot(
+            "<span>[Irr] Ha +12.50A</span> <span>[Vd] Hb -620.00V</span>",
+            "[Irr] Ha: 12.500 A",
+            "[Vd] Hb: -620.000 V",
+        )
+        problems = _err_signed_cursor_text_problems(wrong, -12.5, 620.0)
+        joined = " | ".join(problems)
+        self.assertIn("Err顶部读数Ha文本符号", joined)
+        self.assertIn("Err顶部读数Hb文本符号", joined)
+        self.assertIn("Err横线旁读数Ha文本符号", joined)
+        self.assertIn("Err横线旁读数Hb文本符号", joined)
+
+    def test_capture_reads_interval_endpoint_channels(self) -> None:
+        class _EndpointCapturePlot(_CapturePlot):
+            def enable_interval_interaction(
+                self,
+                start_t_us,
+                end_t_us,
+                on_change,
+                show_horizontal_peak=False,
+                *,
+                mode="interval",
+                channel=None,
+                a_channel=None,
+                b_channel=None,
+                on_horizontal_change=None,
+            ):
+                return None
+
+        plot = _EndpointCapturePlot()
+        capture = Capture()
+        capture.install(plot)
+        plot.enable_interval_interaction(
+            1.0,
+            2.0,
+            None,
+            channel="ic",
+            a_channel="vge",
+            b_channel="ic",
+        )
+
+        self.assertEqual(
+            _captured_cursor_bindings(capture.calls),
+            {
+                "a_us": 1.0,
+                "b_us": 2.0,
+                "a_channel": "vge",
+                "b_channel": "ic",
+            },
+        )
+
+    def test_capture_binding_normalizes_real_ab_ha_hb_roles(self) -> None:
+        calls = {
+            "enable_turn_on_current_interaction": {
+                "bound": {
+                    "t_a_us": 1.0,
+                    "t_b_us": 2.0,
+                    "hb": 10.0,
+                    "ha": 100.0,
+                }
+            }
+        }
+        self.assertEqual(
+            _captured_cursor_bindings(calls),
+            {
+                "a_us": 1.0,
+                "b_us": 2.0,
+                "a_channel": "ic",
+                "b_channel": "ic",
+                "ha": (100.0, "ic"),
+                "hb": (10.0, "ic"),
+            },
+        )
+
+    def test_dpt_parameter_cursor_role_matrix_covers_every_card(self) -> None:
+        self.assertEqual(
+            set(DPT_PARAMETER_CURSOR_ROLES),
+            set(INTERACTIVE_PARAMS),
+        )
+        for key, roles in DPT_PARAMETER_CURSOR_ROLES.items():
+            with self.subTest(parameter=key):
+                for token in ("A", "B", "Ha", "Hb"):
+                    self.assertIn(token, roles)
+
+        self.assertIn("Vge", DPT_PARAMETER_CURSOR_ROLES[("关断过程", "Ic_off_max")])
+        self.assertIn("A=Ic", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
+        self.assertIn("B=Vce", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
+        self.assertIn("A=Vge", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
+        self.assertIn("B=Vce", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
+
+    def test_dpt_endpoint_and_horizontal_matrices_fail_closed(self) -> None:
+        dynamic_power = {
+            ("关断过程", "Pmax"),
+            ("开通", "Pmax"),
+            ("反向恢复", "Pdmax"),
+        }
+        expected = set(INTERACTIVE_PARAMS)
+        self.assertEqual(set(DPT_ENDPOINT_CHANNELS) | dynamic_power, expected)
+        self.assertEqual(set(DPT_HORIZONTAL_BINDINGS) | dynamic_power, expected)
+
+    def test_endpoint_channel_matrices_match_production_contract(self) -> None:
+        self.assertEqual(
+            IEC_TIMING_ENDPOINT_CHANNELS,
+            {
+                ("开通", "Ton"): ("vge", "ic"),
+                ("开通", "Td_on"): ("vge", "ic"),
+                ("开通", "Tr"): ("ic", "ic"),
+                ("关断过程", "Toff"): ("vge", "ic"),
+                ("关断过程", "Td_off"): ("vge", "ic"),
+                ("关断过程", "Tf"): ("ic", "ic"),
+            },
+        )
+        self.assertEqual(
+            GENERIC_MAX_ENDPOINT_CHANNELS,
+            {
+                ("关断过程", "Ic_off_max"): ("vge", "vge"),
+                ("关断过程", "Vce_off_max"): ("vce", "vce"),
+                ("开通", "Ic_on_max"): ("ic", "vce"),
+                ("开通", "Vce_on_max"): ("vge", "vce"),
+                ("反向恢复", "Vrr"): ("v_diode", "v_diode"),
+            },
+        )
+
+    def test_ab_role_binding_fails_mismatched_card_times(self) -> None:
+        self.assertEqual(
+            _ab_role_binding_problems(
+                1.0,
+                2.0,
+                (1.0, 2.0),
+                role_text="A=Vge;B=Ic",
+            ),
+            [],
+        )
+        problems = _ab_role_binding_problems(
+            1.1,
+            2.0,
+            (1.0, 2.0),
+            role_text="A=Vge;B=Ic",
+        )
+        self.assertTrue(any(problem.startswith("A=") for problem in problems))
+
+    def test_cursor_level_binding_checks_waveform_at_cursor_time(self) -> None:
+        t = np.asarray([0.0, 1e-6, 2e-6], dtype=np.float64)
+        values = np.asarray([0.0, 10.0, 20.0], dtype=np.float64)
+        self.assertIsNone(
+            _cursor_level_binding_problem(
+                "A/Ha", 1.0, 10.0, t, values, floor=1e-6
+            )
+        )
+        self.assertIsNotNone(
+            _cursor_level_binding_problem(
+                "A/Ha", 1.0, 15.0, t, values, floor=1e-6
+            )
+        )
+
+    def test_short_required_unavailable_metrics_are_fail_closed(self) -> None:
+        self.assertEqual(
+            SHORT_CIRCUIT_REQUIRED_PARAMS,
+            {
+                "短路电流Imax",
+                "短路时间Tsc",
+                "短路能量Esc_本管",
+            },
+        )
+        for name in SHORT_CIRCUIT_REQUIRED_PARAMS:
+            self.assertEqual(_short_unavailable_audit_status(name), "FAIL")
+        for name in {
+            "应力Vpeak_本管",
+            "短路能量Esc_对管",
+            "应力Vpeak_对管",
+            "Desat动作时间",
+        }:
+            self.assertEqual(_short_unavailable_audit_status(name), "INFO")
+
+    def test_short_energy_audit_uses_interpolated_cursor_endpoints(self) -> None:
+        t = np.asarray([0.0, 1e-6, 2e-6, 3e-6], dtype=np.float64)
+        current = np.full(4, 2.0, dtype=np.float64)
+        voltage = np.full(4, 3.0, dtype=np.float64)
+
+        energy = _short_exact_vi_energy(
+            t,
+            current,
+            voltage,
+            0.25,
+            2.75,
+        )
+
+        self.assertAlmostEqual(energy, 15e-6, places=15)
+
+    def test_capture_records_real_short_current_signature(self) -> None:
+        plot = _CapturePlot()
+        capture = Capture()
+        capture.install(plot)
+
+        plot.enable_short_current_interaction(
+            0.0,
+            5.0,
+            0.5,
+            4.5,
+            1.25,
+            1200.0,
+            lambda *_args: None,
+            channel="ic",
+            emit_result_on_enter=False,
+        )
+
+        bound = capture.calls["enable_short_current_interaction"]["bound"]
+        self.assertEqual(bound["t_a_us"], 0.5)
+        self.assertEqual(bound["t_b_us"], 4.5)
+        self.assertEqual(bound["hb"], 1.25)
+        self.assertEqual(bound["ha"], 1200.0)
+        self.assertEqual(bound["channel"], "ic")
+
+    def test_all_cursor_selection_includes_short_samples_and_paginates(self) -> None:
+        root = Path.cwd()
+        dpt_a = root / "示例文件" / "samples" / "UH_750V_1000A_000.tss"
+        short = root / "示例文件" / "samples" / "short" / "UH_750V_000.tss"
+        dpt_b = root / "示例文件" / "samples" / "UL_750V_1000A_000.tss"
+        discovered = [dpt_a, short, dpt_b]
+
+        with patch(
+            "scripts.validate_gui_cursors.discover_sample_waveforms",
+            return_value=discovered,
+        ), patch.dict(
+            os.environ,
+            {
+                "DPT_VALIDATE_ALL_CURSORS": "1",
+                "DPT_VALIDATE_CURSOR_OFFSET": "1",
+                "DPT_VALIDATE_CURSOR_LIMIT": "2",
+            },
+            clear=False,
+        ):
+            selected = _selected_sample_waveforms(root)
+
+        self.assertEqual(selected, [short, dpt_b])
+
+    def test_default_cursor_selection_excludes_short_samples(self) -> None:
+        root = Path.cwd()
+        dpt = root / "示例文件" / "samples" / "UH_750V_1000A_000.tss"
+        short = root / "示例文件" / "samples" / "short" / "UH_750V_000.tss"
+        with patch(
+            "scripts.validate_gui_cursors.discover_sample_waveforms",
+            return_value=[short, dpt],
+        ), patch.dict(os.environ, {}, clear=False):
+            old = os.environ.pop("DPT_VALIDATE_ALL_CURSORS", None)
+            try:
+                selected = _selected_sample_waveforms(root)
+            finally:
+                if old is not None:
+                    os.environ["DPT_VALIDATE_ALL_CURSORS"] = old
+
+        self.assertEqual(selected, [dpt])
+
+    def test_short_only_cursor_selection_filters_before_pagination(self) -> None:
+        root = Path.cwd()
+        dpt = root / "示例文件" / "samples" / "UH_750V_1000A_000.tss"
+        short_a = root / "示例文件" / "samples" / "short" / "UH_750V_000.tss"
+        short_b = root / "示例文件" / "samples" / "DDD" / "UL_750V_000.tss"
+        with patch(
+            "scripts.validate_gui_cursors.discover_sample_waveforms",
+            return_value=[dpt, short_a, short_b],
+        ), patch.dict(
+            os.environ,
+            {
+                "DPT_VALIDATE_ALL_CURSORS": "1",
+                "DPT_VALIDATE_SHORT_ONLY": "1",
+                "DPT_VALIDATE_CURSOR_OFFSET": "1",
+                "DPT_VALIDATE_CURSOR_LIMIT": "1",
+            },
+            clear=False,
+        ):
+            selected = _selected_sample_waveforms(root)
+
+        self.assertEqual(selected, [short_b])
+
+    def test_dpt_only_cursor_selection_filters_before_pagination(self) -> None:
+        root = Path.cwd()
+        dpt_a = root / "示例文件" / "samples" / "UH_750V_1000A_000.tss"
+        short = root / "示例文件" / "samples" / "short" / "UH_750V_000.tss"
+        dpt_b = root / "示例文件" / "samples" / "UL_750V_1000A_000.tss"
+        with patch(
+            "scripts.validate_gui_cursors.discover_sample_waveforms",
+            return_value=[dpt_a, short, dpt_b],
+        ), patch.dict(
+            os.environ,
+            {
+                "DPT_VALIDATE_ALL_CURSORS": "1",
+                "DPT_VALIDATE_DPT_ONLY": "1",
+                "DPT_VALIDATE_CURSOR_OFFSET": "1",
+                "DPT_VALIDATE_CURSOR_LIMIT": "1",
+            },
+            clear=False,
+        ):
+            selected = _selected_sample_waveforms(root)
+
+        self.assertEqual(selected, [dpt_b])
+
     def test_same_basename_in_different_directories_keeps_distinct_trace_ids(
         self,
     ) -> None:
@@ -500,6 +988,46 @@ class TestWanglihuiInversionAudit(unittest.TestCase):
         self.assertEqual(window.bundle.meta.source_channel_inversions, {"CH3"})
         self.assertEqual(window.bundle.meta.channel_display_inversions, {"CH3"})
         self.assertIn("未二次翻转", note)
+
+
+class TestShortCircuitGuiAudit(unittest.TestCase):
+    sample = (
+        Path(__file__).resolve().parents[2]
+        / "示例文件"
+        / "songzhenxi"
+        / "KSU2506"
+        / "DCU"
+        / "DL"
+        / "LT"
+        / "UH_480V_000.tss"
+    )
+
+    @unittest.skipUnless(sample.exists(), "representative short-circuit sample missing")
+    def test_real_short_branch_exercises_every_parameter_row(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        rows = audit_short_circuit_file(
+            MainWindow,
+            QApplication,
+            app,
+            self.sample,
+        )
+        by_name = {row[2]: row for row in rows}
+
+        self.assertEqual(set(by_name), set(SHORT_CIRCUIT_PARAMS))
+        for name in (
+            "短路电流Imax",
+            "短路时间Tsc",
+            "短路能量Esc_本管",
+            "短路能量Esc_对管",
+        ):
+            self.assertEqual(by_name[name][3], "OK", by_name[name][4])
+        for name in ("应力Vpeak_本管", "应力Vpeak_对管"):
+            self.assertNotEqual(by_name[name][3], "INFO", by_name[name][4])
+        self.assertIn(by_name["Desat动作时间"][3], {"OK", "INFO"})
 
 
 if __name__ == "__main__":

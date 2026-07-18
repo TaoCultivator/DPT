@@ -68,10 +68,41 @@ class TestChannelMapping(unittest.TestCase):
         np.testing.assert_allclose(bundle.get("+CH3"), raw)
         bundle.meta.channel_display_inversions.add("CH3")
         np.testing.assert_allclose(bundle.get("CH3"), -raw)
-        np.testing.assert_allclose(bundle.get("-CH3"), -raw)
+        np.testing.assert_allclose(bundle.get("-CH3"), raw)
         self.assertTrue(bundle.has_channel_reference("-CH3"))
         with self.assertRaises(KeyError):
             bundle.get("-CH9")
+
+    def test_signed_reference_composes_mapping_display_and_source_inversions_once(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        raw = np.array([2.0, -5.0, 11.0])
+        for mapped_sign in (1, -1):
+            for display_inverted in (False, True):
+                for source_inverted in (False, True):
+                    with self.subTest(
+                        mapped_sign=mapped_sign,
+                        display_inverted=display_inverted,
+                        source_inverted=source_inverted,
+                    ):
+                        bundle = WaveformBundle(
+                            t=np.arange(raw.size, dtype=np.float64),
+                            channels={"CH3": raw},
+                            meta=TekMetadata(
+                                channel_display_inversions=(
+                                    {"CH3"} if display_inverted else set()
+                                ),
+                                source_channel_inversions=(
+                                    {"CH3"} if source_inverted else set()
+                                ),
+                            ),
+                        )
+                        ref = "-CH3" if mapped_sign < 0 else "CH3"
+                        display_sign = -1 if display_inverted != source_inverted else 1
+                        expected = float(mapped_sign * display_sign) * raw
+                        np.testing.assert_allclose(bundle.get(ref), expected)
 
     def test_display_inversions_feed_default_derived_currents(self):
         import numpy as np

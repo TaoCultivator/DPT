@@ -5,6 +5,7 @@ import io
 import re
 import tempfile
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
@@ -500,7 +501,12 @@ class _FormulaEvaluator:
 class TssParser:
     """Parse Tektronix session (.tss) files — ZIP archives of .wfm waveforms."""
 
-    def parse(self, path: str | Path) -> WaveformBundle:
+    def parse(
+        self,
+        path: str | Path,
+        *,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> WaveformBundle:
         path = Path(path)
         if not zipfile.is_zipfile(path):
             raise ValueError("TSS 会话: 文件不是有效的 ZIP/TSS 格式")
@@ -526,9 +532,21 @@ class TssParser:
             if not wfm_members:
                 raise ValueError("TSS 会话: 未找到 .wfm 波形文件")
 
+            waveform_total = len(wfm_members)
+            if progress_callback is not None:
+                progress_callback(0, waveform_total, "读取波形通道")
+
+            def emit_waveform_done(index: int) -> None:
+                if progress_callback is not None:
+                    progress_callback(
+                        index,
+                        waveform_total,
+                        f"读取波形通道 {index}/{waveform_total}",
+                    )
+
             with tempfile.TemporaryDirectory(prefix="dpt_tss_") as tmp:
                 tmp_path = Path(tmp)
-                for member in wfm_members:
+                for waveform_index, member in enumerate(wfm_members, start=1):
                     channel = _channel_from_member(member)
                     local = tmp_path / PurePosixPath(member).name
                     with zf.open(member) as src, open(local, "wb") as dst:
@@ -536,14 +554,17 @@ class TssParser:
 
                     wfm = read_file(str(local))
                     if not _looks_like_analog_waveform(wfm):
+                        emit_waveform_done(waveform_index)
                         continue
 
                     channel = channel or _channel_from_waveform(wfm)
                     if not channel or channel in channels:
+                        emit_waveform_done(waveform_index)
                         continue
 
                     t, y = _waveform_arrays(wfm)
                     if y.size == 0:
+                        emit_waveform_done(waveform_index)
                         continue
 
                     channels[channel] = y
@@ -573,6 +594,7 @@ class TssParser:
                         channel_units[channel] = unit
                     if wfm.meta_info is not None and wfm.meta_info.y_position is not None:
                         y_position[channel] = float(wfm.meta_info.y_position)
+                    emit_waveform_done(waveform_index)
 
         if not channels or t_ref is None:
             raise ValueError("TSS 会话: 未能解析有效波形通道")

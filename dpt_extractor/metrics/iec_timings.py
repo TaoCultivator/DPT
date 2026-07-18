@@ -548,13 +548,31 @@ def turn_on_timing_instants(
                     t_i10 = fallback_i10
                     t_i90 = fallback_i90
 
+    # Ic10/Ic90 describe one physical rising edge and therefore form an atomic
+    # ordered pair.  Keeping only Ic90 (or only Ic10) lets Ton/Td_on/Tr borrow
+    # endpoints from different events and leaves a plausible number with no
+    # valid cursor pair.  Fail closed instead; the pipeline marks the affected
+    # cards unavailable so GUI/report cannot present half a measurement.
+    if t_i10 is None or t_i90 is None or t_i90 <= t_i10:
+        t_i10 = None
+        t_i90 = None
+
     # IEC60747-9 / ZF：Td_on=10%Vge→10%Icm，Tr=10%Icm→90%Icm，Ton=10%Vge→90%Icm ⇒ Ton=Td_on+Tr
-    td_on = abs(t_i10 - t_v10) * 1e9 if t_v10 and t_i10 else 0.0
-    tr = abs(t_i90 - t_i10) * 1e9 if t_i10 and t_i90 else 0.0
-    if t_v10 and t_i90:
-        ton = abs(t_i90 - t_v10) * 1e9
-    else:
-        ton = td_on + tr
+    td_on = (
+        abs(t_i10 - t_v10) * 1e9
+        if t_v10 is not None and t_i10 is not None
+        else 0.0
+    )
+    tr = (
+        abs(t_i90 - t_i10) * 1e9
+        if t_i10 is not None and t_i90 is not None
+        else 0.0
+    )
+    ton = (
+        abs(t_i90 - t_v10) * 1e9
+        if t_v10 is not None and t_i90 is not None
+        else 0.0
+    )
     return TurnOnTimingInstants(t_v10, t_i10, t_i90, td_on, tr, ton)
 
 

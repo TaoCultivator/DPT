@@ -38,7 +38,8 @@ SLOPE_RANGE_PRESETS: dict[str, list[SlopePreset]] = {
         ("90%→10%", 90.0, 10.0),
         ("80%→20%", 80.0, 20.0),
     ],
-    # 反向恢复二极管 di/dt：Ha=0div、Hb=IDM（规格书 0.9·IDM→0.1·IDM / 0.8→0.2）
+    # 反向恢复二极管 di/dt：Ha=恢复尾稳定基准、Hb=带符号 IDM
+    # （规格书归一化后 0.9·IDM→0.1·IDM / 0.8→0.2）
     # (3) 50%IF→50%IRM — IF 同 IDM 下降沿；IRM 为零交叉↔尖峰
     "rr_didt": [
         ("90%→10%", 90.0, 10.0, "idm"),
@@ -55,7 +56,7 @@ SLOPE_RANGE_PRESETS: dict[str, list[SlopePreset]] = {
 }
 
 CUSTOM_RANGE_LABEL = "自定义…"
-RR_DIDT_CUSTOM_IDM = "IDM 百分比（Ha=0, Hb=IDM）"
+RR_DIDT_CUSTOM_IDM = "IDM 百分比（Ha=尾基准, Hb=带符号IDM）"
 RR_DIDT_CUSTOM_IF_IRM = "零基准百分比（H0=0, Ha=IF, Hb=IRM）"
 
 

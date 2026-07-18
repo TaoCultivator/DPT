@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.ndimage import median_filter
 
 from dpt_extractor.config.loader import AppConfig
 from dpt_extractor.utils.signal import (
@@ -255,6 +256,8 @@ def _didt_fall_robust(
     top_a: float,
     pct_a: float,
     pct_b: float,
+    *,
+    use_abs: bool = True,
 ) -> DidtCrossingResult | None:
     """关断电流下降 di/dt（抗导通纹波）。
 
@@ -274,7 +277,9 @@ def _didt_fall_robust(
     th_hi = v_lo + f_hi * span
     th_lo = v_lo + f_lo * span
     seg_t = t[i0 : i1 + 1]
-    seg_y = np.abs(ic[i0 : i1 + 1].astype(np.float64))
+    seg_y = ic[i0 : i1 + 1].astype(np.float64)
+    if use_abs:
+        seg_y = np.abs(seg_y)
     if len(seg_t) < 2:
         return None
     start = max(0, int(np.argmax(seg_y)) - 1)
@@ -328,10 +333,27 @@ def didt_between_base_top(
     pct_a: float,
     pct_b: float,
     edge: str,
+    *,
+    use_abs: bool = True,
 ) -> DidtCrossingResult:
-    """在 [i0,i1] 内按 Base–Top 电流跨度（|Ic|）计算 di/dt 穿越。"""
+    """在 [i0,i1] 内按 Base–Top 电流跨度计算 di/dt 真实穿越。
+
+    ``use_abs`` 保留开通等历史幅值域口径。关断逻辑 Ic 已由通道映射
+    自动定向，且其 Base 必须保持带符号，因此关断调用方使用原始带符号
+    坐标，避免“负参考电平却在 |Ic| 上找交点”的不可达混用。
+    """
     if edge == "fall":
-        robust = _didt_fall_robust(t, ic, i0, i1, base_a, top_a, pct_a, pct_b)
+        robust = _didt_fall_robust(
+            t,
+            ic,
+            i0,
+            i1,
+            base_a,
+            top_a,
+            pct_a,
+            pct_b,
+            use_abs=use_abs,
+        )
         if robust is not None:
             return robust
     r = dvdt_between_base_top(
@@ -344,7 +366,7 @@ def didt_between_base_top(
         pct_a,
         pct_b,
         edge,
-        use_abs=True,
+        use_abs=use_abs,
     )
     return DidtCrossingResult(
         float(r.dvdt), r.t_pct_a_s, r.t_pct_b_s, r.th_a, r.th_b
@@ -424,9 +446,132 @@ def _sustained_rise_between_base_top(
     return DvdtCrossingResult(float(value), t_hi, t_lo, th_a, th_b)
 
 
+def _turn_on_main_rise_between_base_top(
+    t: np.ndarray,
+    y: np.ndarray,
+    i0: int,
+    plateau_window: tuple[int, int],
+    base_v: float,
+    top_v: float,
+    pct_a: float,
+    pct_b: float,
+    dt: float,
+) -> tuple[DvdtCrossingResult | None, tuple[int, int]]:
+    """Lock turn-on A/B to the rise episode that feeds the declared Ha band.
+
+    A short pre-edge pulse can contain perfectly valid raw percentage
+    crossings, so a crossing-equality check alone is not enough.  Starting at
+    the confirmed Ha plateau, walk back to the last sustained low-state block
+    and only search the following episode.  Returned A/B and thresholds are
+    always chronological/low-to-high, matching the oscilloscope's visible
+    left/right cursor names even when a custom percentage label is reversed.
+    """
+
+    tt = np.asarray(t, dtype=np.float64)
+    yy = np.asarray(y, dtype=np.float64)
+    n = min(len(tt), len(yy))
+    if n < 4:
+        return None, (0, 0)
+    h0, h1 = (int(plateau_window[0]), int(plateau_window[1]))
+    i0 = max(0, min(int(i0), n - 2))
+    h0 = max(i0 + 2, min(h0, n - 1))
+    h1 = max(h0, min(h1, n - 1))
+    span = float(top_v - base_v)
+    if not np.isfinite(span) or span <= 1e-9:
+        return None, (i0, h0)
+
+    f_lo = min(float(pct_a), float(pct_b))
+    f_hi = max(float(pct_a), float(pct_b))
+    th_lo = float(base_v + f_lo * span)
+    th_hi = float(base_v + f_hi * span)
+    if not (np.isfinite(th_lo) and np.isfinite(th_hi)) or th_hi <= th_lo:
+        return None, (i0, h0)
+
+    # The episode gate stays below the lower published threshold.  A genuine
+    # rise therefore crosses both thresholds after the chosen low-state block.
+    positive_lo = max(0.0, f_lo)
+    gate_fraction = max(
+        0.005,
+        min(0.08, 0.5 * positive_lo if positive_lo > 0.0 else 0.005),
+    )
+    gate = float(base_v + gate_fraction * span)
+    seg = yy[i0 : h0 + 1]
+    if len(seg) < 4 or not np.isfinite(seg).all():
+        return None, (i0, h0)
+    low = seg <= gate + 0.005 * max(abs(span), 1.0)
+    dt_s = max(float(dt), 1e-15)
+    max_hole = max(1, int(round(10e-9 / dt_s)))
+    min_low = max(3, int(round(20e-9 / dt_s)))
+
+    # Close only brief high holes surrounded by low state.  A 12 ns false
+    # pulse remains a separator; a few-sample noise excursion does not.
+    closed = low.copy()
+    k = 0
+    while k < len(closed):
+        if closed[k]:
+            k += 1
+            continue
+        j = k + 1
+        while j < len(closed) and not closed[j]:
+            j += 1
+        if k > 0 and j < len(closed) and j - k <= max_hole:
+            closed[k:j] = True
+        k = j
+
+    runs: list[tuple[int, int]] = []
+    k = 0
+    while k < len(closed):
+        if not closed[k]:
+            k += 1
+            continue
+        j = k + 1
+        while j < len(closed) and closed[j]:
+            j += 1
+        if j - k >= min_low and j < len(closed):
+            runs.append((k, j))
+        k = j
+    if not runs:
+        return None, (i0, h0)
+    _low_start, low_end = runs[-1]
+    episode_start = max(i0, i0 + low_end - 1)
+
+    search_y = yy[episode_start : h0 + 1]
+    low_crosses = np.flatnonzero(
+        (search_y[:-1] < th_lo) & (search_y[1:] >= th_lo)
+    )
+    if len(low_crosses) == 0:
+        return None, (episode_start, h0)
+    low_idx = episode_start + int(low_crosses[0])
+    high_y = yy[low_idx : h0 + 1]
+    high_crosses = np.flatnonzero(
+        (high_y[:-1] < th_hi) & (high_y[1:] >= th_hi)
+    )
+    if len(high_crosses) == 0:
+        return None, (episode_start, h0)
+    high_idx = low_idx + int(high_crosses[0])
+    if high_idx < low_idx or h0 <= high_idx or h1 < h0:
+        return None, (episode_start, h0)
+
+    def _interp(k0: int, threshold: float) -> float:
+        y0 = float(yy[k0])
+        y1 = float(yy[k0 + 1])
+        frac = (threshold - y0) / (y1 - y0) if abs(y1 - y0) > 1e-30 else 0.0
+        return float(tt[k0] + frac * (tt[k0 + 1] - tt[k0]))
+
+    t_lo = _interp(low_idx, th_lo)
+    t_hi = _interp(high_idx, th_hi)
+    if not (np.isfinite(t_lo) and np.isfinite(t_hi)) or t_hi <= t_lo:
+        return None, (episode_start, h0)
+    value = abs(th_hi - th_lo) / (t_hi - t_lo) / 1e9
+    return (
+        DvdtCrossingResult(float(value), t_lo, t_hi, th_lo, th_hi),
+        (episode_start, h0),
+    )
+
+
 @dataclass(frozen=True)
 class DvdtMeasurementContext:
-    """一次关断 dv/dt 测量的稳定电平、真实交点与最终值。"""
+    """一次 dv/dt 测量的参考电平、真实交点与最终值。"""
 
     base_v: float
     top_v: float
@@ -434,14 +579,179 @@ class DvdtMeasurementContext:
     used_fallback: bool = False
 
 
+def turn_on_dvdt_measurement_context(
+    t: np.ndarray,
+    vce: np.ndarray,
+    top_v: float,
+    i0: int,
+    i1: int,
+    dt: float,
+    cfg: AppConfig,
+    pct_hi: float,
+    pct_lo: float,
+) -> DvdtMeasurementContext:
+    """Build the canonical turn-on Vce dv/dt context.
+
+    The accepted DPT definition is ``pct * VceTop`` rather than a percentage
+    of the post-fall local platform span.  ``i1`` is inclusive, matching the
+    turn-on segment stored in :class:`SegmentIndices`.  Keeping the zero
+    reference, A/B crossings and fallback together prevents the result card
+    and its default GUI cursors from silently measuring different slopes.
+    """
+
+    t_arr = np.asarray(t, dtype=np.float64)
+    vce_arr = np.asarray(vce, dtype=np.float64)
+    n = min(len(t_arr), len(vce_arr))
+    if n < 2:
+        crossing = DvdtCrossingResult(0.0, None, None, 0.0, 0.0)
+        return DvdtMeasurementContext(0.0, float(top_v), crossing, True)
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 1, min(int(i1), n - 1))
+    top = float(top_v)
+    th_hi = float(pct_hi) * top
+    th_lo = float(pct_lo) * top
+    seg_t = t_arr[i0 : i1 + 1]
+    seg_y = vce_arr[i0 : i1 + 1]
+    t_a = crossing_time(seg_t, seg_y, th_hi, "falling", start=0)
+    t_b = None
+    if t_a is not None:
+        local = int(np.searchsorted(seg_t, t_a, side="left"))
+        local = max(0, min(local, len(seg_t) - 2))
+        t_b = crossing_time(seg_t, seg_y, th_lo, "falling", start=local)
+    complete = t_a is not None and t_b is not None and t_b > t_a
+    value = (
+        abs(th_hi - th_lo) / abs(float(t_b) - float(t_a)) / 1e9
+        if complete
+        else 0.0
+    )
+    used_fallback = value < 1e-6
+    if used_fallback:
+        value = dvdt_max(t_arr, vce_arr, i0, i1 + 1, dt, cfg)
+    crossing = DvdtCrossingResult(
+        float(value),
+        float(t_a) if t_a is not None else None,
+        float(t_b) if t_b is not None and complete else None,
+        th_hi,
+        th_lo,
+    )
+    return DvdtMeasurementContext(0.0, top, crossing, used_fallback)
+
+
+def rr_dvdt_measurement_context(
+    t: np.ndarray,
+    v_d: np.ndarray,
+    i0: int,
+    i1: int,
+    dt: float,
+    cfg: AppConfig,
+    pct_lo: float,
+    pct_hi: float,
+    *,
+    fallback_i0: int | None = None,
+    fallback_i1: int | None = None,
+) -> DvdtMeasurementContext:
+    """Build the canonical reverse-recovery ``|Vd|`` dv/dt context.
+
+    ``i1`` is exclusive to preserve the long-standing
+    :func:`dvdt_diode_recovery` search window.  Ha is the same ``|VDM|`` peak
+    used by the numeric result and Hb is its zero-amplitude reference; the
+    later settled bus platform is useful visual context but is not the 100%
+    level of this measurement.
+    """
+
+    t_arr = np.asarray(t, dtype=np.float64)
+    vd_arr = np.asarray(v_d, dtype=np.float64)
+    n = min(len(t_arr), len(vd_arr))
+    if n < 2:
+        crossing = DvdtCrossingResult(0.0, None, None, 0.0, 0.0)
+        return DvdtMeasurementContext(0.0, 0.0, crossing, True)
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 2, min(int(i1), n))
+    seg_t = t_arr[i0:i1]
+    seg_y = np.abs(vd_arr[i0:i1])
+    top = float(np.max(seg_y)) if len(seg_y) else 0.0
+    th_lo = float(pct_lo) * top
+    th_hi = float(pct_hi) * top
+    t_a = crossing_time(seg_t, seg_y, th_lo, "rising", start=0)
+    t_b = None
+    if t_a is not None:
+        local = int(np.searchsorted(seg_t, t_a, side="left"))
+        local = max(0, min(local, len(seg_t) - 2))
+        t_b = crossing_time(seg_t, seg_y, th_hi, "rising", start=local)
+    complete = t_a is not None and t_b is not None and t_b > t_a
+    value = (
+        abs(th_hi - th_lo) / abs(float(t_b) - float(t_a)) / 1e9
+        if complete
+        else 0.0
+    )
+    used_fallback = value < 1e-6
+    if used_fallback:
+        fb0 = i0 if fallback_i0 is None else int(fallback_i0)
+        fb1 = i1 if fallback_i1 is None else int(fallback_i1)
+        value = dvdt_max(t_arr, vd_arr, fb0, fb1, dt, cfg)
+    crossing = DvdtCrossingResult(
+        float(value),
+        float(t_a) if t_a is not None else None,
+        float(t_b) if t_b is not None and complete else None,
+        th_lo,
+        th_hi,
+    )
+    return DvdtMeasurementContext(0.0, top, crossing, used_fallback)
+
+
 @dataclass(frozen=True)
 class DidtMeasurementContext:
-    """一次关断 di/dt 测量的稳定电平、真实交点与最终值。"""
+    """一次 di/dt 测量的稳定电平、真实交点与最终值。"""
 
     base_a: float
     top_a: float
     crossing: DidtCrossingResult
     used_fallback: bool = False
+    base_window: tuple[int, int] | None = None
+    top_window: tuple[int, int] | None = None
+    search_window: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class RrDidtMeasurementContext:
+    """一次反向恢复 di/dt 的带符号电平、真实交点与最终值。
+
+    ``forward_a`` 是换流前二极管正向电流在原始 Irr 坐标中的稳定平台，
+    ``base_a`` 是恢复后的本地稳定基线。``reverse_a`` 是反向恢复峰值；
+    只有 ``50%IF→50%IRM`` 模式会把它作为 Hb。管线、GUI 和报告必须复用
+    这一上下文，避免把负向主平台之后的正恢复峰误认成 IDM。
+    """
+
+    forward_a: float
+    base_a: float
+    reverse_a: float
+    zero_a: float | None
+    crossing: DidtCrossingResult
+    polarity: int
+    used_fallback: bool = False
+
+
+@dataclass(frozen=True)
+class RrDidtPreparedSeries:
+    """RR slope data prepared once for the GUI horizontal-cursor hot path.
+
+    Time repair, finite-sample repair, spike-guarded extrema and both physical
+    polarities are independent of the user-selected Ha/Hb levels.  Keeping
+    them here avoids repeating those full-record operations for every
+    ``sigPositionChanged`` event while preserving raw-sample interpolation.
+    """
+
+    t_s: np.ndarray
+    positive_a: np.ndarray
+    negative_a: np.ndarray
+    start_positive: int
+    start_negative: int
+    min_positive_a: float
+    min_negative_a: float
+
+    @property
+    def valid(self) -> bool:
+        return len(self.t_s) >= 4 and len(self.positive_a) == len(self.t_s)
 
 
 def turn_off_dvdt_measurement_context(
@@ -484,6 +794,36 @@ def turn_off_dvdt_measurement_context(
             pct_b,
             "rise",
         )
+    # Low-current/slow turn-off can reach the 90% Vce threshold after the
+    # Vge-derived primary rise window.  Preserve that primary window when it
+    # already yields a complete pair, but otherwise extend only to this
+    # parameter's declared local end and adopt the result only when both raw
+    # ordered intersections exist.  A max-slope fallback must not masquerade
+    # as a complete A/B cursor pair.
+    if (
+        (crossing.t_pct_a_s is None or crossing.t_pct_b_s is None)
+        and search1 < i1
+    ):
+        extended = _sustained_rise_between_base_top(
+            t, vce, search0, i1, base_v, top_v, pct_a, pct_b, dt
+        )
+        if extended is None:
+            extended = dvdt_between_base_top(
+                t,
+                vce,
+                search0,
+                i1,
+                base_v,
+                top_v,
+                pct_a,
+                pct_b,
+                "rise",
+            )
+        if (
+            extended.t_pct_a_s is not None
+            and extended.t_pct_b_s is not None
+        ):
+            crossing = extended
     used_fallback = crossing.dvdt < 1e-6
     if used_fallback:
         fallback = dvdt_max(t, vce, search0, search1 + 1, dt, cfg)
@@ -513,9 +853,14 @@ def turn_off_didt_measurement_context(
     pct_a: float,
     pct_b: float,
     edge: str = "fall",
+    *,
+    next_pulse_on: int | None = None,
 ) -> DidtMeasurementContext:
     """用同一参数本地窗口生成关断 di/dt 的完整默认测量上下文。"""
-    from dpt_extractor.metrics.plateau_level import turn_off_didt_base_top_levels
+    from dpt_extractor.metrics.plateau_level import (
+        turn_off_didt_base_top_levels,
+        turn_off_didt_stable_base_window_indices,
+    )
 
     n = min(len(t), len(ic))
     if n < 2:
@@ -525,6 +870,14 @@ def turn_off_didt_measurement_context(
     i1 = max(i0 + 1, min(int(i1), n - 1))
     search0 = max(i0, min(int(fall_start), i1 - 1))
     search1 = max(search0 + 1, min(int(fall_end), i1))
+    base_window = turn_off_didt_stable_base_window_indices(
+        ic,
+        i1,
+        off_idx,
+        fall_end,
+        dt,
+        next_pulse_on=next_pulse_on,
+    )
     base_a, top_a = turn_off_didt_base_top_levels(
         ic,
         i0,
@@ -534,6 +887,8 @@ def turn_off_didt_measurement_context(
         fall_start,
         fall_end,
         dt,
+        next_pulse_on=next_pulse_on,
+        base_window=base_window,
     )
     crossing = didt_between_base_top(
         t,
@@ -545,6 +900,7 @@ def turn_off_didt_measurement_context(
         pct_a,
         pct_b,
         edge,
+        use_abs=False,
     )
     # Slow/low-current turn-off can finish after the Vge-derived fall window.
     # Keep that window as the primary search so established complete cases do
@@ -565,6 +921,7 @@ def turn_off_didt_measurement_context(
             pct_a,
             pct_b,
             edge,
+            use_abs=False,
         )
         if extended.t_pct_a_s is not None and extended.t_pct_b_s is not None:
             crossing = extended
@@ -581,7 +938,134 @@ def turn_off_didt_measurement_context(
             crossing.irm,
         )
     return DidtMeasurementContext(
-        float(base_a), float(top_a), crossing, used_fallback
+        float(base_a), float(top_a), crossing, used_fallback, base_window
+    )
+
+
+def turn_on_didt_measurement_context(
+    t: np.ndarray,
+    ic: np.ndarray,
+    i0: int,
+    i1: int,
+    dt: float,
+    pct_a: float,
+    pct_b: float,
+    edge: str = "rise",
+    *,
+    base_override: float | None = None,
+    top_override: float | None = None,
+    event_end_idx: int | None = None,
+) -> DidtMeasurementContext:
+    """Build one canonical turn-on di/dt context on the logical signed Ic.
+
+    Base/Hb and Top/Ha are the same event-local stable-band midpoints used by
+    the opening-current card.  Percentage levels are therefore always
+    ``Base + pct * (Top - Base)``.  Raw A/B intersections are limited to the
+    physical rise between those two declared platform windows; an unrelated
+    pre-edge ripple or a highlighted display trace cannot become the source.
+    """
+
+    from dpt_extractor.metrics.plateau_level import (
+        turn_on_current_hb_ha_t,
+        turn_on_current_hb_ha_window_indices,
+    )
+
+    t_arr = np.asarray(t, dtype=np.float64)
+    ic_arr = np.asarray(ic, dtype=np.float64)
+    n = min(len(t_arr), len(ic_arr))
+    if n < 3:
+        crossing = DidtCrossingResult(0.0, None, None, 0.0, 0.0)
+        return DidtMeasurementContext(0.0, 0.0, crossing, True)
+
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 1, min(int(i1), n - 1))
+    base_window, top_window = turn_on_current_hb_ha_window_indices(
+        t_arr,
+        ic_arr,
+        i0,
+        i1,
+        dt,
+        event_end_idx=event_end_idx,
+    )
+    default_base, default_top = turn_on_current_hb_ha_t(
+        t_arr,
+        ic_arr,
+        i0,
+        i1,
+        dt,
+        event_end_idx=event_end_idx,
+    )
+    base_a = (
+        float(base_override)
+        if base_override is not None and np.isfinite(float(base_override))
+        else float(default_base)
+    )
+    top_a = (
+        float(top_override)
+        if top_override is not None and np.isfinite(float(top_override))
+        else float(default_top)
+    )
+
+    b0, _b1 = base_window
+    h0, h1 = top_window
+    search0 = max(0, min(int(b0), n - 2))
+    span = float(top_a - base_a)
+    f_lo = min(float(pct_a), float(pct_b))
+    f_hi = max(float(pct_a), float(pct_b))
+    th_a = float(base_a + f_lo * span) if np.isfinite(span) else 0.0
+    th_b = float(base_a + f_hi * span) if np.isfinite(span) else 0.0
+
+    # Turn-on is always the physical rising Ic edge.  ``edge`` remains in the
+    # public signature for saved configuration compatibility; reversing a
+    # custom percentage label must not redirect the measurement to turn-off.
+    _ = edge
+    raw: DvdtCrossingResult | None = None
+    search_window = (search0, max(search0 + 1, min(int(h0), n - 1)))
+    if (
+        h0 >= 0
+        and h1 >= h0
+        and np.isfinite(base_a)
+        and np.isfinite(top_a)
+        and span > 1e-9
+    ):
+        raw, search_window = _turn_on_main_rise_between_base_top(
+            t_arr,
+            ic_arr,
+            search0,
+            top_window,
+            base_a,
+            top_a,
+            pct_a,
+            pct_b,
+            dt,
+        )
+
+    if raw is None:
+        crossing = DidtCrossingResult(0.0, None, None, th_a, th_b)
+        return DidtMeasurementContext(
+            base_a,
+            top_a,
+            crossing,
+            True,
+            base_window,
+            top_window,
+            search_window,
+        )
+    crossing = DidtCrossingResult(
+        float(raw.dvdt),
+        raw.t_pct_a_s,
+        raw.t_pct_b_s,
+        float(raw.th_a),
+        float(raw.th_b),
+    )
+    return DidtMeasurementContext(
+        base_a,
+        top_a,
+        crossing,
+        False,
+        base_window,
+        top_window,
+        search_window,
     )
 
 
@@ -827,6 +1311,872 @@ def analyze_rr_recovery_current(seg_i: np.ndarray) -> tuple[float, float, int]:
         if irm > 0:
             irm = -irm
     return idm, irm, zc
+
+
+_RR_MAX_REPAIR_RUN_SAMPLES = 3
+
+
+def _rr_longest_invalid_run(values: np.ndarray) -> int:
+    """Return the longest consecutive NaN/Inf run in a one-dimensional trace."""
+    invalid = ~np.isfinite(np.asarray(values, dtype=np.float64))
+    indices = np.flatnonzero(invalid)
+    if len(indices) == 0:
+        return 0
+    boundaries = np.flatnonzero(np.diff(indices) > 1)
+    starts = np.r_[0, boundaries + 1]
+    stops = np.r_[boundaries + 1, len(indices)]
+    return int(np.max(stops - starts))
+
+
+def _rr_invalid_run_exceeds_repair_limit(values: np.ndarray) -> bool:
+    """Only isolated/small invalid clusters may be linearly repaired."""
+    return _rr_longest_invalid_run(values) > _RR_MAX_REPAIR_RUN_SAMPLES
+
+
+def _rr_repair_finite_signal(values: np.ndarray) -> np.ndarray:
+    """Interpolate isolated invalid current samples without changing valid data."""
+    arr = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(arr)
+    if np.all(finite):
+        return arr
+    if not np.any(finite):
+        return np.zeros_like(arr, dtype=np.float64)
+    sample_index = np.arange(len(arr), dtype=np.float64)
+    return np.interp(sample_index, sample_index[finite], arr[finite])
+
+
+def _rr_repair_time_axis(values: np.ndarray) -> np.ndarray | None:
+    """Repair isolated NaN/Inf timestamps and reject a non-monotonic axis."""
+    arr = np.asarray(values, dtype=np.float64)
+    if len(arr) < 2:
+        return None
+    if _rr_invalid_run_exceeds_repair_limit(arr):
+        return None
+    finite = np.isfinite(arr)
+    if np.all(finite):
+        return arr if np.all(np.diff(arr) > 0.0) else None
+    finite_index = np.flatnonzero(finite)
+    if len(finite_index) < 2:
+        return None
+    finite_values = arr[finite]
+    per_sample_steps = np.diff(finite_values) / np.diff(finite_index)
+    positive_steps = per_sample_steps[
+        np.isfinite(per_sample_steps) & (per_sample_steps > 0.0)
+    ]
+    if len(positive_steps) == 0:
+        return None
+    step = float(np.median(positive_steps))
+    sample_index = np.arange(len(arr), dtype=np.float64)
+    repaired = np.interp(sample_index, finite_index, finite_values)
+    first = int(finite_index[0])
+    last = int(finite_index[-1])
+    if first > 0:
+        repaired[:first] = finite_values[0] - step * np.arange(
+            first, 0, -1, dtype=np.float64
+        )
+    if last + 1 < len(repaired):
+        repaired[last + 1 :] = finite_values[-1] + step * np.arange(
+            1, len(repaired) - last, dtype=np.float64
+        )
+    return repaired if np.all(np.diff(repaired) > 0.0) else None
+
+
+def _rr_spike_guarded_extreme_index(
+    values: np.ndarray,
+    *,
+    maximum: bool,
+) -> int:
+    """Return a raw extreme unless it is only a one-point/small-cluster spike.
+
+    A short median reference is used only as an outlier audit.  Genuine raw
+    extrema are retained verbatim, preserving the established stable-band
+    ``(max + min) / 2`` values and the physical IRM peak.  When an extreme is
+    unsupported by its neighbours, the corresponding median-filtered extreme
+    supplies the replacement index.
+    """
+    arr = _rr_repair_finite_signal(values)
+    if len(arr) == 0:
+        return 0
+    kernel = min(11, len(arr) if len(arr) % 2 else len(arr) - 1)
+    if kernel < 3:
+        return int(np.argmax(arr) if maximum else np.argmin(arr))
+    filtered = median_filter(arr, size=kernel, mode="nearest")
+    raw_idx = int(np.argmax(arr) if maximum else np.argmin(arr))
+    p01, p99 = (float(np.percentile(arr, p)) for p in (1.0, 99.0))
+    raw_span = float(np.max(arr) - np.min(arr))
+    # A genuine ringing band normally has supported excursions on both sides,
+    # so a raw extreme can sit roughly half a full band away from its local
+    # median.  A one-sided acquisition spike is nearly the entire raw span away
+    # and still fails this guard.  The robust-span term protects broad/noisy
+    # physical lobes whose 1%/99% band already carries the excursion.
+    tolerance = max(
+        1e-9,
+        0.15 * max(0.0, p99 - p01),
+        0.55 * max(0.0, raw_span),
+    )
+    if abs(float(arr[raw_idx]) - float(filtered[raw_idx])) <= tolerance:
+        return raw_idx
+    return int(np.argmax(filtered) if maximum else np.argmin(filtered))
+
+
+def _rr_spike_guarded_band_center(values: np.ndarray) -> float:
+    """Stable-band max/min midpoint with isolated-extreme rejection."""
+    arr = _rr_repair_finite_signal(values)
+    if len(arr) == 0:
+        return 0.0
+    i_min = _rr_spike_guarded_extreme_index(arr, maximum=False)
+    i_max = _rr_spike_guarded_extreme_index(arr, maximum=True)
+    return 0.5 * (float(arr[i_min]) + float(arr[i_max]))
+
+
+def _rr_quiet_local_platform_window(
+    values: np.ndarray,
+    dt: float,
+    *,
+    min_ns: float = 200.0,
+) -> np.ndarray:
+    """Return the same quiet RR platform window used for its cursor level.
+
+    Window selection remains robust (P5/P95 spread, tail proximity and local
+    slope), but the returned raw band lets the final level use the user's
+    oscilloscope rule: spike-guarded ``(max + min) / 2``.
+    """
+
+    vals = _rr_repair_finite_signal(values)
+    if len(vals) < 8:
+        return vals
+    win_n = max(
+        16,
+        int(round(float(min_ns) * 1e-9 / max(float(dt), 1e-15))),
+    )
+    if len(vals) <= win_n:
+        return vals
+
+    def _robust_center(block: np.ndarray) -> float:
+        p05, p95 = (float(np.percentile(block, p)) for p in (5.0, 95.0))
+        return 0.5 * (p05 + p95)
+
+    step = max(1, win_n // 8)
+    starts = list(range(0, len(vals) - win_n + 1, step))
+    if starts[-1] != len(vals) - win_n:
+        starts.append(len(vals) - win_n)
+    tail_ref = _robust_center(vals[-win_n:])
+    best_start = starts[0]
+    best_score = float("inf")
+    for start in starts:
+        block = vals[start : start + win_n]
+        p05, p50, p95 = (
+            float(np.percentile(block, p)) for p in (5.0, 50.0, 95.0)
+        )
+        center = 0.5 * (p05 + p95)
+        score = (
+            (p95 - p05)
+            + 0.15 * abs(center - tail_ref)
+            + 0.05 * abs(float(block[-1]) - float(block[0]))
+            + 0.02 * abs(p50 - center)
+        )
+        if score < best_score:
+            best_score = score
+            best_start = start
+    return vals[best_start : best_start + win_n]
+
+
+def _rr_quiet_local_platform_band_center(
+    values: np.ndarray,
+    dt: float,
+    *,
+    min_ns: float = 200.0,
+) -> float:
+    """Spike-guarded raw max/min midpoint of the selected quiet RR band."""
+
+    return _rr_spike_guarded_band_center(
+        _rr_quiet_local_platform_window(values, dt, min_ns=min_ns)
+    )
+
+
+def _rr_prepeak_forward_platform_band_center(
+    values: np.ndarray,
+    dt: float,
+    *,
+    min_ns: float = 200.0,
+) -> float:
+    """Return the forward-platform centre without shrinking a clean source band.
+
+    The pre-peak source region is intentionally wider than the nominal quiet
+    platform so it remains compatible with different sample rates and edge
+    positions.  A clean broad region keeps its spike-guarded raw max/min
+    midpoint.  Only when the broad region has both a much larger robust spread
+    and a materially displaced midpoint do we treat it as edge-contaminated
+    and use the quiet sub-band.  Requiring both signals avoids moving an
+    already-correct stable cursor merely because a shorter window has slightly
+    different noise extrema.
+    """
+
+    source = _rr_repair_finite_signal(values)
+    if len(source) == 0:
+        return 0.0
+    broad_center = _rr_spike_guarded_band_center(source)
+    quiet = _rr_quiet_local_platform_window(source, dt, min_ns=min_ns)
+    if len(quiet) < 2 or len(quiet) >= len(source):
+        return float(broad_center)
+
+    quiet_center = _rr_spike_guarded_band_center(quiet)
+    broad_p05, broad_p95 = (
+        float(np.percentile(source, p)) for p in (5.0, 95.0)
+    )
+    quiet_p05, quiet_p95 = (
+        float(np.percentile(quiet, p)) for p in (5.0, 95.0)
+    )
+    broad_spread = max(0.0, broad_p95 - broad_p05)
+    quiet_spread = max(0.0, quiet_p95 - quiet_p05)
+    # A tiny scale-relative floor prevents a numerically flat clean band from
+    # turning harmless quantisation into a contamination decision.
+    quiet_reference = max(
+        1e-9,
+        quiet_spread,
+        0.002 * max(abs(float(quiet_center)), 1.0),
+    )
+    contaminated = (
+        broad_spread > 2.0 * quiet_reference
+        and abs(float(broad_center) - float(quiet_center))
+        > 1.5 * quiet_reference
+    )
+    return float(quiet_center if contaminated else broad_center)
+
+
+def prepare_rr_didt_series(
+    t: np.ndarray,
+    i_d: np.ndarray,
+    i0: int,
+    i1: int,
+) -> RrDidtPreparedSeries:
+    """Prepare an exact RR cursor-search segment once.
+
+    Invalid time axes and current gaps longer than the established repair
+    limit fail closed exactly like :func:`rr_didt_between_levels`.  The two
+    cached orientations are mathematical mirrors of the same repaired raw
+    samples; no smoothing or decimation is introduced.
+    """
+
+    t_arr = np.asarray(t, dtype=np.float64)
+    i_arr = np.asarray(i_d, dtype=np.float64)
+    n = min(len(t_arr), len(i_arr))
+    empty = np.asarray([], dtype=np.float64)
+    empty.setflags(write=False)
+    if n < 2:
+        return RrDidtPreparedSeries(empty, empty, empty, 0, 0, 0.0, 0.0)
+
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 1, min(int(i1), n - 1))
+    raw_i = i_arr[i0 : i1 + 1]
+    repaired_t = _rr_repair_time_axis(t_arr[i0 : i1 + 1])
+    if repaired_t is None or _rr_invalid_run_exceeds_repair_limit(raw_i):
+        return RrDidtPreparedSeries(empty, empty, empty, 0, 0, 0.0, 0.0)
+
+    # ``frozen=True`` protects only the dataclass fields, not NumPy storage.
+    # Own the prepared samples so an input-array edit cannot change crossings
+    # halfway through one cursor session, then expose all three arrays read-only.
+    prepared_t = np.array(repaired_t, dtype=np.float64, copy=True)
+    positive = np.array(
+        _rr_repair_finite_signal(raw_i),
+        dtype=np.float64,
+        copy=True,
+    )
+    negative = -positive
+    start_positive = max(
+        0,
+        _rr_spike_guarded_extreme_index(positive, maximum=True) - 1,
+    )
+    # Applying the same maximum audit to -I is exactly equivalent to the
+    # negative-polarity normalization used by the uncached implementation.
+    start_negative = max(
+        0,
+        _rr_spike_guarded_extreme_index(negative, maximum=True) - 1,
+    )
+    for prepared_values in (prepared_t, positive, negative):
+        prepared_values.setflags(write=False)
+    return RrDidtPreparedSeries(
+        prepared_t,
+        positive,
+        negative,
+        int(start_positive),
+        int(start_negative),
+        float(np.min(positive)) if len(positive) else 0.0,
+        float(np.min(negative)) if len(negative) else 0.0,
+    )
+
+
+def _rr_default_signed_levels(
+    seg_i: np.ndarray,
+    dt: float,
+) -> tuple[float, float, float, float, int]:
+    """Return forward/base/reverse/zero levels and the physical polarity.
+
+    The current stored in a TSS remains signed.  Some upper-bridge recordings
+    therefore contain the large forward-diode platform on the negative side,
+    followed by a smaller positive recovery peak.  Extrema order identifies
+    that physical orientation without globally inverting Irr or affecting
+    Irr/Trr/Err and total-current synthesis.
+    """
+    seg = _rr_repair_finite_signal(seg_i)
+    if len(seg) < 4:
+        return 0.0, 0.0, 0.0, 0.0, 1
+
+    i_pos = _rr_spike_guarded_extreme_index(seg, maximum=True)
+    i_neg = _rr_spike_guarded_extreme_index(seg, maximum=False)
+    polarity = 1 if i_pos < i_neg else -1
+    i_forward = i_pos if polarity > 0 else i_neg
+    i_reverse = i_neg if polarity > 0 else i_pos
+
+    # Keep an extrema-local fallback, then refine it from the approximately
+    # 200 ns quiet band before the preliminary 90% commutation crossing.  The
+    # refinement uses the visible stable-band centre, not a single peak.
+    span = max(8, abs(i_reverse - i_forward))
+    plateau_w = max(12, int(0.35 * span))
+    p0 = max(0, i_forward - plateau_w // 6)
+    p1 = min(len(seg), i_forward + plateau_w)
+    plateau = seg[p0:p1]
+    if len(plateau) < 3:
+        forward = float(seg[i_forward])
+    else:
+        logical = float(polarity) * plateau
+        high_cut = float(np.percentile(logical, 90.0))
+        stable_high = plateau[logical >= high_cut]
+        forward = (
+            float(np.median(stable_high))
+            if len(stable_high) >= 3
+            else float(seg[i_forward])
+        )
+    forward_initial = float(forward)
+
+    # The IDM base is the signed centre of the quiet recovery tail.  The
+    # 50%IF→50%IRM H0 keeps the established late-tail median semantics.
+    tail0 = i_reverse + max(8, int(0.30 * (len(seg) - i_reverse)))
+    tail = seg[tail0:]
+    if len(tail) < 8:
+        tail = seg[i_reverse:]
+    base = (
+        float(_rr_quiet_local_platform_band_center(tail, float(dt), min_ns=200.0))
+        if len(tail)
+        else 0.0
+    )
+
+    normalized = float(polarity) * (seg - base)
+    preliminary_peak = float(np.max(normalized[: i_reverse + 1]))
+    preliminary_90 = 0.90 * preliminary_peak
+    preliminary_crossings = np.flatnonzero(
+        (normalized[:-1] >= preliminary_90)
+        & (normalized[1:] < preliminary_90)
+    )
+    pre_end: int | None = None
+    for candidate in preliminary_crossings:
+        if int(candidate) >= i_forward:
+            pre_end = int(candidate) + 1
+            break
+    if pre_end is not None and pre_end >= 8:
+        candidate = float(
+            _rr_quiet_local_platform_band_center(
+                seg[:pre_end], float(dt), min_ns=200.0
+            )
+        )
+        initial_mag = float(polarity) * (forward_initial - base)
+        candidate_mag = float(polarity) * (candidate - base)
+        # A quiet-window estimator may lock onto the recovery-tail noise on a
+        # short/positive-polarity record.  Only accept it when it preserves the
+        # extrema-local forward-platform magnitude.  This also protects the
+        # real wanglihui CH3 display-inversion workflow.
+        if (
+            initial_mag > 1e-6
+            and candidate_mag > 1e-6
+            and candidate_mag >= 0.50 * initial_mag
+            and candidate_mag <= 1.50 * initial_mag
+        ):
+            forward = candidate
+
+    zero_tail = seg[i_reverse + 1 :]
+    if len(zero_tail) < 8:
+        zero_tail = tail
+    skip = max(8, int(0.10 * len(zero_tail)))
+    rest = zero_tail[skip:] if len(zero_tail) > skip + 8 else zero_tail
+    zero_n = max(8, int(0.22 * len(rest)))
+    settled = rest[-zero_n:] if len(rest) >= zero_n else rest
+    zero = float(np.median(settled)) if len(settled) else float(base)
+    reverse = float(seg[i_reverse])
+    return forward, float(base), reverse, zero, polarity
+
+
+def _rr_idm_crossings_from_prepared(
+    prepared: RrDidtPreparedSeries,
+    forward_a: float,
+    base_a: float,
+    pct_a: float,
+    pct_b: float,
+) -> DidtCrossingResult:
+    """Measure the main forward-current commutation from prepared raw data."""
+
+    polarity = 1 if float(forward_a) >= float(base_a) else -1
+    oriented = prepared.positive_a if polarity > 0 else prepared.negative_a
+    oriented_base = float(polarity) * float(base_a)
+    forward_mag = float(polarity) * (float(forward_a) - float(base_a))
+    th_a_l = float(pct_a) * forward_mag
+    th_b_l = float(pct_b) * forward_mag
+    th_a = float(base_a) + float(polarity) * th_a_l
+    th_b = float(base_a) + float(polarity) * th_b_l
+    oriented_min = (
+        prepared.min_positive_a if polarity > 0 else prepared.min_negative_a
+    )
+    # An invalid prepared series has no observed reverse-current sample.  Its
+    # placeholder minimum is zero, so subtracting a non-zero Base here would
+    # fabricate an IRM diagnostic (for example ``-Base``) even though the
+    # measurement correctly fails closed.  Preserve the established invalid
+    # result semantics: no crossings, zero slope and zero observed IRM.
+    irm = 0.0 if not prepared.valid else float(oriented_min - oriented_base)
+    if (
+        not prepared.valid
+        or forward_mag <= 1e-9
+        or abs(th_a_l - th_b_l) <= 1e-12
+    ):
+        return DidtCrossingResult(
+            0.0, None, None, th_a, th_b, idm=forward_mag, irm=irm
+        )
+
+    th_high = max(th_a_l, th_b_l)
+    th_low = min(th_a_l, th_b_l)
+    th_high_oriented = oriented_base + th_high
+    th_low_oriented = oriented_base + th_low
+    start = (
+        prepared.start_positive if polarity > 0 else prepared.start_negative
+    )
+    seg_t = prepared.t_s
+    dt_s = float(np.median(np.diff(seg_t))) if len(seg_t) > 1 else 0.0
+    hold = max(3, int(round(5e-9 / max(dt_s, 1e-15))))
+    hold = min(64, hold)
+    rebound_hold = max(3, int(round(2e-9 / max(dt_s, 1e-15))))
+    rebound_hold = min(64, rebound_hold)
+    tolerance = 0.01 * max(forward_mag, 1.0)
+
+    high_idx: int | None = None
+    low_idx: int | None = None
+    high_candidates = np.flatnonzero(
+        (oriented[:-1] >= th_high_oriented)
+        & (oriented[1:] < th_high_oriented)
+    )
+    low_candidates = np.flatnonzero(
+        (oriented[:-1] >= th_low_oriented)
+        & (oriented[1:] < th_low_oriented)
+    )
+    for high_candidate in high_candidates:
+        h = int(high_candidate)
+        if h < start:
+            continue
+        for low_candidate in low_candidates:
+            k = int(low_candidate)
+            if k <= h:
+                continue
+            tail = oriented[k + 1 : min(len(oriented), k + 1 + hold)]
+            if (
+                len(tail) < 3
+                or float(np.mean(tail <= th_low_oriented + tolerance)) < 0.70
+            ):
+                continue
+
+            # A short downward platform glitch may cross 90% without reaching
+            # 10%, recover to the forward platform, and otherwise steal cursor
+            # A from the later physical commutation edge.  Reject that high
+            # candidate only when the signal has a sustained rebound clearly
+            # above the high threshold before the paired low crossing.  Brief
+            # near-threshold ringing remains attached to the first physical
+            # crossing, preserving the established cursor interpolation.
+            rebound_run = 0
+            sustained_rebound = False
+            for value in oriented[h + 1 : k + 1]:
+                if float(value) > th_high_oriented + tolerance:
+                    rebound_run += 1
+                    if rebound_run >= rebound_hold:
+                        sustained_rebound = True
+                        break
+                else:
+                    rebound_run = 0
+            if sustained_rebound:
+                continue
+            high_idx = h
+            low_idx = k
+            break
+        if high_idx is not None:
+            break
+    if high_idx is None or low_idx is None:
+        return DidtCrossingResult(
+            0.0, None, None, th_a, th_b, idm=forward_mag, irm=irm
+        )
+
+    def _interp(k: int, threshold: float) -> float:
+        y0 = float(oriented[k] - oriented_base)
+        y1 = float(oriented[k + 1] - oriented_base)
+        frac = (threshold - y0) / (y1 - y0) if abs(y1 - y0) > 1e-30 else 0.0
+        return float(seg_t[k] + frac * (seg_t[k + 1] - seg_t[k]))
+
+    t_high = _interp(high_idx, th_high)
+    t_low = _interp(low_idx, th_low)
+    if t_low <= t_high:
+        return DidtCrossingResult(
+            0.0, None, None, th_a, th_b, idm=forward_mag, irm=irm
+        )
+    t_a = t_high if th_a_l == th_high else t_low
+    t_b = t_high if th_b_l == th_high else t_low
+    didt = abs(th_a_l - th_b_l) / (t_low - t_high) / 1e9
+    return DidtCrossingResult(
+        float(didt), float(t_a), float(t_b), th_a, th_b, idm=forward_mag, irm=irm
+    )
+
+
+def _rr_idm_crossings_from_levels(
+    seg_t: np.ndarray,
+    seg_i: np.ndarray,
+    forward_a: float,
+    base_a: float,
+    pct_a: float,
+    pct_b: float,
+) -> DidtCrossingResult:
+    prepared = prepare_rr_didt_series(seg_t, seg_i, 0, max(1, len(seg_t) - 1))
+    return _rr_idm_crossings_from_prepared(
+        prepared,
+        forward_a,
+        base_a,
+        pct_a,
+        pct_b,
+    )
+
+
+def _rr_if_irm_crossings_from_prepared(
+    prepared: RrDidtPreparedSeries,
+    forward_a: float,
+    reverse_a: float,
+    zero_a: float,
+    pct_a: float,
+    pct_b: float,
+) -> DidtCrossingResult:
+    """Measure IF to IRM on the same normalized physical commutation edge."""
+    polarity = 1 if float(forward_a) >= float(zero_a) else -1
+    oriented = prepared.positive_a if polarity > 0 else prepared.negative_a
+    oriented_zero = float(polarity) * float(zero_a)
+    if_level = float(polarity) * (float(forward_a) - float(zero_a))
+    irm_level = float(polarity) * (float(reverse_a) - float(zero_a))
+    th_if_l = float(pct_a) * if_level
+    th_irm_l = float(pct_b) * irm_level
+    th_if = float(zero_a) + float(polarity) * th_if_l
+    th_irm = float(zero_a) + float(polarity) * th_irm_l
+    if (
+        not prepared.valid
+        or if_level <= 1e-9
+        or irm_level >= -1e-9
+        or abs(th_if_l - th_irm_l) <= 1e-12
+    ):
+        return DidtCrossingResult(
+            0.0, None, None, th_if, th_irm, idm=if_level, irm=irm_level
+        )
+
+    start = (
+        prepared.start_positive if polarity > 0 else prepared.start_negative
+    )
+    seg_t = prepared.t_s
+    t_if = crossing_time(
+        seg_t,
+        oriented,
+        oriented_zero + th_if_l,
+        "falling",
+        start=start,
+    )
+    if t_if is None:
+        return DidtCrossingResult(
+            0.0, None, None, th_if, th_irm, idm=if_level, irm=irm_level
+        )
+    local = int(np.searchsorted(seg_t, t_if, side="left"))
+    local = max(start, min(local, len(seg_t) - 2))
+    t_irm = crossing_time(
+        seg_t,
+        oriented,
+        oriented_zero + th_irm_l,
+        "falling",
+        start=local,
+    )
+    if t_irm is None or t_irm <= t_if:
+        return DidtCrossingResult(
+            0.0, t_if, None, th_if, th_irm, idm=if_level, irm=irm_level
+        )
+    didt = abs(th_if_l - th_irm_l) / (t_irm - t_if) / 1e9
+    return DidtCrossingResult(
+        float(didt), float(t_if), float(t_irm), th_if, th_irm,
+        idm=if_level, irm=irm_level,
+    )
+
+
+def _rr_if_irm_crossings_from_levels(
+    seg_t: np.ndarray,
+    seg_i: np.ndarray,
+    forward_a: float,
+    reverse_a: float,
+    zero_a: float,
+    pct_a: float,
+    pct_b: float,
+) -> DidtCrossingResult:
+    prepared = prepare_rr_didt_series(seg_t, seg_i, 0, max(1, len(seg_t) - 1))
+    return _rr_if_irm_crossings_from_prepared(
+        prepared,
+        forward_a,
+        reverse_a,
+        zero_a,
+        pct_a,
+        pct_b,
+    )
+
+
+def rr_didt_between_prepared_levels(
+    prepared: RrDidtPreparedSeries,
+    pct_a: float,
+    pct_b: float,
+    *,
+    measure: str,
+    forward_a: float,
+    base_or_reverse_a: float,
+    zero_a: float | None = None,
+) -> DidtCrossingResult:
+    """Recalculate exact RR crossings from a prepared cursor-search segment."""
+
+    forward = float(forward_a) if np.isfinite(forward_a) else 0.0
+    other = (
+        float(base_or_reverse_a) if np.isfinite(base_or_reverse_a) else 0.0
+    )
+    zero_value = (
+        float(zero_a) if zero_a is not None and np.isfinite(zero_a) else 0.0
+    )
+    if measure == "if_irm":
+        return _rr_if_irm_crossings_from_prepared(
+            prepared,
+            forward,
+            other,
+            zero_value,
+            pct_a,
+            pct_b,
+        )
+    return _rr_idm_crossings_from_prepared(
+        prepared,
+        forward,
+        other,
+        pct_a,
+        pct_b,
+    )
+
+
+def rr_didt_between_levels(
+    t: np.ndarray,
+    i_d: np.ndarray,
+    i0: int,
+    i1: int,
+    pct_a: float,
+    pct_b: float,
+    *,
+    measure: str,
+    forward_a: float,
+    base_or_reverse_a: float,
+    zero_a: float | None = None,
+) -> DidtCrossingResult:
+    """Recalculate RR di/dt from the currently displayed signed levels."""
+
+    prepared = prepare_rr_didt_series(t, i_d, i0, i1)
+    return rr_didt_between_prepared_levels(
+        prepared,
+        pct_a,
+        pct_b,
+        measure=measure,
+        forward_a=forward_a,
+        base_or_reverse_a=base_or_reverse_a,
+        zero_a=zero_a,
+    )
+
+
+def rr_didt_measurement_context(
+    t: np.ndarray,
+    i_d: np.ndarray,
+    i0: int,
+    i1: int,
+    dt: float,
+    cfg: AppConfig,
+    pct_a: float,
+    pct_b: float,
+    *,
+    measure: str = "idm",
+    rr_i0: int | None = None,
+    rr_i1: int | None = None,
+    fallback_i0: int | None = None,
+    fallback_i1: int | None = None,
+) -> RrDidtMeasurementContext:
+    """Build the one authoritative RR di/dt context for pipeline and GUI."""
+    t_arr = np.asarray(t, dtype=np.float64)
+    i_arr = np.asarray(i_d, dtype=np.float64)
+    n = min(len(t_arr), len(i_arr))
+    if n < 2:
+        empty_crossing = DidtCrossingResult(0.0, None, None, 0.0, 0.0)
+        return RrDidtMeasurementContext(
+            0.0, 0.0, 0.0, None, empty_crossing, 1, True
+        )
+    t_arr = t_arr[:n]
+    i_arr = i_arr[:n]
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 1, min(int(i1), n - 1))
+    valid_dt = float(dt) if np.isfinite(dt) and float(dt) > 0.0 else 0.0
+    if valid_dt <= 0.0:
+        finite_index = np.flatnonzero(np.isfinite(t_arr))
+        if len(finite_index) >= 2:
+            per_sample_steps = np.diff(t_arr[finite_index]) / np.diff(finite_index)
+            positive_steps = per_sample_steps[
+                np.isfinite(per_sample_steps) & (per_sample_steps > 0.0)
+            ]
+            if len(positive_steps):
+                valid_dt = float(np.median(positive_steps))
+    audit_i0 = i0
+    audit_i1 = i1
+    for audit_start, audit_end in (
+        (rr_i0, rr_i1),
+        (fallback_i0, fallback_i1),
+    ):
+        if audit_start is None or audit_end is None:
+            continue
+        lo = max(0, min(int(audit_start), n - 1))
+        hi = max(lo, min(int(audit_end), n - 1))
+        audit_i0 = min(audit_i0, lo)
+        audit_i1 = max(audit_i1, hi)
+    # The authoritative forward-platform centre is measured as far as 0.6 us
+    # before the recovery peak and may begin before the crossing-search i0.
+    # Audit that whole source region before any interpolation; otherwise a
+    # long missing platform block could still synthesize a plausible IDM and
+    # move both the lower horizontal cursor and the final slope.
+    platform_margin = (
+        int(np.ceil(0.6e-6 / valid_dt)) if valid_dt > 0.0 else n
+    )
+    audit_i0 = max(0, audit_i0 - platform_margin)
+    if _rr_invalid_run_exceeds_repair_limit(i_arr[audit_i0 : audit_i1 + 1]):
+        empty_crossing = DidtCrossingResult(0.0, None, None, 0.0, 0.0)
+        return RrDidtMeasurementContext(
+            0.0, 0.0, 0.0, None, empty_crossing, 1, True
+        )
+    i_arr = _rr_repair_finite_signal(i_arr)
+    repaired_t = _rr_repair_time_axis(t_arr)
+    if valid_dt <= 0.0 and repaired_t is not None:
+        valid_dt = float(np.median(np.diff(repaired_t)))
+    level_dt = valid_dt if valid_dt > 0.0 else 1e-9
+    seg_i = i_arr[i0 : i1 + 1]
+    forward, base, reverse, zero, polarity = _rr_default_signed_levels(
+        seg_i, level_dt
+    )
+    if repaired_t is not None and rr_i0 is not None and rr_i1 is not None:
+        from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
+
+        r0 = max(0, min(int(rr_i0), n - 2))
+        r1 = max(r0 + 1, min(int(rr_i1), n - 1))
+        rr_seg = i_arr[r0 : r1 + 1]
+        if len(rr_seg) >= 4:
+            peak_idx = r0 + int(err_recovery_peak_index(rr_seg, level_dt))
+            peak_t = float(repaired_t[peak_idx])
+            p0 = int(
+                np.searchsorted(repaired_t, peak_t - 0.6e-6, side="left")
+            )
+            p1 = int(
+                np.searchsorted(repaired_t, peak_t - 0.2e-6, side="right")
+            )
+            # The declared platform window is adjacent to the crossing search
+            # and may begin before ``rr_slope_window_indices().i0``.  Apply the
+            # same signed centre rule for either probe polarity; the magnitude
+            # guard below rejects a window that has landed on tail noise.
+            p0 = max(0, min(p0, n - 1))
+            p1 = max(p0 + 1, min(p1, n))
+            platform = i_arr[p0:p1]
+            if len(platform) >= 2:
+                # ``peak-0.6us .. peak-0.2us`` is only a broad source region.
+                # On slow/high-current commutations its right edge can already
+                # contain the beginning of the physical current transition.
+                # Taking max/min over that whole region can pull the forward
+                # platform cursor away from the visible quiet-band centre.
+                # Keep the broad raw midpoint when it is demonstrably stable;
+                # only a robust-spread and midpoint-displacement pollution gate
+                # may switch to the quiet ~200 ns sub-band.
+                candidate = _rr_prepeak_forward_platform_band_center(
+                    platform,
+                    level_dt,
+                    min_ns=200.0,
+                )
+                candidate_mag = float(polarity) * (candidate - base)
+                detected_mag = float(polarity) * (forward - base)
+                if (
+                    candidate_mag > 1e-6
+                    and detected_mag > 1e-6
+                    and candidate_mag >= 0.50 * detected_mag
+                    and candidate_mag <= 1.50 * detected_mag
+                ):
+                    forward = float(candidate)
+    if measure == "if_irm":
+        crossing = rr_didt_between_levels(
+            repaired_t if repaired_t is not None else t_arr,
+            i_arr,
+            i0,
+            i1,
+            pct_a,
+            pct_b,
+            measure="if_irm",
+            forward_a=forward,
+            base_or_reverse_a=reverse,
+            zero_a=zero,
+        )
+        zero_out: float | None = float(zero)
+    else:
+        crossing = rr_didt_between_levels(
+            repaired_t if repaired_t is not None else t_arr,
+            i_arr,
+            i0,
+            i1,
+            pct_a,
+            pct_b,
+            measure="idm",
+            forward_a=forward,
+            base_or_reverse_a=base,
+        )
+        zero_out = None
+
+    used_fallback = crossing.didt < 1e-6
+    if used_fallback:
+        fb0 = i0 if fallback_i0 is None else int(fallback_i0)
+        fb1 = i1 if fallback_i1 is None else int(fallback_i1)
+        fb0 = max(0, min(fb0, n - 1))
+        fb1 = max(fb0 + 1, min(fb1, n - 1))
+        fallback = 0.0
+        if valid_dt > 0.0 and fb1 - fb0 >= 3:
+            fallback = didt_max(
+                repaired_t if repaired_t is not None else t_arr,
+                i_arr,
+                fb0,
+                fb1,
+                valid_dt,
+                cfg,
+            )
+            if not np.isfinite(fallback):
+                fallback = 0.0
+        crossing = DidtCrossingResult(
+            float(fallback),
+            crossing.t_pct_a_s,
+            crossing.t_pct_b_s,
+            crossing.th_a,
+            crossing.th_b,
+            crossing.idm,
+            crossing.irm,
+        )
+    return RrDidtMeasurementContext(
+        float(forward),
+        float(base),
+        float(reverse),
+        zero_out,
+        crossing,
+        int(polarity),
+        used_fallback,
+    )
 
 
 def _rr_peak_index_near_hb(seg_i: np.ndarray, hb: float, ha: float) -> int:

@@ -63,6 +63,246 @@ class TestReportTemplateWriter(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不支持的相位/桥臂代码"):
             _resolve_phase_code(ambiguous, result, "U")
 
+    def test_dpt_missing_explicit_condition_never_falls_back_to_row_five(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "RT"
+            wb.save(report)
+
+            with self.assertRaisesRegex(ValueError, "缺少工况组"):
+                write_report_template(
+                    ExtractResult(source_path="ambiguous.tss", profile_code="UL"),
+                    report,
+                    phase_code="UL",
+                    temperature_code="LT",
+                )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(saved["A5"].value, "UH")
+            self.assertEqual(saved["B5"].value, "RT")
+
+    def test_short_missing_explicit_condition_never_relabels_row_five(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "短路测试"
+            ws["A5"] = "25℃"
+            ws["B5"] = "UH"
+            wb.save(report)
+
+            result = ExtractResult(
+                source_path="ambiguous.tss",
+                profile_code="UL",
+                short_circuit_mode=True,
+            )
+            with self.assertRaisesRegex(ValueError, "缺少短路工况行"):
+                write_report_template(
+                    result,
+                    report,
+                    phase_code="UL",
+                    temperature_code="LT",
+                )
+
+            saved = load_workbook(report)["短路测试"]
+            self.assertEqual(saved["A5"].value, "25℃")
+            self.assertEqual(saved["B5"].value, "UH")
+
+    def test_dpt_nonempty_images_require_waveform_sheet(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "report.xlsx"
+            image = td_path / "scope.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            wb.save(report)
+
+            with self.assertRaisesRegex(ValueError, "缺少工作表：U相_双脉冲波形"):
+                write_report_template(
+                    ExtractResult(
+                        source_path="UH_750V_1048A_000.tss",
+                        profile_code="UH",
+                    ),
+                    report,
+                    images={("关断过程", "ΔVce"): image},
+                    phase_code="UH",
+                    temperature_code="RT",
+                )
+
+    def test_short_nonempty_images_require_picture_sheet(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "report.xlsx"
+            image = td_path / "scope.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "短路测试"
+            ws["A5"] = "25℃"
+            ws["B5"] = "UH"
+            wb.save(report)
+
+            with self.assertRaisesRegex(ValueError, "缺少工作表：短路测试图片"):
+                write_report_template(
+                    ExtractResult(
+                        source_path="UH_750V_1048A_000.tss",
+                        profile_code="UH",
+                        short_circuit_mode=True,
+                    ),
+                    report,
+                    images={("短路过程", "短路电流Imax"): image},
+                    phase_code="UH",
+                    temperature_code="RT",
+                )
+
+    def test_unknown_image_key_does_not_require_an_image_sheet(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            wb.save(report)
+
+            summary = write_report_template(
+                ExtractResult(
+                    source_path="UH_750V_1048A_000.tss",
+                    profile_code="UH",
+                ),
+                report,
+                images={("未知过程", "未知参数"): Path(td) / "unused.png"},
+                phase_code="UH",
+                temperature_code="RT",
+            )
+
+            self.assertEqual(summary.images_written, 0)
+            self.assertIsNone(summary.waveform_sheet)
+
+    def test_short_nonempty_images_require_matching_picture_condition(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "report.xlsx"
+            image = td_path / "scope.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "短路测试"
+            ws["A5"] = "25℃"
+            ws["B5"] = "UH"
+            pic = wb.create_sheet("短路测试图片")
+            pic.merge_cells("A1:E1")
+            pic["A1"] = "UL_25℃"
+            wb.save(report)
+
+            with self.assertRaisesRegex(ValueError, "缺少图片工况块：UH_25℃"):
+                write_report_template(
+                    ExtractResult(
+                        source_path="UH_750V_1048A_000.tss",
+                        profile_code="UH",
+                        short_circuit_mode=True,
+                    ),
+                    report,
+                    images={("短路过程", "短路电流Imax"): image},
+                    phase_code="UH",
+                    temperature_code="RT",
+                )
+
+    def test_dpt_nonempty_images_reject_missing_parameter_slot(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "report.xlsx"
+            image = td_path / "scope.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            ws.merge_cells("A5:A8")
+            ws.merge_cells("B5:B8")
+            ws["A5"] = "UH"
+            ws["B5"] = "25℃"
+            wb.create_sheet("U相_双脉冲波形")
+            wb.save(report)
+
+            with self.assertRaisesRegex(ValueError, "双脉冲报告图片写入不完整"):
+                write_report_template(
+                    ExtractResult(
+                        source_path="UH_750V_1048A_000.tss",
+                        profile_code="UH",
+                    ),
+                    report,
+                    images={("关断过程", "ΔVce"): image},
+                    phase_code="UH",
+                    temperature_code="RT",
+                )
+
+    def test_short_nonempty_images_reject_missing_parameter_slot(self):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "report.xlsx"
+            image = td_path / "scope.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "短路测试"
+            ws["A5"] = "25℃"
+            ws["B5"] = "UH"
+            pic = wb.create_sheet("短路测试图片")
+            pic.merge_cells("A1:E1")
+            pic["A1"] = "UH_25℃"
+            wb.save(report)
+
+            with self.assertRaisesRegex(ValueError, "短路报告图片写入不完整"):
+                write_report_template(
+                    ExtractResult(
+                        source_path="UH_750V_1048A_000.tss",
+                        profile_code="UH",
+                        short_circuit_mode=True,
+                    ),
+                    report,
+                    images={("短路过程", "短路电流Imax"): image},
+                    phase_code="UH",
+                    temperature_code="RT",
+                )
+
     def test_inserted_waveform_image_keeps_original_aspect_ratio(self):
         from openpyxl.worksheet.cell_range import CellRange
 
@@ -79,6 +319,22 @@ class TestReportTemplateWriter(unittest.TestCase):
 
             inserted = ws._images[0]
             self.assertAlmostEqual(inserted.width / inserted.height, 160 / 90, delta=0.02)
+
+    def test_insert_image_rejects_missing_file_instead_of_counting_blank_slot(self):
+        from openpyxl.worksheet.cell_range import CellRange
+
+        from dpt_extractor.export.report_template import _insert_image
+
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "missing_scope.png"
+            wb = Workbook()
+            ws = wb.active
+            ws.merge_cells("J2:Q17")
+
+            with self.assertRaisesRegex(FileNotFoundError, "报告图片不存在"):
+                _insert_image(ws, missing, CellRange("J2:Q17"))
+
+            self.assertEqual(ws._images, [])
 
     def test_dpt_template_writes_next_empty_row_and_fills_waveform_labels(self):
         from dpt_extractor.export.mcu2506_layout import COL_OFF
@@ -180,6 +436,92 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved = load_workbook(report)
             self.assertEqual(saved["U相_双脉冲数据"].cell(5, 2).value, "26.5℃")
             self.assertEqual(saved["U相_双脉冲波形"].cell(1, 1).value, "UH_26.5℃")
+
+    def test_dpt_same_condition_keeps_identity_across_repeated_custom_temperatures(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.mcu2506_layout import COL_OFF
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "report.xlsx"
+            image = td_path / "preserved.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            for start_row, temperature in ((5, "25℃"), (9, "-40℃")):
+                data.merge_cells(
+                    start_row=start_row,
+                    start_column=1,
+                    end_row=start_row + 3,
+                    end_column=1,
+                )
+                data.merge_cells(
+                    start_row=start_row,
+                    start_column=2,
+                    end_row=start_row + 3,
+                    end_column=2,
+                )
+                data.cell(start_row, 1, "UH")
+                data.cell(start_row, 2, temperature)
+            wave = wb.create_sheet("U相_双脉冲波形")
+            wave.merge_cells("A1:H17")
+            wave["A1"] = "UH_-40℃"
+            wave.merge_cells("A18:H34")
+            wave["A18"] = "750V_1050A"
+            wave.merge_cells("A35:H51")
+            wave["A35"] = "总概览图"
+            preserved = wb.create_sheet("保留内容")
+            preserved["A1"] = "=1+1"
+            preserved.add_image(XLImage(str(image)), "B2")
+            wb.save(report)
+
+            result = ExtractResult(
+                source_path=str(Path("samples") / "UH_750V_1050A_000.tss"),
+                profile_code="UH",
+                turn_off=TurnOffResult(eoff=1.25),
+            )
+            first = write_report_template(
+                result,
+                report,
+                temperature_labels={"RT": "25℃", "HT": "150℃", "LT": "-55℃"},
+                temperature_code="LT",
+                phase_code="UH",
+            )
+            result.turn_off.eoff = 2.5
+            second = write_report_template(
+                result,
+                report,
+                temperature_labels={"RT": "25℃", "HT": "150℃", "LT": "-60℃"},
+                temperature_code="LT",
+                phase_code="UH",
+            )
+
+            saved = load_workbook(report, data_only=False)
+            self.assertEqual(first.data_row, 9)
+            self.assertEqual(second.data_row, 9)
+            self.assertEqual(
+                saved.sheetnames,
+                ["U相_双脉冲数据", "U相_双脉冲波形", "保留内容"],
+            )
+            self.assertEqual(saved["U相_双脉冲数据"]["B5"].value, "25℃")
+            self.assertEqual(saved["U相_双脉冲数据"]["B9"].value, "-60℃")
+            self.assertEqual(saved["U相_双脉冲波形"]["A1"].value, "UH_-60℃")
+            self.assertIsNone(saved["U相_双脉冲数据"].cell(5, COL_OFF["eoff"]).value)
+            self.assertEqual(
+                saved["U相_双脉冲数据"].cell(9, COL_OFF["eoff"]).value,
+                2.5,
+            )
+            self.assertEqual(saved["保留内容"]["A1"].value, "=1+1")
+            self.assertEqual(len(saved["保留内容"]._images), 1)
+            anchor = saved["保留内容"]._images[0].anchor._from
+            self.assertEqual((anchor.row, anchor.col), (1, 1))
+            for code in ("RT", "HT", "LT"):
+                identity = saved.defined_names[f"_DPT_TEMP_IDENTITY_{code}"]
+                self.assertTrue(identity.hidden)
 
     def test_dpt_manual_page_conditions_override_ambiguous_path(self):
         from dpt_extractor.export.mcu2506_layout import (
@@ -701,6 +1043,170 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved = load_workbook(report)["短路测试"]
             self.assertIsNone(saved.cell(5, COL_ESC_OTHER).value)
             self.assertEqual(saved.cell(5, COL_VPEAK_OTHER).value, 789.123)
+
+    def test_dpt_missing_images_clear_only_active_condition_slots(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_VOLTAGE
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "dpt_stale_images.xlsx"
+            image = td_path / "old_scope.png"
+            _write_tiny_png(image)
+
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            data.merge_cells("A5:A8")
+            data.merge_cells("B5:B8")
+            data["A5"] = "UH"
+            data["B5"] = "25℃"
+            data.cell(5, COL_VOLTAGE, 750)
+            data.cell(5, COL_CURRENT, 1050)
+            data.cell(5, COL_OFF["delta_vce"], 999)
+            data.cell(6, COL_VOLTAGE, 750)
+            data.cell(6, COL_CURRENT, 805)
+
+            wave = wb.create_sheet("U相_双脉冲波形")
+            for base, condition in ((1, "750V_1050A"), (54, "750V_805A")):
+                wave.merge_cells(
+                    start_row=base,
+                    start_column=1,
+                    end_row=base + 16,
+                    end_column=8,
+                )
+                wave.cell(base, 1, "UH_RT")
+                wave.merge_cells(
+                    start_row=base + 17,
+                    start_column=1,
+                    end_row=base + 33,
+                    end_column=8,
+                )
+                wave.cell(base + 17, 1, condition)
+                wave.merge_cells(
+                    start_row=base + 34,
+                    start_column=1,
+                    end_row=base + 50,
+                    end_column=8,
+                )
+                wave.cell(base + 34, 1, "总概览图")
+                wave.merge_cells(
+                    start_row=base,
+                    start_column=10,
+                    end_row=base,
+                    end_column=17,
+                )
+                wave.cell(base, 10, "△Vce（V）")
+                wave.merge_cells(
+                    start_row=base + 1,
+                    start_column=10,
+                    end_row=base + 16,
+                    end_column=17,
+                )
+            for anchor in ("A35", "J2", "A88", "J55"):
+                old_image = XLImage(str(image))
+                old_image.anchor = anchor
+                wave.add_image(old_image)
+            wb.save(report)
+
+            summary = write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=321.0),
+                    unavailable_metrics={("关断过程", "ΔVce")},
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)
+            saved_data = saved["U相_双脉冲数据"]
+            saved_wave = saved["U相_双脉冲波形"]
+            self.assertEqual(summary.waveform_anchor_row, 1)
+            self.assertIsNone(saved_data.cell(5, COL_OFF["delta_vce"]).value)
+            self.assertEqual(len(saved_wave._images), 2)
+            self.assertEqual(
+                sorted(
+                    (item.anchor._from.row + 1, item.anchor._from.col + 1)
+                    for item in saved_wave._images
+                ),
+                [(55, 10), (88, 1)],
+            )
+
+    def test_short_missing_images_clear_only_active_condition_slots(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.export.short_circuit_layout import COL_ICMAX
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "short_stale_images.xlsx"
+            image = td_path / "old_scope.png"
+            _write_tiny_png(image)
+
+            wb = Workbook()
+            data = wb.active
+            data.title = "短路测试"
+            data.merge_cells("A5:A6")
+            data["A5"] = "25℃"
+            data["B5"] = "UH"
+            data["B6"] = "UL"
+            data.cell(5, COL_ICMAX, 999)
+            data.cell(6, COL_ICMAX, 2222)
+
+            picture = wb.create_sheet("短路测试图片")
+            for base, phase_temp in ((1, "UH_RT"), (12, "UL_RT")):
+                picture.merge_cells(
+                    start_row=base,
+                    start_column=1,
+                    end_row=base + 3,
+                    end_column=5,
+                )
+                picture.cell(base, 1, phase_temp)
+                picture.merge_cells(
+                    start_row=base,
+                    start_column=6,
+                    end_row=base,
+                    end_column=8,
+                )
+                picture.cell(base, 6, "短路电流Imax")
+                picture.merge_cells(
+                    start_row=base + 1,
+                    start_column=6,
+                    end_row=base + 9,
+                    end_column=8,
+                )
+            for anchor in ("F2", "F13"):
+                old_image = XLImage(str(image))
+                old_image.anchor = anchor
+                picture.add_image(old_image)
+            wb.save(report)
+
+            summary = write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_000.tss"),
+                    profile_code="UH",
+                    short_circuit_mode=True,
+                    short_circuit=ShortCircuitResult(ic_max=1234.0),
+                    unavailable_metrics={("短路过程", "短路电流Imax")},
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)
+            saved_data = saved["短路测试"]
+            saved_picture = saved["短路测试图片"]
+            self.assertEqual(summary.waveform_anchor_row, 1)
+            self.assertIsNone(saved_data.cell(5, COL_ICMAX).value)
+            self.assertEqual(saved_data.cell(6, COL_ICMAX).value, 2222)
+            self.assertEqual(len(saved_picture._images), 1)
+            anchor = saved_picture._images[0].anchor._from
+            self.assertEqual((anchor.row + 1, anchor.col + 1), (13, 6))
 
     def test_short_layout_leaves_unavailable_metric_cells_blank(self):
         from dpt_extractor.export.short_circuit_layout import (
@@ -2437,6 +2943,80 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(saved["短路测试"].cell(7, 1).value, "-55℃")
             self.assertEqual(saved["短路测试图片"].cell(1, 1).value, "UH_26.5℃")
             self.assertEqual(saved["短路测试图片"].cell(12, 1).value, "UL_-55℃")
+
+    def test_short_same_condition_keeps_identity_across_repeated_custom_temperatures(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "short_report.xlsx"
+            image = td_path / "preserved.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            data = wb.active
+            data.title = "短路测试"
+            for start_row, temperature in ((5, "25℃"), (7, "-40℃")):
+                data.merge_cells(
+                    start_row=start_row,
+                    start_column=1,
+                    end_row=start_row + 1,
+                    end_column=1,
+                )
+                data.cell(start_row, 1, temperature)
+                data.cell(start_row, 2, "UH")
+                data.cell(start_row + 1, 2, "UL")
+            picture = wb.create_sheet("短路测试图片")
+            picture.merge_cells("A1:E4")
+            picture["A1"] = "UL_-40℃"
+            preserved = wb.create_sheet("保留内容")
+            preserved["A1"] = "=2+2"
+            preserved.add_image(XLImage(str(image)), "C3")
+            wb.save(report)
+
+            result = ExtractResult(
+                source_path=str(Path("samples") / "UL_750V_000.tss"),
+                profile_code="UL",
+                short_circuit_mode=True,
+                short_circuit=ShortCircuitResult(ic_max=1111.0),
+            )
+            first = write_report_template(
+                result,
+                report,
+                temperature_labels={"RT": "25℃", "HT": "150℃", "LT": "-55℃"},
+                temperature_code="LT",
+                phase_code="UL",
+            )
+            result.short_circuit.ic_max = 2222.0
+            second = write_report_template(
+                result,
+                report,
+                temperature_labels={"RT": "25℃", "HT": "150℃", "LT": "-60℃"},
+                temperature_code="LT",
+                phase_code="UL",
+            )
+
+            saved = load_workbook(report, data_only=False)
+            self.assertEqual(first.data_row, 8)
+            self.assertEqual(second.data_row, 8)
+            self.assertEqual(
+                saved.sheetnames,
+                ["短路测试", "短路测试图片", "保留内容"],
+            )
+            self.assertEqual(saved["短路测试"]["A5"].value, "25℃")
+            self.assertEqual(saved["短路测试"]["A7"].value, "-60℃")
+            self.assertEqual(saved["短路测试图片"]["A1"].value, "UL_-60℃")
+            self.assertIsNone(saved["短路测试"].cell(6, 5).value)
+            self.assertEqual(saved["短路测试"].cell(8, 5).value, 2222)
+            self.assertEqual(saved["保留内容"]["A1"].value, "=2+2")
+            self.assertEqual(len(saved["保留内容"]._images), 1)
+            anchor = saved["保留内容"]._images[0].anchor._from
+            self.assertEqual((anchor.row, anchor.col), (2, 2))
+            for code in ("RT", "HT", "LT"):
+                identity = saved.defined_names[f"_DPT_TEMP_IDENTITY_{code}"]
+                self.assertTrue(identity.hidden)
 
     def test_short_template_writes_row_and_global_image_slot(self):
         from dpt_extractor.export.report_template import write_report_template

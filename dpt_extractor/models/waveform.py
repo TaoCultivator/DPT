@@ -120,11 +120,15 @@ class WaveformBundle:
         channel = self.channels.get(base)
         if channel is None:
             return None
-        if sign < 0:
-            return -np.asarray(channel, dtype=np.float64)
-        if (base in self.meta.channel_display_inversions) != (
+        display_transform_inverted = (
+            base in self.meta.channel_display_inversions
+        ) != (
             base in self.meta.source_channel_inversions
-        ):
+        )
+        # A signed mapping and the user/source display transform are two
+        # independent factors.  Compose them exactly once instead of letting a
+        # leading '-' bypass the inversion selected in channel settings.
+        if (sign < 0) != display_transform_inverted:
             return -np.asarray(channel, dtype=np.float64)
         return channel
 

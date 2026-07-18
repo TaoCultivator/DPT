@@ -4,6 +4,7 @@ import ast
 from dataclasses import replace
 import os
 import re
+import time
 
 import numpy as np
 import pyqtgraph as pg
@@ -18,6 +19,7 @@ from PyQt6.QtGui import (
     QPolygonF,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
@@ -232,11 +234,69 @@ class ChannelZeroHandle(pg.GraphicsObject):
 class ScopeCursorLine(pg.InfiniteLine):
     """InfiniteLine with a scope-style right-click menu hook."""
 
+    _HIT_WIDTH_PX = 16.0
+
     contextRequested = pyqtSignal(str, QPointF)
 
     def __init__(self, cursor_id: str, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._cursor_id = cursor_id
+
+    def _computeBoundingRect(self) -> QRectF:
+        """Keep the painted line thin while giving it a practical mouse hit area."""
+        view_rect = self.viewRect()
+        if view_rect is None:
+            return QRectF()
+
+        _, orthogonal = self.pixelVectors(direction=QPointF(1.0, 0.0))
+        pixel_size = 0.0 if orthogonal is None else abs(float(orthogonal.y()))
+        paint_half_width = (
+            float(self._maxMarkerSize)
+            + max(float(self.pen.width()) / 2.0, float(self.hoverPen.width()) / 2.0)
+            + 1.0
+        )
+        half_width = max(paint_half_width, self._HIT_WIDTH_PX / 2.0)
+        width = half_width * pixel_size
+
+        bounds = QRectF(view_rect)
+        bounds.setBottom(-width)
+        bounds.setTop(width)
+        length = bounds.width()
+        left = bounds.left() + length * self.span[0]
+        right = bounds.left() + length * self.span[1]
+        bounds.setLeft(left)
+        bounds.setRight(right)
+        bounds = bounds.normalized()
+
+        view_box = self.getViewBox()
+        view_size = view_box.size() if view_box is not None else QSize()
+        if self._bounds != bounds or self._lastViewSize != view_size:
+            self._bounds = bounds
+            self._lastViewSize = view_size
+            self.prepareGeometryChange()
+
+        self._endPoints = (left, right)
+        self._lastViewRect = view_rect
+        return self._bounds
+
+    def setMovable(self, movable: bool) -> None:  # noqa: N802
+        super().setMovable(movable)
+        if not movable:
+            if hasattr(self, "mouseHovering"):
+                self.setMouseHover(False)
+            self.unsetCursor()
+
+    def hoverEvent(self, ev) -> None:  # noqa: N802
+        super().hoverEvent(ev)
+        if not self.movable or not self.mouseHovering:
+            self.unsetCursor()
+            return
+        if self.angle % 180 == 90:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif self.angle % 180 == 0:
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
 
     def mouseClickEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.MouseButton.RightButton:
@@ -414,6 +474,7 @@ class ChannelBox(QFrame):
         super().__init__(parent)
         self._key = key
         self._color = color
+        self._dispatching_double_click = False
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumSize(108, 52)
@@ -447,7 +508,11 @@ class ChannelBox(QFrame):
 
     def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
         if ev.button() == Qt.MouseButton.LeftButton:
-            self.highlightDoubleClicked.emit(self._key)
+            self._dispatching_double_click = True
+            try:
+                self.highlightDoubleClicked.emit(self._key)
+            finally:
+                self._dispatching_double_click = False
             ev.accept()
             return
         super().mouseDoubleClickEvent(ev)
@@ -1458,9 +1523,21 @@ class WaveformPlot(QWidget):
     交互模式（_interactive_mode）：
       - "global"   : 默认。A/B 拖动只更新读数 + 通知 MainWindow（用于无激活参数的测量）
       - "interval" : 某参数被点击后绑定到 A/B；拖动 A/B 实时重算该参数
+      - "semantic_interval": A/B 保留跨通道语义顺序，允许 B 物理上位于 A 左侧
       - "delta_vce": ΔVce 专用——A/B + Ha/Hb 联动
       - "dvdt"/"didt": Ha=Top、Hb=Base；A/B 卡在两者之间百分比穿越时刻（随 Ha/Hb 联动）
     """
+
+    _INTERVAL_HORIZONTAL_MODES = frozenset(
+        {
+            "interval",
+            "semantic_interval",
+            "power_peak",
+            "crosstalk",
+            "irr_cross",
+            "irr_peak",
+        }
+    )
 
     channelMappingRequested = pyqtSignal(str, str)
     channelLabelChanged = pyqtSignal(str, str)
@@ -1853,6 +1930,7 @@ class WaveformPlot(QWidget):
         self._cursor_aux_hline: pg.PlotDataItem | None = None
         self._cursor_aux_vline: pg.PlotDataItem | None = None
         self._cursor_aux_channel: str | None = None
+        self._cursor_aux_value_channel: str | None = None
         self._cursor_aux_t_us: float | None = None
         self._cursor_aux_value: float | None = None
         self._cursor_aux_x_range_us: tuple[float, float] | None = None
@@ -1882,6 +1960,11 @@ class WaveformPlot(QWidget):
         self._role_units: dict[str, str] = {}
         self._raised_key: str | None = None
         self._highlighted_key: str | None = None
+        # A real Qt double click is preceded by one or more ordinary press
+        # events.  Remember whether that sequence began on an already
+        # highlighted trace so the ordinary raise action cannot erase the
+        # information needed to toggle the highlight off.
+        self._legend_press_state: tuple[str, bool, float] | None = None
         self._hidden_channels: set[str] = set()
 
         # 每通道垂直刻度（单位/格），显示坐标 = 原始值 / 刻度 + 位置偏移
@@ -1912,6 +1995,13 @@ class WaveformPlot(QWidget):
         self._loss_fit_include_turn_on: bool = True
         self._base_logical_display_keys: dict[str, str] = {}
         self._logical_display_keys: dict[str, str] = {}
+        # A logical measurement role can intentionally be the negative of its
+        # visible source (for example Irr=-CH3 or an auto-oriented current).
+        # Keep the visible key unsigned and remember only the role-to-display
+        # polarity used by physical-value cursor conversions.
+        self._logical_display_signs: dict[str, int] = {}
+        self._logical_display_aligned: dict[str, bool] = {}
+        self._logical_role_raw: dict[str, np.ndarray] = {}
         self._display_channel_roles: dict[str, list[str]] = {}
         # 每通道 0 值箭头手柄（波形右缘，拖动调垂直位置）
         self._zero_handles: dict[str, ChannelZeroHandle] = {}
@@ -1926,6 +2016,9 @@ class WaveformPlot(QWidget):
         self._interactive_vce: np.ndarray | None = None
         self._interactive_irr_t_us: np.ndarray | None = None
         self._interactive_irr: np.ndarray | None = None
+        self._interactive_waveform_bundle: WaveformBundle | None = None
+        self._interactive_waveform_profile: BridgeProfile | None = None
+        self._interactive_waveform_inversions: tuple[tuple[str, ...], tuple[str, ...]] | None = None
         self._interactive_irr_peak_idx: int | None = None
         self._interactive_trr_i_fall_end: int | None = None
         self._interactive_ic_t_us: np.ndarray | None = None
@@ -1940,14 +2033,30 @@ class WaveformPlot(QWidget):
         self._interactive_search_t0_us: float | None = None
         self._interactive_search_t1_us: float | None = None
         self._interactive_syncing = False
+        self._parameter_cursor_context_suppressed = False
+        self._slope_ab_valid = True
         self._interval_max_hline_enabled = False
         self._interval_peak_on_hb = False
+        # Interval-style measurements may bind Ha/Hb to different physical
+        # channels (for example short-circuit Vpeak: Vce/Vge, Esc: MATH/Ic).
+        # Keep the line bindings independent from the A/B waveform source.
+        self._interval_ha_channel: str | None = None
+        self._interval_hb_channel: str | None = None
+        self._interval_ab_channel: str | None = None
+        # A/B normally sample the currently selected trace.  Parameters whose
+        # two interval boundaries are defined on specific (or different)
+        # waveforms may override each endpoint independently.
+        self._interval_a_channel: str | None = None
+        self._interval_b_channel: str | None = None
+        self._interval_ha_valid = True
+        self._interval_hb_valid = True
         self._h_cursor_a_locked = False
         # 光标联动模式：True=联动（原逻辑），False=独立（禁止自动吸附/联动）
         self._cursor_linked = True
         self._cursor_type = "both"
         self._last_visible_cursor_type = "both"
         self._cursor_readout_overlay = True
+        self._last_cursor_visibility_signature: tuple | None = None
         self._energy_edge_a = "rising"
         self._energy_edge_b = "falling"
         self._energy_b_channel = "ic"
@@ -2011,8 +2120,10 @@ class WaveformPlot(QWidget):
         self._interactive_on_horizontal_change = None
         self._interactive_search_t0_us = None
         self._interactive_search_t1_us = None
+        self._reset_interval_horizontal_bindings(valid=True)
         self._h_cursor_a_locked = False
         self.clear_cursor_auxiliary_guides()
+        self._apply_cursor_visibility()
 
     def cursors_t_us(self) -> tuple[float, float] | None:
         if self._cursor_a is None or self._cursor_b is None:
@@ -2074,6 +2185,7 @@ class WaveformPlot(QWidget):
         self._interactive_search_t1_us = None
         self._interval_max_hline_enabled = False
         self._interval_peak_on_hb = False
+        self._reset_interval_horizontal_bindings(valid=True)
         self._slope_channel = None
         self._slope_zero_ref_enabled = False
         self._hide_h_cursor_zero()
@@ -2151,6 +2263,9 @@ class WaveformPlot(QWidget):
         self._interactive_vce = None
         self._interactive_irr_t_us = None
         self._interactive_irr = None
+        self._interactive_waveform_bundle = None
+        self._interactive_waveform_profile = None
+        self._interactive_waveform_inversions = None
         self._interactive_irr_peak_idx = None
         self._interactive_trr_i_fall_end = None
         self._interactive_ic_t_us = None
@@ -2164,9 +2279,11 @@ class WaveformPlot(QWidget):
         self._interactive_syncing = False
         self._interval_max_hline_enabled = False
         self._interval_peak_on_hb = False
+        self._reset_interval_horizontal_bindings(valid=True)
         self._h_cursor_a_locked = False
         self._raised_key = None
         self._highlighted_key = None
+        self._legend_press_state = None
 
     def _view_coords_at_context_pos(self, pos) -> tuple[float, float]:
         """右键位置 → 视图坐标 (时间 µs, 纵向显示格)。"""
@@ -2223,15 +2340,40 @@ class WaveformPlot(QWidget):
         self._apply_cursor_visibility()
 
     def _cursor_vertical_visible(self) -> bool:
-        return self._cursor_type in {"vertical", "both", "waveform"}
+        return (
+            self._interactive_mode != "unavailable"
+            and not (
+                self._interactive_mode in self._BASE_TOP_SLOPE_MODES
+                and not self._slope_ab_valid
+            )
+            and self._cursor_type in {"vertical", "both", "waveform"}
+        )
 
     def _cursor_horizontal_visible(self) -> bool:
-        return self._cursor_type in {"horizontal", "both"}
+        return (
+            self._interactive_mode != "unavailable"
+            and self._cursor_type in {"horizontal", "both"}
+        )
 
     def _cursor_waveform_visible(self) -> bool:
-        return self._cursor_type == "waveform" or (
+        return self._interactive_mode != "unavailable" and (
+            self._cursor_type == "waveform" or (
             self._cursor_type == "both"
             and self._interactive_mode in {"energy_loss", "trr_measure"}
+            )
+        )
+
+    def _cursor_visibility_signature(self) -> tuple:
+        """Small state key used to avoid repainting cursors on every drag."""
+
+        return (
+            self._interactive_mode,
+            self._cursor_type,
+            bool(self._slope_ab_valid),
+            bool(self._horizontal_line_valid("ha")),
+            bool(self._horizontal_line_valid("hb")),
+            bool(self._slope_zero_ref_enabled),
+            bool(self._cursor_readout_overlay),
         )
 
     def cursor_switch_enabled(self) -> bool:
@@ -2267,24 +2409,38 @@ class WaveformPlot(QWidget):
         for item in (self._cursor_a, self._cursor_b):
             if item is not None:
                 item.setVisible(show_v)
-        for item in (self._h_cursor_a, self._h_cursor_b, self._h_cursor_zero):
-            if item is not None:
-                item.setVisible(show_h and (item is not self._h_cursor_zero or self._slope_zero_ref_enabled))
+        if self._h_cursor_a is not None:
+            self._h_cursor_a.setVisible(show_h and self._horizontal_line_valid("ha"))
+        if self._h_cursor_b is not None:
+            self._h_cursor_b.setVisible(show_h and self._horizontal_line_valid("hb"))
+        if self._h_cursor_zero is not None:
+            self._h_cursor_zero.setVisible(show_h and self._slope_zero_ref_enabled)
         for attr in ("_cursor_a_t_label", "_cursor_b_t_label", "_cursor_ab_delta_label"):
             item = getattr(self, attr)
             if item is not None:
                 item.setVisible(show_v and self._cursor_readout_overlay)
-        for attr in ("_cursor_ha_v_label", "_cursor_hb_v_label", "_cursor_hb_ha_delta_label"):
+        for attr, valid in (
+            ("_cursor_ha_v_label", self._horizontal_line_valid("ha")),
+            ("_cursor_hb_v_label", self._horizontal_line_valid("hb")),
+            (
+                "_cursor_hb_ha_delta_label",
+                self._horizontal_quantities_comparable(),
+            ),
+        ):
             item = getattr(self, attr)
             if item is not None:
-                item.setVisible(show_h and self._cursor_readout_overlay)
-        for attr in ("_cursor_ha_name_label", "_cursor_hb_name_label"):
+                item.setVisible(show_h and self._cursor_readout_overlay and valid)
+        for attr, valid in (
+            ("_cursor_ha_name_label", self._horizontal_line_valid("ha")),
+            ("_cursor_hb_name_label", self._horizontal_line_valid("hb")),
+        ):
             item = getattr(self, attr)
             if item is not None:
-                item.setVisible(show_h)
+                item.setVisible(show_h and valid)
         self._update_waveform_cursor_markers()
         self._sync_cursor_line_label_positions()
         self._refresh_cursor_auxiliary_guides()
+        self._last_cursor_visibility_signature = self._cursor_visibility_signature()
 
     def _set_cursor_readout_overlay(self, enabled: bool) -> None:
         self._cursor_readout_overlay = bool(enabled)
@@ -2360,13 +2516,14 @@ class WaveformPlot(QWidget):
             act_b.triggered.connect(lambda: self._jump_vertical_cursor("b", t_us))
             _add_move_action(act_a)
             _add_move_action(act_b)
-        if show_horizontal and has_horizontal_cursors:
+        if show_horizontal and has_horizontal_cursors and self._horizontal_line_valid("ha"):
             act_ha = QAction("将光标 Ha 移到此处", self)
             act_ha.setEnabled(not self._h_cursor_a_locked)
             act_ha.triggered.connect(
                 lambda: self._jump_horizontal_cursor("a", y_div)
             )
             _add_move_action(act_ha)
+        if show_horizontal and has_horizontal_cursors and self._horizontal_line_valid("hb"):
             act_hb = QAction("将光标 Hb 移到此处", self)
             act_hb.setEnabled(self._line_movable(self._h_cursor_b))
             act_hb.triggered.connect(
@@ -2691,6 +2848,66 @@ class WaveformPlot(QWidget):
     def _remember_user_x_scale(self, scale_us: float) -> None:
         self._user_x_us_per_div = _quantize_x_us_per_div(scale_us)
 
+    def snapshot_report_display_state(self) -> dict[str, object]:
+        """Capture user-visible waveform preferences around report screenshots."""
+
+        return {
+            "hidden_channels": set(self._hidden_channels),
+            "active_channel": self._active_channel,
+            "user_x_us_per_div": self._user_x_us_per_div,
+            "raised_key": self._raised_key,
+            "highlighted_key": self._highlighted_key,
+        }
+
+    def restore_report_display_state(self, state: dict[str, object]) -> None:
+        """Restore display preferences without reviving traces absent on this page."""
+
+        valid_keys = set(self._trace_items)
+        hidden = state.get("hidden_channels", set())
+        if isinstance(hidden, (set, frozenset, list, tuple)):
+            self._hidden_channels = {
+                str(key) for key in hidden if str(key) in valid_keys
+            }
+        else:
+            self._hidden_channels.clear()
+
+        active = str(state.get("active_channel") or "")
+        if active in valid_keys or active in self._trace_raw:
+            self._active_channel = active
+
+        raw_scale = state.get("user_x_us_per_div")
+        try:
+            scale = float(raw_scale) if raw_scale is not None else None
+        except (TypeError, ValueError):
+            scale = None
+        self._user_x_us_per_div = (
+            _quantize_x_us_per_div(scale)
+            if scale is not None and np.isfinite(scale) and scale > 0.0
+            else None
+        )
+
+        raised = str(state.get("raised_key") or "")
+        highlighted = str(state.get("highlighted_key") or "")
+        self._raised_key = (
+            raised
+            if raised in valid_keys and raised not in self._hidden_channels
+            else None
+        )
+        self._highlighted_key = (
+            highlighted
+            if highlighted in valid_keys and highlighted not in self._hidden_channels
+            else None
+        )
+        for key, item in self._trace_items.items():
+            item.setVisible(key not in self._hidden_channels)
+        self._apply_trace_selection_style()
+        self._refresh_legend_styles()
+        self._refresh_zero_handle_styles()
+        self._refresh_overview_traces()
+        self._update_x_ticks()
+        self._update_y_ticks()
+        self._update_readout()
+
     def _param_focus_x_scale_us(self) -> float:
         if self._user_x_us_per_div is not None:
             return self._user_x_us_per_div
@@ -3006,17 +3223,275 @@ class WaveformPlot(QWidget):
         overview_bottom_ax.setTextPen(pg.mkPen(color))
         self._sync_x_tick_labels_from_axis()
 
+    def _logical_display_sign(self, channel: str | None) -> int:
+        """Return ±1 only when *channel* names a logical measurement role."""
+
+        logical = str(channel or "").strip().lower()
+        if logical not in self._logical_display_keys:
+            return 1
+        return int(self._logical_display_signs.get(logical, 1))
+
+    @staticmethod
+    def _relative_waveform_match(
+        logical_raw: np.ndarray | None,
+        visible_raw: np.ndarray | None,
+    ) -> tuple[int, bool]:
+        """Return (sign, aligned) for a logical waveform versus its display."""
+
+        if logical_raw is None or visible_raw is None:
+            return 1, False
+        logical_source = np.asarray(logical_raw).reshape(-1)
+        visible_source = np.asarray(visible_raw).reshape(-1)
+        if logical_source.size == 0 or logical_source.shape != visible_source.shape:
+            return 1, False
+
+        # Uniform sampling keeps this GUI-side audit cheap for long TSS files
+        # while still covering plateaus, transitions and derived Math traces.
+        sample_count = min(int(logical_source.size), 16384)
+        if sample_count < logical_source.size:
+            indices = np.linspace(
+                0,
+                logical_source.size - 1,
+                sample_count,
+                dtype=np.int64,
+            )
+            logical_source = logical_source[indices]
+            visible_source = visible_source[indices]
+        # Convert only the bounded sample.  Converting a complete float32 TSS
+        # trace before sampling caused a needless full-record allocation on
+        # every sign refresh.
+        logical = np.asarray(logical_source, dtype=np.float64)
+        visible = np.asarray(visible_source, dtype=np.float64)
+        finite = np.isfinite(logical) & np.isfinite(visible)
+        if not np.any(finite):
+            return 1, False
+        logical = logical[finite]
+        visible = visible[finite]
+        magnitude = max(
+            float(np.max(np.abs(logical))),
+            float(np.max(np.abs(visible))),
+        )
+        if not np.isfinite(magnitude) or magnitude <= 1e-15:
+            return 1, False
+        logical = logical / magnitude
+        visible = visible / magnitude
+        same_error = float(np.mean(np.abs(logical - visible)))
+        inverted_error = float(np.mean(np.abs(logical + visible)))
+        # A formula-name fallback may point at a semantically related but not
+        # numerically equivalent Math trace.  Apply a negative sign only when
+        # the waveforms are actually the same trace within a small tolerance;
+        # "less wrong than +" is not sufficient evidence for inversion.
+        if inverted_error <= 0.01 and inverted_error + 1e-12 < same_error:
+            return -1, True
+        if same_error <= 0.01:
+            return 1, True
+        return 1, False
+
+    @staticmethod
+    def _relative_waveform_sign(
+        logical_raw: np.ndarray | None,
+        visible_raw: np.ndarray | None,
+    ) -> int:
+        """Identify whether a logical waveform matches a visible trace as ±raw."""
+
+        sign, _aligned = WaveformPlot._relative_waveform_match(
+            logical_raw,
+            visible_raw,
+        )
+        return sign
+
+    def _refresh_logical_display_signs(
+        self,
+        logical_arrays: dict[str, np.ndarray] | None = None,
+    ) -> None:
+        """Bind logical physical values to the waveform actually shown on screen."""
+
+        if logical_arrays is not None:
+            self._logical_role_raw = {
+                str(logical).strip().lower(): np.asarray(raw, dtype=np.float64)
+                for logical, raw in logical_arrays.items()
+                if raw is not None
+            }
+        signs: dict[str, int] = {}
+        aligned: dict[str, bool] = {}
+        for logical, display_key in self._logical_display_keys.items():
+            sign, is_aligned = self._relative_waveform_match(
+                self._logical_role_raw.get(logical),
+                self._effective_raw_for_channel(display_key),
+            )
+            signs[logical] = sign
+            aligned[logical] = is_aligned
+        self._logical_display_signs = signs
+        self._logical_display_aligned = aligned
+
+    def _cursor_value_raw(self, channel: str) -> np.ndarray | None:
+        """Return values in the coordinate system promised by *channel*."""
+
+        logical = str(channel or "").strip().lower()
+        if (
+            logical in self._logical_display_keys
+            and self._logical_display_aligned.get(logical, False)
+        ):
+            raw = self._logical_role_raw.get(logical)
+            if raw is not None:
+                return raw
+        return self._effective_raw_for_channel(
+            self._display_key_for_channel(channel)
+        )
+
     def _to_disp(self, channel: str, value: float) -> float:
-        channel = self._display_key_for_channel(channel)
-        scale = self._disp_scale.get(channel, 1.0)
-        offset = self._disp_offset.get(channel, 0.0)
-        return (float(value) / scale if scale else float(value)) + offset
+        sign = self._logical_display_sign(channel)
+        display_channel = self._display_key_for_channel(channel)
+        scale = self._disp_scale.get(display_channel, 1.0)
+        offset = self._disp_offset.get(display_channel, 0.0)
+        visible_value = float(sign) * float(value)
+        return (
+            visible_value / scale if scale else visible_value
+        ) + offset
 
     def _from_disp(self, channel: str, y_div: float) -> float:
-        channel = self._display_key_for_channel(channel)
-        scale = self._disp_scale.get(channel, 1.0)
-        offset = self._disp_offset.get(channel, 0.0)
-        return (float(y_div) - offset) * scale
+        sign = self._logical_display_sign(channel)
+        display_channel = self._display_key_for_channel(channel)
+        scale = self._disp_scale.get(display_channel, 1.0)
+        offset = self._disp_offset.get(display_channel, 0.0)
+        visible_value = (float(y_div) - offset) * scale
+        return float(sign) * visible_value
+
+    def _reset_interval_horizontal_bindings(self, *, valid: bool) -> None:
+        self._interval_ha_channel = None
+        self._interval_hb_channel = None
+        self._interval_ab_channel = None
+        self._interval_ha_valid = bool(valid)
+        self._interval_hb_valid = bool(valid)
+
+    def _reset_interval_vertical_bindings(self) -> None:
+        self._interval_a_channel = None
+        self._interval_b_channel = None
+
+    def clear_interval_horizontal_lines(self) -> None:
+        """Invalidate interval Ha/Hb so stale lines cannot leak into a new row."""
+
+        self._reset_interval_horizontal_bindings(valid=False)
+        self._update_readout()
+        self._apply_cursor_visibility()
+
+    def _interval_horizontal_bindings_active(self) -> bool:
+        return self._interactive_mode in self._INTERVAL_HORIZONTAL_MODES
+
+    def _horizontal_cursor_binding(self, which: str) -> tuple[str, bool]:
+        """Return the physical channel and validity for one horizontal line."""
+
+        if which not in {"ha", "hb"}:
+            raise ValueError(f"unknown horizontal cursor: {which}")
+        if self._interactive_mode == "unavailable":
+            return "", False
+        if self._interactive_mode == "energy_loss":
+            channel = (
+                getattr(self, "_energy_ha_channel", "vce")
+                if which == "ha"
+                else getattr(self, "_energy_hb_channel", "ic")
+            )
+            return str(channel), True
+        # Slope and dedicated current measurements place their horizontal
+        # lines in a logical role's coordinate system.  Resolving that role to
+        # its visible CH/MATH key here would discard an explicit negative
+        # mapping (for example Irr=-CH3), so keep the logical source for all
+        # value conversions and readouts.
+        if (
+            self._interactive_mode in self._BASE_TOP_SLOPE_MODES
+            and self._slope_channel is not None
+        ):
+            return str(self._slope_channel), True
+        if self._interactive_mode in {"turn_on_current", "short_current"}:
+            return "ic", True
+        if self._interactive_mode == "trr_measure":
+            return "irr", True
+        if self._interactive_mode == "delta_vce":
+            return "vce", True
+        if self._interval_horizontal_bindings_active():
+            channel = (
+                self._interval_ha_channel
+                if which == "ha"
+                else self._interval_hb_channel
+            )
+            valid = (
+                self._interval_ha_valid if which == "ha" else self._interval_hb_valid
+            )
+            return str(channel or self._readout_channel()), bool(valid and channel)
+        return self._readout_channel(), True
+
+    def _horizontal_quantities_comparable(self) -> bool:
+        ha_ch, ha_valid = self._horizontal_cursor_binding("ha")
+        hb_ch, hb_valid = self._horizontal_cursor_binding("hb")
+        if not (ha_valid and hb_valid):
+            return False
+        ha_key = self._display_key_for_channel(ha_ch)
+        hb_key = self._display_key_for_channel(hb_ch)
+        return (
+            ha_key == hb_key
+            and self._logical_display_sign(ha_ch)
+            == self._logical_display_sign(hb_ch)
+            and self._unit_for_channel(ha_ch) == self._unit_for_channel(hb_ch)
+        )
+
+    def _horizontal_line_valid(self, which: str) -> bool:
+        return self._horizontal_cursor_binding(which)[1]
+
+    def _set_interval_horizontal_binding(self, which: str, channel: str) -> None:
+        if which == "ha":
+            self._interval_ha_channel = str(channel)
+            self._interval_ha_valid = True
+        elif which == "hb":
+            self._interval_hb_channel = str(channel)
+            self._interval_hb_valid = True
+        else:
+            raise ValueError(f"unknown horizontal cursor: {which}")
+
+    def _snapshot_horizontal_cursor_values(
+        self, channel: str
+    ) -> list[tuple[pg.InfiniteLine, str, float]]:
+        """Freeze physical cursor levels before changing a channel transform."""
+
+        target = self._display_key_for_channel(channel)
+        snapshots: list[tuple[pg.InfiniteLine, str, float]] = []
+        for which, line in (("ha", self._h_cursor_a), ("hb", self._h_cursor_b)):
+            if line is None:
+                continue
+            bound, valid = self._horizontal_cursor_binding(which)
+            if not valid or self._display_key_for_channel(bound) != target:
+                continue
+            snapshots.append((line, bound, self._from_disp(bound, float(line.value()))))
+        if (
+            self._h_cursor_zero is not None
+            and self._slope_zero_ref_enabled
+            and self._display_key_for_channel(self._readout_channel()) == target
+        ):
+            bound = self._readout_channel()
+            snapshots.append(
+                (
+                    self._h_cursor_zero,
+                    bound,
+                    self._from_disp(bound, float(self._h_cursor_zero.value())),
+                )
+            )
+        return snapshots
+
+    def _restore_horizontal_cursor_values(
+        self,
+        snapshots: list[tuple[pg.InfiniteLine, str, float]],
+        *,
+        invert: bool = False,
+    ) -> None:
+        if not snapshots:
+            return
+        syncing = self._interactive_syncing
+        self._interactive_syncing = True
+        try:
+            for line, channel, value in snapshots:
+                physical = -float(value) if invert else float(value)
+                line.setPos(self._to_disp(channel, physical))
+        finally:
+            self._interactive_syncing = syncing
 
     def _display_inversion_enabled(self, key: str) -> bool:
         base = channel_reference_base_name(key)
@@ -3050,9 +3525,11 @@ class WaveformPlot(QWidget):
         if raw is None:
             return None
         arr = np.asarray(raw, dtype=np.float64)
-        if sign < 0:
-            return -arr
-        if include_display_inversion and self._display_transform_inverted(base or ref):
+        display_transform_inverted = bool(
+            include_display_inversion
+            and self._display_transform_inverted(base or ref)
+        )
+        if (sign < 0) != display_transform_inverted:
             return -arr
         return arr
 
@@ -3060,31 +3537,39 @@ class WaveformPlot(QWidget):
         """Return the full-resolution waveform currently shown for a channel."""
         return self._effective_raw_for_channel(channel, include_display_inversion=True)
 
-    def _effective_reference_for_channel(self, channel: str | None) -> str:
-        ref = normalize_channel_reference(channel)
-        sign, base = split_channel_reference(ref)
-        if not base or sign < 0:
-            return ref
-        if self._display_transform_inverted(base):
-            return f"-{base}"
-        return base
-
-    def effective_profile_for_channel_inversions(
-        self, profile: BridgeProfile
-    ) -> BridgeProfile:
-        """Profile used for calculations when source channels are display-inverted."""
-
-        return replace(
-            profile,
-            vge=self._effective_reference_for_channel(profile.vge),
-            vce=self._effective_reference_for_channel(profile.vce),
-            ic=self._effective_reference_for_channel(profile.ic),
-            il=self._effective_reference_for_channel(profile.il),
-            irr=self._effective_reference_for_channel(profile.irr),
-            v_diode=self._effective_reference_for_channel(profile.v_diode),
-            vge_other=self._effective_reference_for_channel(profile.vge_other),
-            vdesat=self._effective_reference_for_channel(profile.vdesat),
+    @staticmethod
+    def _bundle_inversion_signature(
+        bundle: WaveformBundle,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        return (
+            tuple(sorted(str(ch).upper() for ch in bundle.meta.source_channel_inversions)),
+            tuple(sorted(str(ch).upper() for ch in bundle.meta.channel_display_inversions)),
         )
+
+    def logical_reverse_recovery_current(
+        self,
+        bundle: WaveformBundle,
+        profile: BridgeProfile,
+    ) -> np.ndarray | None:
+        """Return the current plot's full-resolution logical Irr as a read-only view.
+
+        Identity and inversion checks prevent MainWindow cursor calculations from
+        accidentally reusing a previous file, mapping, or pre-inversion array.
+        ``plot_waveforms`` is the sole writer of this cache.
+        """
+
+        if (
+            bundle is not self._interactive_waveform_bundle
+            or profile is not self._interactive_waveform_profile
+            or self._interactive_waveform_inversions
+            != self._bundle_inversion_signature(bundle)
+            or self._interactive_irr is None
+            or len(self._interactive_irr) != len(bundle.t)
+        ):
+            return None
+        view = np.asarray(self._interactive_irr, dtype=np.float64).view()
+        view.setflags(write=False)
+        return view
 
     def _current_x_window_for_display(self) -> tuple[float, float] | None:
         if self._trace_t_us is None or len(self._trace_t_us) == 0:
@@ -3636,12 +4121,20 @@ class WaveformPlot(QWidget):
             and profile.irr
             and profile.il
         ):
+            target = logical_currents.get("ic") if logical_currents else None
             matched = self._best_matching_math_current_trace(
-                logical_currents.get("ic") if logical_currents else None,
+                target,
                 source_data,
             )
             if matched:
                 self._logical_display_keys["ic"] = matched
+            elif target is not None and source_data is not None:
+                # The plotted Math values are available and none matches the
+                # authoritative derived Ic.  A formula-name match can be stale,
+                # scaled or sourced from a different acquisition; fail closed
+                # to the raw-only logical trace rather than showing wrong
+                # cursor cards on a semantically related waveform.
+                self._logical_display_keys["ic"] = LOGICAL_CURRENT_TRACE_KEYS["ic"]
             else:
                 for key, expr in formulas.items():
                     if self._is_sum_formula(expr, profile.irr, profile.il):
@@ -3655,12 +4148,15 @@ class WaveformPlot(QWidget):
             and profile.ic
             and profile.il
         ):
+            target = logical_currents.get("irr") if logical_currents else None
             matched = self._best_matching_math_current_trace(
-                logical_currents.get("irr") if logical_currents else None,
+                target,
                 source_data,
             )
             if matched:
                 self._logical_display_keys["irr"] = matched
+            elif target is not None and source_data is not None:
+                self._logical_display_keys["irr"] = LOGICAL_CURRENT_TRACE_KEYS["irr"]
             else:
                 for key, expr in formulas.items():
                     if self._is_difference_formula(expr, profile.ic, profile.il):
@@ -4029,6 +4525,11 @@ class WaveformPlot(QWidget):
             pen=pg.mkPen(color, width=width),
         )
         item.setClipToView(True)
+        # Cursor motion invalidates the viewport but does not change waveform
+        # samples.  Cache the expensive polyline raster so Qt repaints the
+        # moving cursor/labels without redrawing every static trace.  setData,
+        # pen changes and view transforms invalidate this cache automatically.
+        item.curve.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
         item.setZValue(0)
         self._trace_items[key] = item
         self._trace_style[key] = (color, width)
@@ -4053,6 +4554,7 @@ class WaveformPlot(QWidget):
         if key not in self._trace_items:
             color, width = _source_trace_style(key)
             self._add_trace_item(key, raw, key, color, width)
+            self._refresh_logical_display_signs()
             self._build_channel_bar()
             return
         self._trace_raw[key] = raw
@@ -4069,6 +4571,7 @@ class WaveformPlot(QWidget):
         self._refresh_legend_styles()
         self._update_zero_handle_positions()
         self._update_y_ticks()
+        self._refresh_logical_display_signs()
 
     def export_user_math_channels(
         self,
@@ -4089,6 +4592,51 @@ class WaveformPlot(QWidget):
                 float(offset) if offset is not None and np.isfinite(offset) else None,
             )
         return exported
+
+    def _recalculate_user_math_sources(self) -> None:
+        """Refresh editable Math data after a source display transform changes."""
+
+        pending = {
+            key.upper(): self._math_formulas[key]
+            for key in self._math_source_keys
+            if key in self._math_formulas and key in self._trace_raw
+        }
+        while pending:
+            progressed = False
+            pending_keys = set(pending)
+            for key, expr in list(pending.items()):
+                references = {
+                    ref.upper()
+                    for ref in re.findall(
+                        rf"\b{FORMULA_REFERENCE_PATTERN}\b",
+                        str(expr),
+                        flags=re.IGNORECASE,
+                    )
+                }
+                if (references - {key}) & pending_keys:
+                    continue
+                try:
+                    raw = np.asarray(
+                        self._evaluate_math_formula(key, expr),
+                        dtype=np.float64,
+                    )
+                except Exception:
+                    # Previously valid cyclic/externally sourced formulas keep
+                    # their last samples instead of breaking channel inversion.
+                    pending.pop(key, None)
+                    progressed = True
+                    continue
+                self._formula_sources[key] = raw
+                self._trace_raw[key] = raw
+                self._trace_yrange[key] = (
+                    (float(np.nanmin(raw)), float(np.nanmax(raw)))
+                    if len(raw)
+                    else (0.0, 0.0)
+                )
+                pending.pop(key, None)
+                progressed = True
+            if not progressed:
+                break
 
     def _next_math_key(self) -> str:
         used = {
@@ -4119,6 +4667,11 @@ class WaveformPlot(QWidget):
         profile: BridgeProfile,
         result: ExtractResult | None = None,
     ) -> None:
+        # Invalidate provenance before rebuilding logical arrays.  This also
+        # makes an interrupted replot fail closed instead of exposing stale Irr.
+        self._interactive_waveform_bundle = None
+        self._interactive_waveform_profile = None
+        self._interactive_waveform_inversions = None
         source = bundle.meta.source_path
         is_new_source = source != self._loaded_source_path
         computed_math_channels = {
@@ -4187,9 +4740,7 @@ class WaveformPlot(QWidget):
             if channel is None:
                 return None
             arr = np.asarray(channel, dtype=np.float64)
-            if sign < 0:
-                return -arr
-            if self._display_transform_inverted(base or ref):
+            if (sign < 0) != self._display_transform_inverted(base or ref):
                 return -arr
             return arr
 
@@ -4218,14 +4769,33 @@ class WaveformPlot(QWidget):
         vge = safe_channel(profile.vge)
         vce = safe_channel(profile.vce)
         ic = safe_total_current()
+        il = safe_channel(profile.il)
         irr = safe_reverse_recovery_current(ic)
         v_diode = safe_channel(profile.v_diode)
         vge_other = safe_channel(profile.vge_other)
+        vdesat = safe_channel(profile.vdesat)
         logical_currents = {"ic": ic, "irr": irr}
+        logical_arrays = {
+            "vge": vge,
+            "vce": vce,
+            # A directly mapped Ic cursor follows the signed channel reference
+            # users selected.  Total-current auto-orientation is a calculation
+            # aid and must not mirror an already visible negative source peak.
+            # Derived Ic still uses its authoritative calculated/Math array.
+            "ic": safe_channel(profile.ic) if profile.ic else ic,
+            "il": il,
+            "irr": irr,
+            "v_diode": v_diode,
+            "vge_other": vge_other,
+            "vdesat": vdesat,
+        }
         self._interactive_vce_t_us = t * 1e6
         self._interactive_vce = vce
         self._interactive_irr_t_us = t * 1e6
         self._interactive_irr = irr
+        self._interactive_waveform_bundle = bundle
+        self._interactive_waveform_profile = profile
+        self._interactive_waveform_inversions = self._bundle_inversion_signature(bundle)
         self._interactive_ic_t_us = t * 1e6
         self._interactive_ic = ic
         self._interactive_dt = float(bundle.dt)
@@ -4269,6 +4839,9 @@ class WaveformPlot(QWidget):
         )
         self._logical_display_keys = self._logical_display_key_map(profile)
         self._base_logical_display_keys = dict(self._logical_display_keys)
+        self._logical_display_signs.clear()
+        self._logical_display_aligned.clear()
+        self._logical_role_raw.clear()
         self._prefer_math_display_keys_for_derived_currents(
             profile,
             imported_math_formulas,
@@ -4335,6 +4908,7 @@ class WaveformPlot(QWidget):
                 pen=pg.mkPen(color, width=width),
             )
             item.setClipToView(True)
+            item.curve.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
             item.setZValue(0)
             self._trace_items[key] = item
             self._trace_style[key] = (color, width)
@@ -4349,6 +4923,7 @@ class WaveformPlot(QWidget):
         # 重建底部通道盒（含每通道 V/div）
         self._raised_key = None
         self._highlighted_key = None
+        self._legend_press_state = None
         for key in list(self._trace_items):
             self._trace_units.setdefault(
                 key,
@@ -4376,6 +4951,7 @@ class WaveformPlot(QWidget):
             except Exception:
                 self._math_formulas.pop(ch_key, None)
         self._install_logical_current_display_traces(logical_currents)
+        self._refresh_logical_display_signs(logical_arrays)
 
         self._hidden_channels.clear()
         self._active_channel = self._display_key_for_channel("ic")
@@ -4637,14 +5213,29 @@ class WaveformPlot(QWidget):
         if not inverted:
             return ref
         changed = self._display_inversion_enabled(base) != bool(enabled)
+        horizontal_values = self._snapshot_horizontal_cursor_values(base)
         if enabled:
             self._manual_inverted_channels.add(inverted)
         else:
             self._manual_inverted_channels.discard(inverted)
+        # Editable Math arrays are exported to the bundle immediately by the
+        # MainWindow recalculation handler.  Refresh them before emitting the
+        # inversion signal so a formula such as MATH2=CH3 cannot export the
+        # pre-inversion samples and feed stale data into extraction/reporting.
+        if changed:
+            self._recalculate_user_math_sources()
         self._trace_view_signature = None
         self._refresh_visible_trace(base)
         self._refresh_visible_traces(force=True)
         self._refresh_overview_traces()
+        # Display inversion changes the physical sign of this source exactly
+        # once.  Reproject bound cursors before the MainWindow recalculation
+        # signal runs; a later parameter re-entry may then replace them with
+        # freshly calculated levels without a second flip.
+        self._restore_horizontal_cursor_values(
+            horizontal_values,
+            invert=changed,
+        )
         self._update_readout()
         self._update_waveform_cursor_markers()
         self._update_y_ticks()
@@ -4657,6 +5248,11 @@ class WaveformPlot(QWidget):
         key = key.upper()
         if key not in self._trace_items or not self._can_delete_channel(key):
             return
+        if self._parameter_binding_uses_display_key(key):
+            # A deleted Math source cannot remain a valid Pmax/Ha or endpoint
+            # coordinate system.  Exit the card-specific mode fail-closed;
+            # the user can click the card again to bind its raw V/I fallback.
+            self.disable_interactive_cursors()
         if self._raised_key == key:
             self._raised_key = None
         if self._highlighted_key == key:
@@ -4690,6 +5286,7 @@ class WaveformPlot(QWidget):
                     self._logical_display_keys[logical] = fallback
                 else:
                     self._logical_display_keys.pop(logical, None)
+        self._refresh_logical_display_signs()
         self._display_channel_roles = {
             channel: [role for role in roles if channel.upper() != key]
             for channel, roles in self._display_channel_roles.items()
@@ -4703,6 +5300,26 @@ class WaveformPlot(QWidget):
         self._update_y_ticks()
         self._update_readout()
 
+    def _parameter_binding_uses_display_key(self, key: str) -> bool:
+        """Whether the active parameter card semantically depends on ``key``."""
+
+        if self._interactive_mode == "global":
+            return False
+        target = normalize_channel_reference(key).upper()
+        sources: list[str] = []
+        for role in ("a", "b"):
+            source = self._cursor_endpoint_channel(role)
+            if source:
+                sources.append(str(source))
+        for role in ("ha", "hb"):
+            source, valid = self._horizontal_cursor_binding(role)
+            if valid and source:
+                sources.append(str(source))
+        return any(
+            self._display_key_for_channel(source).upper() == target
+            for source in sources
+        )
+
     def _toggle_channel_visibility(self, key: str) -> None:
         if key not in self._trace_items:
             return
@@ -4710,6 +5327,11 @@ class WaveformPlot(QWidget):
             self._hidden_channels.discard(key)
             self._trace_items[key].setVisible(True)
         else:
+            if self._parameter_binding_uses_display_key(key):
+                # Keeping a live card bound to an invisible source makes its
+                # cursor appear to belong to whatever visible trace is nearby.
+                # Return to neutral cursors instead of presenting stale data.
+                self.disable_interactive_cursors()
             self._hidden_channels.add(key)
             self._trace_items[key].setVisible(False)
             if self._raised_key == key:
@@ -4723,7 +5345,9 @@ class WaveformPlot(QWidget):
         self._update_y_ticks()
 
     # ------------------------------------------------------------------ 每通道垂直位置 ----
-    def _auto_center_channel(self, key: str) -> None:
+    def _auto_center_channel(
+        self, key: str, *, preserve_horizontal_cursors: bool = True
+    ) -> None:
         """按当前刻度将通道波形中点对齐 0 格。"""
         raw = self._effective_raw_for_channel(key)
         scale = self._disp_scale.get(key, 1.0)
@@ -4732,22 +5356,37 @@ class WaveformPlot(QWidget):
         self._set_channel_offset(
             key,
             _auto_center_offset_div(self._fit_raw_for_channel(key, raw), scale),
+            preserve_horizontal_cursors=preserve_horizontal_cursors,
         )
 
     def _set_channel_offset(
-        self, key: str, offset: float, *, lightweight: bool = False, **_kwargs
+        self,
+        key: str,
+        offset: float,
+        *,
+        lightweight: bool = False,
+        preserve_horizontal_cursors: bool = True,
+        **_kwargs,
     ) -> None:
         if key not in self._trace_items or self._trace_t_us is None:
             return
+        horizontal_values = (
+            self._snapshot_horizontal_cursor_values(key)
+            if preserve_horizontal_cursors
+            else []
+        )
         offset = _clamp_offset_div(offset)
         self._disp_offset[key] = offset
         if lightweight:
             self._refresh_visible_trace(key)
+            self._restore_horizontal_cursor_values(horizontal_values)
             self._update_zero_handle_position(key)
+            self._refresh_cursor_auxiliary_guides()
             return
         self._refresh_visible_traces(force=True)
         self._refresh_overview_traces()
         self._refresh_legend_styles()
+        self._restore_horizontal_cursor_values(horizontal_values)
         self._update_y_ticks()
         self._update_zero_handle_positions()
         self._update_readout()
@@ -4840,15 +5479,50 @@ class WaveformPlot(QWidget):
     def _on_legend_clicked(self, key: str) -> None:
         if key not in self._trace_items or key in self._hidden_channels:
             return
+        now = time.monotonic()
+        started_highlighted = self._highlighted_key == key
+        prior = self._legend_press_state
+        if (
+            prior is not None
+            and prior[0] == key
+            and now - prior[2] <= self._legend_double_click_window_s()
+        ):
+            # QTest and native platforms are both allowed to deliver another
+            # press immediately before the double-click event.  Preserve the
+            # first press' state across the complete sequence.
+            started_highlighted = started_highlighted or prior[1]
+        self._legend_press_state = (key, started_highlighted, now)
         self._raise_trace(key)
 
     def _on_legend_double_clicked(self, key: str) -> None:
         if key not in self._trace_items or key in self._hidden_channels:
             return
-        if self._highlighted_key == key:
+        now = time.monotonic()
+        prior = self._legend_press_state
+        box = self._channel_boxes.get(key)
+        from_real_widget_event = bool(
+            box is not None and box._dispatching_double_click
+        )
+        began_highlighted = bool(
+            from_real_widget_event
+            and prior is not None
+            and prior[0] == key
+            and now - prior[2] <= self._legend_double_click_window_s()
+            and prior[1]
+        )
+        self._legend_press_state = None
+        if began_highlighted or self._highlighted_key == key:
             self._clear_highlight()
         else:
             self._highlight_trace(key)
+
+    @staticmethod
+    def _legend_double_click_window_s() -> float:
+        app = QApplication.instance()
+        interval_ms = app.doubleClickInterval() if app is not None else 500
+        # Leave a small dispatch margin for queued platform events without
+        # delaying or merging the immediate single-click response.
+        return max(0.1, float(interval_ms) / 1000.0 + 0.1)
 
     # ------------------------------------------------------------------ 每通道 V/div ----
     def _vdiv_options(self, key: str) -> list[float]:
@@ -4885,6 +5559,7 @@ class WaveformPlot(QWidget):
         raw = self._effective_raw_for_channel(key)
         if raw is None:
             return
+        horizontal_values = self._snapshot_horizontal_cursor_values(key)
         fit_raw = self._fit_raw_for_channel(key, raw)
         if value is None:
             self._manual_vdiv.pop(key, None)
@@ -4897,7 +5572,10 @@ class WaveformPlot(QWidget):
             scale = max(float(value), 1e-15)
             self._manual_vdiv[key] = scale
         self._disp_scale[key] = scale
-        self._auto_center_channel(key)
+        self._auto_center_channel(key, preserve_horizontal_cursors=False)
+        self._restore_horizontal_cursor_values(horizontal_values)
+        self._update_readout()
+        self._refresh_cursor_auxiliary_guides()
 
     def _dim_color(self, color: str, alpha: int = 70) -> QColor:
         c = QColor(color)
@@ -4905,9 +5583,30 @@ class WaveformPlot(QWidget):
         return c
 
     def _active_channel_can_follow_selection(self) -> bool:
+        # Once a parameter declares semantic A/B or Ha/Hb sources, channel
+        # clicks are visual raise/highlight gestures only.  Letting them reset
+        # interval endpoints makes a correct card silently sample an unrelated
+        # trace after the user's normal single/double-click inspection.
+        if self._interactive_mode != "global" and any(
+            channel
+            for channel in (
+                self._interval_a_channel,
+                self._interval_b_channel,
+                self._interval_ab_channel,
+                self._interval_ha_channel,
+                self._interval_hb_channel,
+            )
+        ):
+            return False
         if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
             return False
-        if self._interactive_mode == "turn_on_current":
+        if self._interactive_mode in {
+            "turn_on_current",
+            "short_current",
+            "delta_vce",
+            "energy_loss",
+            "trr_measure",
+        }:
             return False
         return self._raw_only_logical_readout_channel() is None
 
@@ -4940,6 +5639,9 @@ class WaveformPlot(QWidget):
         self._raised_key = key
         self._highlighted_key = None
         if self._active_channel_can_follow_selection():
+            # An explicit trace selection intentionally takes over the generic
+            # readout source (accepted raw-only logical-source behaviour).
+            self._reset_interval_vertical_bindings()
             self._active_channel = key
         self._apply_trace_selection_style()
         self._refresh_legend_styles()
@@ -4952,6 +5654,7 @@ class WaveformPlot(QWidget):
         self._raised_key = key
         self._highlighted_key = key
         if self._active_channel_can_follow_selection():
+            self._reset_interval_vertical_bindings()
             self._active_channel = key
         self._apply_trace_selection_style()
         self._refresh_legend_styles()
@@ -4966,6 +5669,8 @@ class WaveformPlot(QWidget):
         *,
         target_w: float | None = None,
         prefer_abs: bool = False,
+        required_roles: tuple[str, ...] | None = None,
+        expected_power_w: np.ndarray | None = None,
     ) -> tuple[str, float] | None:
         """Focus a visible W trace and mark its peak within the requested window."""
         peak = self.power_peak_in_window(
@@ -4973,6 +5678,8 @@ class WaveformPlot(QWidget):
             t1_us,
             target_w=target_w,
             prefer_abs=prefer_abs,
+            required_roles=required_roles,
+            expected_power_w=expected_power_w,
         )
         if peak is None:
             return None
@@ -4996,8 +5703,17 @@ class WaveformPlot(QWidget):
         *,
         target_w: float | None = None,
         prefer_abs: bool = False,
+        required_roles: tuple[str, ...] | None = None,
+        expected_power_w: np.ndarray | None = None,
     ) -> tuple[str, float, float, float] | None:
-        """Return (channel, peak W, display trace value, t_us) for a visible power trace."""
+        """Return a verified visible power trace peak.
+
+        When ``required_roles``/``expected_power_w`` are supplied, a W/kW
+        trace is display-eligible only if its formula names the parameter's
+        logical sources (when formula metadata exists) and its samples align
+        with the authoritative raw V*I waveform.  This prevents an unrelated
+        or stale Math trace from becoming a Pmax/Pdmax cursor source.
+        """
         if self._trace_t_us is None or len(self._trace_t_us) == 0:
             return None
         lo_us, hi_us = sorted((float(t0_us), float(t1_us)))
@@ -5006,6 +5722,15 @@ class WaveformPlot(QWidget):
         mask = (self._trace_t_us >= lo_us) & (self._trace_t_us <= hi_us)
         if not np.any(mask):
             return None
+        expected_arr: np.ndarray | None = None
+        if expected_power_w is not None:
+            candidate_expected = np.asarray(expected_power_w, dtype=np.float64)
+            if candidate_expected.size != self._trace_t_us.size:
+                return None
+            expected_arr = candidate_expected
+        required_role_set = {
+            str(role).strip().lower() for role in (required_roles or ()) if role
+        }
         candidates: list[tuple[float, str, float, int]] = []
         for key in self._trace_items:
             unit = self._unit_for_channel(key)
@@ -5018,6 +5743,53 @@ class WaveformPlot(QWidget):
             raw_arr = np.asarray(raw, dtype=np.float64)
             if raw_arr.size != self._trace_t_us.size:
                 continue
+            expr = self._math_formulas.get(key)
+            if required_role_set and expr:
+                formula_roles: set[str] = set()
+                for ref in re.findall(
+                    rf"\b{FORMULA_REFERENCE_PATTERN}\b", str(expr).upper()
+                ):
+                    formula_roles.update(self._logical_roles_for_source(ref))
+                if not required_role_set.issubset(formula_roles):
+                    continue
+            if expected_arr is not None:
+                expected_seg = np.asarray(expected_arr[mask], dtype=np.float64)
+                candidate_seg_w = np.asarray(raw_arr[mask], dtype=np.float64) * to_w
+                finite_pair = np.isfinite(expected_seg) & np.isfinite(candidate_seg_w)
+                if np.count_nonzero(finite_pair) < 4:
+                    continue
+                expected_cmp = expected_seg[finite_pair]
+                candidate_cmp = candidate_seg_w[finite_pair]
+                if prefer_abs:
+                    expected_cmp = np.abs(expected_cmp)
+                    candidate_cmp = np.abs(candidate_cmp)
+                expected_peak = float(np.max(np.abs(expected_cmp)))
+                candidate_peak = float(np.max(np.abs(candidate_cmp)))
+                if expected_peak <= 1e-12 or candidate_peak <= 1e-12:
+                    continue
+                peak_ratio = candidate_peak / expected_peak
+                if not 0.65 <= peak_ratio <= 1.35:
+                    continue
+                active = np.abs(expected_cmp) >= 0.05 * expected_peak
+                if np.count_nonzero(active) >= 4:
+                    expected_cmp = expected_cmp[active]
+                    candidate_cmp = candidate_cmp[active]
+                expected_norm = expected_cmp / expected_peak
+                candidate_norm = candidate_cmp / candidate_peak
+                normalized_rmse = float(
+                    np.sqrt(np.mean(np.square(candidate_norm - expected_norm)))
+                )
+                if normalized_rmse > 0.28:
+                    continue
+                if len(expected_norm) >= 4:
+                    expected_std = float(np.std(expected_norm))
+                    candidate_std = float(np.std(candidate_norm))
+                    if expected_std > 1e-9 and candidate_std > 1e-9:
+                        correlation = float(
+                            np.corrcoef(expected_norm, candidate_norm)[0, 1]
+                        )
+                        if not np.isfinite(correlation) or correlation < 0.85:
+                            continue
             seg = raw_arr[mask]
             if seg.size == 0:
                 continue
@@ -5078,6 +5850,7 @@ class WaveformPlot(QWidget):
         self._interactive_search_t1_us = None
         self._interval_max_hline_enabled = False
         self._interval_peak_on_hb = False
+        self._reset_interval_horizontal_bindings(valid=True)
         self._h_cursor_a_locked = False
         full = self._full_x_range
         if full is not None:
@@ -5265,15 +6038,59 @@ class WaveformPlot(QWidget):
                 return key
         return None
 
+    def _cursor_endpoint_channel(self, which: str) -> str | None:
+        """Return the semantic waveform source for A or B when one is bound."""
+
+        if which not in {"a", "b"}:
+            raise ValueError(f"unknown vertical cursor: {which}")
+        if self._interactive_mode == "unavailable":
+            return None
+        if self._interactive_mode in {"turn_on_current", "short_current"}:
+            return "ic"
+        if (
+            self._interactive_mode in self._BASE_TOP_SLOPE_MODES
+            and self._slope_channel is not None
+        ):
+            return str(self._slope_channel)
+        if self._interactive_mode == "energy_loss":
+            channel = (
+                getattr(self, "_energy_a_channel", None)
+                if which == "a"
+                else getattr(self, "_energy_b_channel", None)
+            )
+            if channel:
+                return str(channel)
+        if self._interactive_mode == "trr_measure":
+            return "irr"
+        if self._interactive_mode == "delta_vce":
+            return "vce"
+        if self._interactive_mode in self._INTERVAL_HORIZONTAL_MODES:
+            channel = (
+                self._interval_a_channel
+                if which == "a"
+                else self._interval_b_channel
+            )
+            if not channel:
+                channel = self._interval_ab_channel
+            if channel:
+                # A declared semantic source remains authoritative even when
+                # the user temporarily hides that trace.  Falling back to the
+                # highlighted/first visible waveform would silently turn, for
+                # example, an Irr or Vce endpoint into an unrelated Vge point.
+                return str(channel)
+        return self._cursor_source_channel()
+
     def _cursor_source_color(self, channel: str | None) -> str:
         if channel is None:
             return WAVEFORM_PLOT_FG
-        return self._trace_style.get(channel, (WAVEFORM_PLOT_FG, 1.0))[0]
+        display_key = self._display_key_for_channel(channel)
+        return self._trace_style.get(display_key, (WAVEFORM_PLOT_FG, 1.0))[0]
 
     def _cursor_source_tag(self, channel: str | None) -> str:
         if channel is None:
             return ""
-        legend = self._trace_legend.get(channel, channel)
+        display_key = self._display_key_for_channel(channel)
+        legend = self._trace_legend.get(display_key, channel)
         return legend if len(legend) <= 12 else legend[:11] + "…"
 
     def _sample_cursor_channel(
@@ -5281,7 +6098,7 @@ class WaveformPlot(QWidget):
     ) -> tuple[float, float] | None:
         if channel is None or self._trace_t_us is None:
             return None
-        raw = self._effective_raw_for_channel(channel)
+        raw = self._cursor_value_raw(str(channel))
         if raw is None or len(raw) == 0:
             return None
         tt = self._trace_t_us
@@ -5298,6 +6115,7 @@ class WaveformPlot(QWidget):
 
     def clear_cursor_auxiliary_guides(self) -> None:
         self._cursor_aux_channel = None
+        self._cursor_aux_value_channel = None
         self._cursor_aux_t_us = None
         self._cursor_aux_value = None
         self._cursor_aux_x_range_us = None
@@ -5333,6 +6151,7 @@ class WaveformPlot(QWidget):
         show_vertical_guide: bool = False,
         x_range_us: tuple[float, float] | None = None,
     ) -> None:
+        self._cursor_aux_value_channel = str(channel)
         self._cursor_aux_channel = self._display_key_for_channel(str(channel))
         self._cursor_aux_t_us = float(t_us)
         self._cursor_aux_value = float(value)
@@ -5409,7 +6228,8 @@ class WaveformPlot(QWidget):
             CURSOR_AUXILIARY_HORIZONTAL_COLOR,
             CURSOR_AUXILIARY_LINE_WIDTH,
         )
-        y = float(self._to_disp(channel, float(value)))
+        value_channel = self._cursor_aux_value_channel or channel
+        y = float(self._to_disp(value_channel, float(value)))
 
         show_v = (
             self._cursor_vertical_visible()
@@ -5431,6 +6251,7 @@ class WaveformPlot(QWidget):
             show_h
             and self._h_cursor_a is not None
             and self._h_cursor_b is not None
+            and self._horizontal_quantities_comparable()
         ):
             y0, y1 = sorted(
                 (
@@ -5474,7 +6295,7 @@ class WaveformPlot(QWidget):
             display = self._display_key_for_channel(logical)
             if display in self._hidden_channels:
                 continue
-            sample = self._sample_cursor_channel(display, t_us)
+            sample = self._sample_cursor_channel(logical, t_us)
             if sample is None:
                 continue
             value, y_div = sample
@@ -5512,41 +6333,25 @@ class WaveformPlot(QWidget):
             return None
         if end == "a":
             cursor = self._cursor_a
-            h_line = self._h_cursor_a
             marker_channel = getattr(self, "_energy_a_channel", "vce")
-            level_channel = getattr(self, "_energy_ha_channel", marker_channel)
-            level_value = (
-                self._from_disp(level_channel, float(h_line.value()))
-                if h_line is not None
-                else self._interp_channel(marker_channel, float(cursor.value()))
-            )
         elif end == "b":
             cursor = self._cursor_b
-            h_line = self._h_cursor_b
             marker_channel = getattr(self, "_energy_b_channel", "ic")
-            level_channel = getattr(self, "_energy_hb_channel", marker_channel)
             if self._energy_b_level_vce is not None:
                 marker_channel = "vce"
-                level_channel = "vce"
-                level_value = float(self._energy_b_level_vce)
-            elif h_line is not None:
-                level_value = self._from_disp(level_channel, float(h_line.value()))
-            else:
-                level_value = self._interp_channel(marker_channel, float(cursor.value()))
         else:
             return None
 
         marker_display = self._display_key_for_channel(marker_channel)
-        level_display = self._display_key_for_channel(level_channel)
-        if marker_display != level_display:
-            return None
         if marker_display in self._hidden_channels:
             return None
-        if marker_display not in self._trace_raw:
+        sample = self._sample_cursor_channel(marker_channel, float(cursor.value()))
+        if sample is None:
             return None
+        _raw_value, display_y = sample
         return (
             float(cursor.value()),
-            self._to_disp(marker_display, float(level_value)),
+            float(display_y),
             self._cursor_source_color(marker_display),
         )
 
@@ -5628,29 +6433,32 @@ class WaveformPlot(QWidget):
                 )
                 self._cursor_b_wave_marker.show()
             return
-        ch = self._cursor_source_channel()
-        a_sample = self._sample_cursor_channel(ch, float(self._cursor_a.value()))
-        b_sample = self._sample_cursor_channel(ch, float(self._cursor_b.value()))
-        if ch is None or a_sample is None or b_sample is None:
+        a_ch = self._cursor_endpoint_channel("a")
+        b_ch = self._cursor_endpoint_channel("b")
+        a_sample = self._sample_cursor_channel(
+            a_ch, float(self._cursor_a.value())
+        )
+        b_sample = self._sample_cursor_channel(
+            b_ch, float(self._cursor_b.value())
+        )
+        if a_ch is None or b_ch is None or a_sample is None or b_sample is None:
             self._hide_waveform_cursor_markers()
             return
         self._ensure_waveform_cursor_markers()
-        color = self._cursor_source_color(ch)
         pen = pg.mkPen("#f2f2f2", width=1.2)
-        brush = pg.mkBrush(QColor(color))
         assert self._cursor_a_wave_marker is not None
         assert self._cursor_b_wave_marker is not None
         self._cursor_a_wave_marker.setData(
             [float(self._cursor_a.value())],
             [a_sample[1]],
             pen=pen,
-            brush=brush,
+            brush=pg.mkBrush(QColor(self._cursor_source_color(a_ch))),
         )
         self._cursor_b_wave_marker.setData(
             [float(self._cursor_b.value())],
             [b_sample[1]],
             pen=pen,
-            brush=brush,
+            brush=pg.mkBrush(QColor(self._cursor_source_color(b_ch))),
         )
         self._cursor_a_wave_marker.show()
         self._cursor_b_wave_marker.show()
@@ -5915,6 +6723,28 @@ class WaveformPlot(QWidget):
         """横向光标辅助竖线对齐左侧读数浮窗的左边距。"""
         return self._plot_label_x_left_edge()
 
+    def _normalize_energy_loss_level_value(
+        self,
+        role: str,
+        channel: str,
+        value: float,
+    ) -> float:
+        """Apply one signed/magnitude rule to every energy-loss level readout.
+
+        Err's Ha is a signed Irr Top/reference level.  Other existing energy
+        modes that explicitly use Irr as an amplitude keep their magnitude
+        semantics.  Non-Irr voltage/current levels always retain their sign.
+        """
+
+        if role not in {"ha", "hb"}:
+            raise ValueError(f"unknown energy-loss level role: {role}")
+        normalized = float(value)
+        if str(channel) != "irr":
+            return normalized
+        if role == "ha" and self._energy_fall_a_mode == "err_irr":
+            return normalized
+        return abs(normalized)
+
     def _plot_label_x_right_edge(self) -> float:
         """横向光标名称框：贴右侧，避开左侧 Ha/Hb 数值读数。"""
         vb = self.plot.getPlotItem().getViewBox()
@@ -5923,13 +6753,31 @@ class WaveformPlot(QWidget):
         return x1 - 0.01 * span
 
     def _horizontal_cursor_plot_values(
-        self, ha_div: float, hb_div: float, dt_us: float, *, include_rate: bool
-    ) -> tuple[str, str, str | None]:
+        self,
+        a_us: float,
+        b_us: float,
+        ha_div: float,
+        hb_div: float,
+        dt_us: float,
+        *,
+        include_rate: bool,
+    ) -> tuple[str | None, str | None, str | None]:
         """返回 Ha/Hb 单点 HTML 与 Δ/Δt 浮动框 HTML（示波器风格）。"""
 
-        def _level_html(name: str, val: float, unit: str, color: str) -> str:
+        def _level_html(
+            name: str,
+            val: float,
+            unit: str,
+            color: str,
+            channel: str,
+            *,
+            show_channel: bool,
+        ) -> str:
+            key = self._display_key_for_channel(channel)
+            legend = self._trace_legend.get(key, key)
+            prefix = f"[{legend}] " if show_channel else ""
             return self._cursor_plot_label_html(
-                f"{name}: {self._scope_quantity_text(val, unit)}", color
+                f"{prefix}{name}: {self._scope_quantity_text(val, unit)}", color
             )
 
         def _delta_html(dv: float, unit: str) -> str:
@@ -5943,33 +6791,59 @@ class WaveformPlot(QWidget):
                 )
             return self._cursor_plot_label_html(text, "#CDD6F4")
 
-        if self._interactive_mode == "energy_loss":
-            ha_ch = getattr(self, "_energy_ha_channel", "vce")
-            hb_ch = getattr(self, "_energy_hb_channel", "ic")
+        ha_ch, ha_valid = self._horizontal_cursor_binding("ha")
+        hb_ch, hb_valid = self._horizontal_cursor_binding("hb")
+        comparable = self._horizontal_quantities_comparable()
+        ha_html: str | None = None
+        hb_html: str | None = None
+        ha_val = 0.0
+        hb_val = 0.0
+        u_ha = self._unit_for_channel(ha_ch)
+        u_hb = self._unit_for_channel(hb_ch)
+        if ha_valid:
             ha_val = self._from_disp(ha_ch, ha_div)
-            hb_val = self._from_disp(hb_ch, hb_div)
-            if ha_ch == "irr":
+            if self._interactive_mode == "energy_loss":
+                ha_val = self._normalize_energy_loss_level_value(
+                    "ha", ha_ch, ha_val
+                )
+            elif self._display_key_for_channel(ha_ch) == "irr":
                 ha_val = abs(ha_val)
-            if hb_ch == "irr":
+            ha_html = _level_html(
+                "Ha",
+                ha_val,
+                u_ha,
+                CURSOR_PEN_A,
+                ha_ch,
+                show_channel=not comparable,
+            )
+        if hb_valid:
+            hb_val = self._from_disp(hb_ch, hb_div)
+            if self._interactive_mode == "energy_loss":
+                hb_val = self._normalize_energy_loss_level_value(
+                    "hb", hb_ch, hb_val
+                )
+            elif self._display_key_for_channel(hb_ch) == "irr":
                 hb_val = abs(hb_val)
-            u_ha = self._unit_for_channel(ha_ch)
-            u_hb = self._unit_for_channel(hb_ch)
-            ha_html = _level_html("Ha", ha_val, u_ha, CURSOR_PEN_A)
-            hb_html = _level_html("Hb", hb_val, u_hb, CURSOR_PEN_B)
-            if ha_ch != hb_ch or u_ha != u_hb:
-                return ha_html, hb_html, None
-            return ha_html, hb_html, _delta_html(hb_val - ha_val, u_ha)
-
-        ch = self._readout_channel()
-        unit = self._unit_for_channel(ch)
-        ha_val = self._from_disp(ch, ha_div)
-        hb_val = self._from_disp(ch, hb_div)
-        if ch == "irr":
-            ha_val = abs(ha_val)
-            hb_val = abs(hb_val)
-        ha_html = _level_html("Ha", ha_val, unit, CURSOR_PEN_A)
-        hb_html = _level_html("Hb", hb_val, unit, CURSOR_PEN_B)
-        return ha_html, hb_html, _delta_html(hb_val - ha_val, unit)
+            hb_html = _level_html(
+                "Hb",
+                hb_val,
+                u_hb,
+                CURSOR_PEN_B,
+                hb_ch,
+                show_channel=not comparable,
+            )
+        if not comparable:
+            return ha_html, hb_html, None
+        delta = hb_val - ha_val
+        if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
+            a_sample = self._sample_cursor_channel(ha_ch, a_us)
+            b_sample = self._sample_cursor_channel(ha_ch, b_us)
+            if a_sample is not None and b_sample is not None:
+                # A/B sit on the configured percentage thresholds.  The
+                # slope readout must therefore use their waveform values,
+                # not the full Ha↔Hb 100% span.
+                delta = abs(float(b_sample[0]) - float(a_sample[0]))
+        return ha_html, hb_html, _delta_html(delta, u_ha)
 
     def _remove_cursor_plot_labels(self) -> None:
         for attr in (
@@ -6144,31 +7018,49 @@ class WaveformPlot(QWidget):
                 self._cursor_b_t_label.show()
                 self._cursor_ab_delta_label.show()
                 return
-        ch = self._cursor_source_channel()
-        unit = self._unit_for_channel(ch) if ch is not None else ""
-        sym = self._scope_wave_letter(unit)
-        a_sample = self._sample_cursor_channel(ch, a_us)
-        b_sample = self._sample_cursor_channel(ch, b_us)
+        a_ch = self._cursor_endpoint_channel("a")
+        b_ch = self._cursor_endpoint_channel("b")
+        a_unit = self._unit_for_channel(a_ch) if a_ch is not None else ""
+        b_unit = self._unit_for_channel(b_ch) if b_ch is not None else ""
+        a_sym = self._scope_wave_letter(a_unit)
+        b_sym = self._scope_wave_letter(b_unit)
+        a_sample = self._sample_cursor_channel(a_ch, a_us)
+        b_sample = self._sample_cursor_channel(b_ch, b_us)
         show_wave_values = self._cursor_waveform_visible() and a_sample is not None and b_sample is not None
-        source_color = self._cursor_source_color(ch)
         if show_wave_values:
             assert a_sample is not None and b_sample is not None
-            tag = self._cursor_source_tag(ch)
-            prefix = f"<span style='color:{source_color};font-weight:700'>{tag}</span> " if tag else ""
+            a_color = self._cursor_source_color(a_ch)
+            b_color = self._cursor_source_color(b_ch)
+            a_tag = self._cursor_source_tag(a_ch)
+            b_tag = self._cursor_source_tag(b_ch)
+            a_prefix = f"<span style='color:{a_color};font-weight:700'>{a_tag}</span> " if a_tag else ""
+            b_prefix = f"<span style='color:{b_color};font-weight:700'>{b_tag}</span> " if b_tag else ""
             a_text = (
-                f"{prefix}t: {a_us:.3f} µs<br/>"
-                f"{sym}: {self._scope_quantity_text(a_sample[0], unit)}"
+                f"{a_prefix}t: {a_us:.3f} µs<br/>"
+                f"{a_sym}: {self._scope_quantity_text(a_sample[0], a_unit)}"
             )
             b_text = (
-                f"{prefix}t: {b_us:.3f} µs<br/>"
-                f"{sym}: {self._scope_quantity_text(b_sample[0], unit)}"
+                f"{b_prefix}t: {b_us:.3f} µs<br/>"
+                f"{b_sym}: {self._scope_quantity_text(b_sample[0], b_unit)}"
             )
-            dv = b_sample[0] - a_sample[0]
-            delta_text = (
-                f"Δ t: {dt_us:.3f} µs&nbsp;&nbsp;&nbsp;1 / Δ t: {freq_txt}<br/>"
-                f"Δ {sym}: {self._scope_quantity_text(dv, unit)}&nbsp;&nbsp;&nbsp;"
-                f"Δ {sym}/ Δ t: {self._scope_rate_text(dv, dt_us, is_current=unit == 'A')}"
+            comparable = (
+                a_ch is not None
+                and b_ch is not None
+                and self._display_key_for_channel(a_ch)
+                == self._display_key_for_channel(b_ch)
+                and self._logical_display_sign(a_ch)
+                == self._logical_display_sign(b_ch)
+                and a_unit == b_unit
             )
+            delta_text = f"Δ t: {dt_us:.3f} µs&nbsp;&nbsp;&nbsp;1 / Δ t: {freq_txt}"
+            if comparable:
+                dv = b_sample[0] - a_sample[0]
+                if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
+                    dv = abs(float(dv))
+                delta_text += (
+                    f"<br/>Δ {a_sym}: {self._scope_quantity_text(dv, a_unit)}&nbsp;&nbsp;&nbsp;"
+                    f"Δ {a_sym}/ Δ t: {self._scope_rate_text(dv, dt_us, is_current=a_unit == 'A')}"
+                )
         else:
             a_text = f"t: {a_us:.3f} µs"
             b_text = f"t: {b_us:.3f} µs"
@@ -6216,11 +7108,12 @@ class WaveformPlot(QWidget):
         self._cursor_ha_v_label.setAnchor((0.0, 0.0))
         self._cursor_hb_v_label.setAnchor((0.0, 0.0))
         self._cursor_ha_v_label.setPos(QPointF(x_left, y_top))
-        hb_y = (
-            y_top
-            + self._cursor_readout_stack_height(self._cursor_ha_v_label)
-            + CURSOR_READOUT_STACK_GAP_PX
-        )
+        hb_y = y_top
+        if self._horizontal_line_valid("ha"):
+            hb_y += (
+                self._cursor_readout_stack_height(self._cursor_ha_v_label)
+                + CURSOR_READOUT_STACK_GAP_PX
+            )
         self._cursor_hb_v_label.setPos(QPointF(x_left, hb_y))
         if self._cursor_vertical_visible():
             delta_y = (
@@ -6276,16 +7169,20 @@ class WaveformPlot(QWidget):
             self._position_h_cursor_plot_labels(a_us, b_us, ha_div, hb_div)
             return
         ha_html, hb_html, delta_html = self._horizontal_cursor_plot_values(
+            a_us,
+            b_us,
             ha_div,
             hb_div,
             dt_us,
             include_rate=self._cursor_vertical_visible(),
         )
-        self._cursor_ha_v_label.setHtml(ha_html)
-        self._cursor_hb_v_label.setHtml(hb_html)
+        if ha_html is not None:
+            self._cursor_ha_v_label.setHtml(ha_html)
+        if hb_html is not None:
+            self._cursor_hb_v_label.setHtml(hb_html)
         self._position_h_cursor_plot_labels(a_us, b_us, ha_div, hb_div)
-        self._cursor_ha_v_label.show()
-        self._cursor_hb_v_label.show()
+        self._cursor_ha_v_label.setVisible(ha_html is not None)
+        self._cursor_hb_v_label.setVisible(hb_html is not None)
         if delta_html is not None:
             self._cursor_hb_ha_delta_label.setHtml(delta_html)
             self._cursor_hb_ha_delta_label.show()
@@ -6431,8 +7328,6 @@ class WaveformPlot(QWidget):
     def _set_readout_text(self, txt: str) -> None:
         self._readout_label.setText(txt)
         self._sync_readout_scroll_width()
-        if hasattr(self, "_cursor_type"):
-            self._apply_cursor_visibility()
 
     def _register_auxiliary_dash_line(
         self,
@@ -6504,8 +7399,27 @@ class WaveformPlot(QWidget):
         super().showEvent(event)
         self._schedule_post_layout_sync()
 
-    def _update_readout(self) -> None:
+    def _update_readout(self, *, update_axis: bool = True) -> None:
         """更新顶部信息栏的光标读数（横向排版，不在波形上）。"""
+        if self._interactive_mode == "unavailable":
+            self._set_readout_text("")
+            return
+        if self._parameter_cursor_context_suppressed:
+            self._parameter_cursor_context_suppressed = False
+            self._apply_cursor_visibility()
+        elif (
+            self._last_cursor_visibility_signature
+            != self._cursor_visibility_signature()
+        ):
+            # Mode/binding changes need one visibility refresh.  Cursor motion
+            # within an unchanged mode does not.
+            self._apply_cursor_visibility()
+        if (
+            self._interactive_mode in self._BASE_TOP_SLOPE_MODES
+            and not self._slope_ab_valid
+        ):
+            self._set_readout_text("")
+            return
         if self._cursor_a is None or self._cursor_b is None:
             return
         a = float(self._cursor_a.value())
@@ -6513,7 +7427,8 @@ class WaveformPlot(QWidget):
         ha_div = float(self._h_cursor_a.value()) if self._h_cursor_a is not None else 0.0
         hb_div = float(self._h_cursor_b.value()) if self._h_cursor_b is not None else 0.0
         dt_us = b - a
-        self._update_y_ticks()
+        if update_axis:
+            self._update_y_ticks()
         self._update_v_cursor_plot_labels(a, b)
         self._update_h_cursor_plot_labels(a, b, ha_div, hb_div, dt_us)
         self._sync_cursor_line_label_positions()
@@ -6542,14 +7457,18 @@ class WaveformPlot(QWidget):
         if self._interactive_mode == "energy_loss":
             ha_ch = getattr(self, "_energy_ha_channel", "vce")
             ha_u = self._unit_for_channel(ha_ch)
-            ha_val = self._from_disp(ha_ch, ha_div)
-            if ha_ch == "irr":
-                ha_val = abs(ha_val)
+            ha_val = self._normalize_energy_loss_level_value(
+                "ha",
+                ha_ch,
+                self._from_disp(ha_ch, ha_div),
+            )
             hb_ch = getattr(self, "_energy_hb_channel", "ic")
             hb_u = self._unit_for_channel(hb_ch)
-            hb_val = self._from_disp(hb_ch, hb_div)
-            if hb_ch == "irr":
-                hb_val = abs(hb_val)
+            hb_val = self._normalize_energy_loss_level_value(
+                "hb",
+                hb_ch,
+                self._from_disp(hb_ch, hb_div),
+            )
             _ch_tag = {
                 "ic": "Ic",
                 "vce": "Vce",
@@ -6573,15 +7492,43 @@ class WaveformPlot(QWidget):
             )
             self._set_readout_text(txt)
             return
-        # Ha/Hb/Δy 按当前活动通道的真实单位显示
-        ch = self._readout_channel()
-        if ch not in self._trace_items and ch not in self._trace_raw:
-            ch = self._axis_channel() or ch
-        unit = self._unit_for_channel(ch)
-        ha = self._from_disp(ch, ha_div)
-        hb = self._from_disp(ch, hb_div)
+        # Ha/Hb may belong to separate channels.  Only publish Δy when both
+        # lines describe the same physical source and unit.
+        ha_ch, ha_valid = self._horizontal_cursor_binding("ha")
+        hb_ch, hb_valid = self._horizontal_cursor_binding("hb")
+        comparable = self._horizontal_quantities_comparable()
+        ha_key = self._display_key_for_channel(ha_ch)
+        hb_key = self._display_key_for_channel(hb_ch)
+        ha_unit = self._unit_for_channel(ha_ch)
+        hb_unit = self._unit_for_channel(hb_ch)
+        ha = self._from_disp(ha_ch, ha_div) if ha_valid else 0.0
+        hb = self._from_disp(hb_ch, hb_div) if hb_valid else 0.0
+        ha_label = self._trace_legend.get(ha_key, ha_key)
+        hb_label = self._trace_legend.get(hb_key, hb_key)
+        if not comparable:
+            parts = [
+                f"<span style='color:{ca}'>A {a:9.3f}µs</span>&nbsp;",
+                f"<span style='color:{cb}'>B {b:9.3f}µs</span>&nbsp;",
+                f"Δt {dt_us:+9.3f}µs&nbsp;|Δt| {abs(dt_us):9.3f}µs&nbsp;",
+                f"1/|Δt| {freq_txt:>10}",
+            ]
+            if ha_valid:
+                parts.append(
+                    f"&nbsp;|&nbsp;<span style='color:#999999'>[{ha_label}]</span>&nbsp;"
+                    f"<span style='color:{ca}'>Ha {ha:+10.2f}{ha_unit}</span>"
+                )
+            if hb_valid:
+                parts.append(
+                    f"&nbsp;|&nbsp;<span style='color:#999999'>[{hb_label}]</span>&nbsp;"
+                    f"<span style='color:{cb}'>Hb {hb:+10.2f}{hb_unit}</span>"
+                )
+            self._set_readout_text("".join(parts))
+            return
+
+        ch = ha_ch
+        unit = ha_unit
         dy = hb - ha
-        ch_label = self._trace_legend.get(ch, ch)
+        ch_label = ha_label
         if (
             self._slope_zero_ref_enabled
             and self._h_cursor_zero is not None
@@ -6636,6 +7583,7 @@ class WaveformPlot(QWidget):
         self._interactive_search_t1_us = None
         self._interval_max_hline_enabled = False
         self._interval_peak_on_hb = False
+        self._reset_interval_horizontal_bindings(valid=True)
         self._slope_channel = None
         self._slope_zero_ref_enabled = False
         self._hide_h_cursor_zero()
@@ -6645,6 +7593,36 @@ class WaveformPlot(QWidget):
         if self._h_cursor_b is not None:
             self._h_cursor_b.setMovable(True)
         self._update_readout()
+
+    def clear_parameter_cursor_context(self) -> None:
+        """Hide every cursor belonging to an unavailable parameter card.
+
+        The user's cursor-type preference remains unchanged.  A later valid
+        parameter interaction restores the same cursor type automatically,
+        while an unavailable card cannot display stale A/B/Ha/Hb bindings or
+        readouts from the previously selected parameter.
+        """
+
+        self.clear_cursor_auxiliary_guides()
+        self._interactive_enabled = False
+        self._interactive_on_change = None
+        self._interactive_on_horizontal_change = None
+        self._interactive_mode = "unavailable"
+        self._parameter_cursor_context_suppressed = True
+        self._slope_ab_valid = False
+        self._interactive_search_t0_us = None
+        self._interactive_search_t1_us = None
+        self._interval_max_hline_enabled = False
+        self._interval_peak_on_hb = False
+        self._reset_interval_horizontal_bindings(valid=False)
+        self._reset_interval_vertical_bindings()
+        self._slope_channel = None
+        self._slope_zero_ref_enabled = False
+        self._hide_h_cursor_zero()
+        self._hide_waveform_cursor_markers()
+        self._h_cursor_a_locked = False
+        self._set_readout_text("")
+        self._apply_cursor_visibility()
 
     # ------------------------------------------------------------------ ΔVce 模式 ----
     def enable_delta_vce_interaction(
@@ -6711,7 +7689,7 @@ class WaveformPlot(QWidget):
         if channel == "ic":
             return self._interactive_ic_t_us, self._interactive_ic
         if channel == "v_diode" and self._trace_t_us is not None:
-            raw = self._effective_raw_for_channel(self._display_key_for_channel("v_diode"))
+            raw = self._cursor_value_raw("v_diode")
             if raw is not None:
                 return self._trace_t_us, raw
         return None, None
@@ -6840,6 +7818,7 @@ class WaveformPlot(QWidget):
         self._interactive_on_change = on_change
         self._interactive_on_horizontal_change = None
         self._interactive_mode = mode
+        self._slope_ab_valid = False
         self._slope_channel = channel
         self._active_channel = channel
         self._slope_zero_ref_enabled = zero_v is not None
@@ -6871,10 +7850,21 @@ class WaveformPlot(QWidget):
                 self._hide_h_cursor_zero()
         finally:
             self._interactive_syncing = False
+        # The horizontal platform lines are valid immediately, while A/B stay
+        # hidden until the caller supplies a real pair of raw intersections.
+        if self._parameter_cursor_context_suppressed:
+            self._parameter_cursor_context_suppressed = False
+        self._apply_cursor_visibility()
         if emit_result_on_enter:
             self._emit_dvdt_changed()
 
-    def apply_dvdt_ab_times(self, t_a_us: float, t_b_us: float) -> None:
+    def apply_dvdt_ab_times(
+        self,
+        t_a_us: float,
+        t_b_us: float,
+        *,
+        refresh_readout: bool = True,
+    ) -> None:
         """将 A/B 纵向光标设到百分比穿越时刻（左→右）。"""
         if self._cursor_a is None or self._cursor_b is None:
             return
@@ -6890,7 +7880,27 @@ class WaveformPlot(QWidget):
             self._cursor_b.setMovable(False)
         finally:
             self._interactive_syncing = False
-        self._update_readout()
+        was_invalid = not self._slope_ab_valid
+        self._slope_ab_valid = True
+        if self._parameter_cursor_context_suppressed:
+            self._parameter_cursor_context_suppressed = False
+            was_invalid = True
+        if was_invalid:
+            self._apply_cursor_visibility()
+        if refresh_readout:
+            self._update_readout()
+
+    def invalidate_dvdt_ab_times(self, *, refresh_readout: bool = True) -> None:
+        """Hide stale slope A/B when the current Ha/Hb has no raw crossing."""
+
+        changed = self._slope_ab_valid
+        self._slope_ab_valid = False
+        self.clear_cursor_auxiliary_guides()
+        self._hide_waveform_cursor_markers()
+        if changed:
+            self._apply_cursor_visibility()
+        if refresh_readout:
+            self._update_readout(update_axis=False)
 
     def read_didt_slope_state(
         self, channel: str
@@ -6900,7 +7910,9 @@ class WaveformPlot(QWidget):
             return None
         if self._h_cursor_a is None or self._h_cursor_b is None:
             return None
-        ch = self._readout_channel()
+        # `_readout_channel()` is the visible CH/MATH key.  The cursors were
+        # positioned through the logical slope role, whose sign may differ.
+        ch = self._slope_channel or self._readout_channel()
         top_v = self._from_disp(ch, float(self._h_cursor_a.value()))
         base_v = self._from_disp(ch, float(self._h_cursor_b.value()))
         zero_v = None
@@ -6916,7 +7928,9 @@ class WaveformPlot(QWidget):
             or self._interactive_on_change is None
         ):
             return
-        ch = self._readout_channel()
+        # Preserve the logical source used to position Ha/Hb.  Converting
+        # through the visible key can invert explicitly signed Ic/Irr roles.
+        ch = self._slope_channel or self._readout_channel()
         top_v = self._from_disp(ch, float(self._h_cursor_a.value()))
         base_v = self._from_disp(ch, float(self._h_cursor_b.value()))
         if self._slope_zero_ref_enabled and self._h_cursor_zero is not None:
@@ -6935,20 +7949,23 @@ class WaveformPlot(QWidget):
         *,
         mode: str = "interval",
         channel: str | None = None,
+        a_channel: str | None = None,
+        b_channel: str | None = None,
         on_horizontal_change=None,
     ) -> None:
-        if end_t_us < start_t_us:
+        if mode != "semantic_interval" and end_t_us < start_t_us:
             start_t_us, end_t_us = end_t_us, start_t_us
         self._interactive_enabled = True
         self._set_cursor_link_mode(linked=False)
         self.clear_cursor_auxiliary_guides()
         self._interactive_on_change = on_change
         self._interactive_on_horizontal_change = on_horizontal_change
-        self._interactive_mode = (
+        interval_mode = (
             mode
             if mode
             in {
                 "interval",
+                "semantic_interval",
                 "irr_cross",
                 "trr_measure",
                 "irr_peak",
@@ -6958,6 +7975,7 @@ class WaveformPlot(QWidget):
             }
             else "interval"
         )
+        self._interactive_mode = interval_mode
         if channel:
             self._active_channel = str(channel)
         self._interval_max_hline_enabled = bool(show_horizontal_peak)
@@ -6965,6 +7983,15 @@ class WaveformPlot(QWidget):
 
         if self._cursor_a is None or self._cursor_b is None:
             self._install_persistent_cursors(start_t_us, end_t_us, 1.0)
+        self._interactive_mode = interval_mode
+        self._reset_interval_horizontal_bindings(valid=False)
+        self._reset_interval_vertical_bindings()
+        if channel:
+            self._interval_ab_channel = str(channel)
+        if a_channel:
+            self._interval_a_channel = str(a_channel)
+        if b_channel:
+            self._interval_b_channel = str(b_channel)
 
         self._interactive_syncing = True
         try:
@@ -6982,6 +8009,7 @@ class WaveformPlot(QWidget):
             self._interactive_syncing = False
 
         self._update_readout()
+        self._apply_cursor_visibility()
 
     def enable_crosstalk_interaction(
         self,
@@ -7004,6 +8032,10 @@ class WaveformPlot(QWidget):
 
         if self._cursor_a is None or self._cursor_b is None:
             self._install_persistent_cursors(start_t_us, end_t_us, 1.0)
+        self._interactive_mode = "crosstalk"
+        self._reset_interval_horizontal_bindings(valid=False)
+        self._reset_interval_vertical_bindings()
+        self._interval_ab_channel = "vge_other"
 
         self._interactive_syncing = True
         try:
@@ -7015,6 +8047,7 @@ class WaveformPlot(QWidget):
             self._interactive_syncing = False
 
         self._update_readout()
+        self._apply_cursor_visibility()
 
     def enable_energy_loss_interaction(
         self,
@@ -7556,13 +8589,17 @@ class WaveformPlot(QWidget):
         ):
             return
         ha_ch = self._energy_ha_channel
-        ha_v = float(self._from_disp(ha_ch, float(self._h_cursor_a.value())))
-        if ha_ch == "irr" and self._energy_fall_a_mode != "err_irr":
-            ha_v = abs(ha_v)
+        ha_v = self._normalize_energy_loss_level_value(
+            "ha",
+            ha_ch,
+            self._from_disp(ha_ch, float(self._h_cursor_a.value())),
+        )
         hb_ch = self._energy_hb_channel
-        hb_v = float(self._from_disp(hb_ch, float(self._h_cursor_b.value())))
-        if hb_ch == "irr":
-            hb_v = abs(hb_v)
+        hb_v = self._normalize_energy_loss_level_value(
+            "hb",
+            hb_ch,
+            self._from_disp(hb_ch, float(self._h_cursor_b.value())),
+        )
         ta = float(self._cursor_a.value())
         tb = float(self._cursor_b.value())
         self._interactive_on_change(ta, tb, ha_v, hb_v)
@@ -7594,9 +8631,9 @@ class WaveformPlot(QWidget):
         display_abs: bool = False,
     ) -> tuple[float, float, float] | None:
         """A-B 窗口内峰值点: (时间 µs, 显示/读数值, 显示 Y)。"""
-        channel = self._display_key_for_channel(channel)
+        value_channel = str(channel)
         tt = self._trace_t_us
-        raw = self._effective_raw_for_channel(channel)
+        raw = self._cursor_value_raw(value_channel)
         if tt is None or raw is None or len(tt) == 0:
             return None
         t_lo, t_hi = (min(t0_us, t1_us), max(t0_us, t1_us))
@@ -7616,7 +8653,7 @@ class WaveformPlot(QWidget):
         value = float(np.asarray(raw, dtype=np.float64)[idx])
         if display_abs:
             value = abs(value)
-        return float(tt[idx]), value, float(self._to_disp(channel, value))
+        return float(tt[idx]), value, float(self._to_disp(value_channel, value))
 
     def _min_plot_y_in_window(
         self, channel: str, t0_us: float, t1_us: float
@@ -7632,9 +8669,9 @@ class WaveformPlot(QWidget):
         self, channel: str, t0_us: float, t1_us: float
     ) -> tuple[float, float, float] | None:
         """A-B 窗口内谷值点: (时间 µs, 原始值, 显示 Y)。"""
-        channel = self._display_key_for_channel(channel)
+        value_channel = str(channel)
         tt = self._trace_t_us
-        raw = self._effective_raw_for_channel(channel)
+        raw = self._cursor_value_raw(value_channel)
         if tt is None or raw is None or len(tt) == 0:
             return None
         t_lo, t_hi = (min(t0_us, t1_us), max(t0_us, t1_us))
@@ -7649,7 +8686,7 @@ class WaveformPlot(QWidget):
             return None
         idx = int(idxs[local_idx])
         value = float(np.asarray(raw, dtype=np.float64)[idx])
-        return float(tt[idx]), value, float(self._to_disp(channel, value))
+        return float(tt[idx]), value, float(self._to_disp(value_channel, value))
 
     def set_interval_peak_horizontal(
         self,
@@ -7660,13 +8697,17 @@ class WaveformPlot(QWidget):
         t1_us: float | None = None,
         use_abs_peak: bool = False,
         display_abs_peak: bool = False,
+        _defer_refresh: bool = False,
     ) -> None:
         """interval-peak 模式下把 Ha 设到 A-B 窗内峰值（与全采样波形对齐）。"""
         if not self._interval_max_hline_enabled or self._interval_peak_on_hb:
             return
         if self._h_cursor_a is None:
             return
-        self._active_channel = channel
+        if self._interval_ab_channel is None:
+            self._interval_ab_channel = str(channel)
+            self._active_channel = str(channel)
+        self._set_interval_horizontal_binding("ha", channel)
         y_disp = self._to_disp(channel, float(y))
         if t0_us is not None and t1_us is not None:
             plot_peak = self._peak_plot_point_in_window(
@@ -7681,20 +8722,88 @@ class WaveformPlot(QWidget):
                 self.set_cursor_auxiliary_point(channel, peak_t_us, peak_value)
             else:
                 self.clear_cursor_auxiliary_guides()
+        was_syncing = self._interactive_syncing
         self._interactive_syncing = True
         try:
             self._h_cursor_a.setPos(y_disp)
             self._h_cursor_a.setMovable(True)
             self._h_cursor_a_locked = False
         finally:
-            self._interactive_syncing = False
+            self._interactive_syncing = was_syncing
+        if not _defer_refresh:
+            self._update_readout()
+            self._apply_cursor_visibility()
+
+    def apply_power_peak_binding(
+        self,
+        *,
+        boundary_a_channel: str,
+        boundary_b_channel: str,
+        peak_channel: str | None = None,
+        peak_value: float | None = None,
+        peak_t_us: float | None = None,
+    ) -> None:
+        """Atomically bind one power card to a verified trace or raw V/I.
+
+        A verified W/kW trace owns A, B and Ha together.  If no trace is
+        eligible, A/B return to the loss boundary waves and both horizontal
+        lines become invalid.  Updating every binding before the single final
+        refresh prevents a dragged window from exposing mixed old/new sources.
+        """
+
+        if self._interactive_mode != "power_peak":
+            return
+        boundary_a = str(boundary_a_channel)
+        boundary_b = str(boundary_b_channel)
+        matched = bool(
+            peak_channel
+            and peak_value is not None
+            and np.isfinite(float(peak_value))
+        )
+        self.clear_cursor_auxiliary_guides()
+        was_syncing = self._interactive_syncing
+        self._interactive_syncing = True
+        try:
+            self._reset_interval_horizontal_bindings(valid=False)
+            self._reset_interval_vertical_bindings()
+            self._interval_peak_on_hb = False
+            self._interval_max_hline_enabled = matched
+            if matched:
+                channel = str(peak_channel)
+                self._interval_a_channel = channel
+                self._interval_b_channel = channel
+                self._interval_ab_channel = channel
+                self._active_channel = channel
+                self.set_interval_peak_horizontal(
+                    float(peak_value),
+                    channel=channel,
+                    _defer_refresh=True,
+                )
+                if peak_t_us is not None and np.isfinite(float(peak_t_us)):
+                    self._cursor_aux_value_channel = channel
+                    self._cursor_aux_channel = self._display_key_for_channel(channel)
+                    self._cursor_aux_t_us = float(peak_t_us)
+                    self._cursor_aux_value = float(peak_value)
+                    self._cursor_aux_x_range_us = None
+                    self._cursor_aux_vertical_guide_enabled = False
+            else:
+                self._interval_a_channel = boundary_a
+                self._interval_b_channel = boundary_b
+                self._interval_ab_channel = boundary_a
+                self._active_channel = boundary_a
+        finally:
+            self._interactive_syncing = was_syncing
+        self._apply_cursor_visibility()
         self._update_readout()
 
     def set_interval_base_horizontal(self, y: float, channel: str = "ic") -> None:
         """interval-peak 模式下把 Hb 设到基准电平。"""
         if not self._interval_max_hline_enabled or self._h_cursor_b is None:
             return
-        self._active_channel = channel
+        if self._interval_ab_channel is None:
+            self._interval_ab_channel = str(channel)
+            self._active_channel = str(channel)
+        self._set_interval_horizontal_binding("hb", channel)
         self._interactive_syncing = True
         try:
             self._h_cursor_b.setPos(self._to_disp(channel, float(y)))
@@ -7702,6 +8811,7 @@ class WaveformPlot(QWidget):
         finally:
             self._interactive_syncing = False
         self._update_readout()
+        self._apply_cursor_visibility()
 
     def set_interval_peak_on_hb(
         self,
@@ -7715,7 +8825,10 @@ class WaveformPlot(QWidget):
         """Irr 模式：Hb 自动跟 A/B 区间内最大值（不可手拖）。"""
         if self._h_cursor_b is None:
             return
-        self._active_channel = channel
+        if self._interval_ab_channel is None:
+            self._interval_ab_channel = str(channel)
+            self._active_channel = str(channel)
+        self._set_interval_horizontal_binding("hb", channel)
         y_disp = self._to_disp(channel, float(y))
         if t0_us is not None and t1_us is not None:
             plot_peak = self._peak_plot_point_in_window(
@@ -7733,6 +8846,7 @@ class WaveformPlot(QWidget):
         finally:
             self._interactive_syncing = False
         self._update_readout()
+        self._apply_cursor_visibility()
 
     def enable_turn_on_current_interaction(
         self,
@@ -7837,6 +8951,10 @@ class WaveformPlot(QWidget):
         emit_result_on_enter: bool = False,
     ) -> None:
         """短路电流/Tsc：默认按 Hb 交点给 A/B，手动拖动时光标独立。"""
+        # Imax/Tsc are always physical Ic measurements.  Keep the keyword for
+        # capture/API compatibility, but never let a visible CH selection turn
+        # this interaction into a measurement of an unrelated waveform.
+        channel = "ic"
         lo = min(float(search_t0_us), float(search_t1_us), float(t_a_us), float(t_b_us))
         hi = max(float(search_t0_us), float(search_t1_us), float(t_a_us), float(t_b_us))
         self._interactive_enabled = True
@@ -7959,7 +9077,7 @@ class WaveformPlot(QWidget):
             or self._cursor_b is None
         ):
             return
-        channel = self._active_channel or "ic"
+        channel = self._slope_channel or "ic"
         hb = float(self._from_disp(channel, float(self._h_cursor_b.value())))
         crosses = self._short_current_crossings_for_hb(channel, hb)
         if crosses is None:
@@ -7980,7 +9098,7 @@ class WaveformPlot(QWidget):
             or self._h_cursor_a is None
         ):
             return
-        channel = self._active_channel or "ic"
+        channel = self._slope_channel or "ic"
         tt, yy = self._series_for_channel(channel)
         if tt is None or yy is None or len(tt) == 0:
             return
@@ -8011,7 +9129,7 @@ class WaveformPlot(QWidget):
             or self._h_cursor_b is None
         ):
             return
-        channel = self._active_channel or "ic"
+        channel = self._slope_channel or "ic"
         ta = float(self._cursor_a.value())
         tb = float(self._cursor_b.value())
         hb = float(self._from_disp(channel, float(self._h_cursor_b.value())))
@@ -8040,6 +9158,10 @@ class WaveformPlot(QWidget):
 
         if self._cursor_a is None or self._cursor_b is None:
             self._install_persistent_cursors(start_t_us, end_t_us, 1.0)
+        self._interactive_mode = "irr_peak"
+        self._reset_interval_horizontal_bindings(valid=False)
+        self._reset_interval_vertical_bindings()
+        self._interval_ab_channel = "irr"
 
         self._interactive_syncing = True
         try:
@@ -8054,6 +9176,7 @@ class WaveformPlot(QWidget):
         finally:
             self._interactive_syncing = False
         self._update_readout()
+        self._apply_cursor_visibility()
 
     def _crossings_with_level(
         self,
@@ -8209,6 +9332,10 @@ class WaveformPlot(QWidget):
         if tb < ta:
             ta, tb = tb, ta
         self._active_channel = channel
+        self._interval_ab_channel = str(channel)
+        self._set_interval_horizontal_binding("ha", channel)
+        self._interval_hb_channel = None
+        self._interval_hb_valid = False
         self._interactive_syncing = True
         try:
             self._cursor_a.setPos(ta)
@@ -8221,6 +9348,7 @@ class WaveformPlot(QWidget):
         finally:
             self._interactive_syncing = False
         self._update_readout()
+        self._apply_cursor_visibility()
 
     def set_interval_minmax_horizontal(
         self,
@@ -8236,6 +9364,9 @@ class WaveformPlot(QWidget):
         if self._h_cursor_a is None or self._h_cursor_b is None:
             return
         self._active_channel = channel
+        self._interval_ab_channel = str(channel)
+        self._set_interval_horizontal_binding("ha", channel)
+        self._set_interval_horizontal_binding("hb", channel)
         hi, lo = (max(y_min, y_max), min(y_min, y_max))
         ha_disp = self._to_disp(channel, float(hi))
         hb_disp = self._to_disp(channel, float(lo))
@@ -8259,6 +9390,7 @@ class WaveformPlot(QWidget):
         finally:
             self._interactive_syncing = False
         self._update_readout()
+        self._apply_cursor_visibility()
 
     def _emit_interval_horizontal_changed(self) -> bool:
         if (
@@ -8276,9 +9408,12 @@ class WaveformPlot(QWidget):
             which = "hb"
         else:
             which = ""
-        ch = self._active_channel
-        ha = self._from_disp(ch, float(self._h_cursor_a.value()))
-        hb = self._from_disp(ch, float(self._h_cursor_b.value()))
+        ha_ch, ha_valid = self._horizontal_cursor_binding("ha")
+        hb_ch, hb_valid = self._horizontal_cursor_binding("hb")
+        if not (ha_valid and hb_valid):
+            return False
+        ha = self._from_disp(ha_ch, float(self._h_cursor_a.value()))
+        hb = self._from_disp(hb_ch, float(self._h_cursor_b.value()))
         t0 = float(self._cursor_a.value())
         t1 = float(self._cursor_b.value())
         self._interactive_on_horizontal_change(
@@ -8289,6 +9424,21 @@ class WaveformPlot(QWidget):
             float(hb),
         )
         return True
+
+    def _emit_global_horizontal_changed(self) -> None:
+        """Publish a two-line value only when Ha/Hb are physically comparable."""
+
+        if (
+            self._horizontal_callback is None
+            or self._h_cursor_a is None
+            or self._h_cursor_b is None
+            or not self._horizontal_quantities_comparable()
+        ):
+            return
+        channel, _valid = self._horizontal_cursor_binding("ha")
+        ha = self._from_disp(channel, float(self._h_cursor_a.value()))
+        hb = self._from_disp(channel, float(self._h_cursor_b.value()))
+        self._horizontal_callback(float(ha), float(hb))
 
     # ------------------------------------------------------------------ 信号回调 ----
     def _on_any_cursor_moved(self) -> None:
@@ -8321,6 +9471,7 @@ class WaveformPlot(QWidget):
                 return
             if self._interactive_mode in {
                 "interval",
+                "semantic_interval",
                 "irr_cross",
                 "crosstalk",
                 "power_peak",
@@ -8328,7 +9479,10 @@ class WaveformPlot(QWidget):
                 t0 = float(self._cursor_a.value())
                 t1 = float(self._cursor_b.value())
                 if self._interactive_on_change is not None:
-                    self._interactive_on_change(min(t0, t1), max(t0, t1))
+                    if self._interactive_mode == "semantic_interval":
+                        self._interactive_on_change(t0, t1)
+                    else:
+                        self._interactive_on_change(min(t0, t1), max(t0, t1))
                 return
             if self._interactive_mode == "global" and self._global_callback is not None:
                 self._global_callback(
@@ -8387,11 +9541,19 @@ class WaveformPlot(QWidget):
         if self._interactive_mode == "energy_loss":
             self._handle_energy_loss_vertical_moved()
             return
-        if self._interactive_mode in {"interval", "irr_cross", "crosstalk"}:
+        if self._interactive_mode in {
+            "interval",
+            "semantic_interval",
+            "irr_cross",
+            "crosstalk",
+        }:
             t0 = float(self._cursor_a.value())
             t1 = float(self._cursor_b.value())
             if self._interactive_on_change is not None:
-                self._interactive_on_change(min(t0, t1), max(t0, t1))
+                if self._interactive_mode == "semantic_interval":
+                    self._interactive_on_change(t0, t1)
+                else:
+                    self._interactive_on_change(min(t0, t1), max(t0, t1))
             return
         # global 模式：仅通知 MainWindow 用于 statusBar 测量读数
         if self._interactive_mode == "global" and self._global_callback is not None:
@@ -8403,13 +9565,16 @@ class WaveformPlot(QWidget):
     def _on_horizontal_cursor_moved(self) -> None:
         if self._interactive_syncing:
             return
+        if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
+            # Recalculation may also reposition A/B.  Publish only the final
+            # state once; cursor-only motion never changes the active Y axis.
+            self._emit_dvdt_changed()
+            self._update_readout(update_axis=False)
+            return
         self._update_readout()
         if not self._effective_cursor_linked():
             if self._interactive_mode == "delta_vce":
                 self._emit_delta_vce_changed()
-                return
-            if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
-                self._emit_dvdt_changed()
                 return
             if self._interactive_mode == "crosstalk":
                 if self._cursor_a is not None and self._cursor_b is not None:
@@ -8433,11 +9598,7 @@ class WaveformPlot(QWidget):
             if self._interactive_mode in {"interval", "power_peak"}:
                 if self._emit_interval_horizontal_changed():
                     return
-            if self._horizontal_callback is not None:
-                ch = self._active_channel
-                ha = self._from_disp(ch, float(self._h_cursor_a.value())) if self._h_cursor_a is not None else 0.0
-                hb = self._from_disp(ch, float(self._h_cursor_b.value())) if self._h_cursor_b is not None else 0.0
-                self._horizontal_callback(ha, hb)
+            self._emit_global_horizontal_changed()
             return
         if self._interactive_mode == "delta_vce":
             # 拖动的那根横向光标 → 沿波形吸附其对应纵向光标（Ha↔A, Hb↔B）
@@ -8460,10 +9621,6 @@ class WaveformPlot(QWidget):
             finally:
                 self._interactive_syncing = False
             self._emit_delta_vce_changed()
-            self._update_readout()
-            return
-        if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
-            self._emit_dvdt_changed()
             self._update_readout()
             return
         if self._interactive_mode == "irr_peak":
@@ -8588,12 +9745,7 @@ class WaveformPlot(QWidget):
                 if self._interactive_on_change is not None:
                     self._interactive_on_change(float(ta), float(tb))
             return
-        if self._horizontal_callback is not None:
-            # 回调以活动通道真实单位上报
-            ch = self._active_channel
-            ha = self._from_disp(ch, float(self._h_cursor_a.value())) if self._h_cursor_a is not None else 0.0
-            hb = self._from_disp(ch, float(self._h_cursor_b.value())) if self._h_cursor_b is not None else 0.0
-            self._horizontal_callback(ha, hb)
+        self._emit_global_horizontal_changed()
 
     # ------------------------------------------------------------------ 焦点 ----
     def focus_interval_us(self, t_start_us: float, t_end_us: float) -> None:

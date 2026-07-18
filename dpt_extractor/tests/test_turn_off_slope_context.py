@@ -11,6 +11,10 @@ import numpy as np
 
 from dpt_extractor.config.loader import AppConfig
 from dpt_extractor.metrics.iec_timings import turn_off_ic_fall_window
+from dpt_extractor.metrics.plateau_level import (
+    _plateau_mid_without_isolated_spikes,
+    turn_off_didt_stable_base_window_indices,
+)
 from dpt_extractor.metrics.slopes import (
     turn_off_didt_measurement_context,
     turn_off_dvdt_measurement_context,
@@ -52,6 +56,25 @@ SONG_DCU_LT_WH_480_100 = (
     / "LT"
     / "tss"
     / "WH_480V_100A_000.tss"
+)
+SONG_DCU_LT_WH_480_50 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2506"
+    / "DCU"
+    / "SMC"
+    / "LT"
+    / "tss"
+    / "WH_480V_50A_000.tss"
+)
+LIKANG_UL_50_25 = (
+    ROOT
+    / "示例文件"
+    / "likangkang"
+    / "NED34jixian"
+    / "ul"
+    / "915v-ul-50a-6us-25c_000.tss"
 )
 
 
@@ -203,6 +226,39 @@ class TestTurnOffSlopeSyntheticContext(unittest.TestCase):
         self.assertEqual(di.crossing.didt, 0.0)
 
 
+class TestTurnOffStableBaseWindow(unittest.TestCase):
+    def test_stable_base_window_rejects_short_ringing_half_cycle(self) -> None:
+        dt = 1e-9
+        indices = np.arange(2_600)
+        ic = np.full(len(indices), 48.0, dtype=np.float64)
+        ic[1_000:1_201] = np.linspace(48.0, -3.0, 201)
+        ring = 9.0 * np.sin(np.linspace(0.0, 16.0 * np.pi, 300))
+        ic[1_201:1_501] = -3.0 + ring
+        stable_idx = np.arange(1_501, 2_101)
+        ic[stable_idx] = np.where(stable_idx % 2 == 0, -2.0, -4.0)
+        ic[2_200:] = 500.0
+
+        window = turn_off_didt_stable_base_window_indices(
+            ic,
+            local_end=1_500,
+            off_idx=1_200,
+            fall_end=1_200,
+            dt=dt,
+            next_pulse_on=2_200,
+        )
+        self.assertIsNotNone(window)
+        assert window is not None
+        b0, b1 = window
+        self.assertEqual(b1 - b0 + 1, 200)
+        self.assertGreaterEqual(b0, 1_501)
+        self.assertLess(b1, 2_200)
+        self.assertAlmostEqual(
+            _plateau_mid_without_isolated_spikes(ic[b0 : b1 + 1]),
+            -3.0,
+            places=12,
+        )
+
+
 @unittest.skipUnless(
     SONG_DCU_RT_WL_480_1000.exists(),
     "songzhenxi WL_480V_1000A sample is not available",
@@ -282,6 +338,7 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
             di_a,
             di_b,
             edge=di_range.ic_direction,
+            next_pulse_on=segments.next_pulse_on,
         )
 
         self.assertAlmostEqual(result.turn_off.dvdt, dv_context.crossing.dvdt, places=12)
@@ -296,7 +353,7 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         self.assertAlmostEqual(dv_context.top_v, 472.0234375, places=6)
         self.assertAlmostEqual(dv_context.base_v, 5.984375, places=6)
         self.assertAlmostEqual(di_context.top_a, 1002.15625, places=6)
-        self.assertAlmostEqual(di_context.base_a, 8.03125, places=6)
+        self.assertAlmostEqual(di_context.base_a, 7.84375, places=6)
         self.assertFalse(dv_context.used_fallback)
         self.assertFalse(di_context.used_fallback)
 
@@ -317,8 +374,8 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         # Ic_off_max row; Base remains the settled post-fall level.
         self.assertAlmostEqual(result.turn_off.ic_off_max, 1002.15625, places=6)
         self.assertAlmostEqual(result.turn_off.ic_off_max, di_context.top_a, places=6)
-        self.assertAlmostEqual(result.turn_off.eoff, 56.49762867, places=6)
-        self.assertAlmostEqual(result.turn_off.delta_vce, 194.609375, places=6)
+        self.assertAlmostEqual(result.turn_off.eoff, 57.927060778, places=6)
+        self.assertAlmostEqual(result.turn_off.delta_vce, 200.734375, places=6)
 
     def test_all_slope_range_cells_keep_only_percentage_labels_after_interaction(self) -> None:
         from dpt_extractor.gui.main_window import MainWindow
@@ -387,7 +444,7 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
 
         self.assertAlmostEqual(window.result.turn_off.ic_off_max, 1050.84375, places=6)
         self.assertAlmostEqual(context.top_a, window.result.turn_off.ic_off_max, places=9)
-        self.assertAlmostEqual(window.result.turn_off.didt, 11.620718, places=6)
+        self.assertAlmostEqual(window.result.turn_off.didt, 11.733276216, places=6)
 
         window._on_value_clicked("关断过程", "di/dt")
         QApplication.processEvents()
@@ -420,9 +477,135 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         self.assertFalse(context.used_fallback)
         self.assertIsNotNone(context.crossing.t_pct_a_s)
         self.assertIsNotNone(context.crossing.t_pct_b_s)
-        self.assertAlmostEqual(window.result.turn_off.didt, 0.773031568, places=6)
+        self.assertAlmostEqual(window.result.turn_off.didt, 0.775575355, places=6)
 
         window._on_value_clicked("关断过程", "di/dt")
+        QApplication.processEvents()
+        self.assertIsNotNone(window.wave_plot._cursor_a)
+        self.assertIsNotNone(window.wave_plot._cursor_b)
+        assert window.wave_plot._cursor_a is not None
+        assert window.wave_plot._cursor_b is not None
+        self.assertAlmostEqual(
+            float(window.wave_plot._cursor_a.value()),
+            float(context.crossing.t_pct_a_s) * 1e6,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(window.wave_plot._cursor_b.value()),
+            float(context.crossing.t_pct_b_s) * 1e6,
+            places=6,
+        )
+
+    def test_likangkang_negative_base_uses_200ns_band_and_signed_raw_ab(self) -> None:
+        if not LIKANG_UL_50_25.exists():
+            self.skipTest(f"missing {LIKANG_UL_50_25}")
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        window = MainWindow()
+        self.addCleanup(window.close)
+        window._load_file(str(LIKANG_UL_50_25))
+        self.assertIsNotNone(window.bundle)
+        self.assertIsNotNone(window.result)
+        assert window.bundle is not None
+        assert window.result is not None
+        interval = window._parameter_interval_us("关断过程", "di/dt")
+        self.assertIsNotNone(interval)
+        assert interval is not None
+        context = window._turn_off_didt_context(*interval)
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(context.base_window, (53955, 54579))
+        assert context.base_window is not None
+        b0, b1 = context.base_window
+        ic = bundle_total_current(window.bundle, window.profile)
+        self.assertEqual(b1 - b0 + 1, 625)
+        self.assertAlmostEqual(window.bundle.t[b0] * 1e6, 7.2256, places=6)
+        self.assertAlmostEqual(window.bundle.t[b1] * 1e6, 7.42528, places=6)
+        self.assertAlmostEqual(
+            context.base_a,
+            _plateau_mid_without_isolated_spikes(ic[b0 : b1 + 1]),
+            places=12,
+        )
+        self.assertAlmostEqual(context.base_a, -3.3453125, places=9)
+        self.assertAlmostEqual(context.top_a, 48.46875, places=9)
+        self.assertFalse(context.used_fallback)
+        self.assertIsNotNone(context.crossing.t_pct_a_s)
+        self.assertIsNotNone(context.crossing.t_pct_b_s)
+        assert context.crossing.t_pct_a_s is not None
+        assert context.crossing.t_pct_b_s is not None
+        self.assertAlmostEqual(
+            np.interp(context.crossing.t_pct_a_s, window.bundle.t, ic),
+            context.crossing.th_a,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            np.interp(context.crossing.t_pct_b_s, window.bundle.t, ic),
+            context.crossing.th_b,
+            places=9,
+        )
+        self.assertAlmostEqual(context.crossing.didt, 0.221101811317, places=9)
+        self.assertAlmostEqual(
+            window.result.turn_off.didt,
+            context.crossing.didt,
+            places=12,
+        )
+
+        window._on_value_clicked("关断过程", "di/dt")
+        QApplication.processEvents()
+        self.assertEqual(window.wave_plot._slope_channel, "ic")
+        self.assertIsNotNone(window.wave_plot._cursor_a)
+        self.assertIsNotNone(window.wave_plot._cursor_b)
+        assert window.wave_plot._cursor_a is not None
+        assert window.wave_plot._cursor_b is not None
+        self.assertAlmostEqual(
+            float(window.wave_plot._cursor_a.value()),
+            context.crossing.t_pct_a_s * 1e6,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(window.wave_plot._cursor_b.value()),
+            context.crossing.t_pct_b_s * 1e6,
+            places=6,
+        )
+
+        # Moving Hb is a real interaction path.  It must keep using signed
+        # logical Ic, otherwise a negative Base would again lose cursor B.
+        self.assertIsNotNone(window.wave_plot._h_cursor_b)
+        assert window.wave_plot._h_cursor_b is not None
+        window.wave_plot._h_cursor_b.setPos(
+            window.wave_plot._to_disp("ic", -2.5)
+        )
+        QApplication.processEvents()
+        self.assertIsNotNone(window.wave_plot._cursor_a)
+        self.assertIsNotNone(window.wave_plot._cursor_b)
+        self.assertGreater(window.result.turn_off.didt, 0.0)
+
+    def test_low_current_turn_off_dvdt_extends_to_both_real_crossings(self) -> None:
+        if not SONG_DCU_LT_WH_480_50.exists():
+            self.skipTest(f"missing {SONG_DCU_LT_WH_480_50}")
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        window = MainWindow()
+        self.addCleanup(window.close)
+        window._load_file(str(SONG_DCU_LT_WH_480_50))
+        self.assertIsNotNone(window.result)
+        assert window.result is not None
+        interval = window._parameter_interval_us("关断过程", "dv/dt")
+        self.assertIsNotNone(interval)
+        assert interval is not None
+        context = window._turn_off_dvdt_context(*interval)
+        self.assertIsNotNone(context)
+        assert context is not None
+
+        self.assertFalse(context.used_fallback)
+        self.assertIsNotNone(context.crossing.t_pct_a_s)
+        self.assertIsNotNone(context.crossing.t_pct_b_s)
+
+        window._on_value_clicked("关断过程", "dv/dt")
         QApplication.processEvents()
         self.assertIsNotNone(window.wave_plot._cursor_a)
         self.assertIsNotNone(window.wave_plot._cursor_b)

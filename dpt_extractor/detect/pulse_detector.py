@@ -21,6 +21,9 @@ class PulseEdges:
     off_pulse_number: int = 1
     on_pulse_number: int = 2
     detected_pulse_count: int = 2
+    #: First physical gate rise after the selected turn-off pulse.  This may
+    #: differ from ``pulse2_on`` when the user analyzes non-adjacent pulses.
+    next_pulse_on: int | None = None
     #: True when only one gate pulse is present (turn-on / RR extraction skipped).
     single_pulse: bool = False
 
@@ -139,6 +142,7 @@ class PulseDetector:
 
         p1_on, rough_off = pulses[off_pulse - 1]
         p2_on, p2_off = pulses[on_pulse - 1]
+        next_pulse_on = pulses[off_pulse][0] if off_pulse < n else None
         if off_pulse == on_pulse:
             p1_off = self._refine_pulse_off(vge, p1_on, rough_off, rough_off, dt)
         else:
@@ -151,6 +155,7 @@ class PulseDetector:
             off_pulse_number=off_pulse,
             on_pulse_number=on_pulse,
             detected_pulse_count=n,
+            next_pulse_on=next_pulse_on,
         )
 
     def _refine_pulse_off(

@@ -22,6 +22,17 @@ class TestPulseSelection(unittest.TestCase):
         self.assertEqual(edges.pulse2_on, 300)
         self.assertEqual(edges.off_pulse_number, 1)
         self.assertEqual(edges.on_pulse_number, 2)
+        self.assertEqual(edges.next_pulse_on, 300)
+
+    def test_non_adjacent_selection_keeps_next_physical_rise(self):
+        cfg = AppConfig(pulse_selection=PulseSelectionConfig(off_pulse=1, on_pulse=3))
+        pulses = [(100, 200), (300, 400), (500, 600)]
+        vge = np.zeros(700)
+        for a, b in pulses:
+            vge[a : b + 1] = 10.0
+        edges = PulseDetector(cfg).build_edges(pulses, 1, 3, vge, 1e-8)
+        self.assertEqual(edges.pulse2_on, 500)
+        self.assertEqual(edges.next_pulse_on, 300)
 
     def test_build_edges_third_on(self):
         cfg = AppConfig(pulse_selection=PulseSelectionConfig(off_pulse=2, on_pulse=3))

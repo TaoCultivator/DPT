@@ -81,6 +81,7 @@ class Segmenter:
             pulse1_off=edges.pulse1_off,
             pulse2_on=edges.pulse2_on,
             pulse2_off=edges.pulse2_off,
+            next_pulse_on=edges.next_pulse_on,
         )
 
     @staticmethod

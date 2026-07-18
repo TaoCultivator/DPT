@@ -22,6 +22,7 @@ from dpt_extractor.metrics.iec_windows import (
     integrate_err_recovery,
     integrate_vi_window,
 )
+from dpt_extractor.metrics.iec_timings import turn_on_timing_instants
 from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 from dpt_extractor.models.bridge_profile import UPPER_BRIDGE, guess_profile_from_path
 from dpt_extractor.models.channel_mapping import (
@@ -30,18 +31,40 @@ from dpt_extractor.models.channel_mapping import (
 )
 from dpt_extractor.models.waveform import bundle_total_current
 from dpt_extractor.metrics.plateau_level import (
+    _plateau_mid_without_isolated_spikes,
     dvdt_rr_vd_base_top,
+    turn_on_current_hb_ha_window_indices,
+    turn_on_current_cursor_hb_a_us,
     turn_on_ic_a_cross_hb_us,
     turn_on_ic_b_cross_ha_us,
     turn_on_ic_link_default_times,
 )
 from dpt_extractor.pipeline.extract import extract_all
 from dpt_extractor.tests.sample_paths import sample_tss
+from dpt_extractor.utils.timing_adapt import scope_turn_on_bases
 
 import numpy as np
 
 WH = sample_tss("WH_480V_800A_000.tss")
 ROOT = Path(__file__).resolve().parents[2]
+LIKANG_ROOT = ROOT / "示例文件" / "likangkang" / "NED34jixian"
+LIKANG_WH_50A_175 = LIKANG_ROOT / "wh" / "915v-wh-50a-5.5us-175c_000.tss"
+LIKANG_WH_50A_25 = LIKANG_ROOT / "wh" / "915v-wh-50a-5.5us-25c_000.tss"
+LIKANG_VL_50A_175 = LIKANG_ROOT / "vl" / "915v-vl-50a-6us-175c_000.tss"
+LIKANG_VH_50A_175 = LIKANG_ROOT / "vh" / "915v-vh-50a-6us-175c_000.tss"
+LIKANG_TURN_ON_CURSOR_CASES = tuple(
+    LIKANG_ROOT / "uh" / name
+    for name in (
+        "915v-uh-50a-5.5us-175c_000.tss",
+        "915v-uh-50a-6us-25c_000.tss",
+        "915v-uh-930a-10.8us-25c_000.tss",
+    )
+) + (
+    LIKANG_WH_50A_175,
+    LIKANG_WH_50A_25,
+    LIKANG_VL_50A_175,
+    LIKANG_VH_50A_175,
+)
 SONG_KSU2577_SSS_HT = (
     ROOT
     / "示例文件"
@@ -405,6 +428,12 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreaterEqual(mk.i_start, i0)
         self.assertLessEqual(mk.i_end, i1)
         self.assertGreater(mk.t_end, mk.t_start)
+        self.assertAlmostEqual(
+            float(np.interp(mk.t_start, t, ic)),
+            mk.ha_v,
+            delta=1e-6,
+            msg="Eon A 必须是原始 Ic 与 Ha 的真实插值交点",
+        )
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_scope_window_near_manual_reference(self):
@@ -1153,6 +1182,178 @@ class TestEoffWindow(unittest.TestCase):
                 self.assertAlmostEqual(energy, energy_mj, delta=max(0.05, energy_mj * 0.01))
 
     @unittest.skipUnless(
+        (SONG_KSU2577_SSS_HT / "WH_750V_1050A_000.tss").exists(),
+        "songzhenxi SSS HT WH 1050A sample missing",
+    )
+    def test_wh_1050_eoff_refined_ha_keeps_main_edge_raw_intersection(self):
+        path = SONG_KSU2577_SSS_HT / "WH_750V_1050A_000.tss"
+        bundle = load_waveform(path)
+        profile = guess_profile_from_path(str(path))
+        result = extract_all(bundle, profile, load_config())
+        segs = result.segments
+        assert segs is not None
+        t = bundle.t
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+        markers = eoff_energy_markers(
+            t,
+            ic,
+            vce,
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_off,
+            bundle.dt,
+            pre_ns=load_config().energy.eoff_pre_ns,
+            pulse1_on=segs.pulse1_on,
+        )
+
+        self.assertAlmostEqual(markers.t_start * 1e6, 14.545746667, places=6)
+        self.assertAlmostEqual(markers.t_end * 1e6, 14.874282756, places=6)
+        self.assertAlmostEqual(markers.ha_v, 12.40625, places=6)
+        self.assertAlmostEqual(markers.hb_a, 28.064254893, places=6)
+        self.assertAlmostEqual(
+            float(np.interp(markers.t_start, t, vce)),
+            markers.ha_v,
+            delta=1e-6,
+        )
+        i_a = int(np.searchsorted(t, markers.t_start, side="left"))
+        i_hi = min(len(vce), i_a + max(8, int(round(100e-9 / bundle.dt))))
+        event_top = float(np.max(vce[segs.turn_off[0] : segs.turn_off[1] + 1]))
+        self.assertGreater(
+            float(np.max(vce[i_a:i_hi])),
+            markers.ha_v + 0.15 * (event_top - markers.ha_v),
+            "Eoff A 后必须进入同一 Vce 主上升沿，不能卡到更早的小台阶",
+        )
+
+    @unittest.skipUnless(
+        SONG_KSU2577_SSS_HT.exists() and SONG_KSU2577_SSS_RT.exists(),
+        "songzhenxi SSS 50A HT/RT samples missing",
+    )
+    def test_song_sss_50a_eon_a_backprojects_main_foot_to_raw_ha_crossing(self):
+        expected_a_us = {
+            ("HT", "UH_750V_50A_000.tss"): 9.991674181833,
+            ("HT", "UL_750V_50A_000.tss"): 10.374462080015,
+            ("HT", "VH_750V_50A_000.tss"): 9.491694117661,
+            ("HT", "VL_750V_50A_000.tss"): 10.385455040015,
+            ("HT", "WH_750V_50A_000.tss"): 9.978988742529,
+            ("HT", "WL_750V_50A_000.tss"): 10.489181950015,
+            ("RT", "UH_750V_50A_000.tss"): 10.004530367361,
+            ("RT", "UL_750V_50A_000.tss"): 10.503598123092,
+            ("RT", "VH_750V_50A_000.tss"): 10.003306329232,
+            ("RT", "VL_750V_50A_000.tss"): 9.797284552860,
+            ("RT", "WH_750V_50A_000.tss"): 9.996675838165,
+            ("RT", "WL_750V_50A_000.tss"): 10.497276160015,
+        }
+        roots = {"HT": SONG_KSU2577_SSS_HT, "RT": SONG_KSU2577_SSS_RT}
+        cfg = load_config()
+        for (temperature, name), expected_us in expected_a_us.items():
+            path = roots[temperature] / name
+            with self.subTest(temperature=temperature, sample=name):
+                self.assertTrue(path.exists(), f"missing regression sample: {path}")
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                result = extract_all(bundle, profile, cfg)
+                segs = result.segments
+                assert segs is not None
+                t = bundle.t
+                ic = bundle_total_current(bundle, profile)
+                vce = bundle.get(profile.vce)
+                markers = eon_energy_markers(
+                    t,
+                    ic,
+                    vce,
+                    segs.turn_on[0],
+                    segs.turn_on[1],
+                    segs.pulse2_on,
+                    bundle.dt,
+                    pulse1_off=segs.pulse1_off,
+                )
+                self.assertAlmostEqual(
+                    markers.t_start * 1e6, expected_us, delta=0.002
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(markers.t_start, t, ic)),
+                    markers.ha_v,
+                    delta=1e-6,
+                    msg="Eon A 必须回插到原始 Ic 与 Ha 的交点",
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(markers.t_end, t, vce)),
+                    markers.hb_a,
+                    delta=1e-6,
+                    msg="Eon B 必须保持原始 Vce 与 Hb 的交点",
+                )
+
+                _i_base, _v_top, i_top, _v_base, _w0, _w1 = scope_turn_on_bases(
+                    vce,
+                    ic,
+                    segs.pulse2_on,
+                    segs.turn_on[0],
+                    segs.turn_on[1],
+                    bundle.dt,
+                    pulse1_off=segs.pulse1_off,
+                )
+                span = abs(float(i_top) - float(markers.ha_v))
+                foot_level = float(markers.ha_v) + 0.03 * span
+                search_lo = max(
+                    0,
+                    int(np.searchsorted(t, markers.t_start - bundle.dt, side="left")),
+                )
+                search_hi = min(
+                    len(t) - 2,
+                    int(np.searchsorted(t, markers.t_start + 90e-9, side="right")),
+                )
+                foot_ix = None
+                foot_t = None
+                for k in range(search_lo, search_hi + 1):
+                    y0, y1 = float(ic[k]), float(ic[k + 1])
+                    if y0 <= foot_level < y1 and y1 > y0:
+                        foot_ix = int(k)
+                        foot_t = float(
+                            t[k]
+                            + (foot_level - y0)
+                            / (y1 - y0)
+                            * (t[k + 1] - t[k])
+                        )
+                        break
+                self.assertIsNotNone(foot_ix, "3% foot 必须能确认本次 Ic 主沿")
+                self.assertIsNotNone(foot_t, "3% foot 必须能确认本次 Ic 主沿")
+                assert foot_ix is not None and foot_t is not None
+
+                base_crossings: list[float] = []
+                back_lo = max(
+                    0,
+                    int(np.searchsorted(t, foot_t - 90e-9, side="left")),
+                )
+                for k in range(back_lo, foot_ix + 1):
+                    y0, y1 = float(ic[k]), float(ic[k + 1])
+                    if y0 <= markers.ha_v < y1 and y1 > y0:
+                        base_crossings.append(
+                            float(
+                                t[k]
+                                + (markers.ha_v - y0)
+                                / (y1 - y0)
+                                * (t[k + 1] - t[k])
+                            )
+                        )
+                self.assertTrue(base_crossings)
+                self.assertAlmostEqual(
+                    base_crossings[-1],
+                    markers.t_start,
+                    delta=max(2.0 * bundle.dt, 1e-12),
+                    msg="A 必须是 3% 主沿门前最近的原始 Ic=Ha 上升交点",
+                )
+                reach_hi = min(
+                    len(ic),
+                    foot_ix + max(8, int(round(90e-9 / bundle.dt))),
+                )
+                self.assertGreaterEqual(
+                    float(np.max(ic[foot_ix:reach_hi])),
+                    float(markers.ha_v) + 0.50 * span,
+                    "3% foot 后必须进入同一次 Ic 主上升沿",
+                )
+
+    @unittest.skipUnless(
         (SONG_KSU2577_SSS_HT / "UL_750V_50A_000.tss").exists(),
         "songzhenxi SSS HT UL 50A sample missing",
     )
@@ -1858,6 +2059,612 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(ta, 18.418)
         self.assertGreater(tb, 18.96)
         self.assertLess(tb, 19.05)
+
+    @unittest.skipUnless(
+        all(path.exists() for path in LIKANG_TURN_ON_CURSOR_CASES),
+        "likangkang turn-on cursor samples missing",
+    )
+    def test_likangkang_turn_on_current_ab_are_exact_raw_ic_intersections(self):
+        for path in LIKANG_TURN_ON_CURSOR_CASES:
+            with self.subTest(sample=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                mapping, _source = infer_best_mapping_from_bundle(
+                    bundle, profile.bridge
+                )
+                if mapping is not None:
+                    profile = apply_mapping(profile, mapping)
+                result = extract_all(bundle, profile, load_config())
+                segs = result.segments
+                assert segs is not None
+                ic = bundle_total_current(bundle, profile)
+                on0, on1 = segs.turn_on
+                cfg = load_config()
+                timing = turn_on_timing_instants(
+                    bundle.t,
+                    bundle.get(profile.vge),
+                    ic,
+                    on0,
+                    on1,
+                    segs.pulse2_on,
+                    bundle.dt,
+                    cfg,
+                    pulse2_off=segs.pulse2_off,
+                )
+                ta, tb, hb, ha = turn_on_ic_link_default_times(
+                    bundle.t,
+                    ic,
+                    on0,
+                    on1,
+                    bundle.dt,
+                    vge10_s=timing.t_v10_s,
+                    detect_window_ns=cfg.smoothing.detect_window_ns,
+                )
+                self.assertTrue(np.isfinite(ta))
+                self.assertTrue(np.isfinite(tb))
+                self.assertLess(ta, tb)
+                self.assertAlmostEqual(
+                    float(np.interp(ta * 1e-6, bundle.t, ic)), hb, delta=1e-6
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(tb * 1e-6, bundle.t, ic)), ha, delta=1e-6
+                )
+
+    @unittest.skipUnless(
+        LIKANG_WH_50A_175.exists() and LIKANG_WH_50A_25.exists(),
+        "likangkang WH 50A turn-on cursor samples missing",
+    )
+    def test_wh_50a_turn_on_current_uses_full_200ns_stable_hb(self):
+        expected = (
+            (LIKANG_WH_50A_175, 5.684375, 7.514641159),
+            (LIKANG_WH_50A_25, 5.175, 7.520023133),
+        )
+        cfg = load_config()
+        for path, expected_hb, expected_a in expected:
+            with self.subTest(sample=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                mapping, _source = infer_best_mapping_from_bundle(
+                    bundle, profile.bridge
+                )
+                if mapping is not None:
+                    profile = apply_mapping(profile, mapping)
+                result = extract_all(bundle, profile, cfg)
+                segs = result.segments
+                assert segs is not None
+                ic = bundle_total_current(bundle, profile)
+                on0, on1 = segs.turn_on
+                timing = turn_on_timing_instants(
+                    bundle.t,
+                    bundle.get(profile.vge),
+                    ic,
+                    on0,
+                    on1,
+                    segs.pulse2_on,
+                    bundle.dt,
+                    cfg,
+                    pulse2_off=segs.pulse2_off,
+                )
+                ta, tb, hb, ha = turn_on_ic_link_default_times(
+                    bundle.t,
+                    ic,
+                    on0,
+                    on1,
+                    bundle.dt,
+                    vge10_s=timing.t_v10_s,
+                    detect_window_ns=cfg.smoothing.detect_window_ns,
+                )
+                expected_ta, expected_cursor_hb, hb_win = (
+                    turn_on_current_cursor_hb_a_us(
+                        bundle.t,
+                        ic,
+                        on0,
+                        on1,
+                        bundle.dt,
+                        vge10_s=timing.t_v10_s,
+                        detect_window_ns=cfg.smoothing.detect_window_ns,
+                    )
+                )
+                _pipeline_hb_win, ha_win = turn_on_current_hb_ha_window_indices(
+                    bundle.t, ic, on0, on1, bundle.dt
+                )
+                hb_ref = _plateau_mid_without_isolated_spikes(
+                    ic[hb_win[0] : hb_win[1] + 1]
+                )
+                ha_ref = _plateau_mid_without_isolated_spikes(
+                    ic[ha_win[0] : ha_win[1] + 1]
+                )
+                hb_window_ns = (
+                    float(bundle.t[hb_win[1]] - bundle.t[hb_win[0]]) * 1e9
+                )
+                self.assertGreater(hb_window_ns, 190.0)
+                self.assertLess(hb_window_ns, 205.0)
+                self.assertGreater(ta, float(bundle.t[on0] * 1e6))
+                self.assertGreater(ta, float(bundle.t[hb_win[1]] * 1e6))
+                self.assertLess(ta, float(bundle.t[hb_win[1]] * 1e6 + 0.08))
+                self.assertLess(ta, tb)
+                self.assertEqual(ta, expected_ta)
+                self.assertEqual(hb, expected_cursor_hb)
+                self.assertAlmostEqual(hb, hb_ref, places=9)
+                self.assertAlmostEqual(ha, ha_ref, places=9)
+                self.assertAlmostEqual(hb, expected_hb, places=6)
+                self.assertAlmostEqual(ta, expected_a, places=6)
+                self.assertAlmostEqual(
+                    float(np.interp(ta * 1e-6, bundle.t, ic)), hb, delta=1e-6
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(tb * 1e-6, bundle.t, ic)), ha, delta=1e-6
+                )
+
+    @unittest.skipUnless(
+        all(path.exists() for path in LIKANG_TURN_ON_CURSOR_CASES[:2]),
+        "likangkang UH 50A turn-on cursor samples missing",
+    )
+    def test_uh_50a_vge10_guard_clips_hb_to_event_subband(self):
+        expected = (
+            (LIKANG_TURN_ON_CURSOR_CASES[0], 4.63125, 7.498746667),
+            (LIKANG_TURN_ON_CURSOR_CASES[1], 3.7515625, 8.025943351),
+        )
+        cfg = load_config()
+        for path, expected_hb, expected_a in expected:
+            with self.subTest(sample=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                mapping, _source = infer_best_mapping_from_bundle(
+                    bundle, profile.bridge
+                )
+                if mapping is not None:
+                    profile = apply_mapping(profile, mapping)
+                result = extract_all(bundle, profile, cfg)
+                segs = result.segments
+                assert segs is not None
+                ic = bundle_total_current(bundle, profile)
+                on0, on1 = segs.turn_on
+                timing = turn_on_timing_instants(
+                    bundle.t,
+                    bundle.get(profile.vge),
+                    ic,
+                    on0,
+                    on1,
+                    segs.pulse2_on,
+                    bundle.dt,
+                    cfg,
+                    pulse2_off=segs.pulse2_off,
+                )
+                self.assertIsNotNone(timing.t_v10_s)
+                full_ta, full_hb, full_win = turn_on_current_cursor_hb_a_us(
+                    bundle.t,
+                    ic,
+                    on0,
+                    on1,
+                    bundle.dt,
+                    vge10_s=timing.t_v10_s,
+                    detect_window_ns=100.0,
+                )
+                ta, tb, hb, _ha = turn_on_ic_link_default_times(
+                    bundle.t,
+                    ic,
+                    on0,
+                    on1,
+                    bundle.dt,
+                    vge10_s=timing.t_v10_s,
+                    detect_window_ns=cfg.smoothing.detect_window_ns,
+                )
+                expected_ta, expected_cursor_hb, hb_win = (
+                    turn_on_current_cursor_hb_a_us(
+                        bundle.t,
+                        ic,
+                        on0,
+                        on1,
+                        bundle.dt,
+                        vge10_s=timing.t_v10_s,
+                        detect_window_ns=cfg.smoothing.detect_window_ns,
+                    )
+                )
+                width_ns = (
+                    float(bundle.t[hb_win[1]] - bundle.t[hb_win[0]]) * 1e9
+                )
+                self.assertGreater(width_ns, 60.0)
+                self.assertLess(width_ns, 120.0)
+                self.assertEqual(hb_win[0], on0)
+                self.assertLess(full_win[0], on0)
+                self.assertNotEqual(full_hb, hb)
+                assert timing.t_v10_s is not None
+                self.assertLess(
+                    full_ta * 1e-6,
+                    timing.t_v10_s - cfg.smoothing.detect_window_ns * 1e-9,
+                )
+                self.assertGreaterEqual(
+                    ta * 1e-6,
+                    timing.t_v10_s - cfg.smoothing.detect_window_ns * 1e-9,
+                )
+                self.assertLess(ta, tb)
+                self.assertGreater(ta, float(bundle.t[hb_win[1]] * 1e6))
+                self.assertLess(ta, float(bundle.t[hb_win[1]] * 1e6 + 0.08))
+                self.assertEqual(ta, expected_ta)
+                self.assertEqual(hb, expected_cursor_hb)
+                self.assertAlmostEqual(hb, expected_hb, places=6)
+                self.assertAlmostEqual(ta, expected_a, places=6)
+                self.assertAlmostEqual(
+                    float(np.interp(ta * 1e-6, bundle.t, ic)), hb, delta=1e-6
+                )
+
+    @unittest.skipUnless(
+        LIKANG_VL_50A_175.exists() and LIKANG_VH_50A_175.exists(),
+        "likangkang VL/VH 50A turn-on cursor samples missing",
+    )
+    def test_vl_vh_50a_valid_main_foot_keeps_full_200ns_hb_band(self):
+        cfg = load_config()
+        for path in (LIKANG_VL_50A_175, LIKANG_VH_50A_175):
+            with self.subTest(sample=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                mapping, _source = infer_best_mapping_from_bundle(
+                    bundle, profile.bridge
+                )
+                if mapping is not None:
+                    profile = apply_mapping(profile, mapping)
+                result = extract_all(bundle, profile, cfg)
+                segs = result.segments
+                assert segs is not None
+                ic = bundle_total_current(bundle, profile)
+                on0, on1 = segs.turn_on
+                timing = turn_on_timing_instants(
+                    bundle.t,
+                    bundle.get(profile.vge),
+                    ic,
+                    on0,
+                    on1,
+                    segs.pulse2_on,
+                    bundle.dt,
+                    cfg,
+                    pulse2_off=segs.pulse2_off,
+                )
+                ta, _tb, hb, _ha = turn_on_ic_link_default_times(
+                    bundle.t,
+                    ic,
+                    on0,
+                    on1,
+                    bundle.dt,
+                    vge10_s=timing.t_v10_s,
+                    detect_window_ns=cfg.smoothing.detect_window_ns,
+                )
+                _expected_ta, _expected_hb, hb_win = (
+                    turn_on_current_cursor_hb_a_us(
+                        bundle.t,
+                        ic,
+                        on0,
+                        on1,
+                        bundle.dt,
+                        vge10_s=timing.t_v10_s,
+                        detect_window_ns=cfg.smoothing.detect_window_ns,
+                    )
+                )
+                width_ns = (
+                    float(bundle.t[hb_win[1]] - bundle.t[hb_win[0]]) * 1e9
+                )
+                self.assertGreater(width_ns, 190.0)
+                self.assertAlmostEqual(
+                    float(np.interp(ta * 1e-6, bundle.t, ic)), hb, delta=1e-6
+                )
+
+    def test_turn_on_current_a_accepts_high_signed_hb_main_rise(self):
+        """A high baseline must not be rejected by an absolute 45 A gate."""
+
+        t = np.arange(260, dtype=np.float64) * 1e-9
+        ic = np.concatenate(
+            (
+                np.full(100, 60.0),
+                np.linspace(60.0, 100.0, 41),
+                np.full(119, 100.0),
+            )
+        )
+        ta = turn_on_ic_a_cross_hb_us(t, ic, 0, len(t) - 1, 65.0, 1e-9)
+        self.assertTrue(np.isfinite(ta))
+        self.assertAlmostEqual(ta, 0.105, places=9)
+        self.assertAlmostEqual(
+            float(np.interp(ta * 1e-6, t, ic)), 65.0, places=9
+        )
+
+    def test_turn_on_current_hb_ignores_one_sample_stable_band_spike(self):
+        dt = 1e-9
+        t = np.arange(1400, dtype=np.float64) * dt
+        ic = np.full(1400, -20.0, dtype=np.float64)
+        ic[350] = 75.0
+        ic[500:601] = np.linspace(-20.0, 80.0, 101)
+        ic[601:] = 80.0
+
+        ta, hb, hb_win = turn_on_current_cursor_hb_a_us(
+            t,
+            ic,
+            200,
+            1300,
+            dt,
+            vge10_s=490e-9,
+            detect_window_ns=15.0,
+        )
+
+        self.assertLessEqual(hb_win[0], 350)
+        self.assertGreaterEqual(hb_win[1], 350)
+        self.assertEqual(hb, -20.0)
+        self.assertTrue(np.isfinite(ta))
+        self.assertGreater(ta, 0.49)
+        self.assertAlmostEqual(
+            float(np.interp(ta * 1e-6, t, ic)), hb, places=10
+        )
+
+    def test_turn_on_current_hb_ignores_stable_band_boundary_spikes(self):
+        dt = 1e-9
+        t = np.arange(1400, dtype=np.float64) * dt
+        baseline_ic = np.full(1400, -20.0, dtype=np.float64)
+        baseline_ic[500:601] = np.linspace(-20.0, 80.0, 101)
+        baseline_ic[601:] = 80.0
+        _baseline_ta, _baseline_hb, baseline_window = (
+            turn_on_current_cursor_hb_a_us(
+                t,
+                baseline_ic,
+                200,
+                1300,
+                dt,
+                vge10_s=490e-9,
+                detect_window_ns=15.0,
+            )
+        )
+
+        for spike_index in baseline_window:
+            with self.subTest(spike_index=spike_index):
+                ic = baseline_ic.copy()
+                ic[spike_index] = 30.0
+
+                ta, hb, hb_win = turn_on_current_cursor_hb_a_us(
+                    t,
+                    ic,
+                    200,
+                    1300,
+                    dt,
+                    vge10_s=490e-9,
+                    detect_window_ns=15.0,
+                )
+
+                self.assertEqual(hb_win, baseline_window)
+                self.assertEqual(hb, -20.0)
+                self.assertTrue(np.isfinite(ta))
+                self.assertGreater(ta, 0.49)
+                self.assertAlmostEqual(
+                    float(np.interp(ta * 1e-6, t, ic)), hb, places=10
+                )
+
+    def test_short_stable_bands_ignore_boundary_spikes_without_self_pollution(self):
+        """The candidate spike must not inflate its own detection threshold."""
+
+        for length in (4, 5, 10):
+            for spike_index in (0, length - 1):
+                with self.subTest(length=length, spike_index=spike_index):
+                    stable_band = np.full(length, -20.0, dtype=np.float64)
+                    stable_band[spike_index] = 30.0
+                    self.assertEqual(
+                        _plateau_mid_without_isolated_spikes(stable_band),
+                        -20.0,
+                    )
+
+    def test_short_stable_bands_ignore_separated_internal_spikes(self):
+        for length, spike_indices in ((7, (2, 5)), (9, (2, 6)), (10, (2, 7))):
+            with self.subTest(length=length, spike_indices=spike_indices):
+                stable_band = np.full(length, -20.0, dtype=np.float64)
+                stable_band[list(spike_indices)] = 30.0
+                self.assertEqual(
+                    _plateau_mid_without_isolated_spikes(stable_band),
+                    -20.0,
+                )
+
+    def test_sparse_multi_spikes_do_not_pollute_each_others_threshold(self):
+        cases = {
+            "four_point_internal": (4, {1: 30.0}),
+            "six_point_double_internal": (6, {1: 30.0, 4: 30.0}),
+            "mixed_amplitude": (10, {1: 80.0, 8: 20.0}),
+            "beyond_old_short_cutoff": (25, {2: 30.0, 22: 30.0}),
+        }
+        for name, (length, spikes) in cases.items():
+            with self.subTest(name=name):
+                stable_band = np.full(length, -20.0, dtype=np.float64)
+                for index, value in spikes.items():
+                    stable_band[index] = value
+                self.assertEqual(
+                    _plateau_mid_without_isolated_spikes(stable_band),
+                    -20.0,
+                )
+
+    def test_turn_on_current_short_hb_band_ignores_two_internal_spikes(self):
+        for dt in (20e-9, 25e-9, 30e-9):
+            with self.subTest(dt=dt):
+                n = 100
+                t = np.arange(n, dtype=np.float64) * dt
+                clean = np.full(n, -20.0, dtype=np.float64)
+                clean[40:46] = np.linspace(-20.0, 80.0, 6)
+                clean[46:] = 80.0
+
+                clean_ta, clean_hb, hb_window = turn_on_current_cursor_hb_a_us(
+                    t,
+                    clean,
+                    0,
+                    n - 1,
+                    dt,
+                    vge10_s=float(t[40]),
+                    detect_window_ns=15.0,
+                )
+                spike_indices = (hb_window[0] + 1, hb_window[1] - 1)
+                noisy = clean.copy()
+                noisy[list(spike_indices)] = 30.0
+                noisy_ta, noisy_hb, noisy_window = (
+                    turn_on_current_cursor_hb_a_us(
+                        t,
+                        noisy,
+                        0,
+                        n - 1,
+                        dt,
+                        vge10_s=float(t[40]),
+                        detect_window_ns=15.0,
+                    )
+                )
+
+                self.assertEqual(noisy_window, hb_window)
+                self.assertEqual(noisy_hb, clean_hb)
+                self.assertEqual(noisy_hb, -20.0)
+                self.assertAlmostEqual(noisy_ta, clean_ta, places=9)
+
+    def test_short_stable_band_preserves_continuous_non_spike_shapes(self):
+        cases = {
+            "linear": np.linspace(-20.0, 30.0, 10),
+            "alternating_ringing": np.array([-20.0, 30.0] * 5),
+            "triangular_ringing_lobe": np.array(
+                [-20.0, -15.0, -10.0, -15.0, -20.0, -20.0, -20.0]
+            ),
+            "damped_gaussian_lobe": -20.0
+            + 20.0
+            * np.exp(-0.5 * ((np.arange(14, dtype=np.float64) - 4.0) / 1.4) ** 2),
+            "smooth_four_point_valley": np.array(
+                [-26.696257, -31.385230, -31.266248, -26.698041]
+            ),
+            "smooth_four_point_peak": np.array(
+                [-18.120297, 1.827242, 2.445215, -12.306983]
+            ),
+            "repeating_boundary_extrema": np.array(
+                [30.0, -20.0, -20.0, 30.0]
+            ),
+            "two_sample_excursion": np.array(
+                [-20.0, -20.0, 30.0, 30.0, -20.0, -20.0]
+            ),
+        }
+        for name, stable_band in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    _plateau_mid_without_isolated_spikes(stable_band),
+                    0.5 * (float(np.min(stable_band)) + float(np.max(stable_band))),
+                )
+
+    def test_turn_on_current_hb_preserves_multi_sample_ringing_lobe(self):
+        for dt in (20e-9, 25e-9, 30e-9):
+            with self.subTest(dt=dt):
+                n = 100
+                t = np.arange(n, dtype=np.float64) * dt
+                ic = np.full(n, -20.0, dtype=np.float64)
+                ic[40:46] = np.linspace(-20.0, 80.0, 6)
+                ic[46:] = 80.0
+                _ta, _hb, hb_window = turn_on_current_cursor_hb_a_us(
+                    t,
+                    ic,
+                    0,
+                    n - 1,
+                    dt,
+                    vge10_s=float(t[40]),
+                    detect_window_ns=15.0,
+                )
+                start = hb_window[0] + 1
+                ic[start : start + 5] = np.array(
+                    [-20.0, -15.0, -10.0, -15.0, -20.0]
+                )
+
+                ta, hb, noisy_window = turn_on_current_cursor_hb_a_us(
+                    t,
+                    ic,
+                    0,
+                    n - 1,
+                    dt,
+                    vge10_s=float(t[40]),
+                    detect_window_ns=15.0,
+                )
+
+                self.assertEqual(noisy_window, hb_window)
+                self.assertEqual(hb, -15.0)
+                self.assertTrue(np.isfinite(ta))
+                self.assertAlmostEqual(
+                    float(np.interp(ta * 1e-6, t, ic)), hb, places=10
+                )
+
+    def test_turn_on_current_missing_raw_rise_crossing_stays_unavailable(self):
+        dt = 1e-9
+        t = np.arange(500, dtype=np.float64) * dt
+        ic = np.full(500, 12.0, dtype=np.float64)
+
+        ta, hb, hb_win = turn_on_current_cursor_hb_a_us(
+            t,
+            ic,
+            0,
+            len(t) - 1,
+            dt,
+            vge10_s=300e-9,
+            detect_window_ns=15.0,
+        )
+
+        self.assertTrue(np.isnan(ta))
+        self.assertEqual(hb, 12.0)
+        self.assertGreaterEqual(hb_win[0], 0)
+        self.assertGreaterEqual(hb_win[1], hb_win[0])
+
+    def test_turn_on_current_vge_guard_rechecks_clipped_old_ripple(self):
+        """A clipped Hb band must not retain an earlier unrelated ripple."""
+
+        dt = 1e-9
+        t = np.arange(1200, dtype=np.float64) * dt
+        ic = np.full(1200, 12.0, dtype=np.float64)
+        ic[520:541] = np.linspace(12.0, 8.0, 21)
+        ic[541:561] = np.linspace(8.0, 12.0, 20)
+        ic[700:801] = np.linspace(12.0, 100.0, 101)
+        ic[801:] = 100.0
+
+        ta, hb, hb_win = turn_on_current_cursor_hb_a_us(
+            t,
+            ic,
+            500,
+            1100,
+            dt,
+            vge10_s=690e-9,
+            detect_window_ns=15.0,
+        )
+
+        self.assertTrue(np.isnan(ta))
+        self.assertEqual(hb, 10.0)
+        self.assertEqual(hb_win, (500, 667))
+
+    @unittest.skipUnless(
+        all(path.exists() for path in LIKANG_TURN_ON_CURSOR_CASES),
+        "likangkang Eon cursor samples missing",
+    )
+    def test_likangkang_eon_ab_are_exact_raw_channel_intersections(self):
+        for path in LIKANG_TURN_ON_CURSOR_CASES:
+            with self.subTest(sample=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(str(path))
+                mapping, _source = infer_best_mapping_from_bundle(
+                    bundle, profile.bridge
+                )
+                if mapping is not None:
+                    profile = apply_mapping(profile, mapping)
+                result = extract_all(bundle, profile, load_config())
+                segs = result.segments
+                assert segs is not None
+                ic = bundle_total_current(bundle, profile)
+                vce = bundle.get(profile.vce)
+                markers = eon_energy_markers(
+                    bundle.t,
+                    ic,
+                    vce,
+                    segs.turn_on[0],
+                    segs.turn_on[1],
+                    segs.pulse2_on,
+                    bundle.dt,
+                    pulse1_off=segs.pulse1_off,
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(markers.t_start, bundle.t, ic)),
+                    markers.ha_v,
+                    delta=1e-6,
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(markers.t_end, bundle.t, vce)),
+                    markers.hb_a,
+                    delta=1e-6,
+                )
 
     @unittest.skipUnless(WH.exists(), "WH sample missing")
     def test_wh_eoff_stays_in_expected_band(self):
