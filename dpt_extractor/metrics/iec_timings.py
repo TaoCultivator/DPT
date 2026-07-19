@@ -614,12 +614,13 @@ def reverse_recovery_trr(
     rr0: int | None = None,
     rr1: int | None = None,
     on_edge: int | None = None,
+    pulse2_off: int | None = None,
 ) -> float:
     """
-    Trr = B - A（示波器卡窗口径）。
+    Trr = B - A（反向恢复主峰到峰后恢复稳定平台中线的时间宽度）。
 
-    自动结果不再使用固定 5A 近零阈值；它必须与 GUI 默认卡尺共用
-    ``measure_irr_trr``/``default_irr_trr_measure`` 的 Ha/A/B 交点逻辑。
+    自动结果与 GUI 默认卡尺共用同一 Ha/Hb/A/B 测量上下文；A/B
+    均为原始带符号 Irr 与恢复稳定平台中线的真实首交点。
     """
     _ = v_diode, dt, cfg
     if i1 <= i0 + 5:
@@ -631,7 +632,16 @@ def reverse_recovery_trr(
     )
 
     if rr0 is not None and rr1 is not None and on_edge is not None:
-        marker = default_irr_trr_measure(t, irr, rr0, rr1, on_edge, i0, i1)
+        marker = default_irr_trr_measure(
+            t,
+            irr,
+            rr0,
+            rr1,
+            on_edge,
+            i0,
+            i1,
+            pulse2_off=pulse2_off,
+        )
     else:
         marker = measure_irr_trr(t, irr, i0, i1, i_fall_end=i1)
     if marker is None:

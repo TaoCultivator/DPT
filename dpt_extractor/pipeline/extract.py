@@ -888,7 +888,14 @@ def extract_all(
         rr0=rr0,
         rr1=rr1,
         on_edge=segs.pulse2_on,
+        pulse2_off=segs.pulse2_off,
     )
+    if not np.isfinite(trr) or trr <= 0.0:
+        # A zero value here means the logical Irr main lobe did not provide
+        # both real stable-platform intersections.  Do not publish a plausible
+        # numeric zero or let the GUI fabricate a generic Ic cursor card.
+        trr = 0.0
+        unavailable.add(("反向恢复", "Trr"))
     # Err 按示波器口径：从反向谷值到电流/电压同时回到 base 的区间积分
     if v_diode is not None:
         win_rr_scope = err_energy_markers(

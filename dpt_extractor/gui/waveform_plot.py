@@ -9264,7 +9264,7 @@ class WaveformPlot(QWidget):
         i_fall_end_idx: int | None = None,
         emit_result_on_enter: bool = False,
     ) -> None:
-        """Trr：Ha=参考线；拖 Ha 联动 A(上升沿首个交点)、B(下降沿首个交点)。"""
+        """Trr 默认卡位：Hb=I_RM；Ha=恢复稳定平台中线；A/B=Ha 首交点。"""
         if search_t1_us < search_t0_us:
             search_t0_us, search_t1_us = search_t1_us, search_t0_us
         self._interactive_enabled = True
@@ -9649,74 +9649,6 @@ class WaveformPlot(QWidget):
                 self._interactive_syncing = False
             self._emit_short_current_changed()
             self._update_readout()
-            return
-        if self._interactive_mode == "trr_measure":
-            if (
-                self._h_cursor_a is None
-                or self._h_cursor_b is None
-                or self._cursor_a is None
-                or self._cursor_b is None
-            ):
-                return
-            from dpt_extractor.metrics.irr_measure import trr_crossings_at_ha
-
-            t0 = float(self._interactive_search_t0_us or self._cursor_a.value())
-            t1 = float(self._interactive_search_t1_us or self._cursor_b.value())
-            tt, vv = self._series_for_channel("irr")
-            if tt is None or vv is None:
-                return
-            i0 = int(np.searchsorted(tt, min(t0, t1), side="left"))
-            i1 = int(np.searchsorted(tt, max(t0, t1), side="right")) - 1
-            i0 = max(0, min(i0, len(tt) - 2))
-            i1 = max(i0 + 2, min(i1, len(tt) - 1))
-            pk = self._interactive_irr_peak_idx
-            fall_ns = int(600e-9 / max(self._interactive_dt, 1e-15))
-            i_fall_local = min(len(tt) - 2, max(i1, (pk if pk is not None else i0) + fall_ns))
-            i_fall_end = (
-                self._interactive_trr_i_fall_end
-                if self._interactive_trr_i_fall_end is not None
-                else i_fall_local
-            )
-            i_fall_end = min(len(tt) - 2, max(i_fall_end, i_fall_local))
-
-            sender = self.sender()
-            ha = self._from_disp("irr", float(self._h_cursor_a.value()))
-
-            if sender is self._h_cursor_b:
-                self._emit_trr_measure_changed()
-                return
-
-            t_s = tt * 1e-6
-            cross = trr_crossings_at_ha(
-                t_s,
-                vv,
-                i0,
-                i1,
-                ha,
-                peak_idx=pk,
-                i_fall_end=i_fall_end,
-            )
-            if cross is None:
-                self._emit_trr_measure_changed()
-                return
-            ta_s, tb_s, pk_out = cross
-            self._interactive_irr_peak_idx = pk_out
-            self._interactive_syncing = True
-            try:
-                self._cursor_a.setPos(ta_s * 1e6)
-                self._cursor_b.setPos(tb_s * 1e6)
-            finally:
-                self._interactive_syncing = False
-            self._update_readout()
-            if self._interactive_on_change is not None:
-                hb = self._from_disp("irr", float(self._h_cursor_b.value()))
-                self._interactive_on_change(
-                    ha,
-                    hb,
-                    ta_s * 1e6,
-                    tb_s * 1e6,
-                    max(0.0, (tb_s - ta_s) * 1e9),
-                )
             return
         if self._interactive_mode == "irr_cross":
             if self._h_cursor_a is None or self._cursor_a is None or self._cursor_b is None:

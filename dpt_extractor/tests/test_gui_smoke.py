@@ -8273,41 +8273,278 @@ class TestMainWindowSmoke(unittest.TestCase):
         win.close()
 
     def test_trr_cursor_shows_irr_ha_intersection_markers(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        win = MainWindow()
+        try:
+            win._load_file(str(UH))
+            self.assertIsNotNone(win.result)
+            win._on_value_clicked("反向恢复", "Trr")
+            plot = win.wave_plot
+            self.assertEqual(plot._interactive_mode, "trr_measure")
+            self.assertIsNotNone(plot._cursor_a_wave_marker)
+            self.assertIsNotNone(plot._cursor_b_wave_marker)
+            self.assertTrue(plot._cursor_a_wave_marker.isVisible())
+            self.assertTrue(plot._cursor_b_wave_marker.isVisible())
+            self.assertTrue(plot._cursor_a.movable)
+            self.assertTrue(plot._cursor_b.movable)
+            self.assertTrue(plot._h_cursor_a.movable)
+            self.assertTrue(plot._h_cursor_b.movable)
+
+            irr = bundle_reverse_recovery_current(win.bundle, win.profile)
+            ha = plot._from_disp("irr", float(plot._h_cursor_a.value()))
+            hb = plot._from_disp("irr", float(plot._h_cursor_b.value()))
+            ta = float(plot._cursor_a.value())
+            tb = float(plot._cursor_b.value())
+            self.assertAlmostEqual(hb, win.result.reverse_recovery.irr, delta=0.5)
+            self.assertAlmostEqual(hb, 357.4375, delta=0.5)
+            self.assertAlmostEqual(ha, 35.859375, delta=0.5)
+            self.assertAlmostEqual(ta, 18.559519, delta=0.0005)
+            self.assertAlmostEqual(tb, 18.615935, delta=0.0005)
+            self.assertAlmostEqual(
+                win.result.reverse_recovery.trr,
+                56.415833,
+                delta=0.01,
+            )
+            self.assertAlmostEqual(
+                win.result.reverse_recovery.trr,
+                abs(tb - ta) * 1e3,
+                delta=0.001,
+            )
+            for marker, cursor in (
+                (plot._cursor_a_wave_marker, plot._cursor_a),
+                (plot._cursor_b_wave_marker, plot._cursor_b),
+            ):
+                marker_x, marker_y = marker.getData()
+                self.assertEqual(len(marker_x), 1)
+                self.assertEqual(len(marker_y), 1)
+                t_us = float(cursor.value())
+                self.assertAlmostEqual(float(marker_x[0]), t_us, places=6)
+                raw_at_cursor = float(
+                    np.interp(t_us * 1e-6, win.bundle.t, irr)
+                )
+                self.assertAlmostEqual(raw_at_cursor, ha, delta=0.5)
+                self.assertAlmostEqual(
+                    plot._from_disp("irr", float(marker_y[0])),
+                    raw_at_cursor,
+                    delta=0.5,
+                )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_HT_20260717_UH_1048.exists(), "20260717 UH 1048A sample missing"
+    )
+    def test_songzhenxi_20260717_trr_uses_recovered_platform_midline(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        win = MainWindow()
+        try:
+            win._load_file(str(SONG_SMC_HT_20260717_UH_1048))
+            self.assertIsNotNone(win.result)
+            win._on_value_clicked("反向恢复", "Trr")
+            plot = win.wave_plot
+            self.assertEqual(plot._interactive_mode, "trr_measure")
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "irr")
+            self.assertEqual(plot._cursor_endpoint_channel("b"), "irr")
+
+            ha = plot._from_disp("irr", float(plot._h_cursor_a.value()))
+            hb = plot._from_disp("irr", float(plot._h_cursor_b.value()))
+            ta = float(plot._cursor_a.value())
+            tb = float(plot._cursor_b.value())
+            self.assertAlmostEqual(ha, 16.0, delta=0.25)
+            self.assertAlmostEqual(hb, 286.0625, delta=0.25)
+            self.assertAlmostEqual(ta, 19.1656709433, delta=0.0005)
+            self.assertAlmostEqual(tb, 19.2298417777, delta=0.0005)
+            self.assertAlmostEqual(
+                win.result.reverse_recovery.trr,
+                64.1708343813,
+                delta=0.01,
+            )
+
+            irr = bundle_reverse_recovery_current(win.bundle, win.profile)
+            for marker, cursor in (
+                (plot._cursor_a_wave_marker, plot._cursor_a),
+                (plot._cursor_b_wave_marker, plot._cursor_b),
+            ):
+                marker_x, marker_y = marker.getData()
+                self.assertEqual(len(marker_x), 1)
+                self.assertEqual(len(marker_y), 1)
+                t_us = float(cursor.value())
+                self.assertAlmostEqual(float(marker_x[0]), t_us, places=6)
+                raw_at_cursor = float(np.interp(t_us * 1e-6, win.bundle.t, irr))
+                self.assertAlmostEqual(raw_at_cursor, ha, delta=0.25)
+                self.assertAlmostEqual(
+                    plot._from_disp("irr", float(marker_y[0])),
+                    raw_at_cursor,
+                    delta=0.25,
+                )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_DCU_LT_WH_450_800.exists() and LIKANG_UH_930_REVERSED_TD_ON.exists(),
+        "songzhenxi LT or likangkang mapping sample missing",
+    )
+    def test_trr_platform_and_raw_irr_bindings_cover_lt_and_mapped_channels(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        cases = (
+            (
+                SONG_DCU_LT_WH_450_800,
+                "CH3",
+                -1.703125,
+                213.8125,
+                24.0166745453,
+                24.1711579411,
+                154.4833957213,
+            ),
+            (
+                LIKANG_UH_930_REVERSED_TD_ON,
+                "CH6",
+                46.25,
+                169.46875,
+                13.0408055173,
+                13.0583424000,
+                17.5368827586,
+            ),
+        )
+        for path, source_key, expected_ha, expected_hb, ta_us, tb_us, trr_ns in cases:
+            with self.subTest(sample=path.name):
+                win = MainWindow()
+                try:
+                    win._load_file(str(path))
+                    self.assertIsNotNone(win.result)
+                    win._on_value_clicked("反向恢复", "Trr")
+                    plot = win.wave_plot
+                    self.assertEqual(plot._interactive_mode, "trr_measure")
+                    self.assertEqual(plot._cursor_endpoint_channel("a"), "irr")
+                    self.assertEqual(plot._cursor_endpoint_channel("b"), "irr")
+                    self.assertEqual(
+                        plot._horizontal_cursor_binding("ha"), ("irr", True)
+                    )
+                    self.assertEqual(
+                        plot._horizontal_cursor_binding("hb"), ("irr", True)
+                    )
+                    self.assertEqual(plot._display_key_for_channel("irr"), source_key)
+                    self.assertEqual(plot._cursor_source_channel(), source_key)
+                    self.assertEqual(plot._axis_channel(), source_key)
+
+                    irr = bundle_reverse_recovery_current(win.bundle, win.profile)
+                    peak_idx = plot._interactive_irr_peak_idx
+                    fall_end_idx = plot._interactive_trr_i_fall_end
+                    self.assertIsNotNone(peak_idx)
+                    self.assertIsNotNone(fall_end_idx)
+                    assert peak_idx is not None and fall_end_idx is not None
+
+                    ha = plot._from_disp("irr", float(plot._h_cursor_a.value()))
+                    hb = plot._from_disp("irr", float(plot._h_cursor_b.value()))
+                    self.assertAlmostEqual(ha, expected_ha, delta=0.25)
+                    self.assertAlmostEqual(hb, expected_hb, delta=0.25)
+                    self.assertAlmostEqual(hb, float(irr[peak_idx]), delta=0.25)
+                    self.assertAlmostEqual(
+                        abs(hb), win.result.reverse_recovery.irr, delta=0.25
+                    )
+
+                    peak_t = float(win.bundle.t[peak_idx])
+                    stable_lo = int(
+                        np.searchsorted(
+                            win.bundle.t, peak_t + 0.3e-6, side="left"
+                        )
+                    )
+                    stable_hi = int(
+                        np.searchsorted(
+                            win.bundle.t,
+                            min(
+                                peak_t + 0.6e-6,
+                                float(win.bundle.t[fall_end_idx]),
+                            ),
+                            side="right",
+                        )
+                    )
+                    stable_band = irr[stable_lo:stable_hi]
+                    self.assertGreaterEqual(len(stable_band), 3)
+                    stable_mid = 0.5 * (
+                        float(np.max(stable_band)) + float(np.min(stable_band))
+                    )
+                    self.assertAlmostEqual(ha, stable_mid, delta=0.25)
+
+                    actual_ta = float(plot._cursor_a.value())
+                    actual_tb = float(plot._cursor_b.value())
+                    self.assertAlmostEqual(actual_ta, ta_us, delta=0.0005)
+                    self.assertAlmostEqual(actual_tb, tb_us, delta=0.0005)
+                    self.assertAlmostEqual(
+                        win.result.reverse_recovery.trr, trr_ns, delta=0.01
+                    )
+                    for marker, cursor in (
+                        (plot._cursor_a_wave_marker, plot._cursor_a),
+                        (plot._cursor_b_wave_marker, plot._cursor_b),
+                    ):
+                        marker_x, marker_y = marker.getData()
+                        self.assertEqual(len(marker_x), 1)
+                        self.assertEqual(len(marker_y), 1)
+                        cursor_t_us = float(cursor.value())
+                        raw_y = float(
+                            np.interp(
+                                cursor_t_us * 1e-6,
+                                win.bundle.t,
+                                irr,
+                            )
+                        )
+                        self.assertAlmostEqual(raw_y, ha, delta=0.25)
+                        self.assertAlmostEqual(
+                            float(marker_x[0]), cursor_t_us, places=6
+                        )
+                        self.assertAlmostEqual(
+                            plot._from_disp("irr", float(marker_y[0])),
+                            raw_y,
+                            delta=0.25,
+                        )
+                finally:
+                    win.close()
+
+    def test_trr_without_complete_stable_platform_context_clears_stale_cursors(self):
+        from unittest.mock import patch
+
         from dpt_extractor.gui.main_window import MainWindow
 
         win = MainWindow()
-        win._load_file(str(UH))
-        self.assertIsNotNone(win.result)
-        win._on_value_clicked("反向恢复", "Trr")
-        plot = win.wave_plot
-        self.assertEqual(plot._interactive_mode, "trr_measure")
-        self.assertIsNotNone(plot._cursor_a_wave_marker)
-        self.assertIsNotNone(plot._cursor_b_wave_marker)
-        self.assertTrue(plot._cursor_a_wave_marker.isVisible())
-        self.assertTrue(plot._cursor_b_wave_marker.isVisible())
+        try:
+            win._load_file(str(UH))
+            self.assertIsNotNone(win.result)
+            win._on_value_clicked("反向恢复", "di/dt")
+            plot = win.wave_plot
+            self.assertNotEqual(plot._interactive_mode, "unavailable")
+            win._manual_trr_measure = None
 
-        ha = plot._from_disp("irr", float(plot._h_cursor_a.value()))
-        ta = float(plot._cursor_a.value())
-        tb = float(plot._cursor_b.value())
-        self.assertAlmostEqual(
-            win.result.reverse_recovery.trr,
-            abs(tb - ta) * 1e3,
-            delta=0.001,
-        )
-        for marker, cursor in (
-            (plot._cursor_a_wave_marker, plot._cursor_a),
-            (plot._cursor_b_wave_marker, plot._cursor_b),
-        ):
-            marker_x, marker_y = marker.getData()
-            self.assertEqual(len(marker_x), 1)
-            self.assertEqual(len(marker_y), 1)
-            self.assertAlmostEqual(float(marker_x[0]), float(cursor.value()), places=6)
-            self.assertAlmostEqual(
-                plot._from_disp("irr", float(marker_y[0])),
-                ha,
-                delta=0.5,
-            )
-        win.close()
+            with patch(
+                "dpt_extractor.metrics.irr_measure.default_irr_trr_measure",
+                return_value=None,
+            ):
+                win._on_value_clicked("反向恢复", "Trr")
+
+            self.assertEqual(plot._interactive_mode, "unavailable")
+            self.assertIsNone(plot._cursor_endpoint_channel("a"))
+            self.assertIsNone(plot._cursor_endpoint_channel("b"))
+            self.assertEqual(plot._horizontal_cursor_binding("ha"), ("", False))
+            self.assertEqual(plot._horizontal_cursor_binding("hb"), ("", False))
+            self.assertFalse(plot._cursor_a.isVisible())
+            self.assertFalse(plot._cursor_b.isVisible())
+            self.assertFalse(plot._h_cursor_a.isVisible())
+            self.assertFalse(plot._h_cursor_b.isVisible())
+            self.assertEqual(plot._readout_label.text(), "")
+            self.assertIn("不可用", win.statusBar().currentMessage())
+        finally:
+            win.close()
 
     @unittest.skipUnless(WANGLIHUI_UL_486_985.exists(), "wanglihui UL sample missing")
     def test_derived_irr_trr_cursor_card_uses_internal_current_trace(self):
@@ -8330,6 +8567,10 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertIn(logical_irr, plot._trace_raw)
         self.assertNotIn(logical_irr, plot._trace_items)
         self.assertAlmostEqual(win.result.reverse_recovery.trr, 287.322921, delta=0.01)
+        self.assertTrue(plot._cursor_a.movable)
+        self.assertTrue(plot._cursor_b.movable)
+        self.assertTrue(plot._h_cursor_a.movable)
+        self.assertTrue(plot._h_cursor_b.movable)
 
         def assert_bound_to_logical_irr() -> None:
             self.assertEqual(plot._active_channel, "irr")
@@ -8358,6 +8599,13 @@ class TestMainWindowSmoke(unittest.TestCase):
         assert_bound_to_logical_irr()
 
         irr = bundle_reverse_recovery_current(win.bundle, win.profile)
+        ha = plot._from_disp("irr", float(plot._h_cursor_a.value()))
+        hb = plot._from_disp("irr", float(plot._h_cursor_b.value()))
+        self.assertAlmostEqual(hb, win.result.reverse_recovery.irr, delta=0.25)
+        self.assertAlmostEqual(hb, 312.1875, delta=0.25)
+        self.assertAlmostEqual(ha, 16.640625, delta=0.25)
+        self.assertAlmostEqual(float(plot._cursor_a.value()), 27.915365, delta=0.0005)
+        self.assertAlmostEqual(float(plot._cursor_b.value()), 28.202688, delta=0.0005)
         for marker, cursor in (
             (plot._cursor_a_wave_marker, plot._cursor_a),
             (plot._cursor_b_wave_marker, plot._cursor_b),
@@ -8367,9 +8615,10 @@ class TestMainWindowSmoke(unittest.TestCase):
             self.assertEqual(len(marker_y), 1)
             t_us = float(cursor.value())
             self.assertAlmostEqual(float(marker_x[0]), t_us, places=6)
-            expected = float(np.interp(t_us * 1e-6, win.bundle.t, irr))
             actual = plot._from_disp("irr", float(marker_y[0]))
-            self.assertAlmostEqual(actual, expected, delta=0.75)
+            raw_at_cursor = float(np.interp(t_us * 1e-6, win.bundle.t, irr))
+            self.assertAlmostEqual(raw_at_cursor, ha, delta=0.25)
+            self.assertAlmostEqual(actual, raw_at_cursor, delta=0.25)
 
         # Leaving Trr must bind Toff's two physical endpoints explicitly:
         # A=Vge and B=Ic.  Channel clicks remain visual inspection gestures and

@@ -1,16 +1,24 @@
-"""反向恢复 Irr / Trr 示波器卡尺口径（Ha 参考线 + 尖峰 Hb）。"""
+"""反向恢复 Irr / Trr 示波器卡尺口径（主峰到恢复稳定平台）。"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
 
+from dpt_extractor.metrics.plateau_level import (
+    _plateau_mid_without_isolated_spikes,
+)
 from dpt_extractor.metrics.rr_tail import reverse_recovery_tail_end_index
-
 
 @dataclass(frozen=True)
 class IrrTrrMeasure:
-    """Irr=Hb 处尖峰电流；Trr=(B−A) 在 Ha 上的两交点间隔。"""
+    """Trr 主峰到稳定平台卡尺上下文。
+
+    ``Hb`` 是有符号 I_RM 主峰，``Ha`` 是峰后恢复稳定平台本身的
+    可见最大/最小值中点。
+    ``A/B`` 分别是同一条原始带符号 Irr 主瓣上升沿、峰后下降沿与
+    ``Ha`` 的第一个真实插值交点。
+    """
 
     ha: float
     hb: float
@@ -19,6 +27,7 @@ class IrrTrrMeasure:
     irr: float
     trr_ns: float
     peak_idx: int
+    stable_level: float | None = None
 
 
 def _interp_cross_time(
@@ -75,23 +84,53 @@ def irr_parameter_peak_index(
     amp = max(peak_pos, peak_neg, 1.0)
     if peak_pos >= 0.1 * amp:
         return s0 + pos_i
-    if peak_neg >= 0.1 * amp:
-        return s0 + neg_i
 
     k = max(8, len(seg) // 5)
     head = seg[:k]
     ref = float(np.median(head)) if len(head) else float(np.median(seg))
     th = 0.02 * amp
+    head_diffs = np.diff(np.asarray(head, dtype=np.float64))
+    local_noise = (
+        float(np.median(np.abs(head_diffs - np.median(head_diffs))))
+        if len(head_diffs)
+        else 0.0
+    )
+    negative_platform_fraction = (
+        float(np.mean(head <= -0.5 * peak_neg))
+        if len(head) and peak_neg > 0.0
+        else 0.0
+    )
+    clear_negative_platform = (
+        ref <= -0.5 * peak_neg and negative_platform_fraction >= 0.75
+    )
+    recovery_floor = max(3.0, th, 6.0 * local_noise)
+
+    # At high load, a real 60--80 A positive I_RM can be less than 10% of the
+    # preceding -800--1100 A commutation platform.  Select it only when that
+    # large negative platform is clearly present, the positive lobe follows
+    # the platform trough, and it clears the local raw-sample noise floor.
+    # Near-zero and generic bipolar inputs therefore retain the existing
+    # signed-main-lobe rule below.
+    if (
+        clear_negative_platform
+        and pos_i > neg_i
+        and peak_pos >= recovery_floor
+    ):
+        return s0 + pos_i
+
+    if peak_neg >= 0.1 * amp:
+        return s0 + neg_i
+
     if ref < 0:
         cross = np.where(seg > th)[0]
         if len(cross):
             start = int(cross[0])
             return s0 + start + int(np.argmax(seg[start:]))
-        return s0 + neg_i
-    cross = np.where(seg < -th)[0]
-    if len(cross):
-        start = int(cross[0])
-        return s0 + start + int(np.argmin(seg[start:]))
+    elif ref > 0:
+        cross = np.where(seg < -th)[0]
+        if len(cross):
+            start = int(cross[0])
+            return s0 + start + int(np.argmin(seg[start:]))
     return s0 + pos_i
 
 
@@ -117,23 +156,65 @@ def irr_parameter_peak_value(
     return abs(float(arr[idx]))
 
 
-def _window_mid_by_time(
-    t: np.ndarray, arr: np.ndarray, t_lo_s: float, t_hi_s: float
+def _trr_recovery_stable_level(
+    t: np.ndarray,
+    irr: np.ndarray,
+    peak_idx: int,
+    tail_end_idx: int,
 ) -> float | None:
-    t = np.asarray(t, dtype=np.float64)
-    arr = np.asarray(arr, dtype=np.float64)
-    n = min(len(t), len(arr))
-    if n < 2:
+    """Return the post-peak stable-platform centre used by Trr.
+
+    Keep the project's historical Trr recovery-platform window (300--600 ns
+    after I_RM) so this change only replaces the Trr reference level.  When a
+    record is shorter, use the last available up-to-200 ns post-peak window.
+    The final level is the visible-band midpoint ``(max + min) / 2`` after
+    applying the project's existing isolated-spike guard.
+    """
+
+    t_arr = np.asarray(t, dtype=np.float64)
+    irr_arr = np.asarray(irr, dtype=np.float64)
+    n = min(len(t_arr), len(irr_arr))
+    if n < 3:
         return None
-    lo, hi = sorted((float(t_lo_s), float(t_hi_s)))
-    i0 = int(np.searchsorted(t[:n], lo, side="left"))
-    i1 = int(np.searchsorted(t[:n], hi, side="right"))
-    i0 = max(0, min(i0, n - 1))
-    i1 = max(i0 + 1, min(i1, n))
-    seg = arr[i0:i1]
-    if len(seg) < 2:
+    peak_idx = max(0, min(int(peak_idx), n - 2))
+    tail_end_idx = min(int(tail_end_idx), n - 1)
+    if tail_end_idx <= peak_idx:
         return None
-    return 0.5 * (float(np.max(seg)) + float(np.min(seg)))
+    peak_t = float(t_arr[peak_idx])
+    tail_t = float(t_arr[tail_end_idx])
+
+    def _mid_if_enough(lo_s: float, hi_s: float) -> float | None:
+        lo, hi = float(lo_s), float(hi_s)
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            return None
+        i0 = int(np.searchsorted(t_arr[:n], lo, side="left"))
+        i1 = int(np.searchsorted(t_arr[:n], hi, side="right"))
+        i0 = max(0, min(i0, n - 1))
+        i1 = max(0, min(i1, n))
+        if i1 <= i0:
+            return None
+        values = irr_arr[i0:i1]
+        values = values[np.isfinite(values)]
+        if values.size < 3:
+            return None
+        return float(_plateau_mid_without_isolated_spikes(values))
+
+    preferred_lo = peak_t + 0.3e-6
+    preferred_hi = min(peak_t + 0.6e-6, tail_t)
+    stable = (
+        _mid_if_enough(preferred_lo, preferred_hi)
+        if preferred_hi > preferred_lo
+        else None
+    )
+    if stable is not None:
+        return float(stable)
+
+    fallback_hi = tail_t
+    # A short-tail fallback still needs a real post-peak platform.  Excluding
+    # the peak sample makes fewer than three recovered samples fail closed
+    # instead of averaging I_RM into a fabricated stable level.
+    fallback_lo = max(float(t_arr[peak_idx + 1]), fallback_hi - 0.2e-6)
+    return _mid_if_enough(fallback_lo, fallback_hi)
 
 
 def _lobe_valley_before_peak(seg: np.ndarray, ipk: int) -> int:
@@ -216,13 +297,13 @@ def _trr_cross_indices_at_ha(
     work = np.asarray(seg, dtype=np.float64) * polarity
     level_w = level_f * polarity
     peak_w = float(work[ipk])
-    j_lo = _lobe_valley_before_peak(work, ipk)
-    j_on = _plateau_end_before_spike(work, ipk)
     jf = min(len(seg) - 2, j_fall_end if j_fall_end is not None else len(seg) - 2)
 
-    # A：主瓣上升沿与 Ha 的第一个上升穿越（从谷底起搜，勿用 j_on 以免跳过抬升脚前的首交点）
+    # A：从反向恢复事件窗起点开始，取主瓣上升沿与恢复平台中线的
+    # 第一个上升穿越。稳定平台线通常明显早于半高点，不能沿用只回看
+    # 峰前 300 点的局部谷底，否则慢沿/高采样率记录会把真实 A 排除。
     ja: int | None = None
-    search_lo = max(0, j_lo)
+    search_lo = 0
     for j in range(search_lo, ipk):
         y1, y2 = float(work[j]), float(work[j + 1])
         if y1 <= level_w < y2 or (
@@ -332,11 +413,12 @@ def measure_irr_trr(
     ha: float | None = None,
     peak_idx: int | None = None,
     i_fall_end: int | None = None,
+    stable_level: float | None = None,
 ) -> IrrTrrMeasure | None:
     """
     在 [i0,i1] 内识别反向恢复主瓣：
-    - Ha：脉冲前稳态电流（参考线，可外部指定）
-    - Hb：主瓣尖峰电流（Irr 读数）
+    - Hb：有符号反向恢复尖峰 I_RM
+    - Ha：默认取峰后恢复稳定平台本身的可见最大/最小值中点；可由手动交互指定
     - A/B：主瓣上升沿、下降沿与 Ha 的交点时刻（Trr）
     """
     i0 = max(0, min(i0, len(t) - 2))
@@ -353,12 +435,24 @@ def measure_irr_trr(
         ipk = _find_recovery_peak_index(seg, dt)
     ipk = max(1, min(ipk, len(seg) - 2))
 
-    level = float(ha) if ha is not None else _default_ha(seg, ipk)
     hb = float(seg[ipk])
     irr_val = abs(hb)
 
     if i_fall_end is None:
         i_fall_end = min(len(t) - 1, i0 + ipk + int(600e-9 / max(dt, 1e-15)))
+    if stable_level is None:
+        stable_level = _trr_recovery_stable_level(
+            t,
+            irr,
+            i0 + ipk,
+            int(i_fall_end),
+        )
+    if ha is None:
+        if stable_level is None or not np.isfinite(float(stable_level)):
+            return None
+        level = float(stable_level)
+    else:
+        level = float(ha)
     cross = trr_crossings_at_ha(
         t, irr, i0, i1, level, peak_idx=i0 + ipk, i_fall_end=i_fall_end
     )
@@ -374,6 +468,11 @@ def measure_irr_trr(
         irr=irr_val,
         trr_ns=max(0.0, (tb - ta) * 1e9),
         peak_idx=pk,
+        stable_level=(
+            float(stable_level)
+            if stable_level is not None and np.isfinite(float(stable_level))
+            else None
+        ),
     )
 
 
@@ -385,15 +484,16 @@ def default_irr_trr_measure(
     on_edge: int,
     on0: int,
     on1: int,
+    *,
+    pulse2_off: int | None = None,
 ) -> IrrTrrMeasure | None:
     """
-    Trr 唯一默认口径：用反向恢复主瓣的同一 Ha/A/B 交点逻辑。
+    Trr 唯一默认口径：主恢复峰到峰后恢复稳定平台中线的时间宽度。
 
-    - Ha：主峰后 300--600ns 本地恢复参考线；若该窗无法取值，回退
-      ``measure_irr_trr`` 的主峰前平台默认 Ha。
-    - A：Irr 进入主恢复瓣时第一次与 Ha 相交的真实插值点。
-    - B：Irr 主峰之后第一次回落到 Ha 的真实插值点，不把后续衰减
-      振荡继续算进 Trr。
+    Hb 为有符号 I_RM 主峰，Ha 为恢复稳定平台本身的可见最大/最小值
+    中点；A/B 是
+    原始带符号 Irr 在主峰上升沿、峰后下降沿与 Ha 的第一个交点。
+    Irr 峰值选择、Err 积分以及反向恢复 di/dt 均不由本函数修改。
     """
     t_arr = np.asarray(t, dtype=np.float64)
     irr_arr = np.asarray(irr, dtype=np.float64)
@@ -407,34 +507,50 @@ def default_irr_trr_measure(
     on1 = max(on0 + 2, min(int(on1), n - 1))
     on_edge = max(0, min(int(on_edge), n - 1))
 
-    peak_idx = irr_parameter_peak_index(irr_arr, rr0, rr1, on_edge, on0, on1)
-    peak_idx = max(rr0, min(int(peak_idx), min(on1, n - 1)))
+    pulse2_off_i: int | None = None
+    peak_search_end = on1
+    rr1_event = rr1
+    tail_on1 = on1
+    if pulse2_off is not None:
+        pulse2_off_i = max(0, min(int(pulse2_off), n - 1))
+        # pulse2_off is the first sample of the following turn-off event, so
+        # neither the I_RM search nor the recovered platform may include it.
+        event_last = pulse2_off_i - 1
+        if event_last <= max(rr0, on_edge):
+            return None
+        peak_search_end = min(on1, pulse2_off_i)
+        rr1_event = min(rr1, event_last)
+        tail_on1 = min(on1, event_last)
+
+    peak_idx = irr_parameter_peak_index(
+        irr_arr,
+        rr0,
+        rr1_event,
+        on_edge,
+        on0,
+        peak_search_end,
+    )
+    peak_idx = max(rr0, min(int(peak_idx), min(peak_search_end - 1, n - 1)))
+    if pulse2_off_i is not None and pulse2_off_i <= peak_idx:
+        return None
     fall_end = reverse_recovery_tail_end_index(
         t_arr,
-        rr1,
-        on1,
+        rr1_event,
+        tail_on1,
         peak_idx=peak_idx,
+        pulse2_off=pulse2_off_i,
     )
-    measure_i1 = max(rr1, peak_idx)
+    if pulse2_off_i is not None:
+        fall_end = min(fall_end, pulse2_off_i - 1)
+    if fall_end <= peak_idx:
+        return None
+    measure_i1 = max(rr1_event, peak_idx)
 
-    peak_t = float(t_arr[peak_idx])
-    ha = _window_mid_by_time(t_arr, irr_arr, peak_t + 0.3e-6, peak_t + 0.6e-6)
-    marker = measure_irr_trr(
+    return measure_irr_trr(
         t_arr,
         irr_arr,
         rr0,
         measure_i1,
-        ha=ha,
         peak_idx=peak_idx,
         i_fall_end=fall_end,
     )
-    if marker is None and ha is not None:
-        marker = measure_irr_trr(
-            t_arr,
-            irr_arr,
-            rr0,
-            measure_i1,
-            peak_idx=peak_idx,
-            i_fall_end=fall_end,
-        )
-    return marker

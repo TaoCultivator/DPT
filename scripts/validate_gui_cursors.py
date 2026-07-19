@@ -113,7 +113,10 @@ DPT_PARAMETER_CURSOR_ROLES = {
     ("开通", "Tr"): "A=Ic上升10%；B=Ic上升90%；Ha/Hb=不适用",
     ("开通", "Pmax"): "A/B=Eon功率窗口；有可信功率轨迹时Ha=Vce×Ic峰，否则Ha/Hb=不适用",
     ("反向恢复", "Irr"): "A/B=Irr尖峰取值窗；Ha=不适用；Hb=Irr有符号尖峰",
-    ("反向恢复", "Trr"): "A/B=Irr与Ha的两交点；Ha=Irr参考电平；Hb=Irr有符号尖峰",
+    ("反向恢复", "Trr"): (
+        "A/B=逻辑Irr主瓣上升/下降沿与Ha首交点；"
+        "Ha=峰后恢复稳定平台max/min平均中线；Hb=有符号I_RM尖峰"
+    ),
     ("反向恢复", "Vrr"): "A/B=Vd取值窗；Ha=Vd最大值；Hb=Vd最小值",
     ("反向恢复", "dv/dt"): "A/B=|Vd|阈值交点；Ha=|VDM|；Hb=0幅值基准",
     ("反向恢复", "di/dt"): "A/B=Irr阈值交点；Ha/Hb=Irr恢复平台/正向平台",
@@ -244,6 +247,7 @@ DPT_REQUIRED_INTERSECTION_PARAMS = frozenset(
         ("开通", "Ton"),
         ("开通", "Td_on"),
         ("开通", "Tr"),
+        ("反向恢复", "Trr"),
     }
 )
 
@@ -706,6 +710,70 @@ def _cursor_level_binding_problem(
         f"{label}={float(level):.6g} 未贴波形@{float(t_us):.6f}us"
         f"（插值={observed:.6g},tol={tolerance:.6g}）"
     )
+
+
+def _first_trr_stable_platform_crossings(
+    t: np.ndarray,
+    irr: np.ndarray,
+    rr_start: int,
+    peak_idx: int,
+    fall_end_idx: int,
+    stable_level: float,
+) -> tuple[float, float] | None:
+    """Independently find Trr's first raw crossings from the RR window start."""
+
+    times = np.asarray(t, dtype=np.float64)
+    values = np.asarray(irr, dtype=np.float64)
+    n = min(len(times), len(values))
+    if n < 3:
+        return None
+    start = max(0, min(int(rr_start), n - 2))
+    peak = max(start + 1, min(int(peak_idx), n - 2))
+    end = max(peak + 1, min(int(fall_end_idx), n - 1))
+    level = float(stable_level)
+    polarity = 1.0 if float(values[peak]) >= level else -1.0
+    work = polarity * values[:n]
+    work_level = polarity * level
+
+    def _interp(j: int) -> float:
+        y0, y1 = float(work[j]), float(work[j + 1])
+        t0, t1 = float(times[j]), float(times[j + 1])
+        if abs(y1 - y0) < 1e-15:
+            return t0
+        ratio = (work_level - y0) / (y1 - y0)
+        return t0 + max(0.0, min(1.0, ratio)) * (t1 - t0)
+
+    rise_idx = next(
+        (
+            j
+            for j in range(start, peak)
+            if (
+                float(work[j]) <= work_level < float(work[j + 1])
+                or (
+                    (float(work[j]) - work_level)
+                    * (float(work[j + 1]) - work_level)
+                    <= 0.0
+                    and float(work[j + 1]) > float(work[j])
+                    and abs(float(work[j + 1]) - float(work[j])) > 1e-12
+                )
+            )
+        ),
+        None,
+    )
+    fall_idx = next(
+        (
+            j
+            for j in range(peak, end)
+            if (
+                float(work[j]) >= float(work[j + 1])
+                and float(work[j]) > work_level >= float(work[j + 1])
+            )
+        ),
+        None,
+    )
+    if rise_idx is None or fall_idx is None:
+        return None
+    return _interp(rise_idx), _interp(fall_idx)
 
 
 def _waveform_marker_binding_problems(
@@ -2909,17 +2977,54 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             if c is None:
                 record(section, name, "FAIL", "未触发 enable_trr_measure_interaction（回退 generic）")
                 continue
+            if "enable_interval_interaction" in calls:
+                problems.append("Trr 禁止回退 generic interval 交互")
             b = c["bound"]
             ha_a, hb_a, ta, tb = b["ha_a"], b["hb_a"], b["ta_us"], b["tb_us"]
             peak_idx = b.get("peak_idx")
-            check_time(ta, "A")
-            check_time(tb, "B")
+            from dpt_extractor.metrics.irr_measure import default_irr_trr_measure
+
+            expected = default_irr_trr_measure(
+                t,
+                np.asarray(chan["irr"], dtype=np.float64),
+                segs.reverse_recovery[0],
+                segs.reverse_recovery[1],
+                segs.pulse2_on,
+                segs.turn_on[0],
+                segs.turn_on[1],
+                pulse2_off=segs.pulse2_off,
+            )
+            fall_end_idx = b.get("i_fall_end_idx")
+            authoritative_peak_idx = (
+                int(expected.peak_idx)
+                if expected is not None
+                else int(peak_idx) if peak_idx is not None else int(s1)
+            )
+            authoritative_end_idx = max(
+                int(s1),
+                authoritative_peak_idx,
+                int(fall_end_idx) if fall_end_idx is not None else int(s1),
+            )
+            authoritative_end_idx = max(
+                int(s0), min(authoritative_end_idx, len(t) - 1)
+            )
+            trr_segment = (int(s0), authoritative_end_idx)
+            trr_window_us = (
+                float(t[trr_segment[0]]) * 1e6,
+                float(t[trr_segment[1]]) * 1e6,
+            )
+
+            check_time(ta, "A", seg=trr_segment)
+            check_time(tb, "B", seg=trr_segment)
             if not (ta < tb):
                 problems.append(f"A({ta:.3f})应早于B({tb:.3f})")
-            if irr_ref > 1.0 and not (0.4 * irr_ref <= abs(hb_a) <= 1.4 * irr_ref):
-                problems.append(f"Trr尖峰|Hb|={abs(hb_a):.1f} 与提取Irr={irr_ref:.1f}不符")
-            if peak_idx is not None and not (s0 <= int(peak_idx) <= s1):
-                problems.append(f"peak_idx={peak_idx}不在反向恢复段")
+            if peak_idx is not None and not (
+                trr_segment[0] <= int(peak_idx) <= trr_segment[1]
+            ):
+                problems.append(
+                    f"peak_idx={peak_idx}不在权威Trr扩展窗"
+                    f"[{trr_segment[0]},{trr_segment[1]}]"
+                )
             if peak_idx is None:
                 problems.append("Trr 缺少 Irr 尖峰索引")
             elif 0 <= int(peak_idx) < len(t):
@@ -2936,10 +3041,97 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     f"Trr结果/B-A={result.reverse_recovery.trr:.9g}/"
                     f"{trr_from_ab_ns:.9g}ns"
                 )
-            check_level(ha_a, "irr", "Ha")
-            check_level(hb_a, "irr", "Hb")
+            check_level(ha_a, "irr", "Ha", win_us=trr_window_us)
+            check_level(hb_a, "irr", "Hb", win_us=trr_window_us)
             if str(getattr(mw.wave_plot, "_active_channel", "")) != "irr":
                 problems.append("Trr A/B/Ha/Hb 未绑定 irr 活动通道")
+            stable_a = None if expected is None else expected.stable_level
+            if expected is None or stable_a is None:
+                problems.append("Trr 权威恢复平台卡尺上下文不可用，禁止 generic 回退")
+            else:
+                first_crossings = _first_trr_stable_platform_crossings(
+                    t,
+                    np.asarray(chan["irr"], dtype=np.float64),
+                    segs.reverse_recovery[0],
+                    expected.peak_idx,
+                    (
+                        int(fall_end_idx)
+                        if fall_end_idx is not None
+                        else authoritative_end_idx
+                    ),
+                    float(stable_a),
+                )
+                if first_crossings is None:
+                    problems.append("Trr 从RR事件窗起点无法取得稳定平台首个双交点")
+                    expected_a_us = float(expected.ta_s) * 1e6
+                    expected_b_us = float(expected.tb_s) * 1e6
+                else:
+                    expected_a_us = float(first_crossings[0]) * 1e6
+                    expected_b_us = float(first_crossings[1]) * 1e6
+                expected_values = (
+                    ("Ha", float(ha_a), float(stable_a), 1e-8),
+                    ("Hb", float(hb_a), float(expected.hb), 1e-8),
+                    ("A", float(ta), expected_a_us, 1e-7),
+                    ("B", float(tb), expected_b_us, 1e-7),
+                )
+                for label, actual, expected_value, floor in expected_values:
+                    if not _short_values_close(
+                        actual,
+                        expected_value,
+                        floor=floor,
+                        rtol=1e-8,
+                    ):
+                        problems.append(
+                            f"Trr {label}={actual:.9g} 与权威恢复平台卡尺"
+                            f"={expected_value:.9g}不符"
+                        )
+                if not _short_values_close(
+                    float(expected.ha),
+                    float(stable_a),
+                    floor=1e-8,
+                    rtol=1e-8,
+                ):
+                    problems.append(
+                        f"Trr上下文Ha={expected.ha:.9g} 未等于恢复平台"
+                        f"max/min平均中线={float(stable_a):.9g}"
+                    )
+                if not _short_values_close(
+                    float(expected.ta_s) * 1e6,
+                    expected_a_us,
+                    floor=1e-7,
+                ) or not _short_values_close(
+                    float(expected.tb_s) * 1e6,
+                    expected_b_us,
+                    floor=1e-7,
+                ):
+                    problems.append(
+                        "Trr上下文A/B未使用从RR事件窗起点取得的首个上升/下降交点"
+                    )
+                if peak_idx is None or int(peak_idx) != int(expected.peak_idx):
+                    problems.append(
+                        f"Trr peak_idx={peak_idx} 与权威主峰"
+                        f"={expected.peak_idx}不符"
+                    )
+                if not _short_values_close(
+                    float(result.reverse_recovery.trr),
+                    float(expected.trr_ns),
+                    floor=1e-6,
+                ):
+                    problems.append(
+                        f"Trr结果/权威恢复平台={result.reverse_recovery.trr:.9g}/"
+                        f"{expected.trr_ns:.9g}ns"
+                    )
+                if irr_ref > 1.0 and not np.isclose(
+                    abs(float(hb_a)),
+                    irr_ref,
+                    rtol=0.15,
+                    atol=8.0,
+                ):
+                    problems.append(
+                        f"Trr尖峰|Hb|={abs(float(hb_a)):.1f} "
+                        f"与提取Irr={irr_ref:.1f}不符"
+                    )
+
             for label, cursor_us in (("A/Ha", ta), ("B/Ha", tb)):
                 problem = _cursor_level_binding_problem(
                     label,
@@ -2951,14 +3143,23 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 )
                 if problem is not None:
                     problems.append(problem)
-            if peak_idx is not None and 0 <= int(peak_idx) < len(chan["irr"]):
-                expected_signed = float(chan["irr"][int(peak_idx)])
-                if not np.isclose(hb_a, expected_signed, rtol=0.15, atol=8.0):
-                    problems.append(
-                        f"Trr Hb={hb_a:.1f} 与 peak_idx 有符号值"
-                        f"={expected_signed:.1f}不符"
-                    )
-            detail = f"Ha={ha_a:.2f} Hb={hb_a:.1f} A={ta:.3f} B={tb:.3f} pk={peak_idx}"
+
+            for label, cursor in (
+                ("A", getattr(mw.wave_plot, "_cursor_a", None)),
+                ("B", getattr(mw.wave_plot, "_cursor_b", None)),
+                ("Ha", getattr(mw.wave_plot, "_h_cursor_a", None)),
+                ("Hb", getattr(mw.wave_plot, "_h_cursor_b", None)),
+            ):
+                if cursor is None or not bool(getattr(cursor, "movable", False)):
+                    problems.append(f"Trr {label} 光标应保持可移动")
+
+            stable_text = (
+                f"{float(stable_a):.2f}" if stable_a is not None else "不可用"
+            )
+            detail = (
+                f"stable=Ha={stable_text} HbPeak={hb_a:.1f} "
+                f"A={ta:.3f} B={tb:.3f} pk={peak_idx}"
+            )
 
         elif name == "开通电流":
             c = calls.get("enable_turn_on_current_interaction")

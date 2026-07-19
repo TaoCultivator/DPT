@@ -77,6 +77,7 @@ class SampleValidation:
     status: str
     detail: str
     rr_polarity: int = 0
+    problem_count: int = 0
 
     @property
     def failed(self) -> bool:
@@ -508,12 +509,14 @@ def _mapping_fallback_result(
     base_profile,
     *,
     allow_mapping_fallback: bool,
+    current_problem_count: int | None = None,
 ) -> SampleValidation | None:
     if not allow_mapping_fallback:
         return None
     bridges = [base_profile.bridge]
     if not has_bridge_hint_from_path(path):
         bridges.append("lower" if base_profile.bridge == "upper" else "upper")
+    best_warned: SampleValidation | None = None
     for bridge in dict.fromkeys(bridges):
         candidate_base = make_profile(base_profile.phase, bridge)
         inferred_mapping, mapping_method = infer_best_mapping_from_bundle(
@@ -534,6 +537,27 @@ def _mapping_fallback_result(
             continue
         if not result.warned and not result.failed:
             return result
+        if (
+            not result.failed
+            and (
+                best_warned is None
+                or result.problem_count < best_warned.problem_count
+            )
+        ):
+            best_warned = result
+    if (
+        best_warned is not None
+        and (
+            current_problem_count is None
+            or best_warned.problem_count < int(current_problem_count)
+        )
+    ):
+        # A newly required metric can make the physically correct inferred
+        # mapping WARN without making the original default mapping better.
+        # Keep the inferred candidate when it has fewer independent problems
+        # so diagnostics report the right channel mapping and the real metric
+        # gap instead of falling back to a much more broken default profile.
+        return best_warned
     return None
 
 
@@ -624,10 +648,17 @@ def _validate_dpt_sample(
                 b,
                 base_prof,
                 allow_mapping_fallback=allow_mapping_fallback,
+                current_problem_count=len(problems),
             )
             if fallback is not None:
                 return fallback
-        return SampleValidation(path=path, kind="DPT-1P", status=status, detail=detail)
+        return SampleValidation(
+            path=path,
+            kind="DPT-1P",
+            status=status,
+            detail=detail,
+            problem_count=len(problems),
+        )
 
     on0, on1 = segs.turn_on
     rr0, rr1 = segs.reverse_recovery
@@ -693,6 +724,14 @@ def _validate_dpt_sample(
     ha_settle = float(err_base.level)
     settle_pp = 2.0 * float(err_base.amp)
     problems: list[str] = []
+    if (
+        r.is_metric_unavailable("反向恢复", "Trr")
+        or not np.isfinite(float(r.reverse_recovery.trr))
+        or float(r.reverse_recovery.trr) <= 0.0
+    ):
+        problems.append(
+            f"Trr稳定平台首交点不可用={float(r.reverse_recovery.trr):.6g}ns"
+        )
     on_timing = turn_on_timing_instants(
         b.t,
         b.get(prof.vge),
@@ -803,6 +842,7 @@ def _validate_dpt_sample(
             b,
             base_prof,
             allow_mapping_fallback=allow_mapping_fallback,
+            current_problem_count=len(problems),
         )
         if fallback is not None:
             return fallback
@@ -812,6 +852,7 @@ def _validate_dpt_sample(
         status=status,
         detail=detail,
         rr_polarity=int(rr_context.polarity),
+        problem_count=len(problems),
     )
 
 

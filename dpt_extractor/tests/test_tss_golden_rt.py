@@ -205,7 +205,14 @@ class TestGoldenRtTssSnapshots(unittest.TestCase):
                 )
                 err_m = err_energy_markers(t, irr, vd, rr0, rr1, dt, i_search_end=on1)
                 trr_m = default_irr_trr_measure(
-                    t, irr, rr0, rr1, segs.pulse2_on, on0, on1
+                    t,
+                    irr,
+                    rr0,
+                    rr1,
+                    segs.pulse2_on,
+                    on0,
+                    on1,
+                    pulse2_off=segs.pulse2_off,
                 )
                 self.assertIsNotNone(trr_m)
                 assert trr_m is not None

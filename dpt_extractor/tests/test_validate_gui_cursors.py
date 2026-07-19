@@ -35,6 +35,7 @@ from scripts.validate_gui_cursors import (
     _err_signed_cursor_text_problems,
     _audit_turn_off_slope_context_consistency,
     _unnecessary_ab_focus_expansion,
+    audit_file,
     audit_short_circuit_file,
     SHORT_CIRCUIT_PARAMS,
     SHORT_CIRCUIT_REQUIRED_PARAMS,
@@ -1028,6 +1029,36 @@ class TestShortCircuitGuiAudit(unittest.TestCase):
         for name in ("应力Vpeak_本管", "应力Vpeak_对管"):
             self.assertNotEqual(by_name[name][3], "INFO", by_name[name][4])
         self.assertIn(by_name["Desat动作时间"][3], {"OK", "INFO"})
+
+
+class TestTrrExtendedWindowGuiAudit(unittest.TestCase):
+    sample = (
+        Path(__file__).resolve().parents[2]
+        / "示例文件"
+        / "songzhenxi"
+        / "KSU2577"
+        / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
+        / "SSS"
+        / "LT"
+        / "tss"
+        / "VL-750V-1050A_000.tss"
+    )
+
+    @unittest.skipUnless(sample.exists(), "extended-window Trr sample missing")
+    def test_trr_audit_uses_authoritative_extended_marker_window(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        rows = audit_file(MainWindow, QApplication, app, self.sample)
+        trr_rows = [row for row in rows if row[1:3] == ("反向恢复", "Trr")]
+
+        self.assertEqual(len(trr_rows), 1)
+        self.assertEqual(trr_rows[0][3], "OK", trr_rows[0][4])
+        self.assertIn("stable=Ha=-52.47", trr_rows[0][4])
+        self.assertIn("HbPeak=72.5", trr_rows[0][4])
+        self.assertIn("A=17.304 B=17.334", trr_rows[0][4])
 
 
 if __name__ == "__main__":

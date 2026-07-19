@@ -6049,7 +6049,7 @@ class MainWindow(QMainWindow):
         _apply_irr_interval(t0_us, t1_us, remember=restored is not None)
 
     def _enable_trr_interaction(self) -> None:
-        """Trr：Ha 参考线 + A/B 与 Ha 交点；拖 Ha 联动 A(上升沿)、B(下降沿) 首个交点。"""
+        """Trr：Hb=I_RM 尖峰，Ha=峰后恢复稳定平台的可见中线。"""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return
         from dpt_extractor.metrics.irr_measure import (
@@ -6076,9 +6076,13 @@ class MainWindow(QMainWindow):
                 segs.pulse2_on,
                 on0,
                 on1,
+                pulse2_off=segs.pulse2_off,
             )
             if m is None:
-                self._enable_generic_parameter_interaction("反向恢复", "Trr")
+                self.wave_plot.clear_parameter_cursor_context()
+                self.statusBar().showMessage(
+                    "反向恢复-Trr: 无法在逻辑 Irr 主瓣上取得完整稳定平台中线交点，光标不可用"
+                )
                 return
             ha_a, hb_a = m.ha, m.hb
             ta_us, tb_us = m.ta_s * 1e6, m.tb_s * 1e6
@@ -6087,6 +6091,13 @@ class MainWindow(QMainWindow):
         else:
             ha_a, hb_a, ta_us, tb_us, peak_idx = saved
             trr_init = abs(tb_us - ta_us) * 1e3
+        pulse2_off_idx = max(0, min(int(segs.pulse2_off), len(t) - 1))
+        if peak_idx is None or pulse2_off_idx <= int(peak_idx):
+            self.wave_plot.clear_parameter_cursor_context()
+            self.statusBar().showMessage(
+                "反向恢复-Trr: 第二脉冲关断界早于恢复峰，光标不可用"
+            )
+            return
         fall_end_idx = reverse_recovery_tail_end_index(
             t,
             i1,
@@ -6095,6 +6106,7 @@ class MainWindow(QMainWindow):
             pulse2_off=segs.pulse2_off,
             dt=self.bundle.dt,
         )
+        fall_end_idx = min(fall_end_idx, pulse2_off_idx - 1)
         t1_us = max(t1_us, float(t[fall_end_idx] * 1e6))
 
         def _on_trr_measure(
@@ -6112,7 +6124,9 @@ class MainWindow(QMainWindow):
             self.result.reverse_recovery.trr = float(trr_ns)
             self.result_table.set_metric_value("反向恢复", "Trr", trr_ns)
             self.statusBar().showMessage(
-                f"反向恢复 Trr={trr_ns:.3f}ns (A={ta_us:.3f}µs B={tb_us:.3f}µs Ha={ha:.2f}A)"
+                f"反向恢复 Trr={trr_ns:.3f}ns（手动卡尺；"
+                f"A={ta_us:.3f}µs B={tb_us:.3f}µs，"
+                f"Ha={ha:.2f}A，Hb={hb:.2f}A）"
             )
 
         self._focus_switching_local_view(
@@ -6134,7 +6148,17 @@ class MainWindow(QMainWindow):
         if saved is not None:
             _on_trr_measure(ha_a, hb_a, ta_us, tb_us, trr_init)
         else:
-            self._show_stored_metric_status("反向恢复", "Trr")
+            stable_a = m.stable_level
+            stable_text = (
+                f"，恢复平台={float(stable_a):.2f}A"
+                if stable_a is not None
+                else ""
+            )
+            self.statusBar().showMessage(
+                f"反向恢复 Trr={trr_init:.3f}ns（Hb=I_RM尖峰 {hb_a:.2f}A，"
+                f"Ha=恢复稳定平台中线 {ha_a:.2f}A{stable_text}；"
+                f"A/B=Ha与主瓣上升/下降沿首交点）"
+            )
 
     def _channel_for_param(self, section: str, name: str) -> str:
         """参数 → 波形通道（用于横向光标按该通道 V/div 换算定位）。"""
@@ -7579,7 +7603,16 @@ class MainWindow(QMainWindow):
         rr0, rr1 = segs.reverse_recovery
         on0, on1 = segs.turn_on
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
-        marker = default_irr_trr_measure(t, irr, rr0, rr1, segs.pulse2_on, on0, on1)
+        marker = default_irr_trr_measure(
+            t,
+            irr,
+            rr0,
+            rr1,
+            segs.pulse2_on,
+            on0,
+            on1,
+            pulse2_off=segs.pulse2_off,
+        )
         if marker is None:
             return None
         return float(marker.ta_s * 1e6), float(marker.tb_s * 1e6)
