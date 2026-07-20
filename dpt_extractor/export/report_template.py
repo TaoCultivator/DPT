@@ -69,6 +69,7 @@ class _TemperatureIdentityLabels(dict[str, str | int | float]):
         }
 
 DPT_OVERVIEW_IMAGE_PARAM = ("总概览图", "全局")
+DPT_DATA_GROUP_TEMPLATE_ROWS = 4
 
 DPT_REPORT_IMAGE_PARAMS: tuple[tuple[str, str], ...] = (
     DPT_OVERVIEW_IMAGE_PARAM,
@@ -354,6 +355,53 @@ def _temperature_cell_matches(
     temperature_labels: TemperatureLabels | None = None,
 ) -> bool:
     return _temperature_code_from_token(value, temperature_labels) == temp_code
+
+
+def _temperature_values_match(left: object, right: object) -> bool:
+    """Compare actual temperatures without collapsing them to RT/HT/LT."""
+
+    left_number = _parse_temperature_number(left)
+    right_number = _parse_temperature_number(right)
+    if left_number is not None and right_number is not None:
+        return abs(left_number - right_number) < 0.05
+    left_text = _canonical_temperature_text(left)
+    right_text = _canonical_temperature_text(right)
+    return bool(left_text) and left_text == right_text
+
+
+def _temperature_cell_matches_display(
+    value: object,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    display = _temperature_display(temp_code, temperature_labels)
+    if _temperature_values_match(value, display):
+        return True
+    # A literal RT/HT/LT cell is an uninitialized template placeholder. It may
+    # be claimed once and immediately rewritten to the actual display value.
+    return str(value or "").strip().upper() == temp_code.upper()
+
+
+def _temperature_tokens_match(
+    left: object,
+    right: object,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    left_code = str(left or "").strip().upper()
+    right_code = str(right or "").strip().upper()
+    if left_code in TEMP_LABELS:
+        return _temperature_cell_matches_display(
+            right,
+            left_code,
+            temperature_labels,
+        )
+    if right_code in TEMP_LABELS:
+        return _temperature_cell_matches_display(
+            left,
+            right_code,
+            temperature_labels,
+        )
+    return _temperature_values_match(left, right)
 
 
 def _temperature_display(
@@ -979,6 +1027,133 @@ def _prepare_dpt_data_rows(
     return targets
 
 
+def _insert_dpt_temperature_group(
+    data_ws: Worksheet,
+    source_group: _DptDataGroup,
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
+    """Clone an empty four-row template group for another actual temperature."""
+
+    source_start = source_group.start_row
+    insert_row = source_group.end_row
+    row_count = DPT_DATA_GROUP_TEMPLATE_ROWS
+    merged_ranges = [CellRange(str(rng)) for rng in data_ws.merged_cells.ranges]
+    cloned_ranges = [
+        CellRange(
+            min_col=rng.min_col,
+            max_col=rng.max_col,
+            min_row=insert_row + (rng.min_row - source_start),
+            max_row=insert_row + (rng.max_row - source_start),
+        )
+        for rng in merged_ranges
+        if source_start <= rng.min_row
+        and rng.max_row < source_start + row_count
+    ]
+    for rng in list(data_ws.merged_cells.ranges):
+        data_ws.unmerge_cells(str(rng))
+
+    data_ws.insert_rows(insert_row, row_count)
+    max_column = max(data_ws.max_column, LAST_COL)
+    for offset in range(row_count):
+        source_row = source_start + offset
+        target_row = insert_row + offset
+        _copy_row_style(data_ws, source_row, target_row)
+        for col in range(1, max_column + 1):
+            source = data_ws.cell(source_row, col)
+            target = data_ws.cell(target_row, col)
+            target.value = copy(source.value) if col <= COL_CONDITION else None
+
+    for rng in merged_ranges:
+        shifted = (
+            CellRange(
+                min_col=rng.min_col,
+                max_col=rng.max_col,
+                min_row=rng.min_row + row_count,
+                max_row=rng.max_row + row_count,
+            )
+            if rng.min_row >= insert_row
+            else rng
+        )
+        data_ws.merge_cells(str(shifted))
+    for rng in cloned_ranges:
+        data_ws.merge_cells(str(rng))
+    cloned_range_texts = {str(rng) for rng in cloned_ranges}
+    for col in (1, 2, COL_CONDITION):
+        source_header = next(
+            (
+                rng
+                for rng in merged_ranges
+                if rng.min_row == source_start
+                and rng.min_col == col
+                and rng.max_col == col
+                and rng.max_row >= source_start + row_count - 1
+            ),
+            None,
+        )
+        if source_header is None:
+            continue
+        target_header = CellRange(
+            min_col=col,
+            max_col=col,
+            min_row=insert_row,
+            max_row=insert_row + row_count - 1,
+        )
+        if str(target_header) not in cloned_range_texts:
+            data_ws.merge_cells(str(target_header))
+
+    _set_merged_cell_value(data_ws, insert_row, 1, phase_code.upper())
+    _set_merged_cell_value(
+        data_ws,
+        insert_row,
+        2,
+        _temperature_display(temp_code, temperature_labels),
+    )
+
+
+def _ensure_dpt_temperature_group(
+    data_ws: Worksheet,
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
+    groups = _dpt_data_groups(data_ws)
+    exact_groups = [
+        group
+        for group in groups
+        if group.phase.upper() == phase_code.upper()
+        and _temperature_cell_matches_display(
+            group.temp,
+            temp_code,
+            temperature_labels,
+        )
+    ]
+    if exact_groups:
+        return
+
+    seed_groups = [
+        (index, group)
+        for index, group in enumerate(groups)
+        if group.phase.upper() == phase_code.upper()
+        and _temperature_cell_matches(group.temp, temp_code, temperature_labels)
+    ]
+    if not seed_groups:
+        display_temp = _temperature_display(temp_code, temperature_labels)
+        raise ValueError(
+            f"报告模板工作表“{data_ws.title}”缺少工况组："
+            f"{phase_code.upper()} / {display_temp}；为避免写入错误行，已停止写入"
+        )
+    _source_index, source_group = seed_groups[-1]
+    _insert_dpt_temperature_group(
+        data_ws,
+        source_group,
+        phase_code,
+        temp_code,
+        temperature_labels,
+    )
+
+
 def _find_dpt_data_target(
     result: ExtractResult,
     data_ws: Worksheet,
@@ -992,7 +1167,11 @@ def _find_dpt_data_target(
     for group_index, group in enumerate(_dpt_data_groups(data_ws)):
         if group.phase.upper() != phase_code.upper():
             continue
-        if not _temperature_cell_matches(group.temp, temp_code, temperature_labels):
+        if not _temperature_cell_matches_display(
+            group.temp,
+            temp_code,
+            temperature_labels,
+        ):
             continue
         matching_groups.append((group_index, group))
 
@@ -1043,15 +1222,14 @@ def _normalize_dpt_data_temperature_cells(
     temperature_labels: TemperatureLabels | None = None,
 ) -> None:
     for group in _dpt_data_groups(data_ws):
-        temp_code = _temperature_code_from_token(group.temp, temperature_labels)
-        if temp_code is None:
-            continue
-        _set_merged_cell_value(
-            data_ws,
-            group.start_row,
-            2,
-            _temperature_display(temp_code, temperature_labels),
-        )
+        raw = str(group.temp or "").strip().upper()
+        if raw in TEMP_LABELS:
+            _set_merged_cell_value(
+                data_ws,
+                group.start_row,
+                2,
+                _temperature_display(raw, temperature_labels),
+            )
 
 
 def _dpt_waveform_group_base(data_ws: Worksheet, group_index: int) -> int:
@@ -1216,6 +1394,29 @@ def _phase_temp_parts(
     return match.group(1).upper(), temp_code
 
 
+def _phase_temp_token_parts(label: str) -> tuple[str, str] | None:
+    match = re.fullmatch(r"\s*([UVW][HL])\s*_?\s*(.+?)\s*", str(label or ""), re.I)
+    if match is None:
+        return None
+    return match.group(1).upper(), match.group(2).strip()
+
+
+def _phase_temperature_matches_display(
+    label: str,
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    parts = _phase_temp_token_parts(label)
+    if parts is None or parts[0] != phase_code.upper():
+        return False
+    return _temperature_cell_matches_display(
+        parts[1],
+        temp_code,
+        temperature_labels,
+    )
+
+
 def _dpt_waveform_block_has_data_match(
     data_ws: Worksheet,
     phase_temp_label: str,
@@ -1224,10 +1425,10 @@ def _dpt_waveform_block_has_data_match(
     *,
     require_condition_signature: bool = True,
 ) -> bool:
-    phase_temp = _phase_temp_parts(phase_temp_label, temperature_labels)
+    phase_temp = _phase_temp_token_parts(phase_temp_label)
     if phase_temp is None:
         return False
-    phase_code, temp_code = phase_temp
+    phase_code, temperature_token = phase_temp
     setpoints = _condition_setpoint_match(condition_label)
     if setpoints.vdc is None or setpoints.idc is None:
         return False
@@ -1235,7 +1436,11 @@ def _dpt_waveform_block_has_data_match(
     for group in _dpt_data_groups(data_ws):
         if group.phase.upper() != phase_code:
             continue
-        if not _temperature_cell_matches(group.temp, temp_code, temperature_labels):
+        if not _temperature_tokens_match(
+            group.temp,
+            temperature_token,
+            temperature_labels,
+        ):
             continue
         if (
             require_condition_signature
@@ -1286,8 +1491,12 @@ def _ensure_dpt_waveform_anchor(
     anchor_row = group_base + row_index * DPT_WAVEFORM_BLOCK_STRIDE
     phase_temp = _phase_temp_label(phase_code, temp_code, temperature_labels)
     existing_label = _dpt_waveform_label(ws, anchor_row)
-    existing_parts = _phase_temp_parts(existing_label, temperature_labels)
-    existing_matches_target = existing_parts == (phase_code.upper(), temp_code)
+    existing_matches_target = _phase_temperature_matches_display(
+        existing_label,
+        phase_code,
+        temp_code,
+        temperature_labels,
+    )
     inserted_row_occupied = target.inserted_row and bool(existing_label)
     mismatched_live_block = (
         existing_label
@@ -1830,14 +2039,16 @@ def _normalize_dpt_waveform_text(
 
     labels = _left_merged_ranges_with_value(ws)
     for phase_rng, phase_label in labels:
-        phase_temp = _phase_temp_parts(phase_label, temperature_labels)
+        phase_temp = _phase_temp_token_parts(phase_label)
         if phase_temp is None:
             continue
-        _set_range_value(
-            ws,
-            phase_rng,
-            _phase_temp_label(phase_temp[0], phase_temp[1], temperature_labels),
-        )
+        raw_code = phase_temp[1].strip().upper()
+        if raw_code in TEMP_LABELS:
+            _set_range_value(
+                ws,
+                phase_rng,
+                _phase_temp_label(phase_temp[0], raw_code, temperature_labels),
+            )
         state_col = phase_rng.max_col + 1
         for offset in (0, 17, 34):
             row = phase_rng.min_row + offset
@@ -1878,13 +2089,15 @@ def _normalize_short_picture_text(
             bold=True,
         )
     for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5):
-        phase_temp = _phase_temp_parts(value, temperature_labels)
+        phase_temp = _phase_temp_token_parts(value)
         if phase_temp is not None:
-            _set_range_value(
-                ws,
-                rng,
-                _phase_temp_label(phase_temp[0], phase_temp[1], temperature_labels),
-            )
+            raw_code = phase_temp[1].strip().upper()
+            if raw_code in TEMP_LABELS:
+                _set_range_value(
+                    ws,
+                    rng,
+                    _phase_temp_label(phase_temp[0], raw_code, temperature_labels),
+                )
             _style_text_cell(
                 ws,
                 rng,
@@ -2153,12 +2366,20 @@ def _clear_duplicate_dpt_waveform_blocks(
         anchor_row = phase_rng.min_row
         if anchor_row == target_anchor_row or anchor_row in (protected_anchor_rows or set()):
             continue
-        if _phase_temp_parts(phase_label, temperature_labels) != (
-            phase_code.upper(),
+        if not _phase_temperature_matches_display(
+            phase_label,
+            phase_code,
             temp_code,
+            temperature_labels,
         ):
             continue
         condition_label = label_by_row.get(anchor_row + 17)
+        existing_setpoints = _condition_setpoint_match(condition_label)
+        if existing_setpoints.vdc is None or existing_setpoints.idc is None:
+            # Cleanup is destructive. If a legacy/custom label cannot prove
+            # which V/I condition this block belongs to, preserve it instead
+            # of treating a parse failure as evidence that the image is stale.
+            continue
         if not _condition_matches_setpoints(
             condition_label,
             setpoints,
@@ -2380,7 +2601,11 @@ def _short_target_row(
         if phase != phase_code.upper():
             continue
         row_temp = _merged_value(ws, row, 1)
-        if _temperature_cell_matches(row_temp, temp_code, temperature_labels):
+        if _temperature_cell_matches_display(
+            row_temp,
+            temp_code,
+            temperature_labels,
+        ):
             _set_merged_cell_value(
                 ws,
                 row,
@@ -2395,23 +2620,104 @@ def _short_target_row(
     )
 
 
+def _ensure_short_temperature_group(
+    ws: Worksheet,
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
+    for row in range(5, ws.max_row + 1):
+        if str(ws.cell(row, 2).value or "").upper() != phase_code.upper():
+            continue
+        if _temperature_cell_matches_display(
+            _merged_value(ws, row, 1),
+            temp_code,
+            temperature_labels,
+        ):
+            return
+
+    seed_row = None
+    for row in range(5, ws.max_row + 1):
+        if str(ws.cell(row, 2).value or "").upper() != phase_code.upper():
+            continue
+        if _temperature_cell_matches(
+            _merged_value(ws, row, 1),
+            temp_code,
+            temperature_labels,
+        ):
+            seed_row = row
+    if seed_row is None:
+        return
+
+    temperature_range = _merged_range_containing(ws, seed_row, 1)
+    source_start = temperature_range.min_row if temperature_range is not None else seed_row
+    source_end = temperature_range.max_row if temperature_range is not None else seed_row
+    row_count = source_end - source_start + 1
+    insert_row = source_end + 1
+    merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
+    cloned_ranges = [
+        CellRange(
+            min_col=rng.min_col,
+            max_col=rng.max_col,
+            min_row=insert_row + (rng.min_row - source_start),
+            max_row=insert_row + (rng.max_row - source_start),
+        )
+        for rng in merged_ranges
+        if source_start <= rng.min_row and rng.max_row <= source_end
+    ]
+    for rng in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(rng))
+    ws.insert_rows(insert_row, row_count)
+    for offset in range(row_count):
+        source_row = source_start + offset
+        target_row = insert_row + offset
+        ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+        for col in range(1, ws.max_column + 1):
+            source = ws.cell(source_row, col)
+            target = ws.cell(target_row, col)
+            target.value = copy(source.value) if col <= 3 else None
+            if source.has_style:
+                target.font = copy(source.font)
+                target.fill = copy(source.fill)
+                target.border = copy(source.border)
+                target.alignment = copy(source.alignment)
+                target.protection = copy(source.protection)
+                target.number_format = source.number_format
+    for rng in merged_ranges:
+        shifted = (
+            CellRange(
+                min_col=rng.min_col,
+                max_col=rng.max_col,
+                min_row=rng.min_row + row_count,
+                max_row=rng.max_row + row_count,
+            )
+            if rng.min_row >= insert_row
+            else rng
+        )
+        ws.merge_cells(str(shifted))
+    for rng in cloned_ranges:
+        ws.merge_cells(str(rng))
+    _set_merged_cell_value(
+        ws,
+        insert_row,
+        1,
+        _temperature_display(temp_code, temperature_labels),
+    )
+
+
 def _normalize_short_temperature_cells(
     ws: Worksheet,
     temperature_labels: TemperatureLabels | None = None,
 ) -> None:
     for row in range(5, ws.max_row + 1):
-        temp_code = _temperature_code_from_token(
-            _merged_value(ws, row, 1),
-            temperature_labels,
-        )
-        if temp_code is None:
-            continue
-        _set_merged_cell_value(
-            ws,
-            row,
-            1,
-            _temperature_display(temp_code, temperature_labels),
-        )
+        raw = str(_merged_value(ws, row, 1) or "").strip().upper()
+        if raw in TEMP_LABELS:
+            _set_merged_cell_value(
+                ws,
+                row,
+                1,
+                _temperature_display(raw, temperature_labels),
+            )
 
 
 def _normalize_report_temperature_labels(
@@ -2512,9 +2818,11 @@ def _short_image_anchor_row(
     temperature_labels: TemperatureLabels | None = None,
 ) -> int | None:
     for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5):
-        if _phase_temp_parts(value, temperature_labels) == (
-            phase_code.upper(),
+        if _phase_temperature_matches_display(
+            value,
+            phase_code,
             temp_code,
+            temperature_labels,
         ):
             _set_range_value(
                 ws,
@@ -2523,6 +2831,102 @@ def _short_image_anchor_row(
             )
             return rng.min_row
     return None
+
+
+def _ensure_short_picture_temperature_block(
+    ws: Worksheet,
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> None:
+    labels = _merged_ranges_with_value(ws, min_col=1, max_col=5)
+    if any(
+        _phase_temperature_matches_display(
+            value,
+            phase_code,
+            temp_code,
+            temperature_labels,
+        )
+        for _rng, value in labels
+    ):
+        return
+    seeds = [
+        (index, rng, value)
+        for index, (rng, value) in enumerate(labels)
+        if _phase_temp_parts(value, temperature_labels)
+        == (phase_code.upper(), temp_code)
+    ]
+    if not seeds:
+        return
+    seed_index, seed_range, _seed_value = seeds[-1]
+    source_start = seed_range.min_row
+    insert_row = (
+        labels[seed_index + 1][0].min_row
+        if seed_index + 1 < len(labels)
+        else ws.max_row + 1
+    )
+    row_count = max(1, insert_row - source_start)
+    merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
+    cloned_ranges = [
+        CellRange(
+            min_col=rng.min_col,
+            max_col=rng.max_col,
+            min_row=insert_row + (rng.min_row - source_start),
+            max_row=insert_row + (rng.max_row - source_start),
+        )
+        for rng in merged_ranges
+        if source_start <= rng.min_row and rng.max_row < source_start + row_count
+    ]
+    for rng in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(rng))
+    ws.insert_rows(insert_row, row_count)
+    _shift_image_anchors_for_insert(ws, insert_row, row_count)
+    for offset in range(row_count):
+        source_row = source_start + offset
+        target_row = insert_row + offset
+        ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+        for col in range(1, ws.max_column + 1):
+            source = ws.cell(source_row, col)
+            target = ws.cell(target_row, col)
+            target.value = copy(source.value)
+            if source.has_style:
+                target.font = copy(source.font)
+                target.fill = copy(source.fill)
+                target.border = copy(source.border)
+                target.alignment = copy(source.alignment)
+                target.protection = copy(source.protection)
+                target.number_format = source.number_format
+    for rng in merged_ranges:
+        shifted = (
+            CellRange(
+                min_col=rng.min_col,
+                max_col=rng.max_col,
+                min_row=rng.min_row + row_count,
+                max_row=rng.max_row + row_count,
+            )
+            if rng.min_row >= insert_row
+            else rng
+        )
+        ws.merge_cells(str(shifted))
+    for rng in cloned_ranges:
+        ws.merge_cells(str(rng))
+
+    cloned_label = CellRange(
+        min_col=seed_range.min_col,
+        max_col=seed_range.max_col,
+        min_row=insert_row,
+        max_row=insert_row + (seed_range.max_row - seed_range.min_row),
+    )
+    _set_range_value(
+        ws,
+        cloned_label,
+        _phase_temp_label(phase_code, temp_code, temperature_labels),
+    )
+    for row in range(insert_row, min(ws.max_row, insert_row + row_count - 1) + 1):
+        for col in range(1, 6):
+            label = _normalized(ws.cell(row, col).value)
+            if (label.startswith("VCE") or label.startswith("IMAX")) and row < ws.max_row:
+                ws.cell(row + 1, col).value = None
 
 
 def _write_short_images(
@@ -2687,6 +3091,12 @@ def write_report_template(
         if data_sheet not in wb.sheetnames:
             raise ValueError("报告模板缺少工作表：短路测试")
         data_ws = wb[data_sheet]
+        _ensure_short_temperature_group(
+            data_ws,
+            phase_code,
+            temp_code,
+            temperature_labels,
+        )
         data_row = _short_target_row(
             data_ws,
             phase_code,
@@ -2703,6 +3113,12 @@ def write_report_template(
         anchor_row = None
         if picture_sheet in wb.sheetnames:
             image_ws = wb[picture_sheet]
+            _ensure_short_picture_temperature_block(
+                image_ws,
+                phase_code,
+                temp_code,
+                temperature_labels,
+            )
             anchor_row = _short_image_anchor_row(
                 image_ws,
                 phase_code,
@@ -2727,6 +3143,7 @@ def write_report_template(
             expected_image_keys,
             images_written,
         )
+        emit(progress_total - 2, "整理报告版式")
         _normalize_report_temperature_labels(wb, temperature_labels)
         _set_report_open_zoom(wb, target_screen_width_px)
         _write_report_temperature_identities(wb, temperature_labels)
@@ -2752,6 +3169,12 @@ def write_report_template(
     if expected_image_keys and waveform_sheet not in wb.sheetnames:
         raise ValueError(f"报告模板缺少工作表：{waveform_sheet}，无法写入报告图片")
     waveform_ws = wb[waveform_sheet] if waveform_sheet in wb.sheetnames else None
+    _ensure_dpt_temperature_group(
+        data_ws,
+        phase_code,
+        temp_code,
+        temperature_labels,
+    )
     target = _find_dpt_data_target(
         result0,
         data_ws,
@@ -2834,6 +3257,7 @@ def write_report_template(
         expected_image_keys,
         images_written,
     )
+    emit(progress_total - 2, "整理报告版式")
     _normalize_report_temperature_labels(wb, temperature_labels)
     _set_report_open_zoom(wb, target_screen_width_px)
     _write_report_temperature_identities(wb, temperature_labels)

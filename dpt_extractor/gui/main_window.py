@@ -59,7 +59,13 @@ from dpt_extractor.gui.recent_paths import (
     set_report_template_source_path,
 )
 from dpt_extractor.gui.result_table import ResultTable
-from dpt_extractor.gui.task_progress import UnitRateEstimator, format_duration_ms
+from dpt_extractor.gui.task_progress import (
+    ReportStageBudgetEstimator,
+    ReportTimingContext,
+    ReportTimingHistory,
+    UnitRateEstimator,
+    format_duration_ms,
+)
 from dpt_extractor.gui.theme import (
     DARK_STYLESHEET,
     SUMMARY_STYLE,
@@ -191,6 +197,36 @@ REPORT_PROGRESS_WRITE_TEMPLATE_DONE = 57500
 REPORT_PROGRESS_WRITE_DATA_DONE = 60000
 REPORT_PROGRESS_WRITE_IMAGES_DONE = 80000
 REPORT_PROGRESS_WRITE_DONE_CAP = 85000
+REPORT_TIMING_SETTINGS_KEY = "task_progress/report_timing_history_v1"
+REPORT_TIMING_STAGE_ORDER = (
+    "copy-template",
+    "prepare",
+    "capture",
+    "open-workbook",
+    "write-data",
+    "write-images",
+    "finalize-workbook",
+    "save-workbook",
+)
+
+
+def report_timing_stage_windows(
+    budgets_ms: dict[str, float],
+) -> dict[str, tuple[float, float]]:
+    """Allocate 1%-99.9% in proportion to predicted stage wall time."""
+
+    durations = {
+        stage: max(1.0, float(budgets_ms.get(stage, 1.0)))
+        for stage in REPORT_TIMING_STAGE_ORDER
+    }
+    total = max(1.0, sum(durations.values()))
+    cursor = 0.01
+    windows: dict[str, tuple[float, float]] = {}
+    for stage in REPORT_TIMING_STAGE_ORDER:
+        end = cursor + 0.989 * durations[stage] / total
+        windows[stage] = (cursor, min(0.999, end))
+        cursor = end
+    return windows
 LOAD_PROGRESS_PARSE_DONE = 35000
 LOAD_PROGRESS_MAPPING_DONE = 45000
 LOAD_PROGRESS_EXTRACT_DONE = 85000
@@ -395,6 +431,7 @@ class ReportProgressPanel(QFrame):
         self._finished_ok = False
         self._task_started = False
         self._eta_estimator = UnitRateEstimator()
+        self._report_eta_estimator: ReportStageBudgetEstimator | None = None
         self._density_mode = ""
 
         self._timer = QTimer(self)
@@ -491,7 +528,13 @@ class ReportProgressPanel(QFrame):
         for separator in (self._sep_a, self._sep_b, self._sep_c):
             separator.setVisible(show_separators)
         self._eta_caption.setVisible(not tiny)
-        self._eta_caption.setText("当前阶段预计剩余" if full else "剩余")
+        self._eta_caption.setText(
+            "预计剩余"
+            if self._report_eta_estimator is not None
+            else "当前阶段预计剩余"
+            if full
+            else "剩余"
+        )
 
         layout = self.layout()
         if layout is not None:
@@ -516,6 +559,10 @@ class ReportProgressPanel(QFrame):
         self._finished_ok = False
         self._task_started = True
         self._eta_estimator = UnitRateEstimator()
+        self._report_eta_estimator = None
+        self._eta_caption.setText(
+            "当前阶段预计剩余" if self._density_mode == "full" else "剩余"
+        )
         self.set_stage(stage)
         # Reset atomically so a previous successful 100% cannot flash while
         # the new task's range is being installed.
@@ -560,6 +607,40 @@ class ReportProgressPanel(QFrame):
         self._timer.start()
         self.show()
         self._refresh_readout()
+
+    def begin_report_timing(
+        self,
+        budgets_ms: dict[str, float],
+        stage_windows: dict[str, tuple[float, float]],
+        initial_stage: str,
+    ) -> None:
+        """Attach a whole-task report model to the active progress task."""
+
+        if not self._running:
+            return
+        self._report_eta_estimator = ReportStageBudgetEstimator(
+            budgets_ms,
+            stage_windows,
+        )
+        self._report_eta_estimator.observe(initial_stage)
+        self._eta_caption.setText("预计剩余")
+        self._refresh_readout()
+
+    def observe_report_timing(
+        self,
+        stage: str,
+        completed: int = 0,
+        total: int = 0,
+    ) -> None:
+        if self._running and self._report_eta_estimator is not None:
+            self._report_eta_estimator.observe(stage, completed, total)
+
+    def finish_report_timing(self) -> dict[str, float]:
+        if self._report_eta_estimator is None:
+            return {}
+        durations = self._report_eta_estimator.finish()
+        self._report_eta_estimator = None
+        return durations
 
     def update_busy_progress(
         self,
@@ -608,6 +689,10 @@ class ReportProgressPanel(QFrame):
         new_maximum = max(1, int(total))
         requested = max(new_minimum, min(int(value), new_maximum))
         requested_fraction = requested / new_maximum
+        if self._report_eta_estimator is not None:
+            projected = self._report_eta_estimator.projected_fraction()
+            if projected is not None:
+                requested_fraction = projected
         fraction = max(self._progress_fraction, requested_fraction)
 
         # One-decimal rendering means 99.95% would round to 100.0%.  Keep all
@@ -651,6 +736,7 @@ class ReportProgressPanel(QFrame):
         self._eta_active = False
         self._finished_ok = False
         self._task_started = False
+        self._report_eta_estimator = None
         self._progress_fraction = 0.0
         self.set_stage("任务进度")
         self.setRange(0, 100)
@@ -720,6 +806,13 @@ class ReportProgressPanel(QFrame):
         return percent
 
     def _refresh_readout(self) -> None:
+        if self._running and self._report_eta_estimator is not None:
+            projected = self._report_eta_estimator.projected_fraction()
+            if projected is not None:
+                projected = max(self._progress_fraction, min(0.999, projected))
+                self._progress_fraction = projected
+                ceiling = int(math.floor(self._maximum * 0.999 + 1e-12))
+                self._value = min(ceiling, int(round(projected * self._maximum)))
         percent = max(0.0, min(100.0, self._percent()))
         self._bar.setRange(0, 100000)
         self._bar.setValue(int(round(percent * 1000.0)))
@@ -728,6 +821,14 @@ class ReportProgressPanel(QFrame):
             eta_text = "0 ms"
         elif not self._running:
             eta_text = "—"
+        elif self._report_eta_estimator is not None:
+            eta_ms = self._report_eta_estimator.eta_ms()
+            if eta_ms is None or eta_ms <= 0.0:
+                eta_text = "估算中"
+            elif eta_ms < 1000.0:
+                eta_text = "<1 s"
+            else:
+                eta_text = format_duration_ms(eta_ms)
         elif self._busy or not self._eta_active:
             eta_text = "估算中"
         else:
@@ -747,10 +848,20 @@ class ReportProgressPanel(QFrame):
 
     def _refresh_tooltip(self) -> None:
         detail = self._format.strip() or self._detail_label.text().strip() or "待命"
+        eta_scope = (
+            "整个任务预计剩余"
+            if self._report_eta_estimator is not None
+            else "当前阶段预计剩余"
+        )
+        eta_note = (
+            "预计剩余时间由本机同类报告分阶段历史耗时并结合当前进度校正"
+            if self._report_eta_estimator is not None
+            else "预计剩余时间仅按当前同质阶段估算"
+        )
         description = (
             f"{self.stage_text()}：{detail}\n"
-            f"进度 {self.percent_text()}；当前阶段预计剩余 {self.eta_text()}\n"
-            "百分比表示整个后台任务进度；预计剩余时间仅按当前同质阶段估算"
+            f"进度 {self.percent_text()}；{eta_scope} {self.eta_text()}\n"
+            f"百分比表示整个后台任务进度；{eta_note}"
         )
         self.setToolTip(description)
         self.setAccessibleDescription(description)
@@ -1342,6 +1453,14 @@ class MainWindow(QMainWindow):
         self._report_tasks: dict[int, _ReportWriteTask] = {}
         self._report_capture_state: _ReportCaptureState | None = None
         self._report_progress_active = False
+        self._report_timing_history = ReportTimingHistory.from_json(
+            QSettings("DPT", "DPTExtractor").value(
+                REPORT_TIMING_SETTINGS_KEY,
+                "",
+            )
+        )
+        self._active_report_timing_context: ReportTimingContext | None = None
+        self._report_writes_this_session = 0
         self._report_operation_active = False
         self._report_interaction_locked = False
         self._report_toolbar_enabled_states: list[tuple[QWidget, bool]] = []
@@ -2991,8 +3110,70 @@ class MainWindow(QMainWindow):
         self.report_progress.finish(label, ok=ok, stage=stage)
         self._report_progress_active = False
 
-    def _begin_report_progress(self, total: int, label: str) -> None:
+    def _begin_report_progress(
+        self,
+        total: int,
+        label: str,
+        *,
+        timing_stage: str | None = None,
+    ) -> None:
         self._begin_task_progress("报告写入", total, label)
+        if self._active_report_timing_context is not None and timing_stage is not None:
+            budgets = self._report_timing_history.estimate(
+                self._active_report_timing_context
+            )
+            self.report_progress.begin_report_timing(
+                budgets,
+                report_timing_stage_windows(budgets),
+                timing_stage,
+            )
+
+    def _estimate_report_result_count(self) -> int:
+        result = self.result
+        if (
+            result is None
+            or result.short_circuit_mode
+            or result.single_pulse_mode
+            or int(result.detected_pulse_count or 0) <= 2
+        ):
+            return 1
+        return max(
+            1,
+            len(
+                dpt_export_pulse_pairs(
+                    int(result.detected_pulse_count),
+                    include_pair=(
+                        int(result.off_pulse_index),
+                        int(result.on_pulse_index),
+                    ),
+                )
+            ),
+        )
+
+    def _initialize_report_timing(
+        self,
+        *,
+        existing_report: bool,
+        report_path: Path,
+    ) -> None:
+        if self._active_report_timing_context is not None:
+            return
+        size_path = report_path
+        if not existing_report:
+            template = self._current_report_template_source()
+            if template is not None:
+                size_path = template
+        try:
+            size_bytes = max(0, int(size_path.stat().st_size))
+        except OSError:
+            size_bytes = 0
+        self._active_report_timing_context = ReportTimingContext(
+            existing_report=bool(existing_report),
+            report_size_bytes=size_bytes,
+            image_count=len(self._report_image_params()),
+            result_count=self._estimate_report_result_count(),
+            first_in_session=self._report_writes_this_session == 0,
+        )
 
     def _set_report_progress(
         self,
@@ -3003,7 +3184,16 @@ class MainWindow(QMainWindow):
         eta_phase: str | None = None,
         eta_completed: int = 0,
         eta_total: int = 0,
+        timing_stage: str | None = None,
+        timing_completed: int = 0,
+        timing_total: int = 0,
     ) -> None:
+        if timing_stage is not None:
+            self.report_progress.observe_report_timing(
+                timing_stage,
+                timing_completed,
+                timing_total,
+            )
         self._set_task_progress(
             value,
             total,
@@ -3020,7 +3210,10 @@ class MainWindow(QMainWindow):
         *,
         value: int | None = None,
         total: int | None = None,
+        timing_stage: str | None = None,
     ) -> None:
+        if timing_stage is not None:
+            self.report_progress.observe_report_timing(timing_stage)
         self._set_task_progress_busy(
             label,
             stage="报告写入",
@@ -3029,6 +3222,16 @@ class MainWindow(QMainWindow):
         )
 
     def _finish_report_progress(self, label: str, *, ok: bool) -> None:
+        durations = self.report_progress.finish_report_timing()
+        context = self._active_report_timing_context
+        self._active_report_timing_context = None
+        if ok and context is not None and durations:
+            self._report_timing_history.record(context, durations)
+            QSettings("DPT", "DPTExtractor").setValue(
+                REPORT_TIMING_SETTINGS_KEY,
+                self._report_timing_history.to_json(),
+            )
+            self._report_writes_this_session += 1
         self._finish_task_progress(label, ok=ok, stage="报告写入")
 
     def _start_background_load(self, path: str) -> None:
@@ -8432,6 +8635,9 @@ class MainWindow(QMainWindow):
             eta_phase="report-capture",
             eta_completed=0,
             eta_total=len(params),
+            timing_stage="capture",
+            timing_completed=0,
+            timing_total=len(params),
         )
         images: dict[tuple[str, str], Path] = {}
         vb = self.wave_plot.plot.getPlotItem().getViewBox()
@@ -8463,6 +8669,9 @@ class MainWindow(QMainWindow):
                     eta_phase="report-capture",
                     eta_completed=index,
                     eta_total=len(params),
+                    timing_stage="capture",
+                    timing_completed=index,
+                    timing_total=len(params),
                 )
         finally:
             vb.setRange(
@@ -8470,6 +8679,7 @@ class MainWindow(QMainWindow):
                 yRange=(float(old_y[0]), float(old_y[1])),
                 padding=0.0,
             )
+            self.wave_plot._settle_report_view_layout()
         self._set_report_progress(
             REPORT_PROGRESS_CAPTURE_DONE,
             REPORT_PROGRESS_TOTAL,
@@ -8658,6 +8868,9 @@ class MainWindow(QMainWindow):
             eta_phase="report-capture",
             eta_completed=0,
             eta_total=len(state.params),
+            timing_stage="capture",
+            timing_completed=0,
+            timing_total=len(state.params),
         )
         self.wave_plot._fit_full_range()
         QTimer.singleShot(0, self._capture_next_report_image)
@@ -8672,6 +8885,30 @@ class MainWindow(QMainWindow):
             yRange=(state.old_y[0], state.old_y[1]),
             padding=0.0,
         )
+        self.wave_plot._settle_report_view_layout()
+
+    def _start_report_write_after_capture(
+        self,
+        state: _ReportCaptureState,
+    ) -> None:
+        """Start Excel work after restored widget geometry reaches the event loop."""
+
+        if state.request_id != self._report_request_id:
+            _safe_cleanup_tempdir(state.tempdir)
+            return
+        try:
+            self._start_report_write_task(
+                state.tempdir,
+                state.images or {},
+                state.results,
+                request_id=state.request_id,
+                temperature_code=state.temperature_code,
+                temperature_labels=state.temperature_labels,
+                phase_code=state.phase_code,
+                image_result_index=state.image_result_index,
+            )
+        except Exception as exc:
+            self._fail_report_capture(state, exc)
 
     def _fail_report_capture(
         self,
@@ -8709,20 +8946,14 @@ class MainWindow(QMainWindow):
                     REPORT_PROGRESS_TOTAL,
                     "截图完成，准备写入 Excel...",
                 )
-                images = state.images or {}
-                tempdir = state.tempdir
-                results = state.results
-                request_id = state.request_id
                 self._report_capture_state = None
-                self._start_report_write_task(
-                    tempdir,
-                    images,
-                    results,
-                    request_id=request_id,
-                    temperature_code=state.temperature_code,
-                    temperature_labels=state.temperature_labels,
-                    phase_code=state.phase_code,
-                    image_result_index=state.image_result_index,
+                # Leave one event-loop boundary between hiding the temporary
+                # overview widgets and starting the Excel worker.  This lets
+                # Windows/Qt commit the restored high-DPI layout instead of
+                # exposing the now-unpainted 86px + 20px reserved area.
+                QTimer.singleShot(
+                    0,
+                    lambda state=state: self._start_report_write_after_capture(state),
                 )
                 return
 
@@ -8778,6 +9009,9 @@ class MainWindow(QMainWindow):
                 eta_phase="report-capture",
                 eta_completed=display_index,
                 eta_total=total,
+                timing_stage="capture",
+                timing_completed=display_index,
+                timing_total=total,
             )
             state.index = display_index
             QTimer.singleShot(0, self._capture_next_report_image)
@@ -8874,8 +9108,19 @@ class MainWindow(QMainWindow):
             return False
 
         try:
-            self._begin_report_progress(REPORT_PROGRESS_TOTAL, "复制模板...")
-            self._set_report_progress_busy("复制模板...")
+            self._initialize_report_timing(
+                existing_report=False,
+                report_path=target,
+            )
+            self._begin_report_progress(
+                REPORT_PROGRESS_TOTAL,
+                "复制模板...",
+                timing_stage="copy-template",
+            )
+            self._set_report_progress_busy(
+                "复制模板...",
+                timing_stage="copy-template",
+            )
             self._report_output_path = copy_report_template(src, target)
             self._set_report_progress(
                 REPORT_PROGRESS_TEMPLATE_DONE,
@@ -8926,8 +9171,17 @@ class MainWindow(QMainWindow):
             display_state=self.wave_plot.snapshot_report_display_state(),
         )
         result_snapshot = task.current_result
+        if self._report_output_path is not None:
+            self._initialize_report_timing(
+                existing_report=True,
+                report_path=self._report_output_path,
+            )
         if not self._report_progress_active:
-            self._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告文件...")
+            self._begin_report_progress(
+                REPORT_PROGRESS_TOTAL,
+                "准备报告文件...",
+                timing_stage="prepare",
+            )
         prepare_total = 1
         if (
             not result_snapshot.short_circuit_mode
@@ -8950,6 +9204,9 @@ class MainWindow(QMainWindow):
             eta_phase="report-prepare",
             eta_completed=0,
             eta_total=prepare_total,
+            timing_stage="prepare",
+            timing_completed=0,
+            timing_total=prepare_total,
         )
         task.signals.progress.connect(self._on_report_prepare_progress)
         task.signals.finished.connect(self._on_report_prepare_finished)
@@ -8981,6 +9238,9 @@ class MainWindow(QMainWindow):
             eta_phase="report-prepare",
             eta_completed=max(0, int(done)),
             eta_total=total,
+            timing_stage="prepare",
+            timing_completed=max(0, int(done)),
+            timing_total=total,
         )
 
     def _on_report_prepare_finished(
@@ -9005,6 +9265,7 @@ class MainWindow(QMainWindow):
             REPORT_PROGRESS_PREPARE_DONE,
             REPORT_PROGRESS_TOTAL,
             "报告数据准备完成，准备截图...",
+            timing_stage="capture",
         )
         tempdir: tempfile.TemporaryDirectory | None = None
         try:
@@ -9142,7 +9403,10 @@ class MainWindow(QMainWindow):
         task.signals.failed.connect(self._on_report_write_failed)
         self._report_tasks[request_id] = task
         self._set_report_busy(True)
-        self._set_report_progress_busy("正在打开并写入 Excel...")
+        self._set_report_progress_busy(
+            "正在打开并写入 Excel...",
+            timing_stage="open-workbook",
+        )
         try:
             self._load_pool.start(task)
         except Exception:
@@ -9165,6 +9429,15 @@ class MainWindow(QMainWindow):
                 label,
                 value=REPORT_PROGRESS_WRITE_DONE_CAP,
                 total=REPORT_PROGRESS_TOTAL,
+                timing_stage="save-workbook",
+            )
+            return
+        if label == "整理报告版式":
+            self._set_report_progress(
+                REPORT_PROGRESS_WRITE_IMAGES_DONE,
+                REPORT_PROGRESS_TOTAL,
+                label,
+                timing_stage="finalize-workbook",
             )
             return
         if label == "插入报告图片":
@@ -9178,6 +9451,9 @@ class MainWindow(QMainWindow):
                 eta_phase="report-write-images",
                 eta_completed=max(0, int(value)),
                 eta_total=total,
+                timing_stage="write-images",
+                timing_completed=max(0, int(value)),
+                timing_total=total,
             )
             return
         checkpoint_values = {
@@ -9190,6 +9466,15 @@ class MainWindow(QMainWindow):
             min(progress_value, REPORT_PROGRESS_WRITE_DATA_DONE),
             REPORT_PROGRESS_TOTAL,
             label,
+            timing_stage=(
+                "open-workbook"
+                if label == "打开报告文件"
+                else "write-data"
+                if label == "读取报告模板"
+                else "write-images"
+                if label == "写入报告数据"
+                else None
+            ),
         )
 
     def _on_report_write_finished(

@@ -184,6 +184,80 @@ class TestReportEndToEndRegressions(unittest.TestCase):
                     win.close()
                     self.app.processEvents()
 
+    def test_capture_completion_releases_local_zoom_space_before_excel(self) -> None:
+        win, result = self._load_real_window()
+        completed: dict[str, object] = {}
+
+        def record_write_start(tempdir, images, results, **kwargs) -> None:
+            completed.update(
+                tempdir=tempdir,
+                images=dict(images),
+                results=list(results),
+                kwargs=dict(kwargs),
+            )
+
+        tempdir = tempfile.TemporaryDirectory()
+        try:
+            self.assertTrue(win._try_begin_report_operation())
+            win._report_request_id += 1
+            request_id = win._report_request_id
+            with patch.object(
+                win,
+                "_start_report_write_task",
+                side_effect=record_write_start,
+            ):
+                win._start_report_capture_sequence(
+                    tempdir,
+                    [result],
+                    request_id=request_id,
+                )
+                state = win._report_capture_state
+                self.assertIsNotNone(state)
+                assert state is not None
+                restored_plot_top = win.wave_plot.plot.geometry().top()
+
+                # Reproduce the last parameter screenshot layout: overview and
+                # its scale bar occupy fixed rows above the main waveform.
+                full_x = win.wave_plot._full_x_range
+                self.assertIsNotNone(full_x)
+                assert full_x is not None
+                win.wave_plot._apply_x_us_per_div(
+                    0.2,
+                    center_us=0.5 * (float(full_x[0]) + float(full_x[1])),
+                )
+                panel_layout = win.wave_plot._waveform_panel.layout()
+                self.assertIsNotNone(panel_layout)
+                assert panel_layout is not None
+                panel_layout.activate()
+                self.assertFalse(win.wave_plot._overview_plot.isHidden())
+                self.assertFalse(win.wave_plot._scope_scale_bar.isHidden())
+                occupied_plot_top = win.wave_plot.plot.geometry().top()
+                panel_top = panel_layout.contentsMargins().top()
+                self.assertGreater(occupied_plot_top, panel_top)
+
+                # Complete capture synchronously.  Excel must not start in the
+                # same callback that hides the temporary rows.
+                state.index = len(state.params)
+                win._capture_next_report_image()
+                self.assertFalse(completed)
+                self.assertTrue(win.wave_plot._overview_plot.isHidden())
+                self.assertTrue(win.wave_plot._scope_scale_bar.isHidden())
+                self.assertEqual(
+                    win.wave_plot.plot.geometry().top(),
+                    restored_plot_top,
+                )
+
+                self._drain_events_until(lambda: bool(completed))
+
+            self.assertEqual(completed["kwargs"]["request_id"], request_id)
+        finally:
+            win._report_request_id += 1
+            win._report_capture_state = None
+            win._release_report_operation()
+            tempdir.cleanup()
+            win.close()
+            self.app.processEvents()
+
     def test_production_qtimer_capture_writes_all_19_real_pngs_without_geometry_change(
         self,
     ) -> None:

@@ -2908,6 +2908,29 @@ class WaveformPlot(QWidget):
         self._update_y_ticks()
         self._update_readout()
 
+    def _settle_report_view_layout(self) -> None:
+        """Synchronize local-zoom widgets and release their stale layout space."""
+
+        # Parameter screenshots temporarily show the fixed-height overview and
+        # scale bar.  On a maximized high-DPI window, hiding those children and
+        # immediately starting the Excel worker can leave their old geometry
+        # reserved even though neither child paints anymore.  Rebuild the
+        # overview from the restored page/ViewBox first, then synchronously
+        # activate the panel layout so the main plot fills the released space.
+        self._refresh_overview_traces()
+        self._sync_overview_region_to_main()
+        self._overview_plot.updateGeometry()
+        self._scope_scale_bar.updateGeometry()
+        self.plot.updateGeometry()
+        panel_layout = self._waveform_panel.layout()
+        if panel_layout is not None:
+            panel_layout.invalidate()
+            panel_layout.activate()
+        self._waveform_panel.updateGeometry()
+        self._waveform_panel.update()
+        self.plot.update()
+        self._schedule_post_layout_sync()
+
     def _param_focus_x_scale_us(self) -> float:
         if self._user_x_us_per_div is not None:
             return self._user_x_us_per_div

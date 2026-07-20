@@ -10,15 +10,332 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Hashable
+from dataclasses import asdict, dataclass
+import json
 import math
 from statistics import median
 import time
+from typing import Mapping, Sequence
 
-__all__ = ["UnitRateEstimator", "format_duration_ms"]
+__all__ = [
+    "ReportStageBudgetEstimator",
+    "ReportTimingContext",
+    "ReportTimingHistory",
+    "UnitRateEstimator",
+    "format_duration_ms",
+]
 
 
 Clock = Callable[[], float]
 _NO_PHASE = object()
+
+
+@dataclass(frozen=True)
+class ReportTimingContext:
+    """Complexity signals used to select comparable report timing samples."""
+
+    existing_report: bool
+    report_size_bytes: int
+    image_count: int
+    result_count: int
+    first_in_session: bool
+
+
+def _default_report_stage_budgets_ms(
+    context: ReportTimingContext,
+) -> dict[str, float]:
+    """Return a conservative first-run model until local history is available."""
+
+    size_ratio = max(0.35, min(4.0, context.report_size_bytes / 5_000_000.0))
+    size_scale = math.sqrt(size_ratio)
+    image_scale = max(0.25, context.image_count / 19.0)
+    result_scale = max(1.0, float(context.result_count))
+    cold_scale = 1.15 if context.first_in_session else 1.0
+    return {
+        "copy-template": 450.0 if not context.existing_report else 1.0,
+        "prepare": 900.0 * result_scale,
+        "capture": 4_800.0 * image_scale,
+        "open-workbook": 5_000.0 * size_scale * cold_scale,
+        "write-data": 500.0 * result_scale,
+        "write-images": 8_000.0 * size_scale * image_scale,
+        "finalize-workbook": 10_500.0 * size_scale * cold_scale,
+        "save-workbook": 1_000.0 * size_scale,
+    }
+
+
+class ReportTimingHistory:
+    """Persist and robustly reuse successful whole-report stage timings."""
+
+    _VERSION = 1
+    _MAX_SAMPLES = 30
+    _MAX_NEIGHBORS = 5
+
+    def __init__(self, samples: Sequence[Mapping[str, object]] | None = None) -> None:
+        self._samples: list[dict[str, object]] = []
+        for sample in samples or ():
+            normalized = self._normalize_sample(sample)
+            if normalized is not None:
+                self._samples.append(normalized)
+        self._samples = self._samples[-self._MAX_SAMPLES :]
+
+    @classmethod
+    def from_json(cls, raw: object) -> "ReportTimingHistory":
+        try:
+            payload = json.loads(str(raw or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return cls()
+        if not isinstance(payload, dict) or payload.get("version") != cls._VERSION:
+            return cls()
+        samples = payload.get("samples")
+        return cls(samples if isinstance(samples, list) else ())
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {"version": self._VERSION, "samples": self._samples},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def estimate(self, context: ReportTimingContext) -> dict[str, float]:
+        defaults = _default_report_stage_budgets_ms(context)
+        if not self._samples:
+            return defaults
+
+        ranked = sorted(
+            self._samples,
+            key=lambda sample: self._distance(context, sample),
+        )[: self._MAX_NEIGHBORS]
+        estimates = dict(defaults)
+        for stage, fallback in defaults.items():
+            candidates: list[float] = []
+            for sample in ranked:
+                duration = sample["durations_ms"].get(stage)  # type: ignore[union-attr]
+                if not isinstance(duration, (int, float)) or duration <= 0:
+                    continue
+                candidates.append(
+                    float(duration) * self._stage_scale(stage, context, sample)
+                )
+            if candidates:
+                # Retain a small conservative prior so one unusually fast run
+                # cannot make the next atomic stage race to its cap.
+                observed = float(median(candidates))
+                estimates[stage] = max(1.0, 0.8 * observed + 0.2 * fallback)
+        if context.existing_report:
+            estimates["copy-template"] = 1.0
+        return estimates
+
+    def record(
+        self,
+        context: ReportTimingContext,
+        durations_ms: Mapping[str, float],
+    ) -> None:
+        normalized_durations = {
+            str(stage): float(value)
+            for stage, value in durations_ms.items()
+            if isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value) > 0.0
+        }
+        if not normalized_durations:
+            return
+        self._samples.append(
+            {
+                "context": asdict(context),
+                "durations_ms": normalized_durations,
+            }
+        )
+        self._samples = self._samples[-self._MAX_SAMPLES :]
+
+    @staticmethod
+    def _normalize_sample(sample: Mapping[str, object]) -> dict[str, object] | None:
+        context = sample.get("context")
+        durations = sample.get("durations_ms")
+        if not isinstance(context, dict) or not isinstance(durations, dict):
+            return None
+        try:
+            normalized_context = {
+                "existing_report": bool(context["existing_report"]),
+                "report_size_bytes": max(0, int(context["report_size_bytes"])),
+                "image_count": max(0, int(context["image_count"])),
+                "result_count": max(1, int(context["result_count"])),
+                "first_in_session": bool(context["first_in_session"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+        normalized_durations = {
+            str(stage): float(value)
+            for stage, value in durations.items()
+            if isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value) > 0.0
+        }
+        if not normalized_durations:
+            return None
+        return {
+            "context": normalized_context,
+            "durations_ms": normalized_durations,
+        }
+
+    @staticmethod
+    def _distance(context: ReportTimingContext, sample: Mapping[str, object]) -> float:
+        other = sample["context"]
+        assert isinstance(other, dict)
+        size_a = max(1, context.report_size_bytes)
+        size_b = max(1, int(other["report_size_bytes"]))
+        distance = abs(math.log(size_a / size_b))
+        distance += abs(context.image_count - int(other["image_count"])) / 19.0
+        distance += abs(context.result_count - int(other["result_count"])) * 0.75
+        if context.existing_report != bool(other["existing_report"]):
+            distance += 3.0
+        if context.first_in_session != bool(other["first_in_session"]):
+            distance += 1.5
+        return distance
+
+    @staticmethod
+    def _stage_scale(
+        stage: str,
+        context: ReportTimingContext,
+        sample: Mapping[str, object],
+    ) -> float:
+        other = sample["context"]
+        assert isinstance(other, dict)
+        size_ratio = max(
+            0.25,
+            min(
+                4.0,
+                max(1, context.report_size_bytes)
+                / max(1, int(other["report_size_bytes"])),
+            ),
+        )
+        image_ratio = max(
+            0.25,
+            min(4.0, max(1, context.image_count) / max(1, int(other["image_count"]))),
+        )
+        result_ratio = max(
+            0.5,
+            min(4.0, context.result_count / max(1, int(other["result_count"]))),
+        )
+        cold_ratio = 1.0
+        other_first = bool(other["first_in_session"])
+        if context.first_in_session and not other_first:
+            cold_ratio = 1.15
+        elif not context.first_in_session and other_first:
+            cold_ratio = 1.0 / 1.15
+        if stage in {"capture"}:
+            return image_ratio
+        if stage in {"write-images"}:
+            return math.sqrt(size_ratio) * image_ratio
+        if stage in {"prepare", "write-data"}:
+            return result_ratio
+        if stage in {"open-workbook", "finalize-workbook", "save-workbook"}:
+            return math.sqrt(size_ratio) * cold_ratio
+        return 1.0
+
+
+class ReportStageBudgetEstimator:
+    """Whole-report ETA and capped interpolation across real stage checkpoints."""
+
+    def __init__(
+        self,
+        budgets_ms: Mapping[str, float],
+        stage_windows: Mapping[str, tuple[float, float]],
+        clock: Clock | None = None,
+    ) -> None:
+        self._clock: Clock = clock or time.perf_counter
+        self._budgets_ms = {
+            str(stage): max(1.0, float(value))
+            for stage, value in budgets_ms.items()
+            if math.isfinite(float(value)) and float(value) > 0.0
+        }
+        self._windows = {
+            str(stage): (float(window[0]), float(window[1]))
+            for stage, window in stage_windows.items()
+        }
+        self._order = [stage for stage in self._windows if stage in self._budgets_ms]
+        self._current: str | None = None
+        self._stage_started_at = 0.0
+        self._observed_fraction = 0.0
+        self._durations_ms: dict[str, float] = {}
+
+    def observe(self, stage: str, completed: int = 0, total: int = 0) -> None:
+        stage = str(stage)
+        if stage not in self._windows or stage not in self._budgets_ms:
+            return
+        now = float(self._clock())
+        if stage != self._current:
+            self._close_current(now)
+            self._current = stage
+            self._stage_started_at = now
+            self._observed_fraction = 0.0
+        if total > 0:
+            fraction = max(0.0, min(1.0, float(completed) / float(total)))
+            self._observed_fraction = max(self._observed_fraction, fraction)
+
+    def eta_ms(self) -> float | None:
+        if self._current is None or self._current not in self._order:
+            return None
+        now = float(self._clock())
+        elapsed_ms = self._current_elapsed_ms(now)
+        predicted_ms = self._current_predicted_total_ms(elapsed_ms)
+        if self._observed_fraction >= 1.0:
+            current_remaining = 0.0
+        else:
+            current_remaining = max(
+                250.0,
+                predicted_ms - elapsed_ms,
+                predicted_ms * 0.05,
+            )
+        current_index = self._order.index(self._current)
+        future = sum(
+            self._budgets_ms[stage]
+            for stage in self._order[current_index + 1 :]
+        )
+        return max(1.0, current_remaining + future)
+
+    def projected_fraction(self) -> float | None:
+        if self._current is None:
+            return None
+        window = self._windows.get(self._current)
+        if window is None:
+            return None
+        elapsed_ms = self._current_elapsed_ms(float(self._clock()))
+        predicted_ms = self._current_predicted_total_ms(elapsed_ms)
+        timed_fraction = elapsed_ms / max(1.0, predicted_ms)
+        fraction = max(self._observed_fraction, timed_fraction)
+        if self._observed_fraction < 1.0:
+            fraction = min(fraction, 0.95)
+        else:
+            fraction = 1.0
+        start, end = window
+        return max(0.0, min(0.999, start + (end - start) * fraction))
+
+    def finish(self) -> dict[str, float]:
+        self._close_current(float(self._clock()))
+        self._current = None
+        return dict(self._durations_ms)
+
+    def _current_elapsed_ms(self, now: float) -> float:
+        if self._current is None:
+            return 0.0
+        elapsed = (now - self._stage_started_at) * 1000.0
+        return max(0.0, elapsed) if math.isfinite(elapsed) else 0.0
+
+    def _current_predicted_total_ms(self, elapsed_ms: float) -> float:
+        if self._current is None:
+            return 1.0
+        baseline = self._budgets_ms[self._current]
+        if self._observed_fraction <= 0.05 or elapsed_ms <= 0.0:
+            return baseline
+        current_run = elapsed_ms / self._observed_fraction
+        current_run = max(baseline * 0.5, min(baseline * 3.0, current_run))
+        return 0.35 * baseline + 0.65 * current_run
+
+    def _close_current(self, now: float) -> None:
+        if self._current is None:
+            return
+        elapsed_ms = self._current_elapsed_ms(now)
+        if elapsed_ms > 0.0:
+            self._durations_ms[self._current] = elapsed_ms
 
 
 class UnitRateEstimator:

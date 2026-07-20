@@ -24,13 +24,18 @@ def parse_setpoints_from_filename(path: str) -> tuple[float | None, float | None
     WH_480V_800A_000.tss -> (480.0, 800.0)
     WH_480V_Rg_on3.3ohm_Rg_off3.6ohm_800A_000.tss -> (480.0, 800.0)
     """
-    stem = Path(path).stem.upper()
-    m = _PAIR_RE.search(stem)
+    # Parse the complete basename instead of Path.stem. Report waveform labels
+    # such as ``900V_494.9A`` have no file extension; Path.stem mistakes the
+    # trailing ``.9A`` for a suffix and silently drops the current unit/value.
+    # The setpoint regexes already stop at V/A units, so a real suffix such as
+    # ``.tss`` does not need to be removed first.
+    name = Path(path).name.upper()
+    m = _PAIR_RE.search(name)
     if m:
         return float(m.group(1)), float(m.group(2))
 
-    voltage_matches = list(_VOLTAGE_RE.finditer(stem))
-    current_matches = list(_CURRENT_RE.finditer(stem))
+    voltage_matches = list(_VOLTAGE_RE.finditer(name))
+    current_matches = list(_CURRENT_RE.finditer(name))
     voltage_candidates = [
         match for match in voltage_matches if _float_group(match) >= _MIN_BUS_VOLTAGE
     ]

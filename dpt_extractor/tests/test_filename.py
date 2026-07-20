@@ -17,6 +17,17 @@ class TestFilenameParsing(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertEqual(parse_setpoints_from_filename(filename), expected)
 
+    def test_parse_decimal_setpoints_from_report_condition_labels(self):
+        cases = {
+            "900V_494.9A": (900.0, 494.9),
+            "900V_693.37A": (900.0, 693.37),
+            "850V_777.7A": (850.0, 777.7),
+            "850V_1061.01A": (850.0, 1061.01),
+        }
+        for label, expected in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(parse_setpoints_from_filename(label), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

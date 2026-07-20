@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import tempfile
 import threading
 import unittest
 from unittest.mock import patch
@@ -81,6 +82,102 @@ class TestReportTaskProgress(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(len(finished), 1)
         self.assertEqual(tempdir.cleanup_calls, 1)
+
+    def test_report_stage_budget_shows_whole_task_eta_from_start(self):
+        from dpt_extractor.gui.main_window import (
+            ReportProgressPanel,
+            report_timing_stage_windows,
+        )
+
+        panel = ReportProgressPanel()
+        try:
+            panel.begin(100_000, "准备报告", stage="报告写入")
+            budgets = {
+                "copy-template": 500.0,
+                "prepare": 1_000.0,
+                "capture": 4_000.0,
+                "open-workbook": 5_000.0,
+                "write-data": 500.0,
+                "write-images": 8_000.0,
+                "finalize-workbook": 10_000.0,
+                "save-workbook": 1_000.0,
+            }
+            panel.begin_report_timing(
+                budgets,
+                report_timing_stage_windows(budgets),
+                "prepare",
+            )
+            panel.update_busy_progress(
+                5_000,
+                100_000,
+                "准备报告数据",
+                stage="报告写入",
+            )
+
+            self.assertNotEqual(panel.eta_text(), "估算中")
+            self.assertNotEqual(panel.eta_text(), "—")
+            self.assertEqual(panel.eta_caption_text(), "预计剩余")
+            self.assertIn("整个任务预计剩余", panel.toolTip())
+            self.assertLess(float(panel.percent_text().rstrip("%")), 15.0)
+        finally:
+            panel.close()
+
+    def test_main_window_report_eta_stays_numeric_across_atomic_write_stages(self):
+        from dpt_extractor.gui.main_window import MainWindow, REPORT_PROGRESS_TOTAL
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "existing_report.xlsx"
+            report.write_bytes(b"report timing fixture")
+            win = MainWindow()
+            try:
+                win.result = ExtractResult()
+                win._initialize_report_timing(
+                    existing_report=True,
+                    report_path=report,
+                )
+                win._begin_report_progress(
+                    REPORT_PROGRESS_TOTAL,
+                    "准备报告",
+                    timing_stage="prepare",
+                )
+                observed_percentages = []
+
+                def assert_numeric_eta() -> None:
+                    self.assertNotIn(
+                        win.report_progress.eta_text(),
+                        {"估算中", "—", "0 ms"},
+                    )
+                    observed_percentages.append(
+                        float(win.report_progress.percent_text().rstrip("%"))
+                    )
+
+                assert_numeric_eta()
+                win._set_report_progress_busy(
+                    "正在打开并写入 Excel...",
+                    timing_stage="open-workbook",
+                )
+                assert_numeric_eta()
+                win._report_request_id = 77
+                for value, total, label in (
+                    (1, 25, "读取报告模板"),
+                    (2, 25, "写入报告数据"),
+                    (1, 2, "插入报告图片"),
+                    (2, 2, "插入报告图片"),
+                    (23, 25, "整理报告版式"),
+                    (24, 25, "保存报告文件"),
+                ):
+                    win._on_report_write_progress(77, value, total, label)
+                    assert_numeric_eta()
+
+                self.assertEqual(
+                    observed_percentages,
+                    sorted(observed_percentages),
+                )
+                self.assertLess(observed_percentages[-1], 100.0)
+            finally:
+                win._finish_report_progress("写入失败", ok=False)
+                win.close()
 
     def test_report_write_task_passes_frozen_page_conditions(self):
         from dpt_extractor.gui.main_window import _ReportWriteTask

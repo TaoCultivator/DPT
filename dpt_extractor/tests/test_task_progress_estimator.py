@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from dpt_extractor.gui.task_progress import UnitRateEstimator, format_duration_ms
+from dpt_extractor.gui.task_progress import (
+    ReportStageBudgetEstimator,
+    ReportTimingContext,
+    ReportTimingHistory,
+    UnitRateEstimator,
+    format_duration_ms,
+)
 
 
 class _FakeClock:
@@ -133,6 +139,91 @@ class FormatDurationTests(unittest.TestCase):
 
     def test_non_finite_duration_is_unknown(self):
         self.assertEqual(format_duration_ms(float("nan")), "--")
+
+
+class ReportStageBudgetEstimatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = _FakeClock()
+        self.windows = {
+            "capture": (0.15, 0.55),
+            "open-workbook": (0.55, 0.60),
+            "save-workbook": (0.60, 0.999),
+        }
+        self.estimator = ReportStageBudgetEstimator(
+            {
+                "capture": 4_000.0,
+                "open-workbook": 5_000.0,
+                "save-workbook": 1_000.0,
+            },
+            self.windows,
+            self.clock,
+        )
+
+    def test_whole_task_eta_is_numeric_from_first_stage(self):
+        self.estimator.observe("capture", 0, 4)
+        self.assertAlmostEqual(self.estimator.eta_ms() or -1.0, 10_000.0)
+
+        self.clock.advance(1.0)
+        eta = self.estimator.eta_ms()
+        self.assertIsNotNone(eta)
+        self.assertLess(eta or 0.0, 10_000.0)
+
+    def test_atomic_stage_interpolates_but_never_reaches_checkpoint(self):
+        self.estimator.observe("open-workbook")
+        self.clock.advance(20.0)
+        projected = self.estimator.projected_fraction()
+        self.assertIsNotNone(projected)
+        self.assertLess(projected or 1.0, 0.60)
+        self.assertGreater(projected or 0.0, 0.55)
+        self.assertGreater(self.estimator.eta_ms() or 0.0, 0.0)
+
+    def test_completed_units_correct_stage_and_future_eta(self):
+        self.estimator.observe("capture", 0, 4)
+        self.clock.advance(2.0)
+        self.estimator.observe("capture", 2, 4)
+        projected = self.estimator.projected_fraction()
+        self.assertGreaterEqual(projected or 0.0, 0.35)
+        self.assertLess(projected or 1.0, 0.55)
+
+        self.clock.advance(2.0)
+        self.estimator.observe("open-workbook")
+        durations = self.estimator.finish()
+        self.assertAlmostEqual(durations["capture"], 4_000.0)
+
+
+class ReportTimingHistoryTests(unittest.TestCase):
+    def _context(self, *, first: bool = False) -> ReportTimingContext:
+        return ReportTimingContext(
+            existing_report=True,
+            report_size_bytes=5_000_000,
+            image_count=19,
+            result_count=1,
+            first_in_session=first,
+        )
+
+    def test_empty_history_supplies_conservative_whole_report_model(self):
+        estimate = ReportTimingHistory().estimate(self._context(first=True))
+        self.assertGreater(sum(estimate.values()), 25_000.0)
+        self.assertEqual(estimate["copy-template"], 1.0)
+
+    def test_successful_history_round_trips_and_guides_next_run(self):
+        history = ReportTimingHistory()
+        history.record(
+            self._context(),
+            {
+                "capture": 2_000.0,
+                "open-workbook": 3_000.0,
+                "save-workbook": 700.0,
+            },
+        )
+        restored = ReportTimingHistory.from_json(history.to_json())
+        estimate = restored.estimate(self._context())
+        self.assertLess(estimate["capture"], 4_800.0)
+        self.assertLess(estimate["open-workbook"], 5_000.0)
+
+    def test_invalid_persisted_history_falls_back_without_crashing(self):
+        history = ReportTimingHistory.from_json("{not json")
+        self.assertGreater(sum(history.estimate(self._context()).values()), 0.0)
 
 
 if __name__ == "__main__":
