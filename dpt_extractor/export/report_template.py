@@ -174,6 +174,33 @@ class _DptDataGroup:
 
 
 @dataclass(frozen=True)
+class _ShortTemperatureGroup:
+    start_row: int
+    end_row: int
+    phase_family: str
+    temp: object
+
+
+@dataclass(frozen=True)
+class _WorksheetRowBlock:
+    start_row: int
+    end_row: int
+    sort_key: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _CellSnapshot:
+    block_index: int
+    row_offset: int
+    column: int
+    value: object
+    data_type: str
+    style: object
+    hyperlink: object
+    comment: object
+
+
+@dataclass(frozen=True)
 class _DptDataTarget:
     row: int
     group_index: int
@@ -409,6 +436,44 @@ def _temperature_display(
     temperature_labels: TemperatureLabels | None = None,
 ) -> str:
     return _normalized_temperature_labels(temperature_labels)[temp_code][0]
+
+
+def _temperature_number_for_report_order(
+    value: object,
+    temperature_labels: TemperatureLabels | None = None,
+) -> float | None:
+    number = _parse_temperature_number(value)
+    if number is not None:
+        return number
+    code = str(value or "").strip().upper()
+    if code not in TEMP_LABELS:
+        code = _temperature_code_from_token(value, temperature_labels) or ""
+    if code not in TEMP_LABELS:
+        return None
+    return _normalized_temperature_labels(temperature_labels)[code][1]
+
+
+def _temperature_report_order_key(value: float) -> tuple[int, float]:
+    """Place non-negative temperatures first, then colder negatives lower."""
+
+    number = float(value)
+    return (0, number) if number >= 0 else (1, abs(number))
+
+
+def _phase_report_order(phase_code: str) -> int:
+    code = str(phase_code or "").strip().upper()
+    try:
+        return PHASE_CODES.index(code)
+    except ValueError:
+        return len(PHASE_CODES)
+
+
+def _phase_family_report_order(phase_family: str) -> int:
+    family = str(phase_family or "").strip().upper()[:1]
+    try:
+        return "UVW".index(family)
+    except ValueError:
+        return 3
 
 
 def _phase_temp_label(
@@ -886,6 +951,23 @@ def _copy_row_style(ws: Worksheet, source_row: int, target_row: int) -> None:
             target.number_format = source.number_format
 
 
+def _shift_row_dimensions_for_insert(
+    ws: Worksheet,
+    insert_row: int,
+    amount: int,
+) -> None:
+    """Mirror inserted rows in explicit row dimensions; openpyxl does not."""
+
+    for row in sorted(
+        (row for row in ws.row_dimensions if row >= insert_row),
+        reverse=True,
+    ):
+        dimension = ws.row_dimensions[row]
+        del ws.row_dimensions[row]
+        dimension.index = row + amount
+        ws.row_dimensions[row + amount] = dimension
+
+
 def _shift_merged_range_for_insert(
     rng: CellRange,
     *,
@@ -917,6 +999,7 @@ def _insert_dpt_data_row(data_ws: Worksheet, group_start_row: int, insert_row: i
 
     if insert_row <= data_ws.max_row:
         data_ws.insert_rows(insert_row)
+        _shift_row_dimensions_for_insert(data_ws, insert_row, 1)
     _copy_row_style(data_ws, source_row, insert_row)
 
     for rng in merged_ranges:
@@ -957,6 +1040,257 @@ def _dpt_data_groups(data_ws: Worksheet) -> list[_DptDataGroup]:
             )
         )
     return groups
+
+
+def _row_block_index(
+    blocks: Sequence[_WorksheetRowBlock],
+    row: int,
+) -> int | None:
+    for index, block in enumerate(blocks):
+        if block.start_row <= row <= block.end_row:
+            return index
+    return None
+
+
+def _shift_drawing_anchor_rows(drawing, row_delta: int) -> None:
+    if row_delta == 0:
+        return
+    anchor = drawing.anchor
+    if isinstance(anchor, str):
+        row, col = coordinate_to_tuple(anchor)
+        drawing.anchor = f"{get_column_letter(col)}{row + row_delta}"
+        return
+    start = getattr(anchor, "_from", None)
+    if start is None:
+        return
+    start.row = int(start.row) + row_delta
+    end = getattr(anchor, "to", None)
+    if end is not None:
+        end.row = int(end.row) + row_delta
+
+
+def _reorder_worksheet_row_blocks(
+    ws: Worksheet,
+    blocks: Sequence[_WorksheetRowBlock],
+) -> bool:
+    """Stable-sort contiguous row blocks while keeping drawings attached."""
+
+    source_blocks = sorted(blocks, key=lambda block: block.start_row)
+    if len(source_blocks) < 2:
+        return False
+    for previous, current in zip(source_blocks, source_blocks[1:]):
+        if previous.end_row + 1 != current.start_row:
+            raise ValueError(
+                f"报告工作表“{ws.title}”的温度块不连续："
+                f"{previous.start_row}:{previous.end_row} 与 "
+                f"{current.start_row}:{current.end_row}"
+            )
+
+    ordered_indices = sorted(
+        range(len(source_blocks)),
+        key=lambda index: (source_blocks[index].sort_key, index),
+    )
+    if ordered_indices == list(range(len(source_blocks))):
+        return False
+
+    target_starts: dict[int, int] = {}
+    target_row = source_blocks[0].start_row
+    for source_index in ordered_indices:
+        block = source_blocks[source_index]
+        target_starts[source_index] = target_row
+        target_row += block.end_row - block.start_row + 1
+
+    region_start = source_blocks[0].start_row
+    region_end = source_blocks[-1].end_row
+    merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
+    moved_merged_ranges: list[CellRange] = []
+    for rng in merged_ranges:
+        overlaps = rng.max_row >= region_start and rng.min_row <= region_end
+        if not overlaps:
+            continue
+        if rng.min_row < region_start or rng.max_row > region_end:
+            raise ValueError(
+                f"报告工作表“{ws.title}”存在跨越温度排序区域的合并单元格：{rng}"
+            )
+        block_index = _row_block_index(source_blocks, rng.min_row)
+        if (
+            block_index is None
+            or _row_block_index(source_blocks, rng.max_row) != block_index
+        ):
+            raise ValueError(
+                f"报告工作表“{ws.title}”存在跨温度块合并单元格：{rng}"
+            )
+        block = source_blocks[block_index]
+        row_delta = target_starts[block_index] - block.start_row
+        moved_merged_ranges.append(_shift_range_rows(rng, row_delta))
+
+    cell_snapshots: list[_CellSnapshot] = []
+    for (row, column), cell in list(ws._cells.items()):
+        if not region_start <= row <= region_end:
+            continue
+        block_index = _row_block_index(source_blocks, row)
+        if block_index is None:
+            continue
+        block = source_blocks[block_index]
+        cell_snapshots.append(
+            _CellSnapshot(
+                block_index=block_index,
+                row_offset=row - block.start_row,
+                column=column,
+                value=copy(getattr(cell, "_value", None)),
+                data_type=str(getattr(cell, "data_type", "n")),
+                style=copy(getattr(cell, "_style", None)),
+                hyperlink=copy(getattr(cell, "_hyperlink", None)),
+                comment=copy(getattr(cell, "comment", None)),
+            )
+        )
+
+    row_dimension_snapshots: list[tuple[int, int, object]] = []
+    for row, dimension in list(ws.row_dimensions.items()):
+        if not region_start <= row <= region_end:
+            continue
+        block_index = _row_block_index(source_blocks, row)
+        if block_index is None:
+            continue
+        block = source_blocks[block_index]
+        row_dimension_snapshots.append(
+            (block_index, row - block.start_row, copy(dimension))
+        )
+
+    drawing_moves: list[tuple[object, int]] = []
+    for drawing in [*getattr(ws, "_images", []), *getattr(ws, "_charts", [])]:
+        anchor = drawing.anchor
+        if isinstance(anchor, str):
+            row, _col = coordinate_to_tuple(anchor)
+        else:
+            start = getattr(anchor, "_from", None)
+            if start is None:
+                continue
+            row = int(start.row) + 1
+        block_index = _row_block_index(source_blocks, row)
+        if block_index is None:
+            continue
+        block = source_blocks[block_index]
+        drawing_moves.append(
+            (drawing, target_starts[block_index] - block.start_row)
+        )
+
+    for rng in list(ws.merged_cells.ranges):
+        if rng.max_row >= region_start and rng.min_row <= region_end:
+            ws.unmerge_cells(str(rng))
+    for key in [
+        key for key in ws._cells if region_start <= key[0] <= region_end
+    ]:
+        del ws._cells[key]
+    for row in [
+        row for row in ws.row_dimensions if region_start <= row <= region_end
+    ]:
+        del ws.row_dimensions[row]
+
+    for snapshot in cell_snapshots:
+        row = target_starts[snapshot.block_index] + snapshot.row_offset
+        cell = ws.cell(row, snapshot.column)
+        cell._value = copy(snapshot.value)
+        cell.data_type = snapshot.data_type
+        cell._style = copy(snapshot.style)
+        cell._hyperlink = copy(snapshot.hyperlink)
+        if cell._hyperlink is not None:
+            cell._hyperlink.ref = cell.coordinate
+        cell.comment = copy(snapshot.comment)
+
+    for block_index, row_offset, dimension in row_dimension_snapshots:
+        row = target_starts[block_index] + row_offset
+        dimension.index = row
+        ws.row_dimensions[row] = dimension
+
+    for rng in moved_merged_ranges:
+        ws.merge_cells(str(rng))
+    for drawing, row_delta in drawing_moves:
+        _shift_drawing_anchor_rows(drawing, row_delta)
+    return True
+
+
+def _require_temperature_order_number(
+    ws: Worksheet,
+    value: object,
+    temperature_labels: TemperatureLabels | None = None,
+) -> float:
+    number = _temperature_number_for_report_order(value, temperature_labels)
+    if number is None:
+        raise ValueError(
+            f"报告工作表“{ws.title}”存在无法识别的温度：{value!r}；"
+            "为避免数据与图片错位，已停止写入"
+        )
+    return number
+
+
+def _normalize_dpt_data_temperature_order(
+    ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    groups = _dpt_data_groups(ws)
+    blocks: list[_WorksheetRowBlock] = []
+    for index, group in enumerate(groups):
+        if index + 1 < len(groups):
+            end_row = groups[index + 1].start_row - 1
+        else:
+            phase_range = _merged_range_containing(ws, group.start_row, 1)
+            end_row = (
+                phase_range.max_row
+                if phase_range is not None
+                else group.end_row - 1
+            )
+        number = _require_temperature_order_number(
+            ws,
+            group.temp,
+            temperature_labels,
+        )
+        blocks.append(
+            _WorksheetRowBlock(
+                start_row=group.start_row,
+                end_row=end_row,
+                sort_key=(
+                    _temperature_report_order_key(number),
+                    _phase_report_order(group.phase),
+                ),
+            )
+        )
+    return _reorder_worksheet_row_blocks(ws, blocks)
+
+
+def _normalize_dpt_waveform_temperature_order(
+    ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    labels = [
+        (rng, parts)
+        for rng, value in _left_merged_ranges_with_value(ws)
+        if (parts := _phase_temp_token_parts(value)) is not None
+        and parts[0] in PHASE_CODES
+    ]
+    blocks: list[_WorksheetRowBlock] = []
+    for index, (rng, parts) in enumerate(labels):
+        number = _require_temperature_order_number(
+            ws,
+            parts[1],
+            temperature_labels,
+        )
+        end_row = (
+            labels[index + 1][0].min_row - 1
+            if index + 1 < len(labels)
+            else rng.min_row + DPT_WAVEFORM_BLOCK_STRIDE - 1
+        )
+        blocks.append(
+            _WorksheetRowBlock(
+                start_row=rng.min_row,
+                end_row=end_row,
+                sort_key=(
+                    _temperature_report_order_key(number),
+                    _phase_report_order(parts[0]),
+                ),
+            )
+        )
+    return _reorder_worksheet_row_blocks(ws, blocks)
 
 
 def _sync_dpt_condition_cell(
@@ -1033,11 +1367,14 @@ def _insert_dpt_temperature_group(
     phase_code: str,
     temp_code: str,
     temperature_labels: TemperatureLabels | None = None,
+    *,
+    insert_row: int | None = None,
 ) -> None:
     """Clone an empty four-row template group for another actual temperature."""
 
     source_start = source_group.start_row
-    insert_row = source_group.end_row
+    if insert_row is None:
+        insert_row = source_group.end_row
     row_count = DPT_DATA_GROUP_TEMPLATE_ROWS
     merged_ranges = [CellRange(str(rng)) for rng in data_ws.merged_cells.ranges]
     cloned_ranges = [
@@ -1055,9 +1392,13 @@ def _insert_dpt_temperature_group(
         data_ws.unmerge_cells(str(rng))
 
     data_ws.insert_rows(insert_row, row_count)
+    _shift_row_dimensions_for_insert(data_ws, insert_row, row_count)
+    copied_source_start = (
+        source_start + row_count if insert_row <= source_start else source_start
+    )
     max_column = max(data_ws.max_column, LAST_COL)
     for offset in range(row_count):
-        source_row = source_start + offset
+        source_row = copied_source_start + offset
         target_row = insert_row + offset
         _copy_row_style(data_ws, source_row, target_row)
         for col in range(1, max_column + 1):
@@ -1112,6 +1453,42 @@ def _insert_dpt_temperature_group(
     )
 
 
+def _dpt_temperature_group_insert_row(
+    groups: Sequence[_DptDataGroup],
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+    *,
+    fallback_row: int,
+) -> int:
+    temperature = _temperature_number_for_report_order(
+        _temperature_display(temp_code, temperature_labels),
+        temperature_labels,
+    )
+    if temperature is None:
+        return fallback_row
+    target_key = (
+        _temperature_report_order_key(temperature),
+        _phase_report_order(phase_code),
+    )
+    last_known_end: int | None = None
+    for group in groups:
+        group_temperature = _temperature_number_for_report_order(
+            group.temp,
+            temperature_labels,
+        )
+        if group_temperature is None:
+            continue
+        group_key = (
+            _temperature_report_order_key(group_temperature),
+            _phase_report_order(group.phase),
+        )
+        if group_key > target_key:
+            return group.start_row
+        last_known_end = group.end_row
+    return last_known_end if last_known_end is not None else fallback_row
+
+
 def _ensure_dpt_temperature_group(
     data_ws: Worksheet,
     phase_code: str,
@@ -1145,12 +1522,20 @@ def _ensure_dpt_temperature_group(
             f"{phase_code.upper()} / {display_temp}；为避免写入错误行，已停止写入"
         )
     _source_index, source_group = seed_groups[-1]
+    insert_row = _dpt_temperature_group_insert_row(
+        groups,
+        phase_code,
+        temp_code,
+        temperature_labels,
+        fallback_row=source_group.end_row,
+    )
     _insert_dpt_temperature_group(
         data_ws,
         source_group,
         phase_code,
         temp_code,
         temperature_labels,
+        insert_row=insert_row,
     )
 
 
@@ -1303,8 +1688,12 @@ def _shift_image_anchors_for_insert(
 
 
 def _insert_dpt_waveform_block(ws: Worksheet, insert_row: int) -> None:
-    source_row = max(1, insert_row - DPT_WAVEFORM_BLOCK_STRIDE)
     amount = DPT_WAVEFORM_BLOCK_STRIDE
+    source_row = (
+        insert_row - amount
+        if insert_row > amount
+        else max(1, insert_row)
+    )
     source_end = source_row + amount - 1
     max_row_before = ws.max_row
     merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
@@ -1319,11 +1708,15 @@ def _insert_dpt_waveform_block(ws: Worksheet, insert_row: int) -> None:
 
     if insert_row <= ws.max_row:
         ws.insert_rows(insert_row, amount)
+        _shift_row_dimensions_for_insert(ws, insert_row, amount)
         _shift_image_anchors_for_insert(ws, insert_row, amount)
+    copied_source_row = (
+        source_row + amount if insert_row <= source_row else source_row
+    )
     for offset in range(amount):
-        row_to_copy = source_row + offset
+        row_to_copy = copied_source_row + offset
         if row_to_copy > max_row_before and offset >= DPT_WAVEFORM_BLOCK_ROWS:
-            row_to_copy = max(1, source_row - (amount - offset))
+            row_to_copy = max(1, copied_source_row - (amount - offset))
         _copy_waveform_row(ws, row_to_copy, insert_row + offset)
 
     restored: list[CellRange] = []
@@ -2620,6 +3013,129 @@ def _short_target_row(
     )
 
 
+def _short_temperature_groups(ws: Worksheet) -> list[_ShortTemperatureGroup]:
+    groups: list[_ShortTemperatureGroup] = []
+    seen: set[tuple[int, int]] = set()
+    for row in range(5, ws.max_row + 1):
+        phase = str(ws.cell(row, 2).value or "").strip().upper()
+        if phase not in PHASE_CODES:
+            continue
+        temperature_range = _merged_range_containing(ws, row, 1)
+        start_row = temperature_range.min_row if temperature_range is not None else row
+        end_row = temperature_range.max_row if temperature_range is not None else row
+        key = (start_row, end_row)
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.append(
+            _ShortTemperatureGroup(
+                start_row=start_row,
+                end_row=end_row,
+                phase_family=phase[0],
+                temp=_merged_value(ws, row, 1),
+            )
+        )
+    return sorted(groups, key=lambda group: group.start_row)
+
+
+def _normalize_short_data_temperature_order(
+    ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    groups = _short_temperature_groups(ws)
+    blocks: list[_WorksheetRowBlock] = []
+    for index, group in enumerate(groups):
+        end_row = (
+            groups[index + 1].start_row - 1
+            if index + 1 < len(groups)
+            else group.end_row
+        )
+        number = _require_temperature_order_number(
+            ws,
+            group.temp,
+            temperature_labels,
+        )
+        blocks.append(
+            _WorksheetRowBlock(
+                start_row=group.start_row,
+                end_row=end_row,
+                sort_key=(
+                    _phase_family_report_order(group.phase_family),
+                    _temperature_report_order_key(number),
+                ),
+            )
+        )
+    return _reorder_worksheet_row_blocks(ws, blocks)
+
+
+def _normalize_short_picture_temperature_order(
+    ws: Worksheet,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    labels = [
+        (rng, parts)
+        for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5)
+        if (parts := _phase_temp_token_parts(value)) is not None
+        and parts[0] in PHASE_CODES
+    ]
+    blocks: list[_WorksheetRowBlock] = []
+    for index, (rng, parts) in enumerate(labels):
+        number = _require_temperature_order_number(
+            ws,
+            parts[1],
+            temperature_labels,
+        )
+        end_row = (
+            labels[index + 1][0].min_row - 1
+            if index + 1 < len(labels)
+            else ws.max_row
+        )
+        blocks.append(
+            _WorksheetRowBlock(
+                start_row=rng.min_row,
+                end_row=end_row,
+                sort_key=(
+                    _phase_family_report_order(parts[0][0]),
+                    _temperature_report_order_key(number),
+                    _phase_report_order(parts[0]),
+                ),
+            )
+        )
+    return _reorder_worksheet_row_blocks(ws, blocks)
+
+
+def _short_temperature_group_insert_row(
+    ws: Worksheet,
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+    *,
+    fallback_row: int,
+) -> int:
+    temperature = _temperature_number_for_report_order(
+        _temperature_display(temp_code, temperature_labels),
+        temperature_labels,
+    )
+    if temperature is None:
+        return fallback_row
+    target_key = _temperature_report_order_key(temperature)
+    phase_family = phase_code.upper()[0]
+    last_family_end: int | None = None
+    for group in _short_temperature_groups(ws):
+        if group.phase_family != phase_family:
+            continue
+        group_temperature = _temperature_number_for_report_order(
+            group.temp,
+            temperature_labels,
+        )
+        if group_temperature is None:
+            continue
+        if _temperature_report_order_key(group_temperature) > target_key:
+            return group.start_row
+        last_family_end = group.end_row
+    return last_family_end + 1 if last_family_end is not None else fallback_row
+
+
 def _ensure_short_temperature_group(
     ws: Worksheet,
     phase_code: str,
@@ -2653,7 +3169,13 @@ def _ensure_short_temperature_group(
     source_start = temperature_range.min_row if temperature_range is not None else seed_row
     source_end = temperature_range.max_row if temperature_range is not None else seed_row
     row_count = source_end - source_start + 1
-    insert_row = source_end + 1
+    insert_row = _short_temperature_group_insert_row(
+        ws,
+        phase_code,
+        temp_code,
+        temperature_labels,
+        fallback_row=source_end + 1,
+    )
     merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
     cloned_ranges = [
         CellRange(
@@ -2668,8 +3190,12 @@ def _ensure_short_temperature_group(
     for rng in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(rng))
     ws.insert_rows(insert_row, row_count)
+    _shift_row_dimensions_for_insert(ws, insert_row, row_count)
+    copied_source_start = (
+        source_start + row_count if insert_row <= source_start else source_start
+    )
     for offset in range(row_count):
-        source_row = source_start + offset
+        source_row = copied_source_start + offset
         target_row = insert_row + offset
         ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
         for col in range(1, ws.max_column + 1):
@@ -2850,9 +3376,15 @@ def _ensure_short_picture_temperature_block(
         for _rng, value in labels
     ):
         return
+    phase_labels = [
+        (rng, value, parts)
+        for rng, value in labels
+        if (parts := _phase_temp_token_parts(value)) is not None
+        and parts[0] in PHASE_CODES
+    ]
     seeds = [
         (index, rng, value)
-        for index, (rng, value) in enumerate(labels)
+        for index, (rng, value, _parts) in enumerate(phase_labels)
         if _phase_temp_parts(value, temperature_labels)
         == (phase_code.upper(), temp_code)
     ]
@@ -2860,12 +3392,48 @@ def _ensure_short_picture_temperature_block(
         return
     seed_index, seed_range, _seed_value = seeds[-1]
     source_start = seed_range.min_row
-    insert_row = (
-        labels[seed_index + 1][0].min_row
-        if seed_index + 1 < len(labels)
+    source_next_row = (
+        phase_labels[seed_index + 1][0].min_row
+        if seed_index + 1 < len(phase_labels)
         else ws.max_row + 1
     )
-    row_count = max(1, insert_row - source_start)
+    row_count = max(1, source_next_row - source_start)
+    temperature = _temperature_number_for_report_order(
+        _temperature_display(temp_code, temperature_labels),
+        temperature_labels,
+    )
+    insert_row = source_next_row
+    if temperature is not None:
+        target_key = (
+            _temperature_report_order_key(temperature),
+            _phase_report_order(phase_code),
+        )
+        phase_family = phase_code.upper()[0]
+        last_family_index: int | None = None
+        for index, (rng, value, parts) in enumerate(phase_labels):
+            if parts[0][0] != phase_family:
+                continue
+            block_temperature = _temperature_number_for_report_order(
+                parts[1],
+                temperature_labels,
+            )
+            if block_temperature is None:
+                continue
+            block_key = (
+                _temperature_report_order_key(block_temperature),
+                _phase_report_order(parts[0]),
+            )
+            if block_key > target_key:
+                insert_row = rng.min_row
+                break
+            last_family_index = index
+        else:
+            if last_family_index is not None:
+                insert_row = (
+                    phase_labels[last_family_index + 1][0].min_row
+                    if last_family_index + 1 < len(phase_labels)
+                    else ws.max_row + 1
+                )
     merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
     cloned_ranges = [
         CellRange(
@@ -2880,9 +3448,13 @@ def _ensure_short_picture_temperature_block(
     for rng in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(rng))
     ws.insert_rows(insert_row, row_count)
+    _shift_row_dimensions_for_insert(ws, insert_row, row_count)
     _shift_image_anchors_for_insert(ws, insert_row, row_count)
+    copied_source_start = (
+        source_start + row_count if insert_row <= source_start else source_start
+    )
     for offset in range(row_count):
-        source_row = source_start + offset
+        source_row = copied_source_start + offset
         target_row = insert_row + offset
         ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
         for col in range(1, ws.max_column + 1):
@@ -3091,6 +3663,12 @@ def write_report_template(
         if data_sheet not in wb.sheetnames:
             raise ValueError("报告模板缺少工作表：短路测试")
         data_ws = wb[data_sheet]
+        _normalize_short_data_temperature_order(data_ws, temperature_labels)
+        if picture_sheet in wb.sheetnames:
+            _normalize_short_picture_temperature_order(
+                wb[picture_sheet],
+                temperature_labels,
+            )
         _ensure_short_temperature_group(
             data_ws,
             phase_code,
@@ -3169,6 +3747,12 @@ def write_report_template(
     if expected_image_keys and waveform_sheet not in wb.sheetnames:
         raise ValueError(f"报告模板缺少工作表：{waveform_sheet}，无法写入报告图片")
     waveform_ws = wb[waveform_sheet] if waveform_sheet in wb.sheetnames else None
+    _normalize_dpt_data_temperature_order(data_ws, temperature_labels)
+    if waveform_ws is not None:
+        _normalize_dpt_waveform_temperature_order(
+            waveform_ws,
+            temperature_labels,
+        )
     _ensure_dpt_temperature_group(
         data_ws,
         phase_code,

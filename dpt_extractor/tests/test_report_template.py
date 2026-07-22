@@ -570,15 +570,236 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved = load_workbook(report)
             data = saved["U相_双脉冲数据"]
             wave = saved["U相_双脉冲波形"]
-            self.assertEqual(rows, [13, 17])
+            self.assertEqual(rows, [13, 21])
             self.assertEqual(data["B13"].value, "150℃")
-            self.assertEqual(data["B17"].value, "170℃")
+            self.assertEqual(data["B17"].value, "150℃")
+            self.assertEqual(data["B21"].value, "170℃")
             self.assertEqual(wave["A1"].value, "UH_150℃")
             self.assertEqual(wave["A54"].value, "UH_170℃")
             self.assertEqual(len(wave._images), 2)
             self.assertEqual(
                 sorted(item.anchor._from.row + 1 for item in wave._images),
                 [35, 88],
+            )
+
+    def test_dpt_new_temperatures_insert_in_requested_report_order(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.report_template import (
+            _dpt_data_groups,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "temperature_order.xlsx"
+            image = td_path / "preserved.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            wave = wb.create_sheet("U相_双脉冲波形")
+            template_groups = (
+                ("UH", 25),
+                ("UL", 25),
+                ("UH", 150),
+                ("UL", 150),
+                ("UH", -40),
+                ("UL", -40),
+            )
+            for index, (phase, temperature) in enumerate(template_groups):
+                start_row = 5 + index * 4
+                for col in (1, 2, 3):
+                    data.merge_cells(
+                        start_row=start_row,
+                        start_column=col,
+                        end_row=start_row + 3,
+                        end_column=col,
+                    )
+                data.cell(start_row, 1, phase)
+                data.cell(start_row, 2, f"{temperature}℃")
+                data.cell(start_row, 4, 750)
+                data.cell(start_row, 5, 500)
+
+                anchor_row = 1 + index * 53
+                wave.merge_cells(
+                    start_row=anchor_row,
+                    start_column=1,
+                    end_row=anchor_row + 16,
+                    end_column=8,
+                )
+                wave.cell(anchor_row, 1, f"{phase}_{temperature}℃")
+                wave.merge_cells(
+                    start_row=anchor_row + 17,
+                    start_column=1,
+                    end_row=anchor_row + 33,
+                    end_column=8,
+                )
+                wave.cell(anchor_row + 17, 1, "750V_500A")
+                wave.merge_cells(
+                    start_row=anchor_row + 34,
+                    start_column=1,
+                    end_row=anchor_row + 50,
+                    end_column=8,
+                )
+                wave.cell(anchor_row + 34, 1, "总概览图")
+                wave.cell(anchor_row, 9, "模板标记")
+                if phase == "UH" and temperature in (150, -40):
+                    wave.add_image(XLImage(str(image)), f"B{anchor_row + 34}")
+            wb.save(report)
+
+            writes = (
+                ("LT", -20),
+                ("HT", 100),
+                ("RT", 0),
+                ("HT", 170),
+                ("LT", -55),
+            )
+            for marker, (code, temperature) in enumerate(writes, start=1):
+                labels = {"RT": 25, "HT": 150, "LT": -40}
+                labels[code] = temperature
+                write_report_template(
+                    ExtractResult(
+                        source_path=str(Path("samples") / "UH_750V_500A_000.tss"),
+                        profile_code="UH",
+                        turn_off=TurnOffResult(delta_vce=float(marker)),
+                    ),
+                    report,
+                    temperature_labels=labels,
+                    temperature_code=code,
+                    phase_code="UH",
+                )
+
+            saved = load_workbook(report)
+            data = saved["U相_双脉冲数据"]
+            wave = saved["U相_双脉冲波形"]
+            expected = [
+                ("UH", "0℃"),
+                ("UH", "25℃"),
+                ("UL", "25℃"),
+                ("UH", "100℃"),
+                ("UH", "150℃"),
+                ("UL", "150℃"),
+                ("UH", "170℃"),
+                ("UH", "-20℃"),
+                ("UH", "-40℃"),
+                ("UL", "-40℃"),
+                ("UH", "-55℃"),
+            ]
+            self.assertEqual(
+                [(group.phase, group.temp) for group in _dpt_data_groups(data)],
+                expected,
+            )
+            self.assertEqual(
+                [wave.cell(1 + index * 53, 1).value for index in range(len(expected))],
+                [f"{phase}_{temperature}" for phase, temperature in expected],
+            )
+            self.assertTrue(
+                all(
+                    wave.cell(1 + index * 53, 9).value == "模板标记"
+                    for index in range(len(expected))
+                )
+            )
+            self.assertEqual(
+                sorted(item.anchor._from.row + 1 for item in wave._images),
+                [247, 459],
+            )
+
+    def test_dpt_unsorted_report_is_normalized_before_new_temperature_insert(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.mcu2506_layout import COL_OFF
+        from dpt_extractor.export.report_template import (
+            _dpt_data_groups,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "unsorted_dpt.xlsx"
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            wave = wb.create_sheet("U相_双脉冲波形")
+            original = ((150, 1500.0, 15), (25, 250.0, 25), (-40, -400.0, 40))
+            for index, (temperature, marker, image_width) in enumerate(original):
+                start_row = 5 + index * 4
+                for col in (1, 2, 3):
+                    data.merge_cells(
+                        start_row=start_row,
+                        start_column=col,
+                        end_row=start_row + 3,
+                        end_column=col,
+                    )
+                data.cell(start_row, 1, "UH")
+                data.cell(start_row, 2, f"{temperature}℃")
+                data.cell(start_row, 4, 750)
+                data.cell(start_row, 5, 500)
+                data.cell(start_row, COL_OFF["delta_vce"], marker)
+
+                anchor_row = 1 + index * 53
+                wave.merge_cells(
+                    start_row=anchor_row,
+                    start_column=1,
+                    end_row=anchor_row + 16,
+                    end_column=8,
+                )
+                wave.cell(anchor_row, 1, f"UH_{temperature}℃")
+                wave.merge_cells(
+                    start_row=anchor_row + 17,
+                    start_column=1,
+                    end_row=anchor_row + 33,
+                    end_column=8,
+                )
+                wave.cell(anchor_row + 17, 1, "750V_500A")
+                wave.merge_cells(
+                    start_row=anchor_row + 34,
+                    start_column=1,
+                    end_row=anchor_row + 50,
+                    end_column=8,
+                )
+                wave.cell(anchor_row + 34, 1, "总概览图")
+                image_path = td_path / f"{temperature}.png"
+                _write_rgb_png(image_path, (image_width, 10))
+                wave.add_image(XLImage(str(image_path)), f"B{anchor_row + 34}")
+            wb.save(report)
+
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "UH_750V_500A_000.tss"),
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=1000.0),
+                ),
+                report,
+                temperature_labels={"RT": 25, "HT": 100, "LT": -40},
+                temperature_code="HT",
+                phase_code="UH",
+            )
+
+            saved = load_workbook(report)
+            data = saved["U相_双脉冲数据"]
+            wave = saved["U相_双脉冲波形"]
+            groups = _dpt_data_groups(data)
+            self.assertEqual(
+                [group.temp for group in groups],
+                ["25℃", "100℃", "150℃", "-40℃"],
+            )
+            self.assertEqual(
+                [data.cell(group.start_row, COL_OFF["delta_vce"]).value for group in groups],
+                [250.0, 1000.0, 1500.0, -400.0],
+            )
+            self.assertEqual(
+                [wave.cell(1 + index * 53, 1).value for index in range(4)],
+                ["UH_25℃", "UH_100℃", "UH_150℃", "UH_-40℃"],
+            )
+            self.assertEqual(
+                sorted(
+                    (int(item.width), item.anchor._from.row + 1)
+                    for item in wave._images
+                ),
+                [(15, 141), (25, 35), (40, 194)],
             )
 
     def test_dpt_manual_page_conditions_override_ambiguous_path(self):
@@ -3291,6 +3512,248 @@ class TestReportTemplateWriter(unittest.TestCase):
             for code in ("RT", "HT", "LT"):
                 identity = saved.defined_names[f"_DPT_TEMP_IDENTITY_{code}"]
                 self.assertTrue(identity.hidden)
+
+    def test_short_new_temperatures_insert_in_requested_report_order(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.report_template import (
+            _phase_temp_token_parts,
+            _short_temperature_groups,
+            _merged_ranges_with_value,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "short_temperature_order.xlsx"
+            image = td_path / "preserved.png"
+            _write_tiny_png(image)
+            wb = Workbook()
+            data = wb.active
+            data.title = "短路测试"
+            groups = ((5, 25, "U"), (7, 150, "U"), (9, -40, "U"), (11, 25, "V"))
+            for start_row, temperature, phase in groups:
+                data.merge_cells(
+                    start_row=start_row,
+                    start_column=1,
+                    end_row=start_row + 1,
+                    end_column=1,
+                )
+                data.cell(start_row, 1, temperature)
+                data.cell(start_row, 2, f"{phase}H")
+                data.cell(start_row + 1, 2, f"{phase}L")
+
+            picture = wb.create_sheet("短路测试图片")
+            labels = (
+                "UH_25℃",
+                "UL_25℃",
+                "UH_150℃",
+                "UL_150℃",
+                "UH_-40℃",
+                "UL_-40℃",
+                "VH_25℃",
+                "VL_25℃",
+            )
+            for index, label in enumerate(labels):
+                anchor_row = 1 + index * 4
+                picture.merge_cells(
+                    start_row=anchor_row,
+                    start_column=1,
+                    end_row=anchor_row + 3,
+                    end_column=5,
+                )
+                picture.cell(anchor_row, 1, label)
+                if label in ("UH_150℃", "VH_25℃"):
+                    picture.add_image(XLImage(str(image)), f"F{anchor_row}")
+            wb.save(report)
+
+            writes = (
+                ("LT", -20),
+                ("HT", 100),
+                ("RT", 0),
+                ("HT", 170),
+                ("LT", -55),
+            )
+            for marker, (code, temperature) in enumerate(writes, start=1):
+                temperature_labels = {"RT": 25, "HT": 150, "LT": -40}
+                temperature_labels[code] = temperature
+                write_report_template(
+                    ExtractResult(
+                        source_path=str(Path("samples") / "UL_750V_000.tss"),
+                        profile_code="UL",
+                        short_circuit_mode=True,
+                        short_circuit=ShortCircuitResult(ic_max=float(marker)),
+                    ),
+                    report,
+                    temperature_labels=temperature_labels,
+                    temperature_code=code,
+                    phase_code="UL",
+                )
+
+            saved = load_workbook(report)
+            data = saved["短路测试"]
+            picture = saved["短路测试图片"]
+            self.assertEqual(
+                [
+                    str(group.temp) + "℃" if isinstance(group.temp, (int, float)) else group.temp
+                    for group in _short_temperature_groups(data)
+                ],
+                ["0℃", "25℃", "100℃", "150℃", "170℃", "-20℃", "-40℃", "-55℃", "25℃"],
+            )
+            picture_labels = [
+                value
+                for _rng, value in _merged_ranges_with_value(
+                    picture,
+                    min_col=1,
+                    max_col=5,
+                )
+                if _phase_temp_token_parts(value) is not None
+            ]
+            self.assertEqual(
+                picture_labels,
+                [
+                    "UL_0℃",
+                    "UH_25℃",
+                    "UL_25℃",
+                    "UL_100℃",
+                    "UH_150℃",
+                    "UL_150℃",
+                    "UL_170℃",
+                    "UL_-20℃",
+                    "UH_-40℃",
+                    "UL_-40℃",
+                    "UL_-55℃",
+                    "VH_25℃",
+                    "VL_25℃",
+                ],
+            )
+            self.assertEqual(
+                sorted(item.anchor._from.row + 1 for item in picture._images),
+                [17, 45],
+            )
+
+    def test_short_unsorted_report_is_normalized_before_new_temperature_insert(self):
+        from openpyxl.drawing.image import Image as XLImage
+
+        from dpt_extractor.export.report_template import (
+            _merged_ranges_with_value,
+            _phase_temp_token_parts,
+            _short_temperature_groups,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "unsorted_short.xlsx"
+            wb = Workbook()
+            data = wb.active
+            data.title = "短路测试"
+            original = ((-40, 400.0), (150, 1500.0), (25, 250.0))
+            for index, (temperature, marker) in enumerate(original):
+                start_row = 5 + index * 2
+                data.merge_cells(
+                    start_row=start_row,
+                    start_column=1,
+                    end_row=start_row + 1,
+                    end_column=1,
+                )
+                data.cell(start_row, 1, temperature)
+                data.cell(start_row, 2, "UH")
+                data.cell(start_row + 1, 2, "UL")
+                data.cell(start_row + 1, 5, marker)
+                data.row_dimensions[start_row].height = 20 + index
+            data.merge_cells("A11:A12")
+            data["A11"] = 25
+            data["B11"] = "VH"
+            data["B12"] = "VL"
+
+            picture = wb.create_sheet("短路测试图片")
+            labels = (
+                ("UH_-40℃", 40),
+                ("UL_-40℃", 41),
+                ("UH_150℃", 15),
+                ("UL_150℃", 16),
+                ("UH_25℃", 25),
+                ("UL_25℃", 26),
+                ("VH_25℃", 50),
+                ("VL_25℃", 51),
+            )
+            for index, (label, image_width) in enumerate(labels):
+                anchor_row = 1 + index * 4
+                picture.merge_cells(
+                    start_row=anchor_row,
+                    start_column=1,
+                    end_row=anchor_row + 3,
+                    end_column=5,
+                )
+                picture.cell(anchor_row, 1, label)
+                if label in ("UL_-40℃", "UL_150℃", "UL_25℃", "VH_25℃"):
+                    image_path = td_path / f"{image_width}.png"
+                    _write_rgb_png(image_path, (image_width, 10))
+                    picture.add_image(XLImage(str(image_path)), f"F{anchor_row}")
+            wb.save(report)
+
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "UL_750V_000.tss"),
+                    profile_code="UL",
+                    short_circuit_mode=True,
+                    short_circuit=ShortCircuitResult(ic_max=200.0),
+                ),
+                report,
+                temperature_labels={"RT": 25, "HT": 150, "LT": -20},
+                temperature_code="LT",
+                phase_code="UL",
+            )
+
+            saved = load_workbook(report)
+            data = saved["短路测试"]
+            picture = saved["短路测试图片"]
+            groups = _short_temperature_groups(data)
+            self.assertEqual(
+                [(group.phase_family, str(group.temp)) for group in groups],
+                [("U", "25"), ("U", "150"), ("U", "-20℃"), ("U", "-40"), ("V", "25")],
+            )
+            self.assertEqual(
+                [data.cell(group.start_row + 1, 5).value for group in groups],
+                [250.0, 1500.0, 200.0, 400.0, None],
+            )
+            self.assertEqual(
+                [data.row_dimensions[group.start_row].height for group in groups[:4]],
+                [22.0, 21.0, 20.0, 20.0],
+            )
+            picture_labels = [
+                value
+                for _rng, value in _merged_ranges_with_value(
+                    picture,
+                    min_col=1,
+                    max_col=5,
+                )
+                if _phase_temp_token_parts(value) is not None
+            ]
+            self.assertEqual(
+                picture_labels,
+                [
+                    "UH_25℃",
+                    "UL_25℃",
+                    "UH_150℃",
+                    "UL_150℃",
+                    "UL_-20℃",
+                    "UH_-40℃",
+                    "UL_-40℃",
+                    "VH_25℃",
+                    "VL_25℃",
+                ],
+            )
+            self.assertEqual(
+                sorted(
+                    (int(item.width), item.anchor._from.row + 1)
+                    for item in picture._images
+                ),
+                [(16, 13), (26, 5), (41, 25), (50, 29)],
+            )
 
     def test_short_template_writes_row_and_global_image_slot(self):
         from dpt_extractor.export.report_template import write_report_template
