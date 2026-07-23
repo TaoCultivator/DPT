@@ -50,6 +50,7 @@ TemperatureLabels = Mapping[str, str | int | float]
 
 _TEMPERATURE_IDENTITY_MAGIC = "DPT temperature identities v1"
 _TEMPERATURE_IDENTITY_NAME_PREFIX = "_DPT_TEMP_IDENTITY_"
+_TEMPERATURE_IDENTITY_MANIFEST_NAME = "_DPT_TEMP_IDENTITY_MANIFEST"
 
 
 class _TemperatureIdentityLabels(dict[str, str | int | float]):
@@ -285,19 +286,67 @@ def _normalized_temperature_labels(
 def _read_report_temperature_identities(wb) -> dict[str, object]:
     """Read stable RT/HT/LT identities saved by an earlier report write."""
 
+    def constant_text(defined_name) -> str | None:
+        raw = str(defined_name.attr_text or "").strip()
+        if raw.startswith("="):
+            raw = raw[1:].strip()
+        if len(raw) < 2 or not raw.startswith('"') or not raw.endswith('"'):
+            return None
+        return raw[1:-1].replace('""', '"')
+
+    def is_hidden_global(defined_name) -> bool:
+        return (
+            defined_name is not None
+            and defined_name.localSheetId is None
+            and defined_name.hidden is True
+        )
+
+    def temperature_display(defined_name) -> str | None:
+        if not is_hidden_global(defined_name):
+            return None
+        display = constant_text(defined_name)
+        if display is None or _parse_temperature_number(display) is None:
+            return None
+        if not _canonical_temperature_text(display).endswith("℃"):
+            return None
+        return display
+
+    manifest = wb.defined_names.get(_TEMPERATURE_IDENTITY_MANIFEST_NAME)
+    manifest_valid = (
+        is_hidden_global(manifest)
+        and constant_text(manifest) == _TEMPERATURE_IDENTITY_MAGIC
+    )
     identities: dict[str, object] = {}
     for code in TEMP_LABELS:
         name = f"{_TEMPERATURE_IDENTITY_NAME_PREFIX}{code}"
         defined_name = wb.defined_names.get(name)
-        if (
-            defined_name is None
-            or defined_name.description != _TEMPERATURE_IDENTITY_MAGIC
-        ):
+        display = temperature_display(defined_name)
+        if display is None:
             continue
-        raw = str(defined_name.attr_text or "")
-        if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
-            identities[code] = raw[1:-1].replace('""', '"')
-    return identities
+        if manifest_valid or defined_name.description == _TEMPERATURE_IDENTITY_MAGIC:
+            identities[code] = display
+
+    if manifest_valid:
+        return identities
+
+    # Excel keeps hidden defined-name values but removes their description
+    # attribute when a user opens and saves the report.  A complete, hidden,
+    # workbook-global RT/HT/LT trio is the legacy v1 ownership signature.
+    editor_preserved: dict[str, object] = {}
+    for code in TEMP_LABELS:
+        name = f"{_TEMPERATURE_IDENTITY_NAME_PREFIX}{code}"
+        defined_name = wb.defined_names.get(name)
+        if defined_name is None or defined_name.description not in (
+            None,
+            "",
+            _TEMPERATURE_IDENTITY_MAGIC,
+        ):
+            return identities
+        display = temperature_display(defined_name)
+        if display is None:
+            return identities
+        editor_preserved[code] = display
+    return editor_preserved
 
 
 def _temperature_identity_labels_for_workbook(
@@ -317,13 +366,26 @@ def _write_report_temperature_identities(
     """Persist stable codes without adding or changing report worksheets."""
 
     labels = _normalized_temperature_labels(temperature_labels)
+    existing_identities = _read_report_temperature_identities(wb)
+    existing_manifest = wb.defined_names.get(_TEMPERATURE_IDENTITY_MANIFEST_NAME)
+    if existing_manifest is not None:
+        raw_manifest = str(existing_manifest.attr_text or "").strip()
+        if raw_manifest.startswith("="):
+            raw_manifest = raw_manifest[1:].strip()
+        valid_manifest = (
+            existing_manifest.localSheetId is None
+            and existing_manifest.hidden is True
+            and raw_manifest == f'"{_TEMPERATURE_IDENTITY_MAGIC}"'
+        )
+        if not valid_manifest:
+            raise ValueError(
+                f"报告已存在保留名称“{_TEMPERATURE_IDENTITY_MANIFEST_NAME}”，"
+                "无法安全保存温度工况身份"
+            )
     for code in TEMP_LABELS:
         name = f"{_TEMPERATURE_IDENTITY_NAME_PREFIX}{code}"
         existing = wb.defined_names.get(name)
-        if (
-            existing is not None
-            and existing.description != _TEMPERATURE_IDENTITY_MAGIC
-        ):
+        if existing is not None and code not in existing_identities:
             raise ValueError(
                 f"报告已存在保留名称“{name}”，"
                 "无法安全保存温度工况身份"
@@ -337,6 +399,14 @@ def _write_report_temperature_identities(
                 attr_text=f'"{display}"',
             )
         )
+    wb.defined_names.add(
+        DefinedName(
+            name=_TEMPERATURE_IDENTITY_MANIFEST_NAME,
+            description=_TEMPERATURE_IDENTITY_MAGIC,
+            hidden=True,
+            attr_text=f'"{_TEMPERATURE_IDENTITY_MAGIC}"',
+        )
+    )
 
 
 def _temperature_code_from_token(

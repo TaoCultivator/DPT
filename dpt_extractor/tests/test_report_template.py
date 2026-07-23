@@ -64,6 +64,28 @@ class TestReportTemplateWriter(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不支持的相位/桥臂代码"):
             _resolve_phase_code(ambiguous, result, "U")
 
+    def test_temperature_identity_guard_rejects_incomplete_foreign_name_set(self):
+        from openpyxl.workbook.defined_name import DefinedName
+
+        from dpt_extractor.export.report_template import (
+            _write_report_temperature_identities,
+        )
+
+        wb = Workbook()
+        wb.defined_names.add(
+            DefinedName(
+                name="_DPT_TEMP_IDENTITY_RT",
+                hidden=True,
+                attr_text='"25℃"',
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "_DPT_TEMP_IDENTITY_RT"):
+            _write_report_temperature_identities(
+                wb,
+                {"RT": "25℃", "HT": "150℃", "LT": "-40℃"},
+            )
+
     def test_dpt_missing_explicit_condition_never_falls_back_to_row_five(self):
         from dpt_extractor.export.report_template import write_report_template
         from dpt_extractor.models.results import ExtractResult
@@ -437,6 +459,99 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved = load_workbook(report)
             self.assertEqual(saved["U相_双脉冲数据"].cell(5, 2).value, "26.5℃")
             self.assertEqual(saved["U相_双脉冲波形"].cell(1, 1).value, "UH_26.5℃")
+
+    def test_dpt_report_remains_writable_after_excel_removes_name_descriptions(self):
+        from dpt_extractor.export.mcu2506_layout import COL_OFF
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "report.xlsx"
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            for start_row, temperature in ((5, "25℃"), (9, "150℃")):
+                data.merge_cells(
+                    start_row=start_row,
+                    start_column=1,
+                    end_row=start_row + 3,
+                    end_column=1,
+                )
+                data.merge_cells(
+                    start_row=start_row,
+                    start_column=2,
+                    end_row=start_row + 3,
+                    end_column=2,
+                )
+                data.cell(start_row, 1, "UH")
+                data.cell(start_row, 2, temperature)
+            wb.save(report)
+
+            result = ExtractResult(
+                source_path=str(Path("samples") / "HT" / "UH_750V_1050A_000.tss"),
+                profile_code="UH",
+                turn_off=TurnOffResult(eoff=1.5),
+            )
+            write_report_template(
+                result,
+                report,
+                temperature_labels={"RT": "25℃", "HT": "150℃", "LT": "-40℃"},
+                temperature_code="HT",
+                phase_code="UH",
+            )
+
+            excel_saved = load_workbook(report)
+            del excel_saved.defined_names["_DPT_TEMP_IDENTITY_MANIFEST"]
+            for code in ("RT", "HT", "LT"):
+                excel_saved.defined_names[
+                    f"_DPT_TEMP_IDENTITY_{code}"
+                ].description = None
+            excel_saved.save(report)
+
+            result.source_path = str(
+                Path("samples") / "RT" / "UH_750V_1050A_000.tss"
+            )
+            result.turn_off.eoff = 2.5
+            write_report_template(
+                result,
+                report,
+                temperature_labels={"RT": "25℃", "HT": "150℃", "LT": "-40℃"},
+                temperature_code="RT",
+                phase_code="UH",
+            )
+
+            excel_resaved = load_workbook(report)
+            manifest = excel_resaved.defined_names[
+                "_DPT_TEMP_IDENTITY_MANIFEST"
+            ]
+            self.assertTrue(manifest.hidden)
+            for code in ("RT", "HT", "LT"):
+                excel_resaved.defined_names[
+                    f"_DPT_TEMP_IDENTITY_{code}"
+                ].description = None
+            excel_resaved.save(report)
+
+            result.turn_off.eoff = 3.5
+            write_report_template(
+                result,
+                report,
+                temperature_labels={"RT": "25℃", "HT": "150℃", "LT": "-40℃"},
+                temperature_code="RT",
+                phase_code="UH",
+            )
+
+            saved = load_workbook(report)
+            data = saved["U相_双脉冲数据"]
+            self.assertEqual(data["B5"].value, "25℃")
+            self.assertEqual(data["B9"].value, "150℃")
+            self.assertEqual(
+                data.cell(5, COL_OFF["eoff"]).value,
+                3.5,
+            )
+            self.assertEqual(
+                data.cell(9, COL_OFF["eoff"]).value,
+                1.5,
+            )
 
     def test_dpt_same_code_keeps_distinct_actual_temperatures(self):
         from openpyxl.drawing.image import Image as XLImage
