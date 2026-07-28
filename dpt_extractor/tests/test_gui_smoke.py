@@ -7337,7 +7337,7 @@ class TestMainWindowSmoke(unittest.TestCase):
                         plot._cursor_hb_ha_delta_label.textItem.toPlainText()
                     )
                     self.assertIn(f"{expected_delta:.3f} A", readout)
-                    self.assertIn(f"{expected_rate:.2f} MA/s", readout)
+                    self.assertIn(f"{expected_rate / 1000.0:.2f} GA/s", readout)
                     self.assertNotIn(
                         f"{abs(context.forward_a - context.base_a):.3f} A",
                         readout,

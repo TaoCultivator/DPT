@@ -608,8 +608,10 @@ def turn_on_dvdt_measurement_context(
     i0 = max(0, min(int(i0), n - 2))
     i1 = max(i0 + 1, min(int(i1), n - 1))
     top = float(top_v)
-    th_hi = float(pct_hi) * top
-    th_lo = float(pct_lo) * top
+    high_pct = max(float(pct_hi), float(pct_lo))
+    low_pct = min(float(pct_hi), float(pct_lo))
+    th_hi = high_pct * top
+    th_lo = low_pct * top
     seg_t = t_arr[i0 : i1 + 1]
     seg_y = vce_arr[i0 : i1 + 1]
     t_a = crossing_time(seg_t, seg_y, th_hi, "falling", start=0)
@@ -890,6 +892,12 @@ def turn_off_didt_measurement_context(
         next_pulse_on=next_pulse_on,
         base_window=base_window,
     )
+    # Turn-off is always the physical falling Ic edge. ``edge`` is retained
+    # for saved configuration compatibility; custom percentage order must not
+    # redirect the measurement to a rising edge.
+    _ = edge
+    fall_pct_a = max(float(pct_a), float(pct_b))
+    fall_pct_b = min(float(pct_a), float(pct_b))
     crossing = didt_between_base_top(
         t,
         ic,
@@ -897,9 +905,9 @@ def turn_off_didt_measurement_context(
         search1,
         base_a,
         top_a,
-        pct_a,
-        pct_b,
-        edge,
+        fall_pct_a,
+        fall_pct_b,
+        "fall",
         use_abs=False,
     )
     # Slow/low-current turn-off can finish after the Vge-derived fall window.
@@ -918,9 +926,9 @@ def turn_off_didt_measurement_context(
             i1,
             base_a,
             top_a,
-            pct_a,
-            pct_b,
-            edge,
+            fall_pct_a,
+            fall_pct_b,
+            "fall",
             use_abs=False,
         )
         if extended.t_pct_a_s is not None and extended.t_pct_b_s is not None:

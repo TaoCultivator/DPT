@@ -54,16 +54,10 @@ from dpt_extractor.models.results import (
     power_metric_name,
 )
 from dpt_extractor.models.slope_range import (
-    CUSTOM_RANGE_LABEL,
-    RR_DIDT_CUSTOM_IDM,
-    RR_DIDT_CUSTOM_IF_IRM,
-    SLOPE_RANGE_PRESETS,
     SLOPE_ROW_KEYS,
     SlopeRange,
     default_slope_ranges,
     normalize_slope_range,
-    preset_index_for_range,
-    preset_to_range,
 )
 
 
@@ -1685,10 +1679,6 @@ class ResultTable(QWidget):
         if not row_key:
             return
         current = self._slope_ranges.get(row_key, default_slope_ranges()[row_key])
-        presets = SLOPE_RANGE_PRESETS.get(row_key, [])
-        options = [p[0] for p in presets] + [CUSTOM_RANGE_LABEL]
-        idx = preset_index_for_range(row_key, current)
-        current_idx = idx if idx >= 0 else len(options) - 1
         title_map = {
             "off_dvdt": "关断 dv/dt 取值范围",
             "off_didt": "关断 di/dt 取值范围",
@@ -1697,53 +1687,16 @@ class ResultTable(QWidget):
             "rr_dvdt": "反向恢复 dv/dt 取值范围",
             "rr_didt": "反向恢复 di/dt 取值范围",
         }
-        selected, ok = QInputDialog.getItem(
+        dlg = SlopeRangeDialog(
             self,
-            title_map.get(row_key, "取值范围"),
-            "选择范围：",
-            options,
-            current_idx,
-            False,
+            title=title_map.get(row_key, "取值范围"),
+            initial=current,
+            row_key=row_key,
         )
-        if not ok:
+        if dlg.exec() != dlg.DialogCode.Accepted or dlg.range_value() is None:
             return
-
-        if selected == CUSTOM_RANGE_LABEL:
-            ic_reference = "plateau"
-            if row_key == "rr_didt":
-                algo_options = [RR_DIDT_CUSTOM_IDM, RR_DIDT_CUSTOM_IF_IRM]
-                algo_idx = 0
-                if current.ic_reference == "if_irm":
-                    algo_idx = 1
-                algo, ok_algo = QInputDialog.getItem(
-                    self,
-                    title_map.get(row_key, "自定义取值范围"),
-                    "先选择算法：",
-                    algo_options,
-                    algo_idx,
-                    False,
-                )
-                if not ok_algo:
-                    return
-                ic_reference = "if_irm" if algo == RR_DIDT_CUSTOM_IF_IRM else "idm"
-            dlg = SlopeRangeDialog(
-                self,
-                title=title_map.get(row_key, "自定义取值范围"),
-                initial=current,
-                ic_reference=ic_reference,
-            )
-            if dlg.exec() != dlg.DialogCode.Accepted or dlg.range_value() is None:
-                return
-            new_range = dlg.range_value()
-            assert new_range is not None
-        else:
-            new_range = None
-            for p in presets:
-                if p[0] == selected:
-                    new_range = preset_to_range(p)
-                    break
-            if new_range is None:
-                return
+        new_range = dlg.range_value()
+        assert new_range is not None
 
         self._slope_ranges[row_key] = normalize_slope_range(row_key, new_range)
         if self._on_range_changed:

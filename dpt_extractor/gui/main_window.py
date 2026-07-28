@@ -4490,6 +4490,10 @@ class MainWindow(QMainWindow):
         sr = self._slope_ranges.get(row_key) if row_key else None
         pct_a, pct_b = sr.as_fractions() if sr else (0.1, 0.9)
         edge = self._dvdt_edge(section)
+        if edge == "fall":
+            pct_a, pct_b = max(pct_a, pct_b), min(pct_a, pct_b)
+        else:
+            pct_a, pct_b = min(pct_a, pct_b), max(pct_a, pct_b)
         use_abs = section == "反向恢复"
         if section == "反向恢复":
             y = self.bundle.get(self.profile.v_diode)
@@ -5063,6 +5067,9 @@ class MainWindow(QMainWindow):
         sr = self._slope_ranges.get(row_key) if row_key else None
         pct_a, pct_b = sr.as_fractions() if sr else (0.9, 0.1)
         edge = sr.ic_direction if sr else ("fall" if pct_a > pct_b else "rise")
+        if section == "关断过程":
+            pct_a, pct_b = max(pct_a, pct_b), min(pct_a, pct_b)
+            edge = "fall"
         if section == "反向恢复":
             measure = "idm"
             if sr and sr.ic_reference == "if_irm":

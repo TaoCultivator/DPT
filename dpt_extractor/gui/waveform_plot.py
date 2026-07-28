@@ -6009,12 +6009,14 @@ class WaveformPlot(QWidget):
 
     @staticmethod
     def _scope_rate_text(delta: float, dt_us: float, *, is_current: bool = False) -> str:
-        """示波器 Δ/Δt：自动 V/s、kV/s、MV/s 或 A/s、kA/s、MA/s。"""
+        """示波器 Δ/Δt：按电压/电流斜率自动选择 SI 前缀。"""
         if abs(dt_us) <= 1e-9:
             return "—"
         rate = delta / (dt_us * 1e-6)
         abs_r = abs(rate)
         if is_current:
+            if abs_r >= 1e9:
+                return f"{rate / 1e9:.2f} GA/s"
             if abs_r >= 1e6:
                 return f"{rate / 1e6:.2f} MA/s"
             if abs_r >= 1e3:

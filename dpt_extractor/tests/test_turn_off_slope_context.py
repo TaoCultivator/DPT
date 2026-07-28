@@ -16,10 +16,11 @@ from dpt_extractor.metrics.plateau_level import (
     turn_off_didt_stable_base_window_indices,
 )
 from dpt_extractor.metrics.slopes import (
+    turn_on_dvdt_measurement_context,
     turn_off_didt_measurement_context,
     turn_off_dvdt_measurement_context,
 )
-from dpt_extractor.models.slope_range import default_slope_ranges
+from dpt_extractor.models.slope_range import SlopeRange, default_slope_ranges
 from dpt_extractor.models.waveform import bundle_total_current
 
 
@@ -200,6 +201,67 @@ class TestTurnOffSlopeSyntheticContext(unittest.TestCase):
         )
         self.assertGreater(crossing.didt, 0.0)
 
+    def test_custom_50_to_70_didt_stays_on_physical_turn_off_fall(self) -> None:
+        indices = np.arange(len(self.t))
+        ic = np.where(indices % 2 == 0, 979.5, 980.5).astype(np.float64)
+        ic[900:911] = np.linspace(ic[899], 8.0, 12)[1:]
+        ic[911:] = np.where(indices[911:] % 2 == 0, 7.5, 8.5)
+
+        context = turn_off_didt_measurement_context(
+            self.t,
+            ic,
+            300,
+            1800,
+            pulse1_on=200,
+            off_idx=1000,
+            fall_start=800,
+            fall_end=1000,
+            dt=self.dt,
+            cfg=self.cfg,
+            pct_a=0.50,
+            pct_b=0.70,
+            # The custom dialog historically inferred this from 50 < 70.
+            # The parameter itself is still a physical turn-off falling edge.
+            edge="rise",
+        )
+
+        crossing = context.crossing
+        self.assertFalse(context.used_fallback)
+        self.assertIsNotNone(crossing.t_pct_a_s)
+        self.assertIsNotNone(crossing.t_pct_b_s)
+        assert crossing.t_pct_a_s is not None
+        assert crossing.t_pct_b_s is not None
+        self.assertLess(crossing.t_pct_a_s, crossing.t_pct_b_s)
+        self.assertGreater(crossing.th_a, crossing.th_b)
+        self.assertGreater(crossing.didt, 0.0)
+
+    def test_custom_50_to_70_dvdt_stays_on_physical_turn_on_fall(self) -> None:
+        vce = np.full(len(self.t), 500.0, dtype=np.float64)
+        vce[900:1001] = np.linspace(500.0, 0.0, 101)
+        vce[1001:] = 0.0
+
+        context = turn_on_dvdt_measurement_context(
+            self.t,
+            vce,
+            500.0,
+            700,
+            1200,
+            self.dt,
+            self.cfg,
+            0.50,
+            0.70,
+        )
+
+        crossing = context.crossing
+        self.assertFalse(context.used_fallback)
+        self.assertIsNotNone(crossing.t_pct_a_s)
+        self.assertIsNotNone(crossing.t_pct_b_s)
+        assert crossing.t_pct_a_s is not None
+        assert crossing.t_pct_b_s is not None
+        self.assertLess(crossing.t_pct_a_s, crossing.t_pct_b_s)
+        self.assertGreater(crossing.th_a, crossing.th_b)
+        self.assertGreater(crossing.dvdt, 0.0)
+
     def test_degenerate_records_return_unknown_context_without_gradient_error(self) -> None:
         t = np.asarray([0.0], dtype=np.float64)
         y = np.asarray([1.0], dtype=np.float64)
@@ -376,6 +438,136 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         self.assertAlmostEqual(result.turn_off.ic_off_max, di_context.top_a, places=6)
         self.assertAlmostEqual(result.turn_off.eoff, 57.927060778, places=6)
         self.assertAlmostEqual(result.turn_off.delta_vce, 200.734375, places=6)
+
+    @unittest.skipUnless(
+        SONG_SMC_RT_UH_1048.exists(),
+        "songzhenxi UH_750V_1048A sample is not available",
+    )
+    def test_custom_50_to_70_range_recalculates_didt_and_dvdt_end_to_end(self) -> None:
+        from dpt_extractor.gui.main_window import MainWindow
+
+        window = MainWindow()
+        self.addCleanup(window.close)
+        window._load_file(str(SONG_SMC_RT_UH_1048))
+        self.assertIsNotNone(window.result)
+
+        window._on_slope_range_changed(
+            "off_didt",
+            SlopeRange(
+                50.0,
+                70.0,
+                ic_reference="top",
+                ic_direction="rise",
+            ),
+        )
+        assert window.result is not None
+        self.assertEqual(window.result.turn_off.didt_range, "50%→70%")
+        self.assertGreater(window.result.turn_off.didt, 0.0)
+        off_interval = window._parameter_interval_us("关断过程", "di/dt")
+        self.assertIsNotNone(off_interval)
+        assert off_interval is not None
+        off_context = window._turn_off_didt_context(*off_interval)
+        self.assertIsNotNone(off_context)
+        assert off_context is not None
+        self.assertFalse(off_context.used_fallback)
+        self.assertLess(
+            float(off_context.crossing.t_pct_a_s),
+            float(off_context.crossing.t_pct_b_s),
+        )
+        window._on_value_clicked("关断过程", "di/dt")
+        off_readout = (
+            window.wave_plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+        )
+        self.assertIn(
+            f"{window.result.turn_off.didt:.2f} GA/s",
+            off_readout,
+        )
+        preserved = (
+            window.result.turn_off.delta_vce,
+            window.result.turn_off.eoff,
+            window.result.turn_on.didt,
+            window.result.reverse_recovery.didt_irr,
+        )
+        before_drag = window.result.turn_off.didt
+        plot = window.wave_plot
+        assert plot._h_cursor_a is not None
+        plot._h_cursor_a.setValue(
+            plot._to_disp("ic", float(off_context.top_a) * 0.95)
+        )
+        self.app.processEvents()
+        self.assertNotEqual(window.result.turn_off.didt, before_drag)
+        dragged_readout = (
+            plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+        )
+        self.assertIn(
+            f"{window.result.turn_off.didt:.2f} GA/s",
+            dragged_readout,
+        )
+        self.assertEqual(
+            (
+                window.result.turn_off.delta_vce,
+                window.result.turn_off.eoff,
+                window.result.turn_on.didt,
+                window.result.reverse_recovery.didt_irr,
+            ),
+            preserved,
+        )
+
+        window._on_slope_range_changed(
+            "on_dvdt",
+            SlopeRange(50.0, 70.0),
+        )
+        assert window.result is not None
+        self.assertEqual(window.result.turn_on.dvdt_range, "50%→70%")
+        self.assertGreater(window.result.turn_on.dvdt, 0.0)
+        on_interval = window._parameter_interval_us("开通", "dv/dt")
+        self.assertIsNotNone(on_interval)
+        assert on_interval is not None
+        on_context = window._turn_on_dvdt_context(*on_interval)
+        self.assertIsNotNone(on_context)
+        assert on_context is not None
+        self.assertFalse(on_context.used_fallback)
+        self.assertLess(
+            float(on_context.crossing.t_pct_a_s),
+            float(on_context.crossing.t_pct_b_s),
+        )
+        window._on_value_clicked("开通", "dv/dt")
+        on_readout = (
+            window.wave_plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+        )
+        self.assertIn(
+            f"{window.result.turn_on.dvdt:.2f} GV/s",
+            on_readout,
+        )
+        preserved = (
+            window.result.turn_off.didt,
+            window.result.turn_off.eoff,
+            window.result.turn_on.didt,
+            window.result.reverse_recovery.dvdt_max,
+        )
+        before_drag = window.result.turn_on.dvdt
+        assert plot._h_cursor_a is not None
+        plot._h_cursor_a.setValue(
+            plot._to_disp("vce", float(on_context.top_v) * 0.95)
+        )
+        self.app.processEvents()
+        self.assertNotEqual(window.result.turn_on.dvdt, before_drag)
+        dragged_readout = (
+            plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+        )
+        self.assertIn(
+            f"{window.result.turn_on.dvdt:.2f} GV/s",
+            dragged_readout,
+        )
+        self.assertEqual(
+            (
+                window.result.turn_off.didt,
+                window.result.turn_off.eoff,
+                window.result.turn_on.didt,
+                window.result.reverse_recovery.dvdt_max,
+            ),
+            preserved,
+        )
 
     def test_all_slope_range_cells_keep_only_percentage_labels_after_interaction(self) -> None:
         from dpt_extractor.gui.main_window import MainWindow

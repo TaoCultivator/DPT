@@ -6,7 +6,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFontMetrics, QPalette
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -27,7 +27,9 @@ from dpt_extractor.gui.result_table import (
     SECTION_ACTIVE_TEXT,
     ResultTable,
 )
+from dpt_extractor.gui.slope_range_dialog import SlopeRangeDialog
 from dpt_extractor.gui.theme import SECTION_OFF, SECTION_ON, SECTION_RR
+from dpt_extractor.models.slope_range import CUSTOM_RANGE_LABEL
 from dpt_extractor.models.results import (
     ExtractResult,
     ReverseRecoveryResult,
@@ -143,6 +145,40 @@ class TestResultTableUi(unittest.TestCase):
             table.table.item(on_start, 0).foreground().color().name(),
             SECTION_ACTIVE_TEXT,
         )
+        table.close()
+
+    def test_slope_custom_range_is_entered_in_the_selection_dialog(self) -> None:
+        table = ResultTable()
+        table.set_result(_sample_result())
+        changed: list[tuple[str, float, float]] = []
+        failures: list[BaseException] = []
+        table.set_range_handler(
+            lambda key, value: changed.append(
+                (key, value.start_pct, value.end_pct)
+            )
+        )
+
+        def complete_dialog() -> None:
+            dialog = QApplication.activeModalWidget()
+            try:
+                self.assertIsInstance(dialog, SlopeRangeDialog)
+                assert isinstance(dialog, SlopeRangeDialog)
+                dialog.range_selector.setCurrentText(CUSTOM_RANGE_LABEL)
+                dialog.spin_start.setValue(50.0)
+                dialog.spin_end.setValue(70.0)
+                dialog._accept()
+            except BaseException as exc:
+                failures.append(exc)
+                if dialog is not None:
+                    dialog.close()
+
+        row = _row_for(table, "关断过程", "dv/dt")
+        QTimer.singleShot(0, complete_dialog)
+        table._on_cell_double_clicked(row, 3)
+
+        if failures:
+            raise failures[0]
+        self.assertEqual(changed, [("off_dvdt", 50.0, 70.0)])
         table.close()
 
     def test_unavailable_metrics_show_red_dash_value(self) -> None:
