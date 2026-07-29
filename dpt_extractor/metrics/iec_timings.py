@@ -5,6 +5,10 @@ from dataclasses import dataclass
 import numpy as np
 
 from dpt_extractor.config.loader import AppConfig
+from dpt_extractor.metrics.plateau_level import (
+    turn_off_didt_base_top_levels,
+    turn_on_current_hb_ha_t,
+)
 from dpt_extractor.utils.signal import crossing_time, smooth, threshold_value
 
 
@@ -106,6 +110,61 @@ def turn_off_timing_instants(
     li = int(np.searchsorted(ts, t_i90, side="left"))
     li = max(lv, min(li, len(ts) - 2))
     t_i10 = crossing_time(ts, ic_s, i_10, "falling", start=li)
+    if (
+        t_i10 is None
+        and pulse1_on is not None
+        and pulse2_on is not None
+    ):
+        local_base, local_top = turn_off_didt_base_top_levels(
+            ic,
+            i0,
+            i1,
+            pulse1_on,
+            off_idx,
+            w0,
+            w1_vge,
+            dt,
+            next_pulse_on=pulse2_on,
+        )
+        base_abs = abs(float(local_base))
+        top_abs = abs(float(local_top))
+        span_abs = top_abs - base_abs
+        min_span = max(20.0, 0.15 * max(top_abs, 1.0))
+        if (
+            np.isfinite(base_abs)
+            and np.isfinite(top_abs)
+            and span_abs >= min_span
+        ):
+            local_i90 = crossing_time(
+                ts,
+                ic_s,
+                base_abs + th.high_pct * span_abs,
+                "falling",
+                start=lv,
+            )
+            local_i10 = None
+            if local_i90 is not None:
+                local_start_i10 = int(
+                    np.searchsorted(ts, local_i90, side="left")
+                )
+                local_start_i10 = max(
+                    lv,
+                    min(local_start_i10, len(ts) - 2),
+                )
+                local_i10 = crossing_time(
+                    ts,
+                    ic_s,
+                    base_abs + th.low_pct * span_abs,
+                    "falling",
+                    start=local_start_i10,
+                )
+            if (
+                local_i90 is not None
+                and local_i10 is not None
+                and local_i10 > local_i90
+            ):
+                t_i90 = local_i90
+                t_i10 = local_i10
     if t_i10 is None:
         td_off = max(0.0, (t_i90 - t_v90) * 1e9)
         return TurnOffTimingInstants(t_v90, t_i90, None, td_off, 0.0, td_off)
@@ -202,6 +261,32 @@ def vge_fall_window_indices(
     t_95 = crossing_time(ts, vge_s, v_95, "falling", start=0)
     t_90 = crossing_time(ts, vge_s, v_90, "falling", start=0)
     t_starts = [x for x in (t_98, t_95, t_90) if x is not None]
+    if not t_starts:
+        # A very slow gate discharge can start several microseconds before the
+        # Schmitt low-threshold ``off_idx``.  The compact primary window then
+        # contains only the Miller tail and no 98/95/90% crossing.  Retry only
+        # this missing-crossing case in an earlier, still pulse-local window;
+        # established fast-edge samples keep the primary path unchanged.
+        extended_span = max(int(4e-6 / dt), int(0.60 * p1w))
+        extended_w0 = max(
+            0,
+            pulse1_on + max(2, int(50e-9 / dt)),
+            off_idx - extended_span,
+        )
+        if extended_w0 < w0:
+            extended_ts = t[extended_w0 : w1 + 1]
+            extended_vge = smooth(
+                vge[extended_w0 : w1 + 1],
+                dt,
+                cfg.smoothing.detect_window_ns,
+            )
+            extended_crossings = (
+                crossing_time(
+                    extended_ts, extended_vge, level, "falling", start=0
+                )
+                for level in (v_98, v_95, v_90)
+            )
+            t_starts = [x for x in extended_crossings if x is not None]
     if t_starts:
         t_start = float(min(t_starts))
     else:
@@ -544,9 +629,70 @@ def turn_on_timing_instants(
                     fallback_i10 is not None
                     and fallback_i90 is not None
                     and fallback_i90 > fallback_i10
+                    and fallback_i90
+                    <= float(t[max(0, min(int(i1), len(t) - 1))])
                 ):
                     t_i10 = fallback_i10
                     t_i90 = fallback_i90
+
+                # Derived total-current traces can retain a non-zero pre-edge
+                # offset after IL/Irr probe summation.  If that offset already
+                # sits above the absolute 10%-of-Top threshold, neither the
+                # legacy path nor the stable-Top extension has a physical
+                # rising crossing.  Only in that fail-closed case, reuse the
+                # same event-local raw Base/Top bands as the opening-current
+                # cursor and measure the real 10%/90% swing between them.
+                if t_i10 is None or t_i90 is None:
+                    local_base, local_top = turn_on_current_hb_ha_t(
+                        t,
+                        ic,
+                        i0,
+                        i1,
+                        dt,
+                        event_end_idx=int(pulse2_off),
+                    )
+                    base_abs = abs(float(local_base))
+                    top_abs = abs(float(local_top))
+                    span_abs = top_abs - base_abs
+                    min_span = max(20.0, 0.15 * max(top_abs, 1.0))
+                    if (
+                        np.isfinite(base_abs)
+                        and np.isfinite(top_abs)
+                        and span_abs >= min_span
+                    ):
+                        local_i10 = crossing_time(
+                            extended_ts,
+                            extended_ic,
+                            base_abs + th.low_pct * span_abs,
+                            "rising",
+                        )
+                        local_i90 = None
+                        if local_i10 is not None:
+                            local_start_i90 = int(
+                                np.searchsorted(
+                                    extended_ts,
+                                    local_i10,
+                                    side="left",
+                                )
+                            )
+                            local_start_i90 = max(
+                                0,
+                                min(local_start_i90, len(extended_ts) - 2),
+                            )
+                            local_i90 = crossing_time(
+                                extended_ts,
+                                extended_ic,
+                                base_abs + th.high_pct * span_abs,
+                                "rising",
+                                start=local_start_i90,
+                            )
+                        if (
+                            local_i10 is not None
+                            and local_i90 is not None
+                            and local_i90 > local_i10
+                        ):
+                            t_i10 = local_i10
+                            t_i90 = local_i90
 
     # Ic10/Ic90 describe one physical rising edge and therefore form an atomic
     # ordered pair.  Keeping only Ic90 (or only Ic10) lets Ton/Td_on/Tr borrow

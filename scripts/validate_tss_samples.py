@@ -23,7 +23,7 @@ from dpt_extractor.metrics.iec_windows import (
     err_recovery_peak_index,
     integrate_err_recovery,
     integrate_vi_window,
-    rr_slope_window_indices,
+    rr_completed_measurement_window_indices,
 )
 from dpt_extractor.metrics.iec_timings import (
     TurnOnTimingInstants,
@@ -664,6 +664,17 @@ def _validate_dpt_sample(
     rr0, rr1 = segs.reverse_recovery
     irr = bundle_reverse_recovery_current(b, prof)
     vd = b.get(prof.v_diode)
+    rr_s0, rr_s1, rr_window_completed = (
+        rr_completed_measurement_window_indices(
+            on0,
+            rr1,
+            on1,
+            vd,
+            len(b.t),
+            b.dt,
+        )
+    )
+    rr_context_i1 = rr_s1 if rr_window_completed else rr1
     eoff_m = eoff_energy_markers(
         b.t,
         ic,
@@ -706,7 +717,7 @@ def _validate_dpt_sample(
         irr,
         vd,
         rr0,
-        rr1,
+        rr_context_i1,
         b.dt,
         i_search_end=on1,
         vge=b.get(prof.vge),
@@ -751,7 +762,6 @@ def _validate_dpt_sample(
         event_end_idx=segs.pulse2_off,
     )
     problems.extend(timing_problems)
-    rr_s0, rr_s1 = rr_slope_window_indices(on0, rr1, len(b.t), b.dt)
     slope_active = default_slope_ranges()
     slope_active.update(cfg.slope_ranges)
     rr_di = slope_active["rr_didt"]
@@ -772,9 +782,9 @@ def _validate_dpt_sample(
         di_b,
         measure=rr_measure,
         rr_i0=rr0,
-        rr_i1=rr1,
+        rr_i1=rr_context_i1,
         fallback_i0=rr0,
-        fallback_i1=rr1,
+        fallback_i1=rr_context_i1,
     )
     rr_problems, rr_detail = _audit_rr_didt_context(
         b.t,

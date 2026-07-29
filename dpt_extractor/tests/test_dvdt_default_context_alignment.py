@@ -23,6 +23,30 @@ TARGET = (
     / "HT"
     / "UH_750V_1048A_000.tss"
 )
+WANGLIHUI_HT_TARGETS = (
+    (
+        ROOT
+        / "示例文件"
+        / "wanglihui"
+        / "20260729"
+        / "UH_HT_Rgon3.33R_Rgoff8.92R"
+        / "UH_486V_950A_Rgon3.33R_Rgoff8.92R_000.tss",
+        0.7317665573531311,
+        27.274399507423403,
+        27.793075847830197,
+    ),
+    (
+        ROOT
+        / "示例文件"
+        / "wanglihui"
+        / "20260729"
+        / "UL_HT_Rgon2.267R_Rgoff7.5R"
+        / "UL_486V_950A_Rgon2.267R_Rgoff7.5R_000.tss",
+        0.8956070108671828,
+        26.283775999728606,
+        26.712367999726833,
+    ),
+)
 
 
 @unittest.skipUnless(TARGET.exists(), "songzhenxi 20260717 HT target sample missing")
@@ -104,10 +128,10 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
             self.assertIsNotNone(on_context)
             assert on_context is not None
             self.assertAlmostEqual(on_context.base_v, 0.0, places=12)
-            self.assertAlmostEqual(on_context.top_v, 751.75, places=9)
+            self.assertAlmostEqual(on_context.top_v, 748.909375, places=9)
             self.assertAlmostEqual(
                 on_context.crossing.dvdt,
-                2.2326818108938484,
+                2.1021456116889996,
                 places=12,
             )
             self.assertAlmostEqual(
@@ -117,12 +141,12 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
             )
             self.assertAlmostEqual(
                 float(on_context.crossing.t_pct_a_s) * 1e6,
-                19.010236108012553,
+                20.576111708438016,
                 places=8,
             )
             self.assertAlmostEqual(
                 float(on_context.crossing.t_pct_b_s) * 1e6,
-                19.279598270173594,
+                20.86111932002712,
                 places=8,
             )
             win._on_value_clicked("开通", "dv/dt")
@@ -133,10 +157,10 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
             self.assertIsNotNone(rr_context)
             assert rr_context is not None
             self.assertAlmostEqual(rr_context.base_v, 0.0, places=12)
-            self.assertAlmostEqual(rr_context.top_v, 1065.1875, places=9)
+            self.assertAlmostEqual(rr_context.top_v, 1025.0, places=9)
             self.assertAlmostEqual(
                 rr_context.crossing.dvdt,
-                27.364653240063777,
+                24.852287891176825,
                 places=12,
             )
             self.assertAlmostEqual(
@@ -146,12 +170,12 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
             )
             self.assertAlmostEqual(
                 float(rr_context.crossing.t_pct_a_s) * 1e6,
-                19.1949312896233,
+                20.762784727299738,
                 places=8,
             )
             self.assertAlmostEqual(
                 float(rr_context.crossing.t_pct_b_s) * 1e6,
-                19.22607182674337,
+                20.795779677446405,
                 places=8,
             )
             win._on_value_clicked("反向恢复", "dv/dt")
@@ -164,6 +188,73 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
         finally:
             win.close()
             self._events()
+
+
+@unittest.skipUnless(
+    all(path.exists() for path, *_values in WANGLIHUI_HT_TARGETS),
+    "wanglihui 20260729 HT target samples missing",
+)
+class TestSlowTurnOnDvdtCompletion(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def test_ht_slow_vce_fall_uses_real_90_to_10_crossings_before_turn_off(
+        self,
+    ) -> None:
+        from dpt_extractor.gui.main_window import MainWindow
+
+        for path, expected_dvdt, expected_a_us, expected_b_us in (
+            WANGLIHUI_HT_TARGETS
+        ):
+            with self.subTest(path=str(path)):
+                win = MainWindow()
+                try:
+                    win._load_file(str(path))
+                    interval = win._parameter_interval_us("开通", "dv/dt")
+                    self.assertIsNotNone(interval)
+                    assert interval is not None
+                    context = win._turn_on_dvdt_context(*interval)
+                    self.assertIsNotNone(context)
+                    assert context is not None
+                    self.assertFalse(context.used_fallback)
+                    self.assertAlmostEqual(
+                        context.crossing.dvdt, expected_dvdt, places=12
+                    )
+                    self.assertAlmostEqual(
+                        float(context.crossing.t_pct_a_s) * 1e6,
+                        expected_a_us,
+                        places=8,
+                    )
+                    self.assertAlmostEqual(
+                        float(context.crossing.t_pct_b_s) * 1e6,
+                        expected_b_us,
+                        places=8,
+                    )
+                    self.assertAlmostEqual(
+                        win.result.turn_on.dvdt,
+                        context.crossing.dvdt,
+                        places=12,
+                    )
+
+                    win._on_value_clicked("开通", "dv/dt")
+                    self.assertIsNotNone(win.wave_plot._cursor_a)
+                    self.assertIsNotNone(win.wave_plot._cursor_b)
+                    self.assertAlmostEqual(
+                        float(win.wave_plot._cursor_a.value()),
+                        expected_a_us,
+                        places=8,
+                    )
+                    self.assertAlmostEqual(
+                        float(win.wave_plot._cursor_b.value()),
+                        expected_b_us,
+                        places=8,
+                    )
+                finally:
+                    win.close()
+
 
 if __name__ == "__main__":
     unittest.main()

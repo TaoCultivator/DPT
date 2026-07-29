@@ -7096,7 +7096,7 @@ class TestMainWindowSmoke(unittest.TestCase):
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 
         cases = (
-            (SONG_SMC_HT_20260717_UH_1048, 5.485001520939264),
+            (SONG_SMC_HT_20260717_UH_1048, 5.376362514162928),
             (SONG_SMC_RT_UH_1048, 6.3621142660389545),
         )
         for sample_path, expected_didt in cases:
@@ -7208,7 +7208,7 @@ class TestMainWindowSmoke(unittest.TestCase):
                         )
                         self.assertEqual(
                             expected_forward,
-                            -968.0624999999999,
+                            -1044.40625,
                         )
                         self.assertEqual(context.forward_a, expected_forward)
                         # Selecting the result-table row must place the visible
@@ -8358,13 +8358,13 @@ class TestMainWindowSmoke(unittest.TestCase):
             hb = plot._from_disp("irr", float(plot._h_cursor_b.value()))
             ta = float(plot._cursor_a.value())
             tb = float(plot._cursor_b.value())
-            self.assertAlmostEqual(ha, 16.0, delta=0.25)
-            self.assertAlmostEqual(hb, 286.0625, delta=0.25)
-            self.assertAlmostEqual(ta, 19.1656709433, delta=0.0005)
-            self.assertAlmostEqual(tb, 19.2298417777, delta=0.0005)
+            self.assertAlmostEqual(ha, 20.125, delta=0.25)
+            self.assertAlmostEqual(hb, 285.0625, delta=0.25)
+            self.assertAlmostEqual(ta, 20.7327813334, delta=0.0005)
+            self.assertAlmostEqual(tb, 20.7992682609, delta=0.0005)
             self.assertAlmostEqual(
                 win.result.reverse_recovery.trr,
-                64.1708343813,
+                66.4869275363,
                 delta=0.01,
             )
 

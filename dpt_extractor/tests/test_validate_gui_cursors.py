@@ -963,12 +963,32 @@ class _InversionWindow:
 
 class TestWanglihuiInversionAudit(unittest.TestCase):
     path = Path("samples") / "wanglihui" / "U" / "wave.tss"
+    uploaded_uh_path = (
+        Path("samples")
+        / "wanglihui"
+        / "20260729"
+        / "UH_RT_Rgon3.33R_Rgoff8.92R"
+        / "UH_750V_950A_000.tss"
+    )
 
     def test_uh_enables_display_inversion_through_ui_path(self) -> None:
         window = _InversionWindow(source_inverted=False)
 
         note = _ensure_wanglihui_u_ch3_ui_inversion(
             window, _FakeApplication, self.path
+        )
+
+        self.assertEqual(window.wave_plot.setter_calls, 1)
+        self.assertEqual(window.recalculate_calls, 1)
+        self.assertEqual(window.bundle.meta.source_channel_inversions, set())
+        self.assertEqual(window.bundle.meta.channel_display_inversions, {"CH3"})
+        self.assertIn("UI手动反相", note)
+
+    def test_uploaded_batch_uh_uses_the_same_ui_inversion_path(self) -> None:
+        window = _InversionWindow(source_inverted=False)
+
+        note = _ensure_wanglihui_u_ch3_ui_inversion(
+            window, _FakeApplication, self.uploaded_uh_path
         )
 
         self.assertEqual(window.wave_plot.setter_calls, 1)
@@ -1059,6 +1079,76 @@ class TestTrrExtendedWindowGuiAudit(unittest.TestCase):
         self.assertIn("stable=Ha=-52.47", trr_rows[0][4])
         self.assertIn("HbPeak=72.5", trr_rows[0][4])
         self.assertIn("A=17.304 B=17.334", trr_rows[0][4])
+
+
+class TestTurnOffDeltaVceExtendedPlatformGuiAudit(unittest.TestCase):
+    sample = (
+        Path(__file__).resolve().parents[2]
+        / "示例文件"
+        / "likangkang"
+        / "24B6-20260709"
+        / "RT"
+        / "u"
+        / "uh-900v-693.37a_000.tss"
+    )
+
+    @unittest.skipUnless(sample.exists(), "extended blocking-platform sample missing")
+    def test_delta_vce_audit_uses_declared_parameter_search_window(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        rows = audit_file(MainWindow, QApplication, app, self.sample)
+        delta_rows = [
+            row
+            for row in rows
+            if row[1:3]
+            in {
+                ("关断过程", "ΔVce"),
+                ("关断过程", "Ls_off"),
+            }
+        ]
+
+        self.assertEqual(len(delta_rows), 2)
+        for row in delta_rows:
+            self.assertEqual(row[3], "OK", row[4])
+            self.assertIn("B/Hb=9.386us/895.3V", row[4])
+
+
+class TestTurnOnDeltaVcePreRiseTopGuiAudit(unittest.TestCase):
+    sample = (
+        Path(__file__).resolve().parents[2]
+        / "示例文件"
+        / "likangkang"
+        / "24B6-20260709"
+        / "HT"
+        / "w"
+        / "wh-900v-494.9a_000.tss"
+    )
+
+    @unittest.skipUnless(sample.exists(), "pre-rise Top sample missing")
+    def test_delta_vce_search_window_contains_its_default_top_cursor(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        rows = audit_file(MainWindow, QApplication, app, self.sample)
+        delta_rows = [
+            row
+            for row in rows
+            if row[1:3]
+            in {
+                ("开通", "ΔVce"),
+                ("开通", "Ls_on"),
+            }
+        ]
+
+        self.assertEqual(len(delta_rows), 2)
+        for row in delta_rows:
+            self.assertEqual(row[3], "OK", row[4])
+            self.assertIn("A/Ha=7.883us/906.6V", row[4])
 
 
 if __name__ == "__main__":

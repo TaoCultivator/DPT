@@ -479,16 +479,16 @@ class TestIrrMeasure(unittest.TestCase):
 
         self.assertIsNotNone(marker)
         assert marker is not None
-        self.assertAlmostEqual(marker.ta_s * 1e6, 19.165671, delta=0.002)
-        self.assertAlmostEqual(marker.tb_s * 1e6, 19.229842, delta=0.002)
-        self.assertAlmostEqual(marker.trr_ns, 64.170834, delta=0.02)
-        self.assertAlmostEqual(marker.stable_level, 16.0, delta=0.02)
-        self.assertAlmostEqual(marker.ha, 16.0, delta=0.02)
-        self.assertAlmostEqual(marker.hb, 286.0625, delta=0.02)
-        self.assertAlmostEqual(marker.irr, 286.0625, delta=0.02)
+        self.assertAlmostEqual(marker.ta_s * 1e6, 20.732781, delta=0.002)
+        self.assertAlmostEqual(marker.tb_s * 1e6, 20.799268, delta=0.002)
+        self.assertAlmostEqual(marker.trr_ns, 66.486928, delta=0.02)
+        self.assertAlmostEqual(marker.stable_level, 20.125, delta=0.02)
+        self.assertAlmostEqual(marker.ha, 20.125, delta=0.02)
+        self.assertAlmostEqual(marker.hb, 285.0625, delta=0.02)
+        self.assertAlmostEqual(marker.irr, 285.0625, delta=0.02)
         self.assertAlmostEqual(result.reverse_recovery.trr, marker.trr_ns, places=9)
-        self.assertAlmostEqual(result.reverse_recovery.irr, 286.0625, delta=0.02)
-        self.assertAlmostEqual(result.reverse_recovery.err, 14.085713, delta=0.02)
+        self.assertAlmostEqual(result.reverse_recovery.irr, 285.0625, delta=0.02)
+        self.assertAlmostEqual(result.reverse_recovery.err, 13.731503, delta=0.02)
 
     def test_songzhenxi_sss_lt_lower_high_load_uses_recovery_lobe(self):
         sample_dir = (

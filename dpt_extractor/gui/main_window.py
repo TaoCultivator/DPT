@@ -4276,8 +4276,42 @@ class MainWindow(QMainWindow):
 
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
         rr0, rr1 = self.result.segments.reverse_recovery
-        ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], self.bundle.dt)
+        completed = self._rr_measurement_window_indices()
+        rr_context_i1 = completed[2] if completed is not None else rr1
+        ipk = rr0 + err_recovery_peak_index(
+            irr[rr0 : rr_context_i1 + 1],
+            self.bundle.dt,
+        )
         return float(self.bundle.t[ipk]) * 1e6
+
+    def _rr_measurement_window_indices(
+        self,
+    ) -> tuple[int, int, int, bool] | None:
+        """Shared completed RR slope/context window for GUI parameter cards."""
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        from dpt_extractor.metrics.iec_windows import (
+            rr_completed_measurement_window_indices,
+            rr_slope_window_indices,
+        )
+
+        t = self.bundle.t
+        segs = self.result.segments
+        on0, on1 = segs.turn_on
+        _rr0, rr1 = segs.reverse_recovery
+        vd = self.bundle.maybe_get(self.profile.v_diode)
+        if vd is None:
+            i0, i1 = rr_slope_window_indices(on0, rr1, len(t), self.bundle.dt)
+            return i0, i1, rr1, False
+        i0, i1, completed = rr_completed_measurement_window_indices(
+            on0,
+            rr1,
+            on1,
+            vd,
+            len(t),
+            self.bundle.dt,
+        )
+        return i0, i1, i1 if completed else rr1, completed
 
     def _default_dvdt_on_vce_base_top(
         self, t0_us: float, t1_us: float
@@ -4328,19 +4362,21 @@ class MainWindow(QMainWindow):
             self.cfg,
             pct_hi,
             pct_lo,
+            event_end_idx=segs.pulse2_off,
         )
 
     def _rr_dvdt_context(self) -> DvdtMeasurementContext | None:
         """与 pipeline 共用的反向恢复 dv/dt 默认测量上下文。"""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
-        from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
 
         t = self.bundle.t
         vd = self.bundle.get(self.profile.v_diode)
-        on0, _on1 = self.result.segments.turn_on
         rr0, rr1 = self.result.segments.reverse_recovery
-        i0, i1 = rr_slope_window_indices(on0, rr1, len(t), self.bundle.dt)
+        completed = self._rr_measurement_window_indices()
+        if completed is None:
+            return None
+        i0, i1, rr_context_i1, _extended = completed
         row_key = SLOPE_ROW_KEYS.get(("反向恢复", "dv/dt"))
         sr = self._slope_ranges.get(row_key) if row_key else None
         pct_a, pct_b = sr.as_fractions() if sr else (0.1, 0.9)
@@ -4354,7 +4390,7 @@ class MainWindow(QMainWindow):
             min(pct_a, pct_b),
             max(pct_a, pct_b),
             fallback_i0=rr0,
-            fallback_i1=rr1,
+            fallback_i1=rr_context_i1,
         )
 
     def _turn_off_dvdt_context(
@@ -4932,13 +4968,11 @@ class MainWindow(QMainWindow):
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 
         t = bundle.t
-        from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
-
-        on0, _on1 = result.segments.turn_on
         rr0, rr1 = result.segments.reverse_recovery
-        i0, i1 = rr_slope_window_indices(
-            on0, rr1, len(t), bundle.dt
-        )
+        completed = self._rr_measurement_window_indices()
+        if completed is None:
+            return None
+        i0, i1, rr_context_i1, _extended = completed
         row_key = SLOPE_ROW_KEYS.get(("反向恢复", "di/dt"))
         slope_ranges = state.get("_slope_ranges")
         if not isinstance(slope_ranges, dict):
@@ -4962,9 +4996,9 @@ class MainWindow(QMainWindow):
             pct_b,
             measure=measure,
             rr_i0=rr0,
-            rr_i1=rr1,
+            rr_i1=rr_context_i1,
             fallback_i0=rr0,
-            fallback_i1=rr1,
+            fallback_i1=rr_context_i1,
         )
 
     def _default_didt_top_a(self, section: str, t0_us: float, t1_us: float) -> float:
@@ -5511,6 +5545,14 @@ class MainWindow(QMainWindow):
             )
         if top_t_us is None:
             top_t_us = float(t[top_idx] * 1e6)
+        # The authoritative Top point is intentionally sampled from the
+        # pre-rise plateau and can precede the compact turn_on segment by a
+        # few samples.  The interaction search range must contain its own
+        # default A cursor; otherwise entering the card is valid but the first
+        # horizontal drag immediately clips A to a different crossing.
+        delta_search_i0 = max(0, min(i0, w0, top_idx))
+        delta_search_t0_us = float(t[delta_search_i0] * 1e6)
+        delta_search_t1_us = float(t[i1] * 1e6)
 
         # Hb 初始位置：与提取层一致；三斜率取中间段中点，两斜率取主下降起点拐点。
         knee = _turn_on_delta_vce_knee_point(vce, i0, i1, dt, v_top)
@@ -5568,8 +5610,8 @@ class MainWindow(QMainWindow):
                 move_t_us=b_t,
                 move_v=hb_v,
                 on_change=_on_cursor_change,
-                search_t0_us=float(t[i0] * 1e6),
-                search_t1_us=float(t[i1] * 1e6),
+                search_t0_us=delta_search_t0_us,
+                search_t1_us=delta_search_t1_us,
             )
             return
 
@@ -5579,8 +5621,8 @@ class MainWindow(QMainWindow):
             move_t_us=move_t_us,
             move_v=move_v,
             on_change=_on_cursor_change,
-            search_t0_us=float(t[i0] * 1e6),
-            search_t1_us=float(t[i1] * 1e6),
+            search_t0_us=delta_search_t0_us,
+            search_t1_us=delta_search_t1_us,
         )
         self._show_stored_metric_status("开通", focus_name if focus_name == "Ls_on" else "ΔVce")
 
@@ -5908,14 +5950,16 @@ class MainWindow(QMainWindow):
         on1 = segs.turn_on[1]
         from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
 
-        ipk = err_recovery_peak_index(irr[rr0 : rr1 + 1], dt)
+        completed = self._rr_measurement_window_indices()
+        rr_context_i1 = completed[2] if completed is not None else rr1
+        ipk = err_recovery_peak_index(irr[rr0 : rr_context_i1 + 1], dt)
         ipk_global = rr0 + ipk
         markers = err_energy_markers(
             t,
             irr,
             v_diode,
             rr0,
-            rr1,
+            rr_context_i1,
             dt,
             i_search_end=on1,
             vge=self.bundle.get(self.profile.vge),
@@ -5980,6 +6024,8 @@ class MainWindow(QMainWindow):
             ta_us = markers.t_start * 1e6
             tb_us = markers.t_end * 1e6
             ha_a, hb_v = markers.ha_v, markers.hb_a
+        search_t0 = min(search_t0, float(ta_us), float(tb_us))
+        search_t1 = max(search_t1, float(ta_us), float(tb_us))
 
         # 首次进入 Err 时将恢复区放到推荐位置；已经存在手动 energy
         # 光标时，用户可能刚刚平移/缩放到要复核的局部区域。二次点击只恢复
@@ -6133,6 +6179,8 @@ class MainWindow(QMainWindow):
         )
         if restored is not None:
             ta_us, tb_us, ha_v, hb_v = restored
+            search_t0 = min(search_t0, float(ta_us), float(tb_us))
+            search_t1 = max(search_t1, float(ta_us), float(tb_us))
             self.wave_plot.enable_energy_loss_interaction(
                 search_t0,
                 search_t1,
@@ -6157,6 +6205,8 @@ class MainWindow(QMainWindow):
 
         ta_us = markers.t_start * 1e6
         tb_us = markers.t_end * 1e6
+        search_t0 = min(search_t0, float(ta_us), float(tb_us))
+        search_t1 = max(search_t1, float(ta_us), float(tb_us))
         self._focus_switching_local_view(section, ta_us, tb_us)
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
@@ -8301,12 +8351,14 @@ class MainWindow(QMainWindow):
 
             irr_sig = bundle_reverse_recovery_current(self.bundle, self.profile)
             rr0, rr1 = segs.reverse_recovery
+            completed = self._rr_measurement_window_indices()
+            rr_context_i1 = completed[2] if completed is not None else rr1
             markers = err_energy_markers(
                 t,
                 irr_sig,
                 self.bundle.get(self.profile.v_diode),
                 rr0,
-                rr1,
+                rr_context_i1,
                 self.bundle.dt,
                 i_search_end=segs.turn_on[1],
                 vge=self.bundle.get(self.profile.vge),
@@ -8346,13 +8398,10 @@ class MainWindow(QMainWindow):
                     return trr_iv
                 return t[segs.reverse_recovery[0]] * 1e6, t[segs.reverse_recovery[1]] * 1e6
             if name in {"dv/dt", "di/dt"}:
-                from dpt_extractor.metrics.iec_windows import rr_slope_window_indices
-
-                on0, _ = segs.turn_on
-                _, rr1 = segs.reverse_recovery
-                i0, i1 = rr_slope_window_indices(
-                    on0, rr1, len(t), self.bundle.dt
-                )
+                completed = self._rr_measurement_window_indices()
+                if completed is None:
+                    return None
+                i0, i1, _rr_context_i1, _extended = completed
                 return t[i0] * 1e6, t[i1] * 1e6
 
         return None

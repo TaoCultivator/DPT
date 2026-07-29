@@ -728,10 +728,10 @@ class TestRrDidt(unittest.TestCase):
         self.assertAlmostEqual(original.reverse_a, -mirrored.reverse_a, places=12)
 
         # The lower IDM horizontal cursor is the signed centre of a quiet
-        # ~200 ns sub-band selected inside the broad 0.6 us to 0.2 us
-        # pre-peak source region.  The source region's right edge already
-        # contains the beginning of this sample's commutation edge and must not
-        # participate in the final raw max/min midpoint.
+        # ~200 ns sub-band selected inside the event-relative broad 0.6 us to
+        # 0.2 us pre-peak source region.  Absolute acquisition timestamps are
+        # deliberately not part of this regression because replacement source
+        # files may move the same physical event along the captured timeline.
         peak_idx = rr0 + int(
             err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
         )
@@ -760,7 +760,7 @@ class TestRrDidt(unittest.TestCase):
             float(stable_platform[guarded_min])
             + float(stable_platform[guarded_max])
         )
-        self.assertEqual(expected_forward, -968.0624999999999)
+        self.assertEqual(expected_forward, -1044.40625)
         self.assertEqual(original.forward_a, expected_forward)
         self.assertEqual(mirrored.forward_a, -expected_forward)
 
@@ -777,7 +777,7 @@ class TestRrDidt(unittest.TestCase):
             tail, bundle.dt, min_ns=200.0
         )
         expected_base = _rr_spike_guarded_band_center(quiet_tail)
-        self.assertAlmostEqual(expected_base, 16.265625, places=12)
+        self.assertAlmostEqual(expected_base, 19.625, places=12)
         self.assertAlmostEqual(original.base_a, expected_base, places=12)
         self.assertAlmostEqual(mirrored.base_a, -expected_base, places=12)
 
@@ -799,7 +799,7 @@ class TestRrDidt(unittest.TestCase):
         assert gui_context is not None
         self.assertAlmostEqual(
             gui_context.crossing.didt,
-            5.485001520939264,
+            5.376362514162928,
             places=9,
         )
 

@@ -29,6 +29,7 @@ from dpt_extractor.metrics.iec_windows import (
     energy_window_power,
     integrate_err_recovery,
     integrate_vi_window,
+    rr_completed_measurement_window_indices,
     rr_slope_window_indices,
 )
 from dpt_extractor.metrics.energy import peak_power_kw
@@ -726,6 +727,7 @@ def extract_all(
         cfg,
         on_dv_hi,
         on_dv_lo,
+        event_end_idx=edges.pulse2_off,
     )
     dvdt_on_v = float(on_dvdt_context.crossing.dvdt)
     on_didt_context = turn_on_didt_measurement_context(
@@ -830,7 +832,21 @@ def extract_all(
     # Vrr 口径：开通过程中换流二极管电压最大值
     vrr = float(np.max(v_diode[on0:on1])) if v_diode is not None else 0.0
     # 指导书：di/dt(1)=0.9*IDM->0.1*IDM，dv/dt(1)=0.1*(-VDM)->0.9*(-VDM)
-    rr_s0, rr_s1 = rr_slope_window_indices(on0, rr1, len(t), dt)
+    if v_diode is not None:
+        rr_s0, rr_s1, rr_window_completed = (
+            rr_completed_measurement_window_indices(
+                on0,
+                rr1,
+                on1,
+                v_diode,
+                len(t),
+                dt,
+            )
+        )
+    else:
+        rr_s0, rr_s1 = rr_slope_window_indices(on0, rr1, len(t), dt)
+        rr_window_completed = False
+    rr_context_i1 = rr_s1 if rr_window_completed else rr1
     # 反向恢复 di/dt、dv/dt：由 GUI “范围取值”选择百分比计算
     rr_dv = slope_active["rr_dvdt"]
     rr_di = slope_active["rr_didt"]
@@ -849,7 +865,7 @@ def extract_all(
             pct_lo,
             pct_hi,
             fallback_i0=rr0,
-            fallback_i1=rr1,
+            fallback_i1=rr_context_i1,
         )
         if v_diode is not None
         else None
@@ -871,9 +887,9 @@ def extract_all(
         di_b,
         measure=rr_measure,
         rr_i0=rr0,
-        rr_i1=rr1,
+        rr_i1=rr_context_i1,
         fallback_i0=rr0,
-        fallback_i1=rr1,
+        fallback_i1=rr_context_i1,
     )
     didt_rr = float(rr_didt_context.crossing.didt)
     # Trr 与 GUI 默认卡尺共用同一套 Ha/A/B 主恢复瓣交点逻辑
@@ -903,7 +919,7 @@ def extract_all(
             irr,
             v_diode,
             rr0,
-            rr1,
+            rr_context_i1,
             dt,
             i_search_end=on1,
             vge=vge,

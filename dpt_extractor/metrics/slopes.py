@@ -589,6 +589,8 @@ def turn_on_dvdt_measurement_context(
     cfg: AppConfig,
     pct_hi: float,
     pct_lo: float,
+    *,
+    event_end_idx: int | None = None,
 ) -> DvdtMeasurementContext:
     """Build the canonical turn-on Vce dv/dt context.
 
@@ -621,6 +623,39 @@ def turn_on_dvdt_measurement_context(
         local = max(0, min(local, len(seg_t) - 2))
         t_b = crossing_time(seg_t, seg_y, th_lo, "falling", start=local)
     complete = t_a is not None and t_b is not None and t_b > t_a
+    # Some slow turn-on records finish the physical Vce fall after the
+    # segmenter's compact turn-on display window.  Preserve the historical
+    # window whenever it already contains both crossings; only a missing pair
+    # may extend to the real second-pulse turn-off boundary.
+    if not complete and event_end_idx is not None:
+        extended_i1 = max(i1, min(int(event_end_idx), n - 1))
+        if extended_i1 > i1:
+            extended_t = t_arr[i0 : extended_i1 + 1]
+            extended_y = vce_arr[i0 : extended_i1 + 1]
+            extended_a = crossing_time(
+                extended_t, extended_y, th_hi, "falling", start=0
+            )
+            extended_b = None
+            if extended_a is not None:
+                local = int(
+                    np.searchsorted(extended_t, extended_a, side="left")
+                )
+                local = max(0, min(local, len(extended_t) - 2))
+                extended_b = crossing_time(
+                    extended_t,
+                    extended_y,
+                    th_lo,
+                    "falling",
+                    start=local,
+                )
+            if (
+                extended_a is not None
+                and extended_b is not None
+                and extended_b > extended_a
+            ):
+                t_a = extended_a
+                t_b = extended_b
+                complete = True
     value = (
         abs(th_hi - th_lo) / abs(float(t_b) - float(t_a)) / 1e9
         if complete

@@ -377,12 +377,12 @@ class TestLogicalDisplaySign(unittest.TestCase):
             assert plot._h_cursor_b is not None
             self.assertAlmostEqual(
                 plot._from_disp("irr", float(plot._h_cursor_b.value())),
-                -968.0625,
+                -1044.40625,
                 places=6,
             )
             self.assertAlmostEqual(
                 plot._from_disp("CH3", float(plot._h_cursor_b.value())),
-                -968.0625,
+                -1044.40625,
                 places=6,
             )
         finally:

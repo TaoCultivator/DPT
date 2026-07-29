@@ -601,14 +601,22 @@ def _unnecessary_ab_focus_expansion(
 
 def _is_wanglihui_u_sample(path: Path) -> bool:
     parts = [part.casefold() for part in path.parts]
-    return any(
+    if "wanglihui" not in parts:
+        return False
+    # The older batch is stored below wanglihui/U, while uploaded batches such
+    # as wanglihui/20260729 group files by UH_*/UL_* acquisition folders.
+    # File bridge codes are the stable U-phase discriminator across both
+    # layouts; do not bind the audit setup to one historical directory name.
+    stem = path.stem.casefold()
+    legacy_u_dir = any(
         parts[index] == "wanglihui" and parts[index + 1] == "u"
         for index in range(len(parts) - 1)
     )
+    return legacy_u_dir or stem.startswith(("uh_", "uh-", "ul_", "ul-"))
 
 
 def _ensure_wanglihui_u_ch3_ui_inversion(mw, QApplication, path: Path) -> str:
-    """Apply the wanglihui/U CH3 inversion through the same state path as the UI.
+    """Apply the wanglihui U-phase CH3 inversion through the UI state path.
 
     UH sources start with the display toggle off, so enabling it emits
     ``channelInversionChanged`` and MainWindow recalculates synchronously.  UL
@@ -2155,8 +2163,13 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             else:
                 ta, tb = ab["bound"]["t_a_us"], ab["bound"]["t_b_us"]
                 gui_ab_us = (float(ta), float(tb))
-                check_time(ta, "A")
-                check_time(tb, "B")
+                slope_segment = (s0, s1)
+                if section == "反向恢复":
+                    completed = mw._rr_measurement_window_indices()
+                    if completed is not None:
+                        slope_segment = (completed[0], completed[1])
+                check_time(ta, "A", slope_segment)
+                check_time(tb, "B", slope_segment)
                 ab_txt = f" A={ta:.3f} B={tb:.3f}"
             detail = f"ch={channel} Ha={top_v:.2f} Hb={base_v:.2f}{ab_txt}"
             if section == "关断过程":
@@ -2385,8 +2398,13 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                                 rr_didt_between_levels,
                             )
 
+                            completed = mw._rr_measurement_window_indices()
+                            recovery_end = (
+                                completed[2] if completed is not None else s1
+                            )
                             recovery = np.asarray(
-                                chan["irr"][s0 : s1 + 1], dtype=np.float64
+                                chan["irr"][s0 : recovery_end + 1],
+                                dtype=np.float64,
                             )
                             recovery_peak = s0 + int(
                                 err_recovery_peak_index(recovery, bundle.dt)
@@ -2743,18 +2761,9 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     problems.append("反向恢复 dv/dt MainWindow共用context不可用")
                     detail += " | context=none used_fallback=unknown cross=unknown"
                 else:
-                    from dpt_extractor.metrics.iec_windows import (
-                        rr_slope_window_indices,
-                    )
-
-                    segs = result.segments
-                    assert segs is not None
-                    rr_i0, rr_i1 = rr_slope_window_indices(
-                        segs.turn_on[0],
-                        segs.reverse_recovery[1],
-                        len(t),
-                        bundle.dt,
-                    )
+                    completed = mw._rr_measurement_window_indices()
+                    assert completed is not None
+                    rr_i0, rr_i1, _rr_context_i1, _extended = completed
                     independent_top = float(
                         np.max(np.abs(chan["v_diode"][rr_i0:rr_i1]))
                     )
@@ -2805,8 +2814,12 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             exp = ("vce", "ic") if name == "Eoff" else ("ic", "vce")
             check_channel(ha_ch, exp[0], "Ha")
             check_channel(hb_ch, exp[1], "Hb")
-            check_time(ta, "A")
-            check_time(tb, "B")
+            loss_search_segment = (
+                _idx(t, min(float(win[0]), float(win[1]))),
+                _idx(t, max(float(win[0]), float(win[1]))),
+            )
+            check_time(ta, "A", loss_search_segment)
+            check_time(tb, "B", loss_search_segment)
             if not float(ta) < float(tb):
                 problems.append(f"A({float(ta):.6f})应早于B({float(tb):.6f})")
             problems.extend(
@@ -2850,6 +2863,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             b = c["bound"]
             ta, tb, ha_a, hb_v = b["t_a_us"], b["t_b_us"], b["ha_v"], b["hb_a"]
             ha_ch, hb_ch = b.get("ha_channel"), b.get("hb_channel")
+            win = (b["search_t0_us"], b["search_t1_us"])
             check_channel(ha_ch, "irr", "Ha")
             check_channel(hb_ch, "v_diode", "Hb")
             if not (ta > tb):
@@ -2857,17 +2871,32 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             on1 = seg_idx["turn_on"][1]
             from dpt_extractor.metrics.iec_windows import err_recovery_peak_index
 
+            completed = mw._rr_measurement_window_indices()
+            rr_context_i1 = completed[2] if completed is not None else s1
             ipk = s0 + err_recovery_peak_index(
-                np.asarray(chan["irr"][s0 : s1 + 1], dtype=np.float64),
+                np.asarray(
+                    chan["irr"][s0 : rr_context_i1 + 1],
+                    dtype=np.float64,
+                ),
                 bundle.dt,
             )
             tpk_us = float(t[ipk]) * 1e6
-            ha_win = (tpk_us + 0.4, tpk_us + 0.8)
-            hb_win = (tpk_us - 0.6, tpk_us - 0.2)
-            check_time(ta, "A", (s0, on1))
-            check_time(tb, "B", (s0, on1))
-            check_level(ha_a, "irr", "Ha", ha_win)
-            check_level(hb_v, "v_diode", "Hb", hb_win)
+            err_search_segment = (
+                _idx(t, min(float(win[0]), float(win[1]))),
+                _idx(t, max(float(win[0]), float(win[1]))),
+            )
+            check_time(ta, "A", err_search_segment)
+            check_time(tb, "B", err_search_segment)
+            # Err levels are defined by its actual parameter-local window and
+            # raw A/B intersections.  A fixed peak+0.4~0.8us audit band is not
+            # authoritative for low-current soft recovery and can exclude the
+            # valid early local Top even when Irr(A)==Ha exactly.
+            err_level_window = (
+                min(float(win[0]), float(ta), float(tb)),
+                max(float(win[1]), float(ta), float(tb)),
+            )
+            check_level(ha_a, "irr", "Ha", err_level_window)
+            check_level(hb_v, "v_diode", "Hb", err_level_window)
             err_a_matches, irr_at_a, err_a_atol = _err_a_signed_intersection_check(
                 ha_a,
                 ta * 1e-6,
@@ -3290,15 +3319,40 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             fixed_v = b["fixed_v"]
             move_t = b["move_t_us"]
             move_v = b.get("move_v")
-            check_time(fixed_t, "A")
-            check_time(move_t, "B")
+            search_t0_us = b.get("search_t0_us")
+            search_t1_us = b.get("search_t1_us")
+            search_window_us = None
+            if (
+                search_t0_us is not None
+                and search_t1_us is not None
+                and np.isfinite(float(search_t0_us))
+                and np.isfinite(float(search_t1_us))
+            ):
+                search_window_us = (
+                    min(float(search_t0_us), float(search_t1_us)),
+                    max(float(search_t0_us), float(search_t1_us)),
+                )
+            if search_window_us is None:
+                check_time(fixed_t, "A")
+                check_time(move_t, "B")
+            else:
+                for label, cursor_us in (("A", fixed_t), ("B", move_t)):
+                    if not (
+                        search_window_us[0] - 1e-9
+                        <= float(cursor_us)
+                        <= search_window_us[1] + 1e-9
+                    ):
+                        problems.append(
+                            f"{label}={float(cursor_us):.3f}µs 不在ΔVce参数窗"
+                            f"[{search_window_us[0]:.3f},{search_window_us[1]:.3f}]"
+                        )
             if not float(fixed_t) < float(move_t):
                 problems.append(f"ΔVce/Ls A({fixed_t:.6f})应早于B({move_t:.6f})")
-            check_level(fixed_v, "vce", "Ha")
+            check_level(fixed_v, "vce", "Ha", win_us=search_window_us)
             if move_v is None:
                 problems.append("ΔVce/Ls 缺少 Hb 电平")
             else:
-                check_level(move_v, "vce", "Hb")
+                check_level(move_v, "vce", "Hb", win_us=search_window_us)
             if str(getattr(mw.wave_plot, "_active_channel", "")) != "vce":
                 problems.append("ΔVce/Ls A/B/Ha/Hb 未绑定 vce 活动通道")
             for label, cursor_us, level in (
@@ -3357,13 +3411,6 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             interval_channel = b.get("channel")
             if b.get("mode") != "power_peak":
                 problems.append(f"功率交互模式={b.get('mode')!r}≠power_peak")
-            power_segment = (
-                (s0, seg_idx["turn_on"][1])
-                if section == "反向恢复"
-                else (s0, s1)
-            )
-            check_time(ta, "A", power_segment)
-            check_time(tb, "B", power_segment)
             if not float(ta) < float(tb):
                 problems.append(f"功率A({float(ta):.6f})应早于B({float(tb):.6f})")
             expected_power_interval = mw._parameter_interval_us(section, name)
@@ -3372,6 +3419,14 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 # whereas the P(d)max interval UI displays the same integration
                 # bounds in chronological left/right order.
                 expected_power_interval = tuple(sorted(expected_power_interval))
+                power_segment = (
+                    _idx(t, float(expected_power_interval[0])),
+                    _idx(t, float(expected_power_interval[1])),
+                )
+            else:
+                power_segment = (s0, s1)
+            check_time(ta, "A", power_segment)
+            check_time(tb, "B", power_segment)
             problems.extend(
                 _ab_role_binding_problems(
                     float(ta),
@@ -3555,8 +3610,16 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             ib = interval_call["bound"]
             ta = float(ib["start_t_us"])
             tb = float(ib["end_t_us"])
-            check_time(ta, "A")
-            check_time(tb, "B")
+            timing_interval = mw._iec_timing_interval_us(section, name)
+            if timing_interval is not None:
+                timing_segment = (
+                    _idx(t, min(float(timing_interval[0]), float(timing_interval[1]))),
+                    _idx(t, max(float(timing_interval[0]), float(timing_interval[1]))),
+                )
+            else:
+                timing_segment = (s0, s1)
+            check_time(ta, "A", timing_segment)
+            check_time(tb, "B", timing_segment)
             endpoint_channels = IEC_TIMING_ENDPOINT_CHANNELS[(section, name)]
             if endpoint_channels[0] == endpoint_channels[1] and not ta < tb:
                 problems.append(f"IEC时间A({ta:.6f})应早于B({tb:.6f})")
@@ -3564,7 +3627,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 _ab_role_binding_problems(
                     ta,
                     tb,
-                    mw._iec_timing_interval_us(section, name),
+                    timing_interval,
                     role_text=IEC_TIMING_CURSOR_ROLES[(section, name)],
                 )
             )

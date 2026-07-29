@@ -22,6 +22,14 @@ ROOT = Path(__file__).resolve().parents[2]
 WANGLIHUI_U = ROOT / "示例文件" / "wanglihui" / "U"
 WANGLIHUI_UL = WANGLIHUI_U / "UL_400V_1070A_Rgon1.1R_Rgof5R_000.tss"
 WANGLIHUI_UH = WANGLIHUI_U / "UH_400V_1070A_Rgon1.515R_Rgoff6.346R_000.tss"
+LIKANGKANG_LT_V = (
+    ROOT
+    / "示例文件"
+    / "likangkang"
+    / "24B6-20260709"
+    / "LT"
+    / "v"
+)
 
 
 def _load_mapped(path: Path):
@@ -33,6 +41,79 @@ def _load_mapped(path: Path):
 
 
 class TestTurnOnCursorWindows(unittest.TestCase):
+    def test_likangkang_vh_offset_baseline_keeps_real_turn_off_crossings(
+        self,
+    ) -> None:
+        cases = {
+            "vh-850v-1061.01a_000.tss": (
+                510.530580835668,
+                63.063803131152,
+                573.594383966819,
+            ),
+            "vh-850v-777.7a_000.tss": (
+                636.555185586138,
+                55.068663139802,
+                691.623848725940,
+            ),
+            "vh-900v-494.9a_000.tss": (
+                597.786945709801,
+                47.479217110926,
+                645.266162820727,
+            ),
+            "vh-900v-693.37a_000.tss": (
+                581.071327266743,
+                52.800135979686,
+                633.871463246428,
+            ),
+        }
+        for name, (td_off_ns, tf_ns, toff_ns) in cases.items():
+            path = LIKANGKANG_LT_V / name
+            with self.subTest(sample=name):
+                if not path.exists():
+                    self.skipTest(f"missing {path}")
+                _bundle, _profile, result = _load_mapped(path)
+                self.assertAlmostEqual(result.turn_off.td_off, td_off_ns, places=6)
+                self.assertAlmostEqual(result.turn_off.tf, tf_ns, places=6)
+                self.assertAlmostEqual(result.turn_off.toff, toff_ns, places=6)
+
+    def test_likangkang_vh_offset_baseline_keeps_real_turn_on_crossings(
+        self,
+    ) -> None:
+        cases = {
+            "vh-850v-1061.01a_000.tss": (
+                195.378020876570,
+                108.318917935122,
+                303.696938811692,
+            ),
+            "vh-850v-777.7a_000.tss": (
+                188.156957989656,
+                95.738082067140,
+                283.895040056796,
+            ),
+            "vh-900v-494.9a_000.tss": (
+                176.798431009858,
+                82.256592766703,
+                259.055023776561,
+            ),
+            "vh-900v-693.37a_000.tss": (
+                184.096872750447,
+                91.736321134007,
+                275.833193884454,
+            ),
+        }
+        for name, (td_on_ns, tr_ns, ton_ns) in cases.items():
+            path = LIKANGKANG_LT_V / name
+            with self.subTest(sample=name):
+                if not path.exists():
+                    self.skipTest(f"missing {path}")
+                _bundle, _profile, result = _load_mapped(path)
+                self.assertAlmostEqual(result.turn_on.td_on, td_on_ns, places=6)
+                self.assertAlmostEqual(result.turn_on.tr, tr_ns, places=6)
+                self.assertAlmostEqual(result.turn_on.ton, ton_ns, places=6)
+                self.assertNotIn(("开通", "Td_on"), result.unavailable_metrics)
+                self.assertNotIn(("开通", "Tr"), result.unavailable_metrics)
+                self.assertNotIn(("开通", "Ton"), result.unavailable_metrics)
+
     def test_wanglihui_vce_on_max_window_spans_turn_on_event(self) -> None:
         cases = [
             (WANGLIHUI_UL, (36.22, 36.32), (36.78, 36.95)),

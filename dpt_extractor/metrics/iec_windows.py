@@ -1662,7 +1662,7 @@ def _eoff_vce_ha_crossing_at_main_rise(
 ) -> tuple[int, float]:
     """关断 A：Vce 主上升沿第一次穿 Ha 的时刻。"""
     _ = search_span_ns
-    return _main_edge_level_crossing(
+    provisional_idx, provisional_t = _main_edge_level_crossing(
         t_seg,
         v_seg,
         ha_v,
@@ -1675,6 +1675,39 @@ def _eoff_vce_ha_crossing_at_main_rise(
         raw_window_ns=pre_rise_span_ns,
         first_sustained_rise=True,
     )
+    # The edge fit is only an anchor for rejecting pre-edge noise.  Published
+    # A must still be a real interpolation of the raw Vce samples with Ha;
+    # returning the fitted timestamp itself can visibly miss the waveform on
+    # slow/noisy turn-off captures.
+    radius = max(
+        8,
+        int(round(max(float(pre_rise_span_ns), 40.0) * 1e-9 / max(float(dt), 1e-15))),
+    )
+    lo = max(0, int(provisional_idx) - radius)
+    hi = min(len(v_seg) - 1, int(provisional_idx) + radius)
+    candidates = _crossing_pair_indices(
+        v_seg,
+        float(ha_v),
+        lo,
+        hi,
+        direction="rising",
+    )
+    if candidates:
+        raw = [
+            (
+                idx,
+                _eoff_crossing_time_us(
+                    t_seg,
+                    v_seg,
+                    idx,
+                    float(ha_v),
+                    "rising",
+                ),
+            )
+            for idx in candidates
+        ]
+        return min(raw, key=lambda item: abs(float(item[1]) - float(provisional_t)))
+    return int(provisional_idx), float(provisional_t)
 
 
 def _eoff_vce_rise_start_index(
@@ -1912,21 +1945,46 @@ def eoff_energy_markers(
     ha_v = float(_v_base)
     hb_a = _plateau_mean_ic_after_off(ic, off_idx, w1, dt)
 
+    low_current_eoff = float(i_top) < 180.0
+    pre_rise_span_ns = 320.0 if low_current_eoff else 160.0
     sw0 = max(w0, i0)
+    # A compact segment may begin one or a few samples after Vce has already
+    # crossed its refined conducting-platform Ha.  In that specific case,
+    # extend only the A-search source slightly to the left so the published
+    # cursor can remain a real raw Vce/Ha interpolation.
+    if sw0 > 0 and float(vce[sw0]) >= float(_v_base):
+        left_limit = (
+            max(0, int(pulse1_on))
+            if pulse1_on is not None
+            else 0
+        )
+        sw0 = max(
+            left_limit,
+            sw0
+            - max(
+                2,
+                int(
+                    round(
+                        pre_rise_span_ns
+                        * 1e-9
+                        / max(float(dt), 1e-15)
+                    )
+                ),
+            ),
+        )
     v_seg = vce[sw0 : w1 + 1].astype(np.float64)
     # 带符号：下桥关断回落平台为负，B=Ic 回落与 Hb 交点须在真实波形上
     i_seg = ic[sw0 : w1 + 1].astype(np.float64)
     t_sw = t[sw0 : w1 + 1]
     local_off = off_idx - sw0
 
-    low_current_eoff = float(i_top) < 180.0
     i_start_local, t_start = _eoff_vce_ha_crossing_at_main_rise(
         t_sw,
         v_seg,
         ha_v,
         dt,
         float(v_top),
-        pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
+        pre_rise_span_ns=pre_rise_span_ns,
     )
     raw_ha_v = float(ha_v)
     raw_i_start_local = int(i_start_local)
@@ -1948,7 +2006,7 @@ def eoff_energy_markers(
                 ha_v,
                 dt,
                 float(v_top),
-                pre_rise_span_ns=320.0 if low_current_eoff else 160.0,
+                pre_rise_span_ns=pre_rise_span_ns,
             )
 
     fall_anchor = max(i_start_local + 1, int(np.searchsorted(t_sw, t_start, side="left")))
@@ -4008,6 +4066,7 @@ def integrate_vi_window_base_compensated(
 
 
 RR_SLOPE_TAIL_NS = 250.0
+RR_SLOPE_COMPLETION_FRACTION = 0.90
 
 
 def rr_slope_window_indices(
@@ -4026,3 +4085,56 @@ def rr_slope_window_indices(
     tail = max(0, int(round(float(tail_ns) * 1e-9 / dt)))
     i1 = max(i0 + 2, min(n_samples - 1, int(rr1) + tail))
     return i0, i1
+
+
+def rr_completed_measurement_window_indices(
+    on0: int,
+    rr1: int,
+    event_end_idx: int,
+    v_diode: np.ndarray,
+    n_samples: int,
+    dt: float,
+) -> tuple[int, int, bool]:
+    """Return the legacy RR slope window, extending only when its edge is incomplete.
+
+    The default RR dv/dt measurement needs the physical 90% crossing of the
+    event-local ``max(abs(Vd))``.  Some slow commutations finish after the
+    segmenter's ``rr1 + 250 ns`` tail.  In that case the legacy window can
+    contain neither that crossing nor the matching current commutation edge,
+    yet still publish plausible slopes from pre-edge drift.
+
+    Keep the legacy window bit-stable whenever it already reaches 90% of the
+    complete turn-on event's ``|Vd|`` peak.  Otherwise, extend only to the
+    caller-supplied end of that same turn-on event.  The boolean tells callers
+    whether RR peak/platform-dependent contexts must use the completed end too.
+    """
+    i0, legacy_i1 = rr_slope_window_indices(on0, rr1, n_samples, dt)
+    if n_samples < 2:
+        return i0, legacy_i1, False
+
+    event_i1 = max(i0 + 2, min(int(event_end_idx), int(n_samples)))
+    if event_i1 <= legacy_i1:
+        return i0, legacy_i1, False
+
+    vd = np.abs(np.asarray(v_diode, dtype=np.float64))
+    available = min(len(vd), int(n_samples))
+    legacy_end = min(int(legacy_i1), available)
+    event_end = min(int(event_i1), available)
+    if legacy_end <= i0 or event_end <= legacy_end:
+        return i0, legacy_i1, False
+
+    legacy_finite = vd[i0:legacy_end]
+    legacy_finite = legacy_finite[np.isfinite(legacy_finite)]
+    event_finite = vd[i0:event_end]
+    event_finite = event_finite[np.isfinite(event_finite)]
+    if legacy_finite.size == 0 or event_finite.size == 0:
+        return i0, legacy_i1, False
+
+    legacy_peak = float(np.max(legacy_finite))
+    event_peak = float(np.max(event_finite))
+    incomplete = (
+        event_peak > 1e-12
+        and legacy_peak
+        < RR_SLOPE_COMPLETION_FRACTION * event_peak
+    )
+    return i0, event_i1 if incomplete else legacy_i1, bool(incomplete)
