@@ -38,6 +38,9 @@ from dpt_extractor.metrics.plateau_level import (  # noqa: E402
     turn_on_current_cursor_hb_a_us,
     turn_on_ic_b_cross_ha_us,
 )
+from dpt_extractor.metrics.slopes import (  # noqa: E402
+    rr_dvdt_prefers_settled_platform,
+)
 from dpt_extractor.models.waveform import (  # noqa: E402
     bundle_reverse_recovery_current,
     bundle_total_current,
@@ -118,7 +121,7 @@ DPT_PARAMETER_CURSOR_ROLES = {
         "Ha=峰后恢复稳定平台max/min平均中线；Hb=有符号I_RM尖峰"
     ),
     ("反向恢复", "Vrr"): "A/B=Vd取值窗；Ha=Vd最大值；Hb=Vd最小值",
-    ("反向恢复", "dv/dt"): "A/B=|Vd|阈值交点；Ha=|VDM|；Hb=0幅值基准",
+    ("反向恢复", "dv/dt"): "A/B=|Vd|阈值交点；默认Ha=|VDM|/Hb=0；低Irr强振铃时Ha/Hb=稳定Vd Top/Base",
     ("反向恢复", "di/dt"): "A/B=Irr阈值交点；Ha/Hb=Irr恢复平台/正向平台",
     ("反向恢复", "Pdmax"): "A/B=Err功率窗口；有可信功率轨迹时Ha=|Vd|×|Irr|峰，否则Ha/Hb=不适用",
     ("反向恢复", "Err"): "A=Irr与Ha交点；B=Vd与Hb交点；Ha=Irr局部offset Top；Hb=Vd基线",
@@ -2767,18 +2770,44 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     independent_top = float(
                         np.max(np.abs(chan["v_diode"][rr_i0:rr_i1]))
                     )
-                    if float(base_v) != 0.0 or float(context.base_v) != 0.0:
-                        problems.append(
-                            "反向恢复 dv/dt Hb未使用0幅值基准: "
-                            f"gui/context={float(base_v):.12g}/{float(context.base_v):.12g}V"
+                    use_settled_platform = rr_dvdt_prefers_settled_platform(
+                        chan["irr"],
+                        result.reverse_recovery.irr,
+                        segs.turn_on[1],
+                        segs.pulse2_off,
+                        bundle.dt,
+                    )
+                    if use_settled_platform:
+                        settled_ratio = (
+                            float(context.top_v) / independent_top
+                            if independent_top > 1e-9
+                            else 0.0
                         )
-                    if not _short_values_close(
-                        float(top_v), independent_top, floor=1e-9
-                    ):
-                        problems.append(
-                            "反向恢复 dv/dt Ha未绑定|VDM|: "
-                            f"{float(top_v):.12g}≠{independent_top:.12g}V"
-                        )
+                        if not 0.70 <= settled_ratio <= 0.98:
+                            problems.append(
+                                "反向恢复 dv/dt 低Irr强振铃时Ha未避开过冲峰值: "
+                                f"Top/|VDM|max={settled_ratio:.6f}"
+                            )
+                        if abs(float(context.base_v)) > 0.05 * abs(
+                            float(context.top_v)
+                        ):
+                            problems.append(
+                                "反向恢复 dv/dt 稳定Base偏离低平台: "
+                                f"{float(context.base_v):.12g}V"
+                            )
+                    else:
+                        if float(base_v) != 0.0 or float(context.base_v) != 0.0:
+                            problems.append(
+                                "反向恢复 dv/dt Hb未使用0幅值基准: "
+                                f"gui/context={float(base_v):.12g}/{float(context.base_v):.12g}V"
+                            )
+                        if not _short_values_close(
+                            float(top_v), independent_top, floor=1e-9
+                        ):
+                            problems.append(
+                                "反向恢复 dv/dt Ha未绑定|VDM|: "
+                                f"{float(top_v):.12g}≠{independent_top:.12g}V"
+                            )
                     context_problems, context_detail = (
                         _audit_turn_off_slope_context_consistency(
                             metric_name="反向恢复 dv/dt",

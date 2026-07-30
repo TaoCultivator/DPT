@@ -33,9 +33,10 @@ class TestRrSlopeWindowCompletion(unittest.TestCase):
         bundle = load_waveform(SLOW_VL_LT)
         result = extract_all(bundle, PROFILES["VL"], load_config())
 
-        # Irr/Trr were already correct through their own completed main-lobe
-        # path.  Completing the shared RR measurement context must not move
-        # those two control metrics.
+        # Irr/Trr/di-dt/Pdmax were already correct through their own completed
+        # main-lobe path and remain unchanged.  The 0729 report-backed repair
+        # intentionally moves only dv/dt away from the late Vd overshoot and
+        # lets Err reach the visible settled-tail crossing.
         self.assertAlmostEqual(result.reverse_recovery.irr, 94.4375, places=9)
         self.assertAlmostEqual(
             result.reverse_recovery.trr,
@@ -44,7 +45,7 @@ class TestRrSlopeWindowCompletion(unittest.TestCase):
         )
         self.assertAlmostEqual(
             result.reverse_recovery.dvdt_max,
-            4.406522505465541,
+            5.511084000091792,
             places=9,
         )
         self.assertAlmostEqual(
@@ -59,7 +60,7 @@ class TestRrSlopeWindowCompletion(unittest.TestCase):
         )
         self.assertAlmostEqual(
             result.reverse_recovery.err,
-            5.085597732896291,
+            7.793262545633712,
             places=9,
         )
 

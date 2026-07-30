@@ -37,6 +37,7 @@ from dpt_extractor.metrics.irr_measure import irr_parameter_peak_value
 from dpt_extractor.metrics.plateau_level import turn_off_delta_vce_blocking_top
 from dpt_extractor.metrics.slopes import (
     rr_dvdt_measurement_context,
+    rr_dvdt_prefers_settled_platform,
     rr_didt_measurement_context,
     turn_on_dvdt_measurement_context,
     turn_on_didt_measurement_context,
@@ -854,6 +855,13 @@ def extract_all(
     di_a, di_b = rr_di.as_fractions()
     pct_lo = min(dv_a, dv_b)
     pct_hi = max(dv_a, dv_b)
+    rr_dvdt_settled_platform = rr_dvdt_prefers_settled_platform(
+        irr,
+        irr_peak,
+        on1,
+        edges.pulse2_off,
+        dt,
+    )
     rr_dvdt_context = (
         rr_dvdt_measurement_context(
             t,
@@ -866,6 +874,8 @@ def extract_all(
             pct_hi,
             fallback_i0=rr0,
             fallback_i1=rr_context_i1,
+            use_settled_platform=rr_dvdt_settled_platform,
+            event_end_idx=on1,
         )
         if v_diode is not None
         else None

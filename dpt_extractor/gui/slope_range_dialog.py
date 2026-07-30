@@ -124,6 +124,22 @@ class SlopeRangeDialog(QDialog):
         self.algorithm_selector.currentIndexChanged.connect(
             self._on_algorithm_changed
         )
+        # Measure the largest state before the native window is shown.  If the
+        # dialog is first centered in its compact preset state and expands
+        # afterward, Windows can keep the old top-left position while the
+        # frame crosses the work-area edge, producing QWindows setGeometry
+        # warnings and a visibly jumping dialog.  Preallocating the maximum
+        # content height keeps preset/custom switching geometry-stable.
+        self.custom_editor.setVisible(True)
+        self.algorithm_editor.setVisible(self._row_key == "rr_didt")
+        self._update_hint()
+        layout.activate()
+        expanded_hint = self.sizeHint()
+        self.setMinimumHeight(expanded_hint.height())
+        self.resize(
+            max(self.minimumWidth(), expanded_hint.width()),
+            expanded_hint.height(),
+        )
         self._on_selection_changed()
 
     def range_value(self) -> SlopeRange | None:

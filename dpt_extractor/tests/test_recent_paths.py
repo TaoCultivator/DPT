@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -24,8 +25,19 @@ class TestRecentPaths(unittest.TestCase):
             QSettings.Scope.UserScope,
             self._td.name,
         )
+        self._settings_patcher = patch(
+            "dpt_extractor.gui.recent_paths._settings",
+            side_effect=lambda: QSettings(
+                QSettings.Format.IniFormat,
+                QSettings.Scope.UserScope,
+                "DPT",
+                "DPTExtractor",
+            ),
+        )
+        self._settings_patcher.start()
 
     def tearDown(self):
+        self._settings_patcher.stop()
         self._td.cleanup()
 
     def test_export_roundtrip_and_dialog_initial(self):

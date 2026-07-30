@@ -6,12 +6,108 @@ import numpy as np
 from scipy.ndimage import median_filter
 
 from dpt_extractor.config.loader import AppConfig
+from dpt_extractor.metrics.offset_measurement import scope_top_base
+from dpt_extractor.metrics.plateau_level import dvdt_rr_vd_plateau_top
 from dpt_extractor.utils.signal import (
     crossing_time,
     max_slope_filtered,
     slope_between_crossings,
     threshold_value,
 )
+
+
+def rr_dvdt_prefers_settled_platform(
+    irr: np.ndarray,
+    irr_peak_a: float,
+    compact_event_end_idx: int,
+    pulse_end_idx: int,
+    dt: float,
+) -> bool:
+    """Whether low-IRM ringing makes the Vd overshoot an invalid dv/dt Top.
+
+    The 0729 LT reference captures have a real low-current recovery edge
+    followed by a large ringing packet.  In that morphology the absolute Vd
+    maximum is a later overshoot, not the stable blocking-voltage endpoint.
+    Keep the historical peak-amplitude definition for all other records.
+    """
+    y = np.asarray(irr, dtype=np.float64)
+    n = len(y)
+    if n < 12:
+        return False
+    event_end = max(0, min(int(compact_event_end_idx), n - 1))
+    pulse_end = max(event_end, min(int(pulse_end_idx), n - 1))
+    if pulse_end <= event_end:
+        return False
+    peak_abs = abs(float(irr_peak_a))
+    if not 80.0 <= peak_abs <= 130.0:
+        return False
+    lookahead = max(8, int(round(120e-9 / max(float(dt), 1e-15))))
+    tail_end = min(pulse_end, event_end + lookahead)
+    if tail_end < event_end + 8:
+        return False
+    post_tail = y[event_end : tail_end + 1]
+    post_tail_pp = float(np.max(post_tail) - np.min(post_tail))
+    return post_tail_pp >= max(35.0, 0.35 * peak_abs)
+
+
+def _rr_dvdt_settled_base_top(
+    t: np.ndarray,
+    vd_abs: np.ndarray,
+    i0: int,
+    i1: int,
+    event_end_idx: int | None,
+    dt: float,
+) -> tuple[float, float] | None:
+    """Return event-local stable Vd Base/Top for a ringing-polluted RR edge."""
+    t_arr = np.asarray(t, dtype=np.float64)
+    y = np.asarray(vd_abs, dtype=np.float64)
+    n = min(len(t_arr), len(y))
+    if n < 12:
+        return None
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 2, min(int(i1), n))
+    event_end = (
+        i1 - 1
+        if event_end_idx is None
+        else max(i0 + 1, min(int(event_end_idx), n - 1))
+    )
+    peak_idx = i0 + int(np.argmax(y[i0 : event_end + 1]))
+    search_end = min(
+        n - 1,
+        max(
+            peak_idx + 2,
+            int(np.searchsorted(t_arr, float(t_arr[peak_idx]) + 1.35e-6)),
+        ),
+    )
+    top = float(
+        dvdt_rr_vd_plateau_top(
+            t_arr,
+            y,
+            peak_idx,
+            dt,
+            search_end,
+        )
+    )
+    if not np.isfinite(top) or top <= 1e-9:
+        return None
+
+    seg_t = t_arr[i0:i1]
+    seg_y = y[i0:i1]
+    first_rise = crossing_time(seg_t, seg_y, 0.10 * top, "rising", start=0)
+    base = 0.0
+    if first_rise is not None:
+        base_i0 = int(np.searchsorted(t_arr, float(first_rise) - 400e-9))
+        base_i1 = int(np.searchsorted(t_arr, float(first_rise) - 100e-9))
+        base_i0 = max(0, min(base_i0, n - 2))
+        base_i1 = max(base_i0 + 2, min(base_i1, n))
+        _local_top, local_base = scope_top_base(y[base_i0:base_i1])
+        if np.isfinite(local_base):
+            base = float(local_base)
+    if abs(base) <= 0.01 * abs(top):
+        base = 0.0
+    if base >= top:
+        return None
+    return float(base), float(top)
 
 
 def dvdt_off(
@@ -686,14 +782,17 @@ def rr_dvdt_measurement_context(
     *,
     fallback_i0: int | None = None,
     fallback_i1: int | None = None,
+    use_settled_platform: bool = False,
+    event_end_idx: int | None = None,
 ) -> DvdtMeasurementContext:
     """Build the canonical reverse-recovery ``|Vd|`` dv/dt context.
 
     ``i1`` is exclusive to preserve the long-standing
-    :func:`dvdt_diode_recovery` search window.  Ha is the same ``|VDM|`` peak
-    used by the numeric result and Hb is its zero-amplitude reference; the
-    later settled bus platform is useful visual context but is not the 100%
-    level of this measurement.
+    :func:`dvdt_diode_recovery` search window.  The default Ha is the same
+    ``|VDM|`` peak used by the numeric result and Hb is its zero-amplitude
+    reference.  A narrowly detected low-IRM ringing morphology may instead
+    use the event-local stable blocking-voltage Base/Top so a later overshoot
+    cannot steal the 90% crossing.
     """
 
     t_arr = np.asarray(t, dtype=np.float64)
@@ -706,9 +805,22 @@ def rr_dvdt_measurement_context(
     i1 = max(i0 + 2, min(int(i1), n))
     seg_t = t_arr[i0:i1]
     seg_y = np.abs(vd_arr[i0:i1])
+    base = 0.0
     top = float(np.max(seg_y)) if len(seg_y) else 0.0
-    th_lo = float(pct_lo) * top
-    th_hi = float(pct_hi) * top
+    if use_settled_platform:
+        settled_levels = _rr_dvdt_settled_base_top(
+            t_arr,
+            np.abs(vd_arr),
+            i0,
+            i1,
+            event_end_idx,
+            dt,
+        )
+        if settled_levels is not None:
+            base, top = settled_levels
+    span = float(top) - float(base)
+    th_lo = float(base) + float(pct_lo) * span
+    th_hi = float(base) + float(pct_hi) * span
     t_a = crossing_time(seg_t, seg_y, th_lo, "rising", start=0)
     t_b = None
     if t_a is not None:
@@ -733,7 +845,7 @@ def rr_dvdt_measurement_context(
         th_lo,
         th_hi,
     )
-    return DvdtMeasurementContext(0.0, top, crossing, used_fallback)
+    return DvdtMeasurementContext(base, top, crossing, used_fallback)
 
 
 @dataclass(frozen=True)

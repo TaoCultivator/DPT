@@ -146,6 +146,7 @@ from dpt_extractor.metrics.slopes import (
     dvdt_max,
     prepare_rr_didt_series,
     rr_dvdt_measurement_context,
+    rr_dvdt_prefers_settled_platform,
     rr_didt_between_levels,
     rr_didt_between_prepared_levels,
     rr_didt_measurement_context,
@@ -4323,7 +4324,7 @@ class MainWindow(QMainWindow):
         return float(context.base_v), float(context.top_v)
 
     def _default_rr_dvdt_base_top_v(self) -> tuple[float, float] | None:
-        """反向恢复 dv/dt：Hb=0，Ha=数值计算使用的 |VDM|。"""
+        """反向恢复 dv/dt：返回数值计算使用的同一组 Vd Base/Top。"""
         context = self._rr_dvdt_context()
         if context is None:
             return None
@@ -4377,6 +4378,16 @@ class MainWindow(QMainWindow):
         if completed is None:
             return None
         i0, i1, rr_context_i1, _extended = completed
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        irr = bundle_reverse_recovery_current(self.bundle, self.profile)
+        use_settled_platform = rr_dvdt_prefers_settled_platform(
+            irr,
+            self.result.reverse_recovery.irr,
+            self.result.segments.turn_on[1],
+            self.result.segments.pulse2_off,
+            self.bundle.dt,
+        )
         row_key = SLOPE_ROW_KEYS.get(("反向恢复", "dv/dt"))
         sr = self._slope_ranges.get(row_key) if row_key else None
         pct_a, pct_b = sr.as_fractions() if sr else (0.1, 0.9)
@@ -4391,6 +4402,8 @@ class MainWindow(QMainWindow):
             max(pct_a, pct_b),
             fallback_i0=rr0,
             fallback_i1=rr_context_i1,
+            use_settled_platform=use_settled_platform,
+            event_end_idx=self.result.segments.turn_on[1],
         )
 
     def _turn_off_dvdt_context(

@@ -3652,6 +3652,38 @@ def err_energy_markers(
     irr_full = np.asarray(irr, dtype=np.float64)
     vd_full = np.asarray(v_diode, dtype=np.float64)
     tpk = float(t[ipk_global])
+    # Low-IRM captures can still carry a recovery ringing packet when the
+    # segmenter's compact ``turn_on`` window ends.  Treating that boundary as
+    # the Err search ceiling makes A land on an early ringing crossing even
+    # though the same pulse contains a settled-tail crossing a few hundred
+    # nanoseconds later.  Extend only when the post-boundary packet remains
+    # large relative to the actual recovery peak; established HT/RT cases
+    # whose tail is already small keep their historical window bit-for-bit.
+    initial_search_end = int(i_search_end)
+    hard_search_end = (
+        min(len(t) - 1, max(initial_search_end, int(pulse2_off)))
+        if pulse2_off is not None
+        else len(t) - 1
+    )
+    peak_abs = abs(float(irr_full[ipk_global]))
+    unsettled_tail_extended = False
+    if 80.0 <= peak_abs <= 130.0 and hard_search_end > initial_search_end:
+        lookahead_end = min(
+            hard_search_end,
+            initial_search_end
+            + _samples_for_seconds(dt, 120e-9, minimum=8),
+        )
+        if lookahead_end >= initial_search_end + 8:
+            post_tail = irr_full[initial_search_end : lookahead_end + 1]
+            post_tail_pp = float(np.max(post_tail) - np.min(post_tail))
+            unsettled_limit = max(35.0, 0.35 * peak_abs)
+            if post_tail_pp >= unsettled_limit:
+                i_search_end = min(
+                    hard_search_end,
+                    initial_search_end
+                    + _samples_for_seconds(dt, 300e-9, minimum=8),
+                )
+                unsettled_tail_extended = int(i_search_end) > initial_search_end
     # legacy 先找主 IRM 后的恢复稳定入口；新口径只把它作为 Err 本地
     # Top/Base 窗口的事件锚点，不能继续把 (max+min)/2 当成 Ha Top。
     err_base = _err_recovery_settled_base(irr_full, ipk_global, dt, i_search_end)
@@ -3824,7 +3856,8 @@ def err_energy_markers(
         peak,
     )
     if (
-        peak > 0.0
+        not unsettled_tail_extended
+        and peak > 0.0
         and ha >= soft_recovery_ha_floor
         and abs(float(peak)) >= 120.0
     ):
