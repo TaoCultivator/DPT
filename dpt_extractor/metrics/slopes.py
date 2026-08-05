@@ -6,8 +6,10 @@ import numpy as np
 from scipy.ndimage import median_filter
 
 from dpt_extractor.config.loader import AppConfig
-from dpt_extractor.metrics.offset_measurement import scope_top_base
-from dpt_extractor.metrics.plateau_level import dvdt_rr_vd_plateau_top
+from dpt_extractor.metrics.plateau_level import (
+    _plateau_mid_without_isolated_spikes,
+    dvdt_rr_vd_plateau_top,
+)
 from dpt_extractor.utils.signal import (
     crossing_time,
     max_slope_filtered,
@@ -100,9 +102,14 @@ def _rr_dvdt_settled_base_top(
         base_i1 = int(np.searchsorted(t_arr, float(first_rise) - 100e-9))
         base_i0 = max(0, min(base_i0, n - 2))
         base_i1 = max(base_i0 + 2, min(base_i1, n))
-        _local_top, local_base = scope_top_base(y[base_i0:base_i1])
-        if np.isfinite(local_base):
-            base = float(local_base)
+        base_band = y[base_i0:base_i1]
+        base_band = base_band[np.isfinite(base_band)]
+        if len(base_band) >= 2:
+            # This range is already a declared, edge-adjacent stable band.
+            # Tek-style modal Top/Base would split its ripple and bias Base
+            # toward one side of the visible trace.  The slope reference must
+            # instead sit at the spike-guarded raw (max + min) / 2 centre.
+            base = float(_plateau_mid_without_isolated_spikes(base_band))
     if abs(base) <= 0.01 * abs(top):
         base = 0.0
     if base >= top:

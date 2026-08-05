@@ -180,6 +180,7 @@ class TestReportTaskProgress(unittest.TestCase):
                 win.close()
 
     def test_report_write_task_passes_frozen_page_conditions(self):
+        from dpt_extractor.export.report_template import DptReportConditions
         from dpt_extractor.gui.main_window import _ReportWriteTask
         from dpt_extractor.models.results import ExtractResult
 
@@ -201,6 +202,11 @@ class TestReportTaskProgress(unittest.TestCase):
             "LT",
             "UL",
             0,
+            DptReportConditions(
+                voltage_v=750.0,
+                current_a=1048.0,
+                rg_on_ohm=3.233,
+            ),
         )
 
         with patch(
@@ -212,8 +218,14 @@ class TestReportTaskProgress(unittest.TestCase):
         self.assertEqual(received["temperature_code"], "LT")
         self.assertEqual(received["phase_code"], "UL")
         self.assertEqual(received["image_result_index"], 0)
+        self.assertEqual(received["report_conditions"].voltage_v, 750.0)
+        self.assertEqual(received["report_conditions"].current_a, 1048.0)
+        self.assertEqual(received["report_conditions"].rg_on_ohm, 3.233)
 
     def test_main_window_snapshots_selected_report_conditions_when_report_starts(self):
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.export.report_template import DptReportConditions
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.models.bridge_profile import make_profile
         from dpt_extractor.models.results import ExtractResult
@@ -238,17 +250,31 @@ class TestReportTaskProgress(unittest.TestCase):
             )
             win._set_profile_combos(make_profile("U", "lower"))
             win._set_temperature_code("LT")
+            win._merge_recognized_report_conditions(
+                DptReportConditions(
+                    voltage_v=750.0,
+                    current_a=1048.0,
+                    rg_on_ohm=3.233,
+                    rg_off_ohm=3.586,
+                    cg_nf=10.0,
+                )
+            )
             win._start_report_prepare_task()
 
             self.assertEqual(len(pool.tasks), 1)
             self.assertEqual(pool.tasks[0].phase_code, "UL")
             self.assertEqual(pool.tasks[0].temperature_code, "LT")
             self.assertEqual(pool.tasks[0].temperature_labels["LT"], "-40℃")
+            self.assertEqual(pool.tasks[0].report_conditions.voltage_v, 750.0)
+            self.assertEqual(pool.tasks[0].report_conditions.current_a, 1048.0)
+            self.assertEqual(pool.tasks[0].report_conditions.cg_nf, 10.0)
             win._set_profile_combos(make_profile("U", "upper"))
             win._set_temperature_code("RT")
             self.assertEqual(pool.tasks[0].phase_code, "UL")
             self.assertEqual(pool.tasks[0].temperature_code, "LT")
+            self.assertEqual(pool.tasks[0].report_conditions.voltage_v, 750.0)
         finally:
+            QSettings("DPT", "DPTExtractor").remove("conditions/report/dpt/UL")
             win._report_prepare_tasks.clear()
             win._release_report_operation()
             win._load_pool = original_pool
@@ -275,6 +301,101 @@ class TestReportTaskProgress(unittest.TestCase):
         self.assertEqual(win.report_progress.detail_text(), "失败")
         self.assertEqual(win.report_progress.eta_text(), "—")
         win.close()
+
+    def test_report_condition_memory_is_separate_per_bridge_and_short_imax_is_detected(self):
+        from dpt_extractor.export.report_template import DptReportConditions
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+        from dpt_extractor.models.test_mode import TestMode
+
+        class _MemorySettings:
+            values: dict[str, object] = {}
+
+            def __init__(self, *_args) -> None:
+                pass
+
+            def value(self, key: str, default=None):
+                return self.values.get(key, default)
+
+            def setValue(self, key: str, value) -> None:  # noqa: N802
+                self.values[key] = value
+
+            def remove(self, key: str) -> None:
+                prefix = f"{key}/"
+                for stored in list(self.values):
+                    if stored == key or stored.startswith(prefix):
+                        self.values.pop(stored, None)
+
+            def sync(self) -> None:
+                pass
+
+        with patch("dpt_extractor.gui.main_window.QSettings", _MemorySettings):
+            win = MainWindow()
+            try:
+                win._set_profile_combos(make_profile("U", "upper"))
+                win._merge_recognized_report_conditions(
+                    DptReportConditions(
+                        voltage_v=750.0,
+                        current_a=1048.0,
+                        rg_on_ohm=3.2,
+                    )
+                )
+                win._set_profile_combos(make_profile("U", "lower"))
+                lower = win._current_report_conditions()
+                self.assertIsNone(lower.voltage_v)
+                self.assertIsNone(lower.rg_on_ohm)
+                win._merge_recognized_report_conditions(
+                    DptReportConditions(rg_on_ohm=3.6)
+                )
+
+                win._set_profile_combos(make_profile("U", "upper"))
+                upper = win._current_report_conditions()
+                self.assertEqual(upper.voltage_v, 750.0)
+                self.assertEqual(upper.current_a, 1048.0)
+                self.assertEqual(upper.rg_on_ohm, 3.2)
+                win._merge_recognized_report_conditions(
+                    DptReportConditions(voltage_v=900.0)
+                )
+                merged = win._current_report_conditions()
+                self.assertEqual(merged.voltage_v, 900.0)
+                self.assertEqual(merged.current_a, 1048.0)
+
+                win.cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+                win._apply_test_mode_ui()
+                result = ExtractResult(
+                    short_circuit_mode=True,
+                    short_circuit=ShortCircuitResult(ic_max=593.0),
+                )
+                win._apply_detected_short_imax(result)
+                short = win._current_report_conditions()
+                self.assertEqual(short.imax_a, 593.0)
+                self.assertEqual(
+                    [label.text() for label in win._report_condition_field_labels],
+                    ["Vce", "Imax", "Cdesat", "Rdesat", "Vdesat"],
+                )
+            finally:
+                win.close()
+
+            restarted = MainWindow()
+            try:
+                restarted._set_profile_combos(make_profile("U", "upper"))
+                upper_after_restart = restarted._current_report_conditions()
+                self.assertEqual(upper_after_restart.voltage_v, 900.0)
+                self.assertEqual(upper_after_restart.current_a, 1048.0)
+                self.assertEqual(upper_after_restart.rg_on_ohm, 3.2)
+
+                restarted._set_profile_combos(make_profile("U", "lower"))
+                lower_after_restart = restarted._current_report_conditions()
+                self.assertEqual(lower_after_restart.rg_on_ohm, 3.6)
+
+                restarted._set_profile_combos(make_profile("U", "upper"))
+                restarted.cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+                restarted._apply_test_mode_ui()
+                short_after_restart = restarted._current_report_conditions()
+                self.assertEqual(short_after_restart.imax_a, 593.0)
+            finally:
+                restarted.close()
 
     def test_cleanup_failure_cannot_suppress_success_terminal_signal(self):
         from dpt_extractor.gui.main_window import _ReportWriteTask

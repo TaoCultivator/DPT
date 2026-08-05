@@ -18,6 +18,10 @@ VERSION = VERSION_MATCH.group(1) if VERSION_MATCH else "0.0.0"
 
 datas = [
     (str(ROOT / "dpt_extractor" / "config" / "default.yaml"), "dpt_extractor/config"),
+    (
+        str(ROOT / "dpt_extractor" / "io" / "tek_scope_bridge.ps1"),
+        "dpt_extractor/io",
+    ),
     (str(ROOT / "默认报告模板.xlsx"), "dpt_extractor/templates"),
     (
         str(ROOT / "assets" / "noncommercial_authorization_poster.png"),

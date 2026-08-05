@@ -87,6 +87,19 @@ class TestFourTssCompatibility(unittest.TestCase):
       self.assertIn("profile=WL", result.detail)
       self.assertIn("map=trend", result.detail)
 
+  def test_hinted_wanglihui_validation_uses_gate_label_before_extraction(self) -> None:
+      path = sample_tss("UH_486V_1000A_Rgon3.33R_Rgoff8.92R_000.tss")
+      if not path.exists():
+          self.skipTest("missing wanglihui channel-label sample")
+      from scripts.validate_tss_samples import _validate_dpt_sample
+
+      result = _validate_dpt_sample(path)
+
+      self.assertEqual(result.kind, "DPT")
+      self.assertEqual(result.status, "OK")
+      self.assertIn("profile=UH", result.detail)
+      self.assertIn("map=label", result.detail)
+
   def test_err_positive_and_marker_order(self) -> None:
       for path in SAMPLES:
           with self.subTest(sample=path.name):

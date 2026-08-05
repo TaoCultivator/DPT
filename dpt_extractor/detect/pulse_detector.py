@@ -45,6 +45,22 @@ class PulseDetector:
         vs = smooth(vge, dt, pd.smooth_ns)
         lo, hi = np.percentile(vs, [2, 98])
         span = hi - lo
+        # A valid short gate state can occupy less than 2% of a long capture.
+        # In that case the historical percentile pair collapses onto the
+        # majority state and the short pulse/gap disappears before interval
+        # detection.  Estimate an alternate pair from a persistence-smoothed
+        # trace whose window is the configured minimum valid pulse width.  It
+        # rejects isolated spikes while preserving every >=0.5us T1/T2/... state
+        # with the default 0.3us validity threshold.  Keep the historical
+        # percentile levels whenever they still represent the full gate swing.
+        persistence_ns = max(pd.smooth_ns, pd.min_pulse_width_us * 1_000.0)
+        persistent = smooth(vs, dt, persistence_ns)
+        persistent_lo = float(np.min(persistent))
+        persistent_hi = float(np.max(persistent))
+        persistent_span = persistent_hi - persistent_lo
+        if persistent_span > 1e-6 and span < 0.5 * persistent_span:
+            lo, hi = persistent_lo, persistent_hi
+            span = persistent_span
         if span < 1e-6:
             raise ValueError("Vge has insufficient swing for pulse detection")
         th_on = lo + pd.hysteresis_ratio * span

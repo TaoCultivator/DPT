@@ -123,6 +123,66 @@ def _norm_label(text: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
 
 
+_PROFILE_CODE_PATTERNS = (
+    re.compile(r"(?:VGE|VGS|VCE|VDS|IC|ID|I)([UVW])([HL])"),
+    re.compile(r"([UVW])([HL])(?:VGE|VGS|VCE|VDS|IC|ID|I)"),
+)
+
+
+def _profile_codes_from_norm(norm: str) -> set[tuple[str, str]]:
+    codes: set[tuple[str, str]] = set()
+    for pattern in _PROFILE_CODE_PATTERNS:
+        codes.update((match.group(1), match.group(2)) for match in pattern.finditer(norm))
+    return codes
+
+
+def _gate_arm_from_norm(norm: str) -> str | None:
+    if not re.search(r"VGE|VGS", norm):
+        return None
+    coded_arms = {arm for _phase, arm in _profile_codes_from_norm(norm)}
+    if len(coded_arms) == 1:
+        return next(iter(coded_arms))
+    is_upper = any(re.search(pattern, norm) for pattern in _UPPER_VGE_PATTERNS)
+    is_lower = any(re.search(pattern, norm) for pattern in _LOWER_VGE_PATTERNS)
+    if is_upper != is_lower:
+        return "H" if is_upper else "L"
+    return None
+
+
+def infer_profile_hint_from_labels(
+    labels: dict[str, str],
+) -> tuple[str | None, str | None]:
+    """Infer phase/bridge defaults from explicit scope channel labels.
+
+    A hint is returned only when all explicit phase codes agree.  Bridge hints
+    prefer gate labels because a capture commonly includes both the DUT and the
+    complementary Vce labels.  Ambiguous labels deliberately leave the current
+    software choice unchanged.
+    """
+
+    normalized = [_norm_label(label) for label in labels.values() if label]
+    profile_codes = {
+        code
+        for norm in normalized
+        for code in _profile_codes_from_norm(norm)
+    }
+    phases = {phase for phase, _arm in profile_codes}
+    phase = next(iter(phases)) if len(phases) == 1 else None
+
+    gate_arms = {
+        arm
+        for norm in normalized
+        if (arm := _gate_arm_from_norm(norm)) is not None
+    }
+    if len(gate_arms) == 1:
+        arm = next(iter(gate_arms))
+    else:
+        coded_arms = {arm for _phase, arm in profile_codes}
+        arm = next(iter(coded_arms)) if len(coded_arms) == 1 else None
+    bridge = "upper" if arm == "H" else "lower" if arm == "L" else None
+    return phase, bridge
+
+
 def _is_raw_scope_channel(ch: str) -> bool:
     return bool(re.fullmatch(r"CH[1-6]", ch.upper()))
 

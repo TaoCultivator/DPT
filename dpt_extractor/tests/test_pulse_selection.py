@@ -10,6 +10,50 @@ from dpt_extractor.pipeline.pulse_sequence import dpt_export_results
 
 
 class TestPulseSelection(unittest.TestCase):
+    def test_all_half_microsecond_timing_segments_survive_long_capture(self):
+        dt = 5e-9
+        t = np.arange(0.0, 100e-6, dt)
+        detector = PulseDetector(AppConfig())
+
+        for segment_count in (3, 5):
+            with self.subTest(segment_count=segment_count):
+                vge = np.zeros_like(t)
+                start = int(round(10e-6 / dt))
+                segment_samples = int(round(0.5e-6 / dt))
+                for segment in range(segment_count):
+                    if segment % 2 == 0:
+                        i0 = start + segment * segment_samples
+                        i1 = i0 + segment_samples
+                        vge[i0:i1] = 15.0
+
+                pulses = detector.detect_all(t, vge, dt)
+
+                self.assertEqual(len(pulses), (segment_count + 1) // 2)
+                for pulse_index, (pulse_start, pulse_end) in enumerate(pulses):
+                    expected_start = start + 2 * pulse_index * segment_samples
+                    expected_end = expected_start + segment_samples
+                    self.assertLessEqual(abs(pulse_start - expected_start) * dt, 40e-9)
+                    self.assertLessEqual(abs(pulse_end - expected_end) * dt, 40e-9)
+                    self.assertGreaterEqual(
+                        (pulse_end - pulse_start) * dt,
+                        0.49e-6,
+                    )
+                for previous, current in zip(pulses, pulses[1:]):
+                    self.assertGreaterEqual(
+                        (current[0] - previous[1]) * dt,
+                        0.45e-6,
+                    )
+
+                edges = detector.build_edges(
+                    pulses,
+                    1,
+                    1 if len(pulses) == 1 else 2,
+                    vge,
+                    dt,
+                )
+                self.assertFalse(edges.single_pulse)
+                self.assertEqual(edges.detected_pulse_count, len(pulses))
+
     def test_build_edges_second_pulse(self):
         cfg = AppConfig(pulse_selection=PulseSelectionConfig(off_pulse=1, on_pulse=2))
         pulses = [(100, 200), (300, 400), (500, 600)]

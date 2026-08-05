@@ -136,6 +136,31 @@ _SHORT_IMAGE_HEADERS: dict[tuple[str, str], str] = {
 ImageMap = Mapping[tuple[str, str], str | Path]
 ReportProgressCallback = Callable[[int, int, str], None]
 
+
+@dataclass(frozen=True)
+class DptReportConditions:
+    """Operator-visible DPT report identity captured when report writing starts."""
+
+    voltage_v: float | None = None
+    current_a: float | None = None
+    rg_on_ohm: float | None = None
+    rg_off_ohm: float | None = None
+    cg_nf: float | None = None
+
+
+@dataclass(frozen=True)
+class ShortReportConditions:
+    """Operator-visible short-circuit report conditions."""
+
+    vce_v: float | None = None
+    imax_a: float | None = None
+    cdesat_pf: float | None = None
+    rdesat_kohm: float | None = None
+    vdesat_v: float | None = None
+
+
+ReportConditions = DptReportConditions | ShortReportConditions
+
 REPORT_IMAGE_DISPLAY_SIZE_PX = (320, 240)
 DPT_WAVEFORM_BLOCK_ROWS = 51
 DPT_WAVEFORM_BLOCK_STRIDE = 53
@@ -216,6 +241,8 @@ class _DptSetpointMatch:
     idc: float | None
     vdc_from_filename: bool = False
     idc_from_filename: bool = False
+    vdc_explicit_blank: bool = False
+    idc_explicit_blank: bool = False
 
 
 def _format_temperature_number(value: float) -> str:
@@ -752,6 +779,42 @@ def _condition_signature(text: object) -> dict[str, float]:
     return tokens
 
 
+def infer_dpt_report_conditions(source_path: str) -> DptReportConditions:
+    """Return every DPT report condition that can be recognized from a source path."""
+
+    voltage_v, current_a = parse_setpoints_from_filename(source_path)
+    signature = _condition_signature(source_path)
+    common_rg = signature.get("rg")
+    return DptReportConditions(
+        voltage_v=voltage_v,
+        current_a=current_a,
+        rg_on_ohm=signature.get("rg_on", common_rg),
+        rg_off_ohm=signature.get("rg_off", common_rg),
+        cg_nf=signature.get("cg"),
+    )
+
+
+def _effective_dpt_condition_signature(
+    result: ExtractResult,
+    report_conditions: DptReportConditions | None = None,
+) -> dict[str, float]:
+    if report_conditions is None:
+        return _condition_signature(result.source_path)
+
+    # A GUI snapshot is authoritative, including explicit blanks.  TSS values
+    # have already been copied into the editors before the snapshot is taken.
+    signature: dict[str, float] = {}
+    overrides = {
+        "rg_on": report_conditions.rg_on_ohm,
+        "rg_off": report_conditions.rg_off_ohm,
+        "cg": report_conditions.cg_nf,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            signature[key] = float(value)
+    return signature
+
+
 def _condition_value_matches(expected: float, actual: float) -> bool:
     return abs(float(expected) - float(actual)) <= max(0.05, abs(float(expected)) * 0.02)
 
@@ -853,9 +916,14 @@ def _format_condition_key(
         return f"{fv:g}"
 
     suffix = _format_condition_signature(condition_signature or {})
-    if vdc is None and idc is None:
+    setpoint_parts: list[str] = []
+    if vdc is not None:
+        setpoint_parts.append(f"{fmt(vdc)}V")
+    if idc is not None:
+        setpoint_parts.append(f"{fmt(idc)}A")
+    base = "_".join(setpoint_parts)
+    if not base:
         return suffix
-    base = f"{fmt(vdc)}V_{fmt(idc)}A"
     return f"{base}_{suffix}" if suffix else base
 
 
@@ -865,16 +933,38 @@ def _condition_values(text: str | None) -> tuple[float | None, float | None]:
     return parse_setpoints_from_filename(str(text))
 
 
-def _dpt_setpoint_match(result: ExtractResult) -> _DptSetpointMatch:
+def _dpt_setpoint_match(
+    result: ExtractResult,
+    report_conditions: DptReportConditions | None = None,
+) -> _DptSetpointMatch:
     fn_v, fn_i = parse_setpoints_from_filename(result.source_path)
     vdc_from_filename = fn_v is not None
     idc_from_filename = fn_i is not None and fn_i > 0
     vdc, idc = _match_setpoints(result)
+    vdc_explicit_blank = False
+    idc_explicit_blank = False
+    if report_conditions is not None:
+        vdc = (
+            float(report_conditions.voltage_v)
+            if report_conditions.voltage_v is not None
+            else None
+        )
+        idc = (
+            float(report_conditions.current_a)
+            if report_conditions.current_a is not None
+            else None
+        )
+        vdc_from_filename = vdc is not None
+        idc_from_filename = idc is not None
+        vdc_explicit_blank = vdc is None
+        idc_explicit_blank = idc is None
     return _DptSetpointMatch(
         vdc=vdc,
         idc=idc,
         vdc_from_filename=vdc_from_filename,
         idc_from_filename=idc_from_filename,
+        vdc_explicit_blank=vdc_explicit_blank,
+        idc_explicit_blank=idc_explicit_blank,
     )
 
 
@@ -985,15 +1075,25 @@ def _data_row_matches_setpoints(
     setpoints: _DptSetpointMatch,
 ) -> bool:
     row_vdc, row_idc = _data_row_setpoints(ws, row)
-    return _setpoint_value_matches(
-        setpoints.vdc,
-        row_vdc,
-        expected_from_filename=setpoints.vdc_from_filename,
-    ) and _setpoint_value_matches(
-        setpoints.idc,
-        row_idc,
-        expected_from_filename=setpoints.idc_from_filename,
+    voltage_matches = (
+        row_vdc is None
+        if setpoints.vdc_explicit_blank
+        else _setpoint_value_matches(
+            setpoints.vdc,
+            row_vdc,
+            expected_from_filename=setpoints.vdc_from_filename,
+        )
     )
+    current_matches = (
+        row_idc is None
+        if setpoints.idc_explicit_blank
+        else _setpoint_value_matches(
+            setpoints.idc,
+            row_idc,
+            expected_from_filename=setpoints.idc_from_filename,
+        )
+    )
+    return voltage_matches and current_matches
 
 
 def _data_row_has_payload(ws: Worksheet, row: int) -> bool:
@@ -1367,7 +1467,22 @@ def _sync_dpt_condition_cell(
     data_ws: Worksheet,
     group_start_row: int,
     signature: Mapping[str, float],
+    *,
+    replace: bool = False,
 ) -> None:
+    if replace:
+        exact = "\n".join(
+            _format_condition_line(key, signature[key])
+            for key in _CONDITION_TOKEN_ORDER
+            if key in signature
+        )
+        _set_merged_cell_value(
+            data_ws,
+            group_start_row,
+            COL_CONDITION,
+            exact or None,
+        )
+        return
     if not signature:
         return
     current = _merged_value(data_ws, group_start_row, COL_CONDITION)
@@ -1405,13 +1520,14 @@ def _prepare_dpt_data_rows(
     data_ws: Worksheet,
     target: _DptDataTarget,
     results: Sequence[ExtractResult],
+    report_conditions: DptReportConditions | None = None,
 ) -> list[_DptDataTarget]:
     """Reserve consecutive report rows without overwriting unrelated conditions."""
     if not results:
         return []
     targets = [target]
     for offset in range(1, len(results)):
-        setpoints = _dpt_setpoint_match(results[offset])
+        setpoints = _dpt_setpoint_match(results[offset], report_conditions)
         row = target.row + offset
         group = _dpt_group_containing(data_ws, target.group_start_row)
         needs_insert = group is None or row >= group.end_row
@@ -1615,9 +1731,13 @@ def _find_dpt_data_target(
     phase_code: str,
     temp_code: str,
     temperature_labels: TemperatureLabels | None = None,
+    report_conditions: DptReportConditions | None = None,
 ) -> _DptDataTarget:
-    setpoints = _dpt_setpoint_match(result)
-    source_condition = _condition_signature(result.source_path)
+    setpoints = _dpt_setpoint_match(result, report_conditions)
+    source_condition = _effective_dpt_condition_signature(
+        result,
+        report_conditions,
+    )
     matching_groups: list[tuple[int, _DptDataGroup]] = []
     for group_index, group in enumerate(_dpt_data_groups(data_ws)):
         if group.phase.upper() != phase_code.upper():
@@ -1662,7 +1782,12 @@ def _find_dpt_data_target(
             2,
             _temperature_display(temp_code, temperature_labels),
         )
-        _sync_dpt_condition_cell(data_ws, group.start_row, source_condition)
+        _sync_dpt_condition_cell(
+            data_ws,
+            group.start_row,
+            source_condition,
+            replace=report_conditions is not None,
+        )
         return target
 
     display_temp = _temperature_display(temp_code, temperature_labels)
@@ -2202,11 +2327,21 @@ def _ensure_dpt_data_power_columns(ws: Worksheet) -> bool:
     return True
 
 
-def _write_dpt_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
+def _write_dpt_data(
+    ws: Worksheet,
+    row: int,
+    result: ExtractResult,
+    report_conditions: DptReportConditions | None = None,
+) -> None:
     off = result.turn_off
     on = result.turn_on
     rr = result.reverse_recovery
-    vdc, idc = _match_setpoints(result)
+    if report_conditions is None:
+        setpoints = _dpt_setpoint_match(result)
+        vdc, idc = setpoints.vdc, setpoints.idc
+    else:
+        vdc = report_conditions.voltage_v
+        idc = report_conditions.current_a
 
     def col(section: str, fallback_col: int, *headers: str, require_header: bool = False) -> int | None:
         return _dpt_metric_col(
@@ -2217,8 +2352,8 @@ def _write_dpt_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
             require_header=require_header,
         )
 
-    _set_value(ws, row, 4, _num(vdc, 1))
-    _set_value(ws, row, 5, _num(idc, 1))
+    ws.cell(row, 4).value = _num(vdc, 1)
+    ws.cell(row, 5).value = _num(idc, 1)
     _set_dpt_metric_value(
         ws,
         row,
@@ -3332,12 +3467,19 @@ def _normalize_report_temperature_labels(
             _normalize_short_picture_text(ws, temperature_labels)
 
 
-def _write_short_data(ws: Worksheet, row: int, result: ExtractResult) -> None:
+def _write_short_data(
+    ws: Worksheet,
+    row: int,
+    result: ExtractResult,
+    report_conditions: ShortReportConditions | None = None,
+) -> None:
     sc = result.short_circuit
     vdc = _short_voltage_from_filename(result.source_path)
     if vdc is None:
         vdc, _idc = _match_setpoints(result)
-    _set_value(ws, row, 4, _num(vdc, 1))
+    if report_conditions is not None:
+        vdc = report_conditions.vce_v
+    ws.cell(row, 4).value = _num(vdc, 1)
     _set_metric_value(ws, row, 5, result, "短路过程", "短路电流Imax", _num(sc.ic_max, 3))
     _set_metric_value(ws, row, 6, result, "短路过程", "短路时间Tsc", _num(sc.tsc, 4))
     _set_metric_value(ws, row, 7, result, "短路过程", "短路能量Esc_本管", _num(sc.esc_dut, 4))
@@ -3360,6 +3502,68 @@ def _short_voltage_from_filename(path: str) -> float | None:
     return float(match.group(1))
 
 
+def _short_labeled_condition_token(
+    text: str,
+    term: str,
+) -> tuple[float, str] | None:
+    number = r"(-?\d+(?:\.\d+)?)"
+    unit = r"([A-ZΩ]*)"
+    separators = r"[\s_\-=：:]*"
+    patterns = (
+        re.compile(rf"(?:{term}){separators}{number}\s*{unit}", re.IGNORECASE),
+        re.compile(rf"{number}\s*{unit}{separators}(?:{term})", re.IGNORECASE),
+    )
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match is not None:
+            return float(match.group(1)), str(match.group(2) or "").upper()
+    return None
+
+
+def infer_short_report_conditions(source_path: str) -> ShortReportConditions:
+    """Recognize short-circuit report conditions without inventing missing values."""
+
+    text = str(source_path).upper().replace("Ω", "OHM")
+    generic_vce, generic_imax = parse_setpoints_from_filename(source_path)
+    vce_token = _short_labeled_condition_token(text, r"V[\s_\-]*CE")
+    imax_token = _short_labeled_condition_token(text, r"I[\s_\-]*MAX")
+    cdesat_token = _short_labeled_condition_token(text, r"C[\s_\-]*DESAT")
+    rdesat_token = _short_labeled_condition_token(text, r"R[\s_\-]*DESAT")
+    vdesat_token = _short_labeled_condition_token(text, r"V[\s_\-]*DESAT")
+
+    cdesat_pf: float | None = None
+    if cdesat_token is not None:
+        value, unit = cdesat_token
+        if unit in {"N", "NF"}:
+            value *= 1_000.0
+        elif unit in {"U", "UF"}:
+            value *= 1_000_000.0
+        cdesat_pf = value
+
+    rdesat_kohm: float | None = None
+    if rdesat_token is not None:
+        value, unit = rdesat_token
+        if unit in {"OHM", "R"}:
+            value /= 1_000.0
+        elif unit in {"M", "MOHM"}:
+            value *= 1_000.0
+        rdesat_kohm = value
+
+    return ShortReportConditions(
+        vce_v=(
+            vce_token[0]
+            if vce_token is not None
+            else generic_vce
+            if generic_vce is not None and generic_vce >= 50.0
+            else None
+        ),
+        imax_a=imax_token[0] if imax_token is not None else generic_imax,
+        cdesat_pf=cdesat_pf,
+        rdesat_kohm=rdesat_kohm,
+        vdesat_v=vdesat_token[0] if vdesat_token is not None else None,
+    )
+
+
 def _format_measurement_with_unit(
     value: float | None,
     unit: str,
@@ -3377,20 +3581,50 @@ def _write_short_picture_conditions(
     ws: Worksheet,
     anchor_row: int,
     result: ExtractResult,
+    report_conditions: ShortReportConditions | None = None,
 ) -> None:
+    explicit = report_conditions or ShortReportConditions()
+    use_legacy_fallbacks = report_conditions is None
     values = {
         "VCE": _format_measurement_with_unit(
-            _short_voltage_from_filename(result.source_path),
+            (
+                explicit.vce_v
+                if explicit.vce_v is not None
+                else _short_voltage_from_filename(result.source_path)
+                if use_legacy_fallbacks
+                else None
+            ),
             "V",
             digits=1,
         ),
         "IMAX": _format_measurement_with_unit(
-            result.short_circuit.ic_max,
+            (
+                explicit.imax_a
+                if explicit.imax_a is not None
+                else result.short_circuit.ic_max
+                if use_legacy_fallbacks
+                else None
+            ),
             "A",
             digits=3,
         ),
+        "CDESAT": _format_measurement_with_unit(
+            explicit.cdesat_pf,
+            "pF",
+            digits=3,
+        ),
+        "RDESAT": _format_measurement_with_unit(
+            explicit.rdesat_kohm,
+            "K",
+            digits=3,
+        ),
+        "VDESAT": _format_measurement_with_unit(
+            explicit.vdesat_v,
+            "V",
+            digits=3,
+        ),
     }
-    if all(value is None for value in values.values()):
+    if report_conditions is None and all(value is None for value in values.values()):
         return
 
     max_row = min(ws.max_row, anchor_row + 10)
@@ -3402,9 +3636,15 @@ def _write_short_picture_conditions(
                 key = "VCE"
             elif label.startswith("IMAX"):
                 key = "IMAX"
+            elif label.startswith("CDESAT"):
+                key = "CDESAT"
+            elif label.startswith("RDESAT"):
+                key = "RDESAT"
+            elif label.startswith("VDESAT"):
+                key = "VDESAT"
             if key is None:
                 continue
-            _set_value(ws, row + 1, col, values[key])
+            ws.cell(row + 1, col).value = values[key]
 
 
 def _short_image_anchor_row(
@@ -3567,7 +3807,10 @@ def _ensure_short_picture_temperature_block(
     for row in range(insert_row, min(ws.max_row, insert_row + row_count - 1) + 1):
         for col in range(1, 6):
             label = _normalized(ws.cell(row, col).value)
-            if (label.startswith("VCE") or label.startswith("IMAX")) and row < ws.max_row:
+            if (
+                label.startswith(("VCE", "IMAX", "CDESAT", "RDESAT", "VDESAT"))
+                and row < ws.max_row
+            ):
                 ws.cell(row + 1, col).value = None
 
 
@@ -3578,11 +3821,17 @@ def _write_short_images(
     result: ExtractResult,
     progress_callback: Callable[[int, int, str], None] | None = None,
     temperature_labels: TemperatureLabels | None = None,
+    report_conditions: ShortReportConditions | None = None,
 ) -> int:
     if anchor_row is None:
         _normalize_short_picture_text(ws, temperature_labels)
         return 0
-    _write_short_picture_conditions(ws, anchor_row, result)
+    _write_short_picture_conditions(
+        ws,
+        anchor_row,
+        result,
+        report_conditions,
+    )
     # As with DPT reports, the active short-circuit condition owns a complete
     # set of slots.  Remove its prior pictures before filtering this run's
     # unavailable or missing images; other condition blocks remain untouched.
@@ -3687,6 +3936,7 @@ def write_report_template(
     temperature_code: str | None = None,
     phase_code: str | None = None,
     image_result_index: int | None = None,
+    report_conditions: ReportConditions | None = None,
 ) -> ReportWriteSummary:
     path = Path(report_path)
     results = _as_report_results(result)
@@ -3725,6 +3975,16 @@ def write_report_template(
     temp_code = _resolve_temp_code(result0.source_path, temperature_code)
 
     if result0.short_circuit_mode:
+        if report_conditions is not None and not isinstance(
+            report_conditions,
+            ShortReportConditions,
+        ):
+            raise TypeError("短路报告收到不匹配的双脉冲工况快照")
+        short_report_conditions = (
+            report_conditions
+            if isinstance(report_conditions, ShortReportConditions)
+            else None
+        )
         if len(results) != 1:
             raise ValueError("短路测试报告不支持多行结果")
         result = result0
@@ -3751,7 +4011,12 @@ def write_report_template(
             temp_code,
             temperature_labels,
         )
-        _write_short_data(data_ws, data_row, result)
+        _write_short_data(
+            data_ws,
+            data_row,
+            result,
+            short_report_conditions,
+        )
         _normalize_short_temperature_cells(data_ws, temperature_labels)
         emit(2, "写入报告数据")
         expected_image_keys = _expected_short_image_keys(image_map, result)
@@ -3785,6 +4050,7 @@ def write_report_template(
                 result,
                 progress_callback=emit_image,
                 temperature_labels=temperature_labels,
+                report_conditions=short_report_conditions,
             )
         _require_complete_report_images(
             "短路",
@@ -3805,6 +4071,17 @@ def write_report_template(
             waveform_anchor_row=anchor_row,
             images_written=images_written,
         )
+
+    if report_conditions is not None and not isinstance(
+        report_conditions,
+        DptReportConditions,
+    ):
+        raise TypeError("双脉冲报告收到不匹配的短路工况快照")
+    dpt_report_conditions = (
+        report_conditions
+        if isinstance(report_conditions, DptReportConditions)
+        else None
+    )
 
     sheet_prefix = _phase_sheet_prefix(phase_code)
     data_sheet = f"{sheet_prefix}相_双脉冲数据"
@@ -3835,19 +4112,33 @@ def write_report_template(
         phase_code,
         temp_code,
         temperature_labels,
+        dpt_report_conditions,
     )
-    condition_signature = _condition_signature(image_result.source_path)
-    _sync_dpt_condition_cell(data_ws, target.group_start_row, condition_signature)
-    data_targets = _prepare_dpt_data_rows(data_ws, target, results)
+    condition_signature = _effective_dpt_condition_signature(
+        image_result,
+        dpt_report_conditions,
+    )
+    _sync_dpt_condition_cell(
+        data_ws,
+        target.group_start_row,
+        condition_signature,
+        replace=dpt_report_conditions is not None,
+    )
+    data_targets = _prepare_dpt_data_rows(
+        data_ws,
+        target,
+        results,
+        dpt_report_conditions,
+    )
     data_rows = [item.row for item in data_targets]
     data_row = data_rows[0]
     for row, row_result in zip(data_rows, results):
-        _write_dpt_data(data_ws, row, row_result)
+        _write_dpt_data(data_ws, row, row_result, dpt_report_conditions)
     _normalize_dpt_data_temperature_cells(data_ws, temperature_labels)
     emit(2, "写入报告数据")
     if waveform_ws is not None:
         _sync_dpt_waveform_insertions(waveform_ws, data_ws, data_targets)
-    setpoints = _dpt_setpoint_match(image_result)
+    setpoints = _dpt_setpoint_match(image_result, dpt_report_conditions)
     waveform_anchor_rows: list[int] = []
     if waveform_ws is not None:
         for row_target, row_result in zip(data_targets, results):
@@ -3858,7 +4149,20 @@ def write_report_template(
                 row_offset=row_target.row_offset,
                 inserted_row=False,
             )
-            row_vdc, row_idc = _match_setpoints(row_result)
+            row_setpoints = _dpt_setpoint_match(
+                row_result,
+                dpt_report_conditions,
+            )
+            row_vdc = (
+                dpt_report_conditions.voltage_v
+                if dpt_report_conditions is not None
+                else row_setpoints.vdc
+            )
+            row_idc = (
+                dpt_report_conditions.current_a
+                if dpt_report_conditions is not None
+                else row_setpoints.idc
+            )
             waveform_anchor_rows.append(
                 _ensure_dpt_waveform_anchor(
                     waveform_ws,
@@ -3868,7 +4172,10 @@ def write_report_template(
                     temp_code,
                     row_vdc,
                     row_idc,
-                    _condition_signature(row_result.source_path),
+                    _effective_dpt_condition_signature(
+                        row_result,
+                        dpt_report_conditions,
+                    ),
                     temperature_labels,
                 )
             )

@@ -1733,6 +1733,12 @@ class WaveformPlot(QWidget):
         self.plot.customContextMenuRequested.connect(self._show_context_menu)
 
         vb = self.plot.getPlotItem().getViewBox()
+        # pyqtgraph places borderRect above all ChildGroup items (z=1000).
+        # It is visually redundant here and can swallow real hover/drag events
+        # before the scope cursors (z=50) receive them.
+        vb.setBorder(None)
+        vb.borderRect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        vb.borderRect.hide()
         vb.setMouseEnabled(x=True, y=False)
         vb.setDefaultPadding(0.0)
         # 时间轴按 ~10 等分给整刻度线（随缩放自适应，去掉细密小网格）
@@ -1769,6 +1775,9 @@ class WaveformPlot(QWidget):
         overview_item.getAxis("bottom").setTextPen(axis_pen)
         overview_item.setContentsMargins(0, 0, 0, 0)
         overview_vb = overview_item.getViewBox()
+        overview_vb.setBorder(None)
+        overview_vb.borderRect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        overview_vb.borderRect.hide()
         overview_vb.setMouseEnabled(x=False, y=False)
         overview_vb.setDefaultPadding(0.0)
         overview_vb.setBackgroundColor("#151515")
@@ -2098,6 +2107,63 @@ class WaveformPlot(QWidget):
     def set_view_range_handler(self, cb) -> None:
         """MainWindow 监听当前屏幕范围变化，用于屏幕范围测量。"""
         self._view_range_callback = cb
+
+    def scope_cursor_snapshot(self) -> dict[str, object] | None:
+        """Return the current software view/cursors in physical scope units.
+
+        The snapshot is intentionally pull-based. Dragging lines never talks to
+        the instrument; MainWindow requests one snapshot only after a parameter
+        value is clicked.
+        """
+
+        if self._interactive_mode in {"global", "unavailable"}:
+            return None
+        window = self._current_x_window_for_display()
+        if window is None:
+            return None
+        x0_us, x1_us = (float(window[0]), float(window[1]))
+        if not (np.isfinite(x0_us) and np.isfinite(x1_us) and x1_us > x0_us):
+            return None
+
+        def horizontal(which: str, line: pg.InfiniteLine | None) -> tuple[str | None, float | None]:
+            if line is None or not line.isVisible():
+                return None, None
+            channel, valid = self._horizontal_cursor_binding(which)
+            if not valid:
+                return None, None
+            source = self._display_key_for_channel(channel)
+            if re.fullmatch(r"(?:CH|MATH)\d+", source, re.IGNORECASE) is None:
+                return None, None
+            scale = float(self._disp_scale.get(source, 1.0))
+            offset = float(self._disp_offset.get(source, 0.0))
+            # Scope HBARS use the selected physical source. Do not apply the
+            # logical role sign here (for example Irr=-CH3), because the scope
+            # cursor is attached to CH3 itself.
+            value = (float(line.value()) - offset) * scale
+            return source.upper(), float(value)
+
+        source_a, level_a = horizontal("ha", self._h_cursor_a)
+        source_b, level_b = horizontal("hb", self._h_cursor_b)
+        cursor_a = (
+            float(self._cursor_a.value()) * 1e-6
+            if self._cursor_a is not None and self._cursor_a.isVisible()
+            else None
+        )
+        cursor_b = (
+            float(self._cursor_b.value()) * 1e-6
+            if self._cursor_b is not None and self._cursor_b.isVisible()
+            else None
+        )
+        return {
+            "x_start_s": x0_us * 1e-6,
+            "x_stop_s": x1_us * 1e-6,
+            "cursor_a_s": cursor_a,
+            "cursor_b_s": cursor_b,
+            "source_a": source_a,
+            "source_b": source_b,
+            "level_a": level_a,
+            "level_b": level_b,
+        }
 
     def current_x_range_us(self) -> tuple[float, float] | None:
         try:

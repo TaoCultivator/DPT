@@ -1,6 +1,7 @@
 import unittest
 
 from dpt_extractor.io.waveform_loader import load_waveform
+from dpt_extractor.io.label_mapping import infer_profile_hint_from_labels
 from dpt_extractor.models.channel_mapping import (
     infer_best_mapping_from_bundle,
     infer_mapping_from_bundle,
@@ -18,6 +19,43 @@ VL_MOS = sample_tss("VL_750V_805A_000.tss")
 
 
 class TestLabelMapping(unittest.TestCase):
+    def test_scope_labels_infer_phase_but_leave_two_bridge_labels_ambiguous(self):
+        phase, bridge = infer_profile_hint_from_labels(
+            {
+                "CH1": "VGE_UH",
+                "CH2": "VCE_UH",
+                "CH3": "IC_UL",
+                "CH4": "IL",
+                "CH5": "VCE_UL",
+                "CH6": "VGE_UL",
+            }
+        )
+
+        self.assertEqual(phase, "U")
+        self.assertIsNone(bridge)
+
+    def test_scope_labels_infer_unique_phase_and_bridge(self):
+        self.assertEqual(
+            infer_profile_hint_from_labels(
+                {
+                    "CH1": "WH-Vge",
+                    "CH2": "WH-Vce",
+                    "CH3": "Ic",
+                }
+            ),
+            ("W", "upper"),
+        )
+        self.assertEqual(
+            infer_profile_hint_from_labels({"CH6": "VGE_VL"}),
+            ("V", "lower"),
+        )
+
+    def test_conflicting_phase_labels_do_not_override_current_phase(self):
+        phase, _bridge = infer_profile_hint_from_labels(
+            {"CH1": "VGE_UH", "CH6": "VGE_VL"}
+        )
+        self.assertIsNone(phase)
+
     def _synthetic_upper_bundle(self):
         import numpy as np
 
@@ -109,6 +147,17 @@ class TestLabelMapping(unittest.TestCase):
         self.assertEqual(mapping.v_diode, "CH5")
         self.assertEqual(mapping.vge_other, "CH6")
         self.assertTrue(mapping.ic_from_sum_irr_il)
+
+        scope_mapping, scope_source = infer_best_mapping_from_bundle(
+            bundle,
+            "upper",
+            prefer_labels=True,
+        )
+        self.assertEqual(scope_source, "label")
+        self.assertIsNotNone(scope_mapping)
+        assert scope_mapping is not None
+        self.assertEqual(scope_mapping.vge, "CH6")
+        self.assertEqual(scope_mapping.il, "CH3")
 
     def test_lower_waveform_trend_mapping_ignores_bad_labels(self):
         bundle = self._synthetic_lower_bundle()

@@ -11,8 +11,8 @@ from typing import Callable
 import numpy as np
 
 from PyQt6 import sip
-from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, Qt, QSettings, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QCloseEvent, QPainter, QPalette, QPixmap, QResizeEvent
+from PyQt6.QtCore import QLocale, QObject, QRunnable, QSize, QThreadPool, Qt, QSettings, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCloseEvent, QDoubleValidator, QPainter, QPalette, QPixmap, QResizeEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -42,9 +43,14 @@ from dpt_extractor.config.loader import AppConfig, load_config
 from dpt_extractor.export.excel_export import default_export_path, export_to_excel
 from dpt_extractor.export.report_template import (
     DPT_OVERVIEW_IMAGE_PARAM,
+    DptReportConditions,
+    ReportConditions,
     SHORT_REPORT_IMAGE_PARAMS,
     ReportWriteSummary,
+    ShortReportConditions,
     dpt_report_image_params_for_result,
+    infer_dpt_report_conditions,
+    infer_short_report_conditions,
     write_report_template,
 )
 from dpt_extractor.gui.channel_mapping_dialog import resolve_profile
@@ -89,6 +95,12 @@ from dpt_extractor.models.channel_mapping import (
     validate_mapping,
 )
 from dpt_extractor.io.waveform_loader import load_waveform
+from dpt_extractor.io.label_mapping import infer_profile_hint_from_labels
+from dpt_extractor.io.tek_scope import (
+    ScopeViewState,
+    read_tektronix_scope,
+    sync_tektronix_scope,
+)
 from dpt_extractor.models.bridge_profile import (
     PHASES,
     UPPER_BRIDGE,
@@ -238,6 +250,27 @@ TEMP_CONDITION_DEFAULTS = {
 }
 TEMP_CONDITION_SETTINGS_PREFIX = "conditions/temperature/"
 SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY = "short_circuit/tsc_range"
+REPORT_CONDITION_SETTINGS_PREFIX = "conditions/report/"
+DPT_REPORT_CONDITION_FIELDS = (
+    ("voltage_v", "Vdc", "V"),
+    ("current_a", "Idc", "A"),
+    ("rg_on_ohm", "Rg_on", "Ω"),
+    ("rg_off_ohm", "Rg_off", "Ω"),
+    ("cg_nf", "Cg", "nF"),
+)
+SHORT_REPORT_CONDITION_FIELDS = (
+    ("vce_v", "Vce", "V"),
+    ("imax_a", "Imax", "A"),
+    ("cdesat_pf", "Cdesat", "pF"),
+    ("rdesat_kohm", "Rdesat", "kΩ"),
+    ("vdesat_v", "Vdesat", "V"),
+)
+
+
+def _app_settings() -> QSettings:
+    """Create the production settings store; tests may inject an isolated store."""
+
+    return QSettings("DPT", "DPTExtractor")
 
 _REPORT_MANUAL_STATE_ATTRS = (
     "_manual_intervals",
@@ -356,6 +389,34 @@ def _nearest_raw_level_crossing_time_us(
 class TemperatureSpinBox(QDoubleSpinBox):
     def textFromValue(self, value: float) -> str:  # noqa: N802
         return _format_temperature_number(value)
+
+
+class ReportConditionEdit(QLineEdit):
+    """Compact optional numeric editor used by the report-condition toolbar."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        validator = QDoubleValidator(0.0, 1_000_000_000.0, 6, self)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        validator.setLocale(QLocale.c())
+        self.setValidator(validator)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def numeric_value(self) -> float | None:
+        text = self.text().strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        return value if math.isfinite(value) and value >= 0.0 else None
+
+    def set_numeric_value(self, value: float | None) -> None:
+        if value is None or not math.isfinite(float(value)):
+            self.clear()
+            return
+        self.setText(f"{float(value):g}")
 
 
 class CenteredComboBox(QComboBox):
@@ -1007,9 +1068,15 @@ def _auto_dpt_profile_candidate(
     cfg: AppConfig,
     phase: str,
     bridge: str,
+    *,
+    prefer_labels: bool = False,
 ) -> _AutoProfileCandidate | None:
     base_profile = make_profile(phase, bridge)
-    inferred, inferred_source = infer_best_mapping_from_bundle(bundle, bridge)
+    inferred, inferred_source = infer_best_mapping_from_bundle(
+        bundle,
+        bridge,
+        prefer_labels=prefer_labels,
+    )
     profile = apply_mapping(base_profile, inferred) if inferred is not None else base_profile
     try:
         result = run_extraction(bundle, profile, cfg)
@@ -1029,13 +1096,22 @@ def _select_ambiguous_bridge_dpt_profile(
     bundle: WaveformBundle,
     cfg: AppConfig,
     guessed: BridgeProfile,
+    *,
+    ignore_path_bridge_hint: bool = False,
+    prefer_labels: bool = False,
 ) -> _AutoProfileCandidate | None:
-    if has_bridge_hint_from_path(path):
+    if not ignore_path_bridge_hint and has_bridge_hint_from_path(path):
         return None
     candidates: list[_AutoProfileCandidate] = []
     bridges = [guessed.bridge, "lower" if guessed.bridge == "upper" else "upper"]
     for bridge in dict.fromkeys(bridges):
-        candidate = _auto_dpt_profile_candidate(bundle, cfg, guessed.phase, bridge)
+        candidate = _auto_dpt_profile_candidate(
+            bundle,
+            cfg,
+            guessed.phase,
+            bridge,
+            prefer_labels=prefer_labels,
+        )
         if candidate is not None:
             candidates.append(candidate)
     if not candidates:
@@ -1047,7 +1123,12 @@ def _compute_waveform_load_outcome(
     path: str,
     cfg: AppConfig,
     progress_callback: Callable[[int, int, str, str, int, int], None] | None = None,
+    *,
+    waveform_reader: Callable[[Callable[[int, int, str], None]], WaveformBundle]
+    | None = None,
 ) -> _WaveformLoadOutcome:
+    profile_hint_path = path
+
     def emit_progress(
         value: int,
         label: str,
@@ -1080,16 +1161,46 @@ def _compute_waveform_load_outcome(
 
     emit_progress(0, "读取原始数据...")
     load_t0 = time.perf_counter()
-    bundle = load_waveform(path, progress_callback=emit_waveform_progress)
+    if waveform_reader is None:
+        bundle = load_waveform(path, progress_callback=emit_waveform_progress)
+    else:
+        bundle = waveform_reader(emit_waveform_progress)
+        idn_fields = tuple(
+            part.strip() for part in bundle.meta.instrument_idn.split(",")
+        )
+        model = idn_fields[1] if len(idn_fields) > 1 else bundle.meta.model
+        serial = idn_fields[2] if len(idn_fields) > 2 else ""
+        path = "_".join(part for part in (model, serial) if part) + ".scope"
     load_t1 = time.perf_counter()
     emit_progress(LOAD_PROGRESS_PARSE_DONE, "读取完成，正在识别通道...")
 
-    guessed = guess_profile_from_path(path)
+    guessed = guess_profile_from_path(profile_hint_path)
+    scope_phase_hint: str | None = None
+    scope_bridge_hint: str | None = None
+    mapping_store = ChannelMappingStore()
+    source_path = bundle.meta.source_path or path
+    current_scope_mapping = (
+        mapping_store.get(
+            guessed.phase,
+            guessed.bridge,
+            source_path=source_path,
+        )
+        if bundle.meta.source_kind == "scope"
+        else None
+    )
+    if bundle.meta.source_kind == "scope" and current_scope_mapping is None:
+        scope_phase_hint, scope_bridge_hint = infer_profile_hint_from_labels(
+            bundle.meta.channel_labels
+        )
+        guessed = make_profile(
+            scope_phase_hint or guessed.phase,
+            scope_bridge_hint or guessed.bridge,
+        )
     base_profile = make_profile(guessed.phase, guessed.bridge)
-    custom_mapping = ChannelMappingStore().get(
+    custom_mapping = mapping_store.get(
         guessed.phase,
         guessed.bridge,
-        source_path=bundle.meta.source_path or path,
+        source_path=source_path,
     )
     mapping_custom = custom_mapping is not None
     profile = (
@@ -1112,6 +1223,7 @@ def _compute_waveform_load_outcome(
             inferred, inferred_source = infer_best_mapping_from_bundle(
                 bundle,
                 guessed.bridge,
+                prefer_labels=bundle.meta.source_kind == "scope",
             )
             if inferred is not None:
                 profile = apply_mapping(base_profile, inferred)
@@ -1126,12 +1238,24 @@ def _compute_waveform_load_outcome(
             result = None
             short_circuit_not_ready = False
         elif mode == TestMode.DPT and custom_mapping is None:
-            selected = _select_ambiguous_bridge_dpt_profile(path, bundle, cfg, guessed)
+            selected = _select_ambiguous_bridge_dpt_profile(
+                profile_hint_path,
+                bundle,
+                cfg,
+                guessed,
+                ignore_path_bridge_hint=(
+                    bundle.meta.source_kind == "scope"
+                    and scope_bridge_hint is None
+                ),
+                prefer_labels=bundle.meta.source_kind == "scope",
+            )
             if selected is not None:
                 profile = selected.profile
                 inferred = selected.inferred
                 inferred_source = selected.inferred_source
                 result = selected.result
+                if bundle.meta.source_kind == "scope":
+                    guessed = make_profile(guessed.phase, profile.bridge)
             else:
                 result = run_extraction(bundle, profile, cfg)
             short_circuit_not_ready = False
@@ -1201,6 +1325,65 @@ class _WaveformLoadTask(QRunnable):
         self.signals.finished.emit(self.request_id, outcome)
 
 
+class _ScopeLoadTask(QRunnable):
+    def __init__(self, request_id: int, cfg: AppConfig, profile_code: str) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.cfg = cfg
+        self.profile_code = profile_code
+        self.signals = _WaveformLoadSignals()
+
+    def run(self) -> None:
+        try:
+            outcome = _compute_waveform_load_outcome(
+                f"{self.profile_code}_USB_示波器",
+                self.cfg,
+                progress_callback=lambda value, total, label, eta_phase, eta_completed, eta_total: self.signals.progress.emit(
+                    self.request_id,
+                    value,
+                    total,
+                    label,
+                    eta_phase,
+                    eta_completed,
+                    eta_total,
+                ),
+                waveform_reader=lambda progress: read_tektronix_scope(
+                    progress_callback=progress
+                ),
+            )
+        except Exception as exc:
+            self.signals.failed.emit(self.request_id, "scope://usb", str(exc))
+            return
+        self.signals.finished.emit(self.request_id, outcome)
+
+
+class _ScopeSyncSignals(QObject):
+    finished = pyqtSignal(int)
+    failed = pyqtSignal(int, str)
+
+
+class _ScopeSyncTask(QRunnable):
+    def __init__(
+        self,
+        request_id: int,
+        resource: str,
+        state: ScopeViewState,
+    ) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.resource = resource
+        self.state = state
+        self.signals = _ScopeSyncSignals()
+
+    def run(self) -> None:
+        try:
+            sync_tektronix_scope(self.resource, self.state)
+        except Exception as exc:
+            self.signals.failed.emit(self.request_id, str(exc))
+            return
+        self.signals.finished.emit(self.request_id)
+
+
 class _ReportWriteSignals(QObject):
     progress = pyqtSignal(int, int, int, str)
     finished = pyqtSignal(int, object, float)
@@ -1248,6 +1431,7 @@ class _ReportPrepareTask(QRunnable):
         active_metric: tuple[str, str] | None = None,
         active_slope_param: tuple[str, str] | None = None,
         display_state: dict[str, object] | None = None,
+        report_conditions: ReportConditions | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -1263,6 +1447,13 @@ class _ReportPrepareTask(QRunnable):
         self.active_metric = deepcopy(active_metric)
         self.active_slope_param = deepcopy(active_slope_param)
         self.display_state = deepcopy(display_state or {})
+        self.report_conditions = deepcopy(
+            report_conditions
+            if report_conditions is not None
+            else ShortReportConditions()
+            if current_result.short_circuit_mode
+            else DptReportConditions()
+        )
         self.signals = _ReportPrepareSignals()
 
     def run(self) -> None:
@@ -1328,6 +1519,7 @@ class _ReportCaptureState:
     temperature_code: str
     temperature_labels: dict[str, str]
     phase_code: str
+    report_conditions: ReportConditions
     image_result_index: int
     capture_page: _ReportPageState
     restore_page: _ReportPageState
@@ -1349,6 +1541,7 @@ class _ReportWriteTask(QRunnable):
         temperature_code: str | None = None,
         phase_code: str | None = None,
         image_result_index: int = 0,
+        report_conditions: ReportConditions | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -1361,6 +1554,14 @@ class _ReportWriteTask(QRunnable):
         self.temperature_code = temperature_code
         self.phase_code = phase_code
         self.image_result_index = int(image_result_index)
+        result0 = result[0] if isinstance(result, list) else result
+        self.report_conditions = deepcopy(
+            report_conditions
+            if report_conditions is not None
+            else ShortReportConditions()
+            if result0.short_circuit_mode
+            else DptReportConditions()
+        )
         self.signals = _ReportWriteSignals()
 
     def run(self) -> None:
@@ -1375,6 +1576,7 @@ class _ReportWriteTask(QRunnable):
                 temperature_code=self.temperature_code,
                 phase_code=self.phase_code,
                 image_result_index=self.image_result_index,
+                report_conditions=self.report_conditions,
                 progress_callback=lambda value, total, label: self.signals.progress.emit(
                     self.request_id,
                     value,
@@ -1448,14 +1650,16 @@ class MainWindow(QMainWindow):
         self._pre_offset_cursor_linked: bool | None = None
         self._active_slope_param: tuple[str, str] | None = None
         self._load_request_id = 0
-        self._load_tasks: dict[int, _WaveformLoadTask] = {}
+        self._load_tasks: dict[int, QRunnable] = {}
+        self._scope_sync_request_id = 0
+        self._scope_sync_tasks: dict[int, _ScopeSyncTask] = {}
         self._report_request_id = 0
         self._report_prepare_tasks: dict[int, _ReportPrepareTask] = {}
         self._report_tasks: dict[int, _ReportWriteTask] = {}
         self._report_capture_state: _ReportCaptureState | None = None
         self._report_progress_active = False
         self._report_timing_history = ReportTimingHistory.from_json(
-            QSettings("DPT", "DPTExtractor").value(
+            _app_settings().value(
                 REPORT_TIMING_SETTINGS_KEY,
                 "",
             )
@@ -1470,11 +1674,14 @@ class MainWindow(QMainWindow):
         self._report_waveform_mouse_transparent = False
         self._report_splitter_mouse_transparent = False
         self._load_pool = QThreadPool.globalInstance()
+        self._scope_io_pool = QThreadPool(self)
+        self._scope_io_pool.setMaxThreadCount(1)
         self._license_notice_dialog: QDialog | None = None
         self._license_notice_timer = QTimer(self)
         self._license_notice_timer.setSingleShot(True)
         self._license_notice_timer.timeout.connect(self._show_first_run_license_notice)
         self._temperature_values = self._load_temperature_values()
+        self._report_condition_context: tuple[str, str] | None = None
 
         self._build_ui()
         self.result_table.set_range_handler(self._on_slope_range_changed)
@@ -1482,7 +1689,7 @@ class MainWindow(QMainWindow):
             self._on_short_circuit_tsc_range_changed
         )
         self.result_table.set_eoff_pre_handler(self._on_eoff_pre_changed)
-        self.result_table.set_value_click_handler(self._on_value_clicked)
+        self.result_table.set_value_click_handler(self._on_result_value_clicked)
         self.result_table.set_offset_measurement_add_handler(
             self._on_offset_measurement_add_requested
         )
@@ -1531,7 +1738,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
         self.lbl_current_file.setToolTip("待处理数据原始文件名")
-        self.lbl_top_status = QLabel("请打开 Tektronix TSS 会话文件")
+        self.lbl_top_status = QLabel("请读取示波器或打开 Tektronix TSS 会话文件")
         self.lbl_top_status.setObjectName("topStatusInfo")
         self.lbl_top_status.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
@@ -1546,8 +1753,11 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
 
-        self.btn_open = QPushButton("打开文件")
-        self.btn_open.setObjectName("primaryButton")
+        self.btn_scope = QPushButton("读取示波器")
+        self.btn_scope.setObjectName("primaryButton")
+        self.btn_scope.clicked.connect(self._read_scope_waveform)
+
+        self.btn_open = QPushButton("打开 TSS")
         self.btn_open.setToolTip("支持 Tektronix TSS 会话文件")
         self.btn_open.clicked.connect(self._open_waveform)
 
@@ -1589,6 +1799,32 @@ class MainWindow(QMainWindow):
         self.spin_temp_value.setValue(self._temperature_values["RT"])
         self.spin_temp_value.valueChanged.connect(self._on_temperature_value_changed)
 
+        self.report_condition_group = QFrame()
+        self.report_condition_group.setObjectName("reportConditions")
+        report_condition_layout = QHBoxLayout(self.report_condition_group)
+        report_condition_layout.setContentsMargins(6, 2, 6, 2)
+        report_condition_layout.setSpacing(3)
+        self.lbl_report_conditions = QLabel("工况")
+        self.lbl_report_conditions.setObjectName("reportConditionsTitle")
+        report_condition_layout.addWidget(self.lbl_report_conditions)
+        self._report_condition_edits: list[ReportConditionEdit] = []
+        self._report_condition_field_labels: list[QLabel] = []
+        self._report_condition_unit_labels: list[QLabel] = []
+        for _key, label_text, unit_text in DPT_REPORT_CONDITION_FIELDS:
+            label = QLabel(label_text)
+            label.setObjectName("reportConditionLabel")
+            edit = ReportConditionEdit()
+            edit.setObjectName("reportConditionValue")
+            unit = QLabel(unit_text)
+            unit.setObjectName("reportConditionUnit")
+            report_condition_layout.addWidget(label)
+            report_condition_layout.addWidget(edit)
+            report_condition_layout.addWidget(unit)
+            edit.editingFinished.connect(self._save_current_report_conditions)
+            self._report_condition_edits.append(edit)
+            self._report_condition_field_labels.append(label)
+            self._report_condition_unit_labels.append(unit)
+
         self.btn_recalc = QPushButton("重新计算")
         self.btn_recalc.setToolTip("按当前设置重新计算全部参数")
         self.btn_recalc.clicked.connect(lambda: self._recalculate(reset_manual=True))
@@ -1620,6 +1856,7 @@ class MainWindow(QMainWindow):
 
         row_controls = QHBoxLayout()
         row_controls.setSpacing(5)
+        row_controls.addWidget(self.btn_scope)
         row_controls.addWidget(self.btn_open)
         self.lbl_phase = QLabel("相别")
         row_controls.addWidget(self.lbl_phase)
@@ -1631,12 +1868,18 @@ class MainWindow(QMainWindow):
         row_controls.addWidget(self.lbl_temp)
         row_controls.addWidget(self.combo_temp)
         row_controls.addWidget(self.spin_temp_value)
-        row_controls.addWidget(self.lbl_map_status, stretch=1)
+        row_controls.addWidget(self.lbl_map_status)
+        row_controls.addWidget(self.report_condition_group, stretch=1)
         row_controls.addWidget(self.btn_recalc)
         row_controls.addWidget(self.btn_export)
         row_controls.addWidget(self.btn_select_report_template)
         row_controls.addWidget(self.btn_select_report_output)
         row_controls.addWidget(self.btn_write_report)
+        row_report_conditions = QHBoxLayout()
+        row_report_conditions.setSpacing(5)
+        self._toolbar_primary_row = row_controls
+        self._toolbar_report_condition_row = row_report_conditions
+        self._report_condition_in_primary_row = True
         self.lbl_test_mode = QLabel("测试模式")
         self.lbl_test_mode.setObjectName("testModeTitle")
         self.lbl_test_mode.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1731,7 +1974,12 @@ class MainWindow(QMainWindow):
         row_tools.addLayout(row_tools_left, stretch=0)
         row_tools.addLayout(row_tools_right, stretch=1)
 
-        self._toolbar_rows = (row_title, row_controls, row_tools)
+        self._toolbar_rows = (
+            row_title,
+            row_controls,
+            row_report_conditions,
+            row_tools,
+        )
         self._toolbar_tool_sections = (
             row_tools_left,
             row_tools_right,
@@ -1741,6 +1989,7 @@ class MainWindow(QMainWindow):
 
         tb_root.addLayout(row_title)
         tb_root.addLayout(row_controls)
+        tb_root.addLayout(row_report_conditions)
         tb_root.addLayout(row_tools)
 
         self.result_table = ResultTable()
@@ -1809,7 +2058,7 @@ class MainWindow(QMainWindow):
         return text
 
     def _license_settings(self) -> QSettings:
-        return QSettings("DPT", "DPTExtractor")
+        return _app_settings()
 
     def _should_show_license_notice(self) -> bool:
         raw = self._license_settings().value(
@@ -1818,10 +2067,12 @@ class MainWindow(QMainWindow):
         return not bool(raw)
 
     def _mark_license_notice_shown(self) -> None:
-        self._license_settings().setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+        settings = self._license_settings()
+        settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+        settings.sync()
 
     def _load_temperature_values(self) -> dict[str, float]:
-        settings = QSettings("DPT", "DPTExtractor")
+        settings = _app_settings()
         values = dict(TEMP_CONDITION_DEFAULTS)
         for code, default in TEMP_CONDITION_DEFAULTS.items():
             raw = settings.value(f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}", default)
@@ -1832,7 +2083,7 @@ class MainWindow(QMainWindow):
         return values
 
     def _load_short_circuit_tsc_range(self) -> str:
-        raw = QSettings("DPT", "DPTExtractor").value(
+        raw = _app_settings().value(
             SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
             SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
         )
@@ -1841,7 +2092,7 @@ class MainWindow(QMainWindow):
 
     def _save_short_circuit_tsc_range(self, label: str) -> str:
         _start, _end, normalized = short_circuit_tsc_range_percentages(label)
-        QSettings("DPT", "DPTExtractor").setValue(
+        _app_settings().setValue(
             SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
             normalized,
         )
@@ -1850,10 +2101,12 @@ class MainWindow(QMainWindow):
     def _save_temperature_value(self, code: str, value: float) -> None:
         if code not in TEMP_CONDITION_DEFAULTS:
             return
-        QSettings("DPT", "DPTExtractor").setValue(
+        settings = _app_settings()
+        settings.setValue(
             f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}",
             float(value),
         )
+        settings.sync()
 
     def _temperature_display_labels(self) -> dict[str, str]:
         return {
@@ -1864,6 +2117,139 @@ class MainWindow(QMainWindow):
     def _current_temperature_code(self) -> str:
         code = str(self.combo_temp.currentData() or "RT").strip().upper()
         return code if code in TEMP_CONDITION_DEFAULTS else "RT"
+
+    @staticmethod
+    def _report_condition_specs(
+        mode_key: str,
+    ) -> tuple[tuple[str, str, str], ...]:
+        return (
+            SHORT_REPORT_CONDITION_FIELDS
+            if mode_key == "short"
+            else DPT_REPORT_CONDITION_FIELDS
+        )
+
+    def _report_condition_mode_key(self) -> str:
+        return (
+            "short"
+            if parse_test_mode(self.cfg.test_mode.mode) == TestMode.SHORT_CIRCUIT
+            else "dpt"
+        )
+
+    def _save_current_report_conditions(self) -> None:
+        if self._report_condition_context is None:
+            return
+        mode_key, phase_code = self._report_condition_context
+        settings = _app_settings()
+        for (field, _label, _unit), edit in zip(
+            self._report_condition_specs(mode_key),
+            self._report_condition_edits,
+        ):
+            key = (
+                f"{REPORT_CONDITION_SETTINGS_PREFIX}"
+                f"{mode_key}/{phase_code}/{field}"
+            )
+            value = edit.numeric_value()
+            if value is None:
+                settings.remove(key)
+            else:
+                settings.setValue(key, float(value))
+        settings.sync()
+
+    def _switch_report_condition_context(self) -> None:
+        mode_key = self._report_condition_mode_key()
+        phase_code = self._current_report_phase_code()
+        context = (mode_key, phase_code)
+        if context == self._report_condition_context:
+            return
+        self._save_current_report_conditions()
+        settings = _app_settings()
+        specs = self._report_condition_specs(mode_key)
+        for index, ((field, label_text, unit_text), edit) in enumerate(
+            zip(specs, self._report_condition_edits)
+        ):
+            self._report_condition_field_labels[index].setText(label_text)
+            self._report_condition_unit_labels[index].setText(unit_text)
+            key = (
+                f"{REPORT_CONDITION_SETTINGS_PREFIX}"
+                f"{mode_key}/{phase_code}/{field}"
+            )
+            raw = settings.value(key, None)
+            try:
+                value = None if raw is None or str(raw).strip() == "" else float(raw)
+            except (TypeError, ValueError):
+                value = None
+            edit.set_numeric_value(value)
+        self._report_condition_context = context
+
+    def _current_report_conditions(self) -> ReportConditions:
+        self._switch_report_condition_context()
+        mode_key = self._report_condition_mode_key()
+        values = {
+            field: edit.numeric_value()
+            for (field, _label, _unit), edit in zip(
+                self._report_condition_specs(mode_key),
+                self._report_condition_edits,
+            )
+        }
+        self._save_current_report_conditions()
+        if mode_key == "short":
+            return ShortReportConditions(**values)
+        return DptReportConditions(**values)
+
+    def _merge_recognized_report_conditions(
+        self,
+        conditions: ReportConditions,
+    ) -> None:
+        self._switch_report_condition_context()
+        mode_key = self._report_condition_mode_key()
+        if mode_key == "short" and not isinstance(conditions, ShortReportConditions):
+            return
+        if mode_key == "dpt" and not isinstance(conditions, DptReportConditions):
+            return
+        for (field, _label, _unit), edit in zip(
+            self._report_condition_specs(mode_key),
+            self._report_condition_edits,
+        ):
+            value = getattr(conditions, field)
+            if value is not None:
+                edit.set_numeric_value(value)
+        self._save_current_report_conditions()
+
+    def _apply_detected_short_imax(self, result: ExtractResult | None) -> None:
+        if (
+            result is None
+            or not result.short_circuit_mode
+            or self._report_condition_mode_key() != "short"
+            or result.is_metric_unavailable("短路过程", "短路电流Imax")
+        ):
+            return
+        value = float(result.short_circuit.ic_max)
+        if not math.isfinite(value):
+            return
+        self._merge_recognized_report_conditions(
+            ShortReportConditions(imax_a=value)
+        )
+
+    def _place_report_condition_group(self, *, primary_row: bool) -> None:
+        if primary_row == self._report_condition_in_primary_row:
+            return
+        if primary_row:
+            self._toolbar_report_condition_row.removeWidget(
+                self.report_condition_group
+            )
+            insert_at = self._toolbar_primary_row.indexOf(self.lbl_map_status) + 1
+            self._toolbar_primary_row.insertWidget(
+                insert_at,
+                self.report_condition_group,
+                1,
+            )
+        else:
+            self._toolbar_primary_row.removeWidget(self.report_condition_group)
+            self._toolbar_report_condition_row.addWidget(
+                self.report_condition_group,
+                1,
+            )
+        self._report_condition_in_primary_row = primary_row
 
     def _current_report_phase_code(self) -> str:
         phase = str(self.combo_phase.currentData() or "U").strip().upper()
@@ -2132,6 +2518,11 @@ class MainWindow(QMainWindow):
             show_map_status = True
             text_mode = "full"
 
+        report_conditions_in_primary_row = bucket == "full"
+        self._place_report_condition_group(
+            primary_row=report_conditions_in_primary_row
+        )
+
         control_h = min_h + 8
         param_control_h = max(22, min_h + 2)
         param_group_h = param_control_h + 8
@@ -2147,28 +2538,32 @@ class MainWindow(QMainWindow):
 
         if self._toolbar_text_mode != text_mode:
             if text_mode == "tiny":
-                self.btn_open.setText("打开")
+                self.btn_scope.setText("示波器")
+                self.btn_open.setText("TSS")
                 self.btn_recalc.setText("重算")
                 self.btn_export.setText("导出")
                 self.btn_select_report_template.setText("模板")
                 self.btn_select_report_output.setText("位置")
                 self.btn_write_report.setText("写入")
             elif text_mode == "compact":
-                self.btn_open.setText("打开文件")
+                self.btn_scope.setText("示波器")
+                self.btn_open.setText("打开 TSS")
                 self.btn_recalc.setText("重算")
                 self.btn_export.setText("导出")
                 self.btn_select_report_template.setText("模板")
                 self.btn_select_report_output.setText("位置")
                 self.btn_write_report.setText("写报告")
             elif text_mode == "medium":
-                self.btn_open.setText("打开文件")
+                self.btn_scope.setText("读取示波器")
+                self.btn_open.setText("打开 TSS")
                 self.btn_recalc.setText("重新计算")
                 self.btn_export.setText("导出 Excel")
                 self.btn_select_report_template.setText("加载模板")
                 self.btn_select_report_output.setText("报告位置")
                 self.btn_write_report.setText("写入报告")
             else:
-                self.btn_open.setText("打开文件")
+                self.btn_scope.setText("读取示波器")
+                self.btn_open.setText("打开 TSS")
                 self.btn_recalc.setText("重新计算")
                 self.btn_export.setText("导出 Excel")
                 self.btn_select_report_template.setText("加载模板")
@@ -2201,9 +2596,31 @@ class MainWindow(QMainWindow):
         self.report_progress.setFixedHeight(title_h)
         self.combo_phase.setFixedWidth(phase_w)
         self.combo_bridge.setFixedWidth(bridge_w)
+        self.report_condition_group.setFixedHeight(control_h)
+        condition_edit_w = (
+            50
+            if report_conditions_in_primary_row
+            else 64
+            if window_width >= 1180
+            else 54
+        )
+        condition_layout = self.report_condition_group.layout()
+        if condition_layout is not None:
+            condition_layout.setSpacing(2 if window_width < 1180 else 3)
+        for index, edit in enumerate(self._report_condition_edits):
+            edit.setFixedWidth(condition_edit_w + (4 if index == 4 else 0))
+            edit.setFixedHeight(max(20, control_h - 6))
+        for label in (
+            self.lbl_report_conditions,
+            *self._report_condition_field_labels,
+            *self._report_condition_unit_labels,
+        ):
+            label.setFixedHeight(max(20, control_h - 4))
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.spin_off_pulse.setFixedWidth(param_pulse_w)
         self.spin_on_pulse.setFixedWidth(param_pulse_w)
         for w in (
+            self.btn_scope,
             self.btn_open,
             self.btn_recalc,
             self.btn_export,
@@ -2361,6 +2778,38 @@ class MainWindow(QMainWindow):
                 font-weight: 800;
                 padding: 0 {max(5, pad_h - 4)}px;
                 min-height: {min_h}px;
+            }}
+            QFrame#toolbar QFrame#reportConditions {{
+                background:#0c1719;
+                border:1px solid #31545a;
+                border-radius:7px;
+            }}
+            QFrame#toolbar QLabel#reportConditionsTitle {{
+                color:#70dfeb;
+                font-weight:800;
+                padding-right:2px;
+            }}
+            QFrame#toolbar QLabel#reportConditionLabel {{
+                color:#d9e5e2;
+                font-size:{label_px}px;
+            }}
+            QFrame#toolbar QLabel#reportConditionUnit {{
+                color:#8fa7aa;
+                font-size:{label_px}px;
+            }}
+            QFrame#toolbar QLineEdit#reportConditionValue {{
+                background:#101e20;
+                color:#f2d45c;
+                border:1px solid #3c6268;
+                border-radius:5px;
+                font-family:"Cascadia Mono", Consolas, monospace;
+                font-size:{font_px}px;
+                font-weight:700;
+                padding:0 3px;
+            }}
+            QFrame#toolbar QLineEdit#reportConditionValue:focus {{
+                border-color:#44d8e8;
+                background:#13282b;
             }}
             QFrame#toolbar QFrame#paramCalcGroup {{
                 background:#0c1515;
@@ -2596,6 +3045,11 @@ class MainWindow(QMainWindow):
         mode = parse_test_mode(self.cfg.test_mode.mode)
         is_dpt = mode == TestMode.DPT
         is_offset = mode == TestMode.OFFSET_MEASUREMENT
+        if is_offset:
+            self._save_current_report_conditions()
+        else:
+            self._switch_report_condition_context()
+        self.report_condition_group.setVisible(not is_offset)
         if not is_offset:
             self._restore_pre_offset_cursor_mode()
         for w in self._pulse_toolbar_widgets:
@@ -2727,6 +3181,7 @@ class MainWindow(QMainWindow):
                 inferred, _source = infer_best_mapping_from_bundle(
                     self.bundle,
                     bridge,
+                    prefer_labels=self.bundle.meta.source_kind == "scope",
                 )
                 if inferred is not None:
                     profile = apply_mapping(profile, inferred)
@@ -2768,6 +3223,7 @@ class MainWindow(QMainWindow):
         self._recalculate()
 
     def _on_phase_bridge_changed(self) -> None:
+        self._switch_report_condition_context()
         self.profile = self._current_profile()
         if self.bundle:
             self._recalculate(reset_manual=True)
@@ -2936,11 +3392,16 @@ class MainWindow(QMainWindow):
             source_path=self._current_mapping_source_path(),
         )
         self.profile = _profile_for_test_mode(self.profile, self.cfg)
+        if parse_test_mode(self.cfg.test_mode.mode) != TestMode.OFFSET_MEASUREMENT:
+            self._switch_report_condition_context()
         self._update_map_status_label()
 
     def _open_waveform(self) -> None:
         fallback = (
-            Path(self._current_path).parent if self._current_path else Path.home()
+            Path(self._current_path).parent
+            if self._current_path
+            and (self.bundle is None or self.bundle.meta.source_kind == "file")
+            else Path.home()
         )
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -2951,6 +3412,26 @@ class MainWindow(QMainWindow):
         if path:
             self._load_file(path, background=True)
 
+    def _read_scope_waveform(self) -> None:
+        self._load_request_id += 1
+        request_id = self._load_request_id
+        profile_code = make_profile(
+            str(self.combo_phase.currentData() or self.profile.phase),
+            str(self.combo_bridge.currentData() or self.profile.bridge),
+        ).code
+        task = _ScopeLoadTask(
+            request_id,
+            self._load_cfg_for_new_file(),
+            profile_code,
+        )
+        task.signals.progress.connect(self._on_background_load_progress)
+        task.signals.finished.connect(self._on_background_load_finished)
+        task.signals.failed.connect(self._on_background_load_failed)
+        self._load_tasks[request_id] = task
+        self._set_load_busy(True, "USB 示波器")
+        self._begin_task_progress("数据导入", TASK_PROGRESS_TOTAL, "正在连接 USB 示波器...")
+        self._scope_io_pool.start(task)
+
     def _load_cfg_for_new_file(self) -> AppConfig:
         cfg = deepcopy(self.cfg)
         cfg.vdc_override = None
@@ -2959,6 +3440,7 @@ class MainWindow(QMainWindow):
         return cfg
 
     def _set_load_busy(self, busy: bool, path: str = "") -> None:
+        self.btn_scope.setEnabled(not busy)
         self.btn_open.setEnabled(not busy)
         self.btn_recalc.setEnabled(not busy)
         self.btn_export.setEnabled(not busy)
@@ -3228,7 +3710,7 @@ class MainWindow(QMainWindow):
         self._active_report_timing_context = None
         if ok and context is not None and durations:
             self._report_timing_history.record(context, durations)
-            QSettings("DPT", "DPTExtractor").setValue(
+            _app_settings().setValue(
                 REPORT_TIMING_SETTINGS_KEY,
                 self._report_timing_history.to_json(),
             )
@@ -3306,6 +3788,10 @@ class MainWindow(QMainWindow):
             return
         self._set_load_busy(False)
         self._finish_task_progress("导入失败", ok=False, stage="数据导入")
+        if _path.startswith("scope://"):
+            self.lbl_top_status.setText(message)
+            self.statusBar().showMessage(message)
+            return
         QMessageBox.critical(self, "加载失败", message)
 
     def _clear_manual_adjustments(self, *, reset_plot: bool = True) -> None:
@@ -3492,28 +3978,50 @@ class MainWindow(QMainWindow):
             extract_label = "偏移测量准备"
         else:
             extract_label = "提取" if outcome.result is not None else "参数尝试"
+        source_label = "已读取示波器" if outcome.bundle.meta.source_kind == "scope" else "已加载"
         msg = (
-            f"已加载: {Path(outcome.path).name}  |  "
+            f"{source_label}: {Path(outcome.path).name}  |  "
             f"读取 {outcome.load_ms:.0f} ms  {extract_label} {outcome.extract_ms:.0f} ms"
         )
+        if outcome.bundle.meta.source_kind == "scope":
+            msg += (
+                f"（完整记录 {len(outcome.bundle.channels)} 通道 × "
+                f"{outcome.bundle.n} 点/通道）"
+            )
         if outcome.mapping_custom:
             msg += "（已应用自定义通道映射）"
         elif inferred is not None:
             if outcome.inferred_source == "trend":
                 msg += "（已按波形趋势识别通道）"
             else:
-                msg += "（已按 TSS 标签识别通道）"
+                msg += "（已按通道标签识别通道）"
         if outcome.result is None and mode != TestMode.OFFSET_MEASUREMENT:
-            reason = outcome.extraction_error or "当前波形不满足该模式的自动计算条件"
-            msg += f"（参数未计算：{reason}）"
+            if outcome.bundle.meta.source_kind == "scope":
+                # USB acquisition and parameter extraction are independent:
+                # once samples are available, the import is successful even
+                # when the current record cannot produce DPT parameters.
+                msg += "（当前波形已完整加载；参数计算未生成结果）"
+            else:
+                reason = outcome.extraction_error or "当前波形不满足该模式的自动计算条件"
+                msg += f"（参数未计算：{reason}）"
         elif mode == TestMode.OFFSET_MEASUREMENT:
             msg += "（偏移测量模式：未运行参数计算）"
         if outcome.bundle.meta.channel_vdiv:
-            msg += f"（已应用 TSS 垂直刻度 {len(outcome.bundle.meta.channel_vdiv)} 通道）"
+            msg += f"（已应用源垂直刻度 {len(outcome.bundle.meta.channel_vdiv)} 通道）"
         return msg
 
-    def _extraction_placeholder_detail(self, error: str) -> str:
+    def _extraction_placeholder_detail(
+        self,
+        error: str,
+        *,
+        source_kind: str = "file",
+    ) -> str:
         reason = error.strip() or "当前波形不满足该模式的自动计算条件。"
+        if source_kind == "scope":
+            return (
+                "示波器当前波形已完整加载并显示。"
+                f"参数计算未生成结果；这不影响波形查看。计算信息：{reason}"
+            )
         return f"当前波形已加载，参数未计算。原因：{reason}"
 
     @staticmethod
@@ -3878,12 +4386,23 @@ class MainWindow(QMainWindow):
         self.lbl_current_file.setText(Path(path).name)
         self.lbl_current_file.setToolTip(path)
         self._set_temperature_code(_infer_temp_code_from_path(path))
+        if self.bundle.meta.source_kind == "file":
+            mode = parse_test_mode(self.cfg.test_mode.mode)
+            if mode == TestMode.DPT:
+                self._merge_recognized_report_conditions(
+                    infer_dpt_report_conditions(path)
+                )
+            elif mode == TestMode.SHORT_CIRCUIT:
+                self._merge_recognized_report_conditions(
+                    infer_short_report_conditions(path)
+                )
         self._slope_ranges = default_slope_ranges()
         self.cfg.short_circuit_tsc_range = self._load_short_circuit_tsc_range()
         self.result_table.set_slope_ranges(self._slope_ranges)
         self._clear_manual_adjustments()
         self._offset_measurements = self._default_offset_measurements_for_bundle()
-        set_last_open_path(path)
+        if self.bundle.meta.source_kind == "file":
+            set_last_open_path(path)
 
         if parse_test_mode(self.cfg.test_mode.mode) == TestMode.OFFSET_MEASUREMENT:
             self._enter_offset_measurement_mode(outcome)
@@ -3894,7 +4413,10 @@ class MainWindow(QMainWindow):
             mode_label = MODE_UI_LABELS[parse_test_mode(self.cfg.test_mode.mode)]
             self.result_table.set_mode_placeholder(
                 mode_label,
-                self._extraction_placeholder_detail(outcome.extraction_error),
+                self._extraction_placeholder_detail(
+                    outcome.extraction_error,
+                    source_kind=self.bundle.meta.source_kind,
+                ),
             )
             self.result_table.setMaximumWidth(
                 self.result_table.preferred_panel_width()
@@ -3905,6 +4427,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(self._loaded_status_message(outcome, inferred))
             return
         self.result = outcome.result
+        self._apply_detected_short_imax(self.result)
         self.result_table.set_result(self.result)
         if self.result.detected_pulse_count > 0:
             self._update_pulse_toolbar(
@@ -4062,6 +4585,55 @@ class MainWindow(QMainWindow):
             self._enable_crosstalk_interaction(section)
             return
         self._enable_generic_parameter_interaction(section, name)
+
+    def _on_result_value_clicked(self, section: str, name: str) -> None:
+        """Handle a real table click, then perform one live-scope refresh."""
+
+        self._on_value_clicked(section, name)
+        if self._metric_unavailable(section, name):
+            return
+        QTimer.singleShot(0, self._start_scope_sync_from_plot)
+
+    def _start_scope_sync_from_plot(self) -> None:
+        bundle = self.bundle
+        if (
+            bundle is None
+            or bundle.meta.source_kind != "scope"
+            or not bundle.meta.instrument_resource
+        ):
+            return
+        snapshot = self.wave_plot.scope_cursor_snapshot()
+        if snapshot is None:
+            return
+        state = ScopeViewState(
+            record_start_s=float(bundle.t[0]),
+            record_stop_s=float(bundle.t[-1]),
+            **snapshot,
+        )
+        self._scope_sync_request_id += 1
+        request_id = self._scope_sync_request_id
+        task = _ScopeSyncTask(
+            request_id,
+            bundle.meta.instrument_resource,
+            state,
+        )
+        task.signals.finished.connect(self._on_scope_sync_finished)
+        task.signals.failed.connect(self._on_scope_sync_failed)
+        self._scope_sync_tasks[request_id] = task
+        self.statusBar().showMessage("正在同步软件窗口与光标到示波器...")
+        self._scope_io_pool.start(task)
+
+    def _on_scope_sync_finished(self, request_id: int) -> None:
+        self._scope_sync_tasks.pop(request_id, None)
+        if request_id != self._scope_sync_request_id:
+            return
+        self.statusBar().showMessage("示波器已同步当前软件窗口与光标")
+
+    def _on_scope_sync_failed(self, request_id: int, message: str) -> None:
+        self._scope_sync_tasks.pop(request_id, None)
+        if request_id != self._scope_sync_request_id:
+            return
+        self.statusBar().showMessage(f"示波器同步失败：{message}")
 
     def _metric_unavailable(self, section: str, name: str) -> bool:
         return (
@@ -4686,20 +5258,11 @@ class MainWindow(QMainWindow):
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
-        if restored is None or section == "反向恢复":
+        if restored is None:
             if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
                 self._focus_switching_local_view(section, ta_us, tb_us)
             else:
                 self._focus_switching_local_view(section, search_t0, search_t1)
-        elif res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
-            ta_us = res0.t_pct_a_s * 1e6
-            tb_us = res0.t_pct_b_s * 1e6
-            pad = max(0.08, abs(ta_us - tb_us) * 4.0)
-            self.wave_plot.focus_interval_us(
-                min(ta_us, tb_us) - pad, max(ta_us, tb_us) + pad
-            )
-        else:
-            self.wave_plot.focus_interval_us(min(search_t0, search_t1), max(search_t0, search_t1))
         if restored is not None:
             self._apply_dvdt_result(section, res0, top_v, base_v, search_t0, search_t1)
         else:
@@ -5472,20 +6035,11 @@ class MainWindow(QMainWindow):
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
-        if manual is None or section == "反向恢复":
+        if manual is None:
             if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
                 self._focus_switching_local_view(section, ta_us, tb_us)
             else:
                 self._focus_switching_local_view(section, search_t0, search_t1)
-        elif res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
-            ta_us = res0.t_pct_a_s * 1e6
-            tb_us = res0.t_pct_b_s * 1e6
-            pad = max(0.08, abs(ta_us - tb_us) * 4.0)
-            self.wave_plot.focus_interval_us(
-                min(ta_us, tb_us) - pad, max(ta_us, tb_us) + pad
-            )
-        else:
-            self.wave_plot.focus_interval_us(min(search_t0, search_t1), max(search_t0, search_t1))
         if manual is not None:
             self._apply_didt_result(
                 section,
@@ -5587,7 +6141,14 @@ class MainWindow(QMainWindow):
         if move_t_us is None:
             move_t_us = float(t[move_idx] * 1e6)
 
-        self._focus_switching_local_view("开通", top_t_us, move_t_us)
+        key = ("开通", "ΔVce")
+        restored = (
+            self._manual_delta_vce.get(key)
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
+        if restored is None:
+            self._focus_switching_local_view("开通", top_t_us, move_t_us)
 
         def _on_cursor_change(_fx_t: float, _fx_v: float, _mv_t: float, _mv_v: float, delta: float) -> None:
             # delta 已是两光标电压差绝对值（A、B 对称）
@@ -5608,15 +6169,8 @@ class MainWindow(QMainWindow):
                     f"开通ΔVce交互: A={_fx_v:.2f} V, B={_mv_v:.2f} V, ΔVce={delta:.3f} V"
                 )
 
-        key = ("开通", "ΔVce")
-        restored = (
-            self._manual_delta_vce.get(key)
-            if self._manual_cursors_apply_to_current_waveform()
-            else None
-        )
         if restored is not None:
             a_t, b_t, ha_v, hb_v = restored
-            self.wave_plot.focus_interval_us(float(t[i0] * 1e6), float(t[i1] * 1e6))
             self.wave_plot.enable_delta_vce_interaction(
                 fixed_t_us=a_t,
                 fixed_v=ha_v,
@@ -5693,7 +6247,14 @@ class MainWindow(QMainWindow):
         )
         if top_t_us is None:
             top_t_us = float(t[top_idx] * 1e6)
-        self._focus_switching_local_view("关断过程", peak_t_us, top_t_us)
+        key = ("关断过程", "ΔVce")
+        restored = (
+            self._manual_delta_vce.get(key)
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
+        if restored is None:
+            self._focus_switching_local_view("关断过程", peak_t_us, top_t_us)
 
         def _on_cursor_change(_fx_t: float, _fx_v: float, _mv_t: float, _mv_v: float, delta: float) -> None:
             # delta 已是两光标电压差绝对值（A、B 对称）
@@ -5714,15 +6275,8 @@ class MainWindow(QMainWindow):
                     f"关断ΔVce交互: A(尖峰)={_fx_v:.2f} V, B(Top)={_mv_v:.2f} V, ΔVce={delta:.3f} V"
                 )
 
-        key = ("关断过程", "ΔVce")
-        restored = (
-            self._manual_delta_vce.get(key)
-            if self._manual_cursors_apply_to_current_waveform()
-            else None
-        )
         if restored is not None:
             a_t, b_t, ha_v, hb_v = restored
-            self.wave_plot.focus_interval_us(float(t[off0] * 1e6), float(t[off1] * 1e6))
             self.wave_plot.enable_delta_vce_interaction(
                 fixed_t_us=a_t,
                 fixed_v=ha_v,
@@ -5898,10 +6452,8 @@ class MainWindow(QMainWindow):
         interval_channel = matched[0] if matched is not None else boundary_a
         endpoint_a = matched[0] if matched is not None else boundary_a
         endpoint_b = matched[0] if matched is not None else boundary_b
-        if restored is None or section == "反向恢复":
+        if restored is None:
             self._focus_switching_local_view(section, t0_us, t1_us)
-        else:
-            self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_interval_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
@@ -6252,6 +6804,11 @@ class MainWindow(QMainWindow):
         self,
     ) -> tuple[float, float, float, float, int | None] | None:
         """再次点击 Trr 时恢复用户上次拖动的 Ha/A/B。"""
+        if (
+            not self._manual_cursors_apply_to_current_waveform()
+            or self._manual_trr_measure is None
+        ):
+            return None
         live = self.wave_plot.read_trr_measure_state()
         if live is not None:
             return live
@@ -6317,7 +6874,8 @@ class MainWindow(QMainWindow):
         def _on_irr_interval(t0_us: float, t1_us: float) -> None:
             _apply_irr_interval(t0_us, t1_us, remember=True)
 
-        self._focus_switching_local_view("反向恢复", t0_us, t1_us)
+        if restored is None:
+            self._focus_switching_local_view("反向恢复", t0_us, t1_us)
         self.wave_plot.enable_irr_peak_interaction(t0_us, t1_us, _on_irr_interval)
         _apply_irr_interval(t0_us, t1_us, remember=restored is not None)
 
@@ -6402,11 +6960,12 @@ class MainWindow(QMainWindow):
                 f"Ha={ha:.2f}A，Hb={hb:.2f}A）"
             )
 
-        self._focus_switching_local_view(
-            "反向恢复",
-            ta_us,
-            max(tb_us, t1_us),
-        )
+        if saved is None:
+            self._focus_switching_local_view(
+                "反向恢复",
+                ta_us,
+                max(tb_us, t1_us),
+            )
         self.wave_plot.enable_trr_measure_interaction(
             t0_us,
             t1_us,
@@ -6513,7 +7072,11 @@ class MainWindow(QMainWindow):
         t = self.bundle.t
         dt = self.bundle.dt
         t_search_lo, t_search_hi = min(interval), max(interval)
-        restored = self._manual_turn_on_current
+        restored = (
+            self._manual_turn_on_current
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
 
         def _idx_from_t_us(t_us: float) -> int:
             idx = int(np.searchsorted(t, t_us * 1e-6, side="left"))
@@ -6592,8 +7155,6 @@ class MainWindow(QMainWindow):
 
         if restored is None:
             self._focus_switching_local_view("开通", t_a_us, t_b_us)
-        else:
-            self.wave_plot.focus_interval_us(t_a_us, t_b_us)
         self.wave_plot.enable_turn_on_current_interaction(
             t_a_us,
             t_search_hi,
@@ -6665,8 +7226,6 @@ class MainWindow(QMainWindow):
         t0_us, t1_us = restored if restored is not None else interval
         if restored is None:
             self._focus_switching_local_view(section, t0_us, t1_us)
-        else:
-            self.wave_plot.focus_interval_us(t0_us, t1_us)
         self.wave_plot.enable_crosstalk_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
@@ -6946,7 +7505,7 @@ class MainWindow(QMainWindow):
         if (
             not is_short_circuit_param
             and manual_extreme is None
-            and (restored is None or section == "反向恢复")
+            and restored is None
         ):
             self._focus_switching_local_view(section, t0_us, t1_us)
         cursor_a_channel, cursor_b_channel = (
@@ -8445,13 +9004,17 @@ class MainWindow(QMainWindow):
                 mode_label = MODE_UI_LABELS[parse_test_mode(self.cfg.test_mode.mode)]
                 self.result_table.set_mode_placeholder(
                     mode_label,
-                    self._extraction_placeholder_detail(str(exc)),
+                    self._extraction_placeholder_detail(
+                        str(exc),
+                        source_kind=self.bundle.meta.source_kind,
+                    ),
                 )
                 self.statusBar().showMessage(
                     f"{mode_label}：参数未计算，波形已保留"
                 )
                 return
 
+            self._apply_detected_short_imax(self.result)
             self.result_table.set_result(self.result)
             if self.result.detected_pulse_count > 0:
                 self._update_pulse_toolbar(
@@ -8810,6 +9373,7 @@ class MainWindow(QMainWindow):
         temperature_code: str | None = None,
         temperature_labels: dict[str, str] | None = None,
         phase_code: str | None = None,
+        report_conditions: ReportConditions | None = None,
         image_result_index: int | None = None,
         capture_bundle: WaveformBundle | None = None,
         capture_profile: BridgeProfile | None = None,
@@ -8906,6 +9470,13 @@ class MainWindow(QMainWindow):
                 if phase_code is not None
                 else self._current_report_phase_code()
             ),
+            report_conditions=deepcopy(
+                report_conditions
+                if report_conditions is not None
+                else ShortReportConditions()
+                if preferred_result.short_circuit_mode
+                else DptReportConditions()
+            ),
             image_result_index=resolved_image_index,
             capture_page=capture_page,
             restore_page=self._current_report_page_state(),
@@ -8974,6 +9545,7 @@ class MainWindow(QMainWindow):
                 temperature_code=state.temperature_code,
                 temperature_labels=state.temperature_labels,
                 phase_code=state.phase_code,
+                report_conditions=state.report_conditions,
                 image_result_index=state.image_result_index,
             )
         except Exception as exc:
@@ -9238,6 +9810,7 @@ class MainWindow(QMainWindow):
             active_metric=self.result_table._active_metric,
             active_slope_param=self._active_slope_param,
             display_state=self.wave_plot.snapshot_report_display_state(),
+            report_conditions=self._current_report_conditions(),
         )
         result_snapshot = task.current_result
         if self._report_output_path is not None:
@@ -9350,6 +9923,9 @@ class MainWindow(QMainWindow):
                     task.temperature_labels if task is not None else None
                 ),
                 phase_code=(task.phase_code if task is not None else None),
+                report_conditions=(
+                    task.report_conditions if task is not None else None
+                ),
                 image_result_index=(
                     _report_image_result_index(results, task.current_result)
                     if task is not None
@@ -9429,6 +10005,7 @@ class MainWindow(QMainWindow):
         temperature_code: str | None = None,
         temperature_labels: dict[str, str] | None = None,
         phase_code: str | None = None,
+        report_conditions: ReportConditions | None = None,
         image_result_index: int | None = None,
     ) -> None:
         if not results or self._report_output_path is None:
@@ -9465,6 +10042,13 @@ class MainWindow(QMainWindow):
                 int(image_result_index)
                 if image_result_index is not None
                 else _report_image_result_index(results, self.result or results[0])
+            ),
+            (
+                report_conditions
+                if report_conditions is not None
+                else ShortReportConditions()
+                if results[0].short_circuit_mode
+                else DptReportConditions()
             ),
         )
         task.signals.progress.connect(self._on_report_write_progress)

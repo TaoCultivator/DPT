@@ -56,6 +56,14 @@ class TekMetadata:
     record_length: int = 0
     zero_index: float = 0.0
     source_path: str = ""
+    #: Data origin. ``file`` keeps the historical TSS path behaviour; ``scope``
+    #: marks a live USB/VISA record and enables one-shot scope synchronization.
+    source_kind: str = "file"
+    #: VISA resource used to read the live record, for example
+    #: USB0::0x0699::0x0527::C078514::INSTR.
+    instrument_resource: str = ""
+    #: Full *IDN? response captured together with the live record.
+    instrument_idn: str = ""
     #: CH/MATH column name -> oscilloscope Label row text
     channel_labels: dict[str, str] = field(default_factory=dict)
     #: CH/MATH -> vertical scale from session (.wfm user view), units per division (V/格, A/格)

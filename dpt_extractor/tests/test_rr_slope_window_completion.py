@@ -10,6 +10,7 @@ from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.iec_windows import (
     rr_completed_measurement_window_indices,
 )
+from dpt_extractor.metrics.slopes import rr_dvdt_measurement_context
 from dpt_extractor.models.bridge_profile import PROFILES
 from dpt_extractor.pipeline.extract import extract_all
 
@@ -45,7 +46,7 @@ class TestRrSlopeWindowCompletion(unittest.TestCase):
         )
         self.assertAlmostEqual(
             result.reverse_recovery.dvdt_max,
-            5.511084000091792,
+            5.510489760718153,
             places=9,
         )
         self.assertAlmostEqual(
@@ -67,12 +68,49 @@ class TestRrSlopeWindowCompletion(unittest.TestCase):
         # The old fixed rr1+250 ns window stopped at 19.84056 us, before
         # either physical edge completed, yet produced plausible noise slopes.
         # The authoritative crossings must instead land on the late main
-        # commutation edges of this same turn-on event.
+        # commutation edges of this same turn-on event.  Its settled Base is
+        # the visible 2.09375..21.6875 V band's exact 11.890625 V midpoint.
         self.assertGreater(result.reverse_recovery.dvdt_max, 1.0)
         self.assertGreater(result.reverse_recovery.didt_irr, 3.5)
 
 
 class TestRrMeasurementWindowCompletionGate(unittest.TestCase):
+    def test_settled_rr_dvdt_base_uses_stable_band_visual_center(self) -> None:
+        dt = 2e-9
+        t = np.arange(2500, dtype=np.float64) * dt
+        vd = np.full_like(t, 30.0)
+
+        # The edge-adjacent low plateau has a real 20..40 V visible ripple.
+        # Its reference is the middle of that band, not the most frequent
+        # histogram bucket at either side of it.
+        ripple = np.array(
+            [20.0, 25.0, 30.0, 35.0, 40.0, 35.0, 30.0, 25.0]
+        )
+        vd[:800] = np.resize(ripple, 800)
+        vd[800:850] = np.linspace(30.0, 800.0, 50)
+        vd[850:] = 800.0
+        vd[870] = 1000.0
+        vd[1200:] = 800.0 + 10.0 * np.sin(
+            np.linspace(0.0, 20.0 * np.pi, len(vd) - 1200)
+        )
+
+        context = rr_dvdt_measurement_context(
+            t,
+            vd,
+            800,
+            920,
+            dt,
+            load_config(),
+            0.1,
+            0.9,
+            use_settled_platform=True,
+            event_end_idx=900,
+        )
+
+        self.assertAlmostEqual(context.base_v, 30.0, places=6)
+        self.assertAlmostEqual(context.top_v, 800.0, delta=0.05)
+        self.assertFalse(context.used_fallback)
+
     def test_extends_when_legacy_window_cannot_reach_90_percent_vd(self) -> None:
         vd = np.zeros(1000, dtype=np.float64)
         vd[400:500] = np.linspace(0.0, 100.0, 100)

@@ -570,8 +570,16 @@ def _validate_dpt_sample(
 ) -> SampleValidation:
     cfg = load_config()
     base_prof = guess_profile_from_path(path)
-    prof = profile_override or base_prof
     b = load_waveform(path)
+    prof = profile_override or base_prof
+    if profile_override is None and has_bridge_hint_from_path(path):
+        inferred_mapping, inferred_source = infer_best_mapping_from_bundle(
+            b,
+            base_prof.bridge,
+        )
+        if inferred_mapping is not None:
+            prof = apply_mapping(base_prof, inferred_mapping)
+            mapping_method = inferred_source or "inferred"
     try:
         r = extract_all(b, prof, cfg)
     except Exception:

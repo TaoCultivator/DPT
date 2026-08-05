@@ -64,8 +64,14 @@ def infer_mapping_from_waveform_trends(
 def infer_best_mapping_from_bundle(
     bundle: WaveformBundle | None,
     bridge: str,
+    *,
+    prefer_labels: bool = False,
 ) -> tuple[ChannelMapping | None, str]:
-    """Try waveform trends first, then TSS labels as a fallback."""
+    """Infer mapping, optionally trusting live scope labels before trends."""
+    if prefer_labels:
+        inferred = infer_mapping_from_bundle(bundle, bridge)
+        if inferred is not None:
+            return inferred, "label"
     inferred = infer_mapping_from_waveform_trends(bundle, bridge)
     if inferred is not None:
         return inferred, "trend"

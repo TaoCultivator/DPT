@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, Qt
+from PyQt6.QtGui import QCursor
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -25,6 +26,10 @@ class TestScopeCursorInteraction(unittest.TestCase):
         self.plot = pg.PlotWidget()
         self.plot.resize(1000, 700)
         self.plot.setRange(xRange=(-1.0, 1.0), yRange=(-1.0, 1.0), padding=0.0)
+        view_box = self.plot.getPlotItem().getViewBox()
+        view_box.setBorder(None)
+        view_box.borderRect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        view_box.borderRect.hide()
         self.lines = {
             "A": ScopeCursorLine(
                 "A", pos=-0.35, angle=90, movable=True,
@@ -48,12 +53,17 @@ class TestScopeCursorInteraction(unittest.TestCase):
             ),
         }
         for line in self.lines.values():
+            line.setZValue(50)
             self.plot.addItem(line)
         self.plot.show()
+        self.plot.raise_()
+        self.plot.activateWindow()
+        self.plot.viewport().setFocus()
         self.app.processEvents()
 
     def tearDown(self) -> None:
         self.plot.close()
+        self.app.processEvents()
 
     def _line_point(self, line: ScopeCursorLine, offset_px: int = 0) -> QPoint:
         view_box = self.plot.getPlotItem().getViewBox()
@@ -68,7 +78,9 @@ class TestScopeCursorInteraction(unittest.TestCase):
                 QPointF(line.value(), y_range[0] + 0.82 * (y_range[1] - y_range[0]))
             )
             offset = QPoint(offset_px, 0)
-        return self.plot.mapFromScene(scene) + offset
+        plot_point = self.plot.mapFromScene(scene)
+        viewport_point = self.plot.viewport().mapFrom(self.plot, plot_point)
+        return viewport_point + offset
 
     def _drag(self, line: ScopeCursorLine, offset_px: int, delta_px: int) -> None:
         viewport = self.plot.viewport()
@@ -81,10 +93,42 @@ class TestScopeCursorInteraction(unittest.TestCase):
             expected_cursor = Qt.CursorShape.SizeHorCursor
         before = float(line.value())
 
+        QTest.mouseMove(viewport, QPoint(1, 1))
+        QTest.qWait(20)
+        self.app.processEvents()
         QTest.mouseMove(viewport, press)
         QTest.qWait(40)
         self.app.processEvents()
-        self.assertTrue(line.mouseHovering, msg=f"offset={offset_px}px")
+        plot_point = viewport.mapTo(self.plot, press)
+        scene_point = self.plot.mapToScene(plot_point)
+        local_point = line.mapFromScene(scene_point)
+        scene_items = [
+            (
+                getattr(item, "_cursor_id", type(item).__name__),
+                item.zValue(),
+                type(item.parentItem()).__name__ if item.parentItem() is not None else None,
+                item.acceptHoverEvents(),
+                int(item.acceptedMouseButtons().value),
+            )
+            for item in self.plot.scene().items(scene_point)
+        ]
+        hover_items = [
+            getattr(item, "_cursor_id", type(item).__name__)
+            for item in self.plot.scene().hoverItems
+        ]
+        last_hover = self.plot.scene().lastHoverEvent
+        self.assertTrue(
+            line.mouseHovering,
+            msg=(
+                f"offset={offset_px}px press={press} plot={plot_point} "
+                f"scene={scene_point} local={local_point} "
+                f"bounds={line.boundingRect()} shape={line.shape().contains(local_point)} "
+                f"items={scene_items} hover={hover_items} "
+                f"last={last_hover.scenePos() if last_hover is not None else None} "
+                f"buttons={QApplication.mouseButtons()} cursor={QCursor.pos()} "
+                f"target={viewport.mapToGlobal(press)}"
+            ),
+        )
         self.assertTrue(line.hasCursor(), msg=f"offset={offset_px}px")
         self.assertEqual(line.cursor().shape(), expected_cursor)
         QTest.mousePress(

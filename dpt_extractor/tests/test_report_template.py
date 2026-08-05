@@ -44,6 +44,171 @@ def _drawing_anchor_counts(path: Path) -> dict[str, int]:
 
 
 class TestReportTemplateWriter(unittest.TestCase):
+    def test_report_condition_inference_covers_dpt_and_short_tokens(self):
+        from dpt_extractor.export.report_template import (
+            infer_dpt_report_conditions,
+            infer_short_report_conditions,
+        )
+
+        dpt = infer_dpt_report_conditions(
+            "UH_750V_1048A_Rg_on3.233ohm_Rg_off3.586ohm_Cg10nf.tss"
+        )
+        self.assertEqual(dpt.voltage_v, 750.0)
+        self.assertEqual(dpt.current_a, 1048.0)
+        self.assertEqual(dpt.rg_on_ohm, 3.233)
+        self.assertEqual(dpt.rg_off_ohm, 3.586)
+        self.assertEqual(dpt.cg_nf, 10.0)
+
+        short = infer_short_report_conditions(
+            "UH_Vce750V_Imax593A_Cdesat100pF_Rdesat1K_Vdesat9V.tss"
+        )
+        self.assertEqual(short.vce_v, 750.0)
+        self.assertEqual(short.imax_a, 593.0)
+        self.assertEqual(short.cdesat_pf, 100.0)
+        self.assertEqual(short.rdesat_kohm, 1.0)
+        self.assertEqual(short.vdesat_v, 9.0)
+
+    def test_dpt_page_conditions_override_report_identity_and_cells(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CONDITION,
+            COL_CURRENT,
+            COL_VOLTAGE,
+            build_mcu2506_workbook,
+        )
+        from dpt_extractor.export.report_template import (
+            DptReportConditions,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "dpt_conditions.xlsx"
+            result = ExtractResult(
+                source_path="scope://C078514",
+                profile_code="UH",
+                vdc=756.8,
+            )
+            result.turn_off.ic_off_max = 1052.1
+            wb = build_mcu2506_workbook(result)
+            ws = wb.active
+            ws.title = "U相_双脉冲数据"
+            for col in (1, 2, COL_CONDITION):
+                ws.merge_cells(
+                    start_row=5,
+                    start_column=col,
+                    end_row=8,
+                    end_column=col,
+                )
+            ws.cell(5, 1, "UH")
+            ws.cell(5, 2, "25℃")
+            wb.save(report)
+
+            write_report_template(
+                result,
+                report,
+                phase_code="UH",
+                temperature_code="RT",
+                report_conditions=DptReportConditions(
+                    voltage_v=750.0,
+                    current_a=1048.0,
+                    rg_on_ohm=3.233,
+                    rg_off_ohm=3.586,
+                    cg_nf=10.0,
+                ),
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(saved.cell(5, COL_VOLTAGE).value, 750)
+            self.assertEqual(saved.cell(5, COL_CURRENT).value, 1048)
+            self.assertEqual(
+                saved.cell(5, COL_CONDITION).value,
+                "Rg_on = 3.233 ohm\nRg_off = 3.586 ohm\nCg = 10 nf",
+            )
+
+    def test_blank_page_conditions_do_not_block_report_or_fallback(self):
+        from dpt_extractor.export.report_template import (
+            DptReportConditions,
+            ShortReportConditions,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "short_blank_conditions.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "短路测试"
+            ws["A5"] = "25℃"
+            ws["B5"] = "UH"
+            wb.save(report)
+
+            result = ExtractResult(
+                source_path="UH_750V_short.tss",
+                profile_code="UH",
+                short_circuit_mode=True,
+                short_circuit=ShortCircuitResult(ic_max=593.0),
+            )
+            write_report_template(
+                result,
+                report,
+                phase_code="UH",
+                temperature_code="RT",
+                report_conditions=ShortReportConditions(),
+            )
+
+            saved = load_workbook(report)["短路测试"]
+            self.assertIsNone(saved.cell(5, 4).value)
+            self.assertEqual(saved.cell(5, 5).value, 593)
+
+            # The empty DPT snapshot itself is valid and carries explicit blanks.
+            self.assertIsNone(DptReportConditions().voltage_v)
+
+    def test_short_picture_conditions_write_all_five_values_and_clear_blanks(self):
+        from dpt_extractor.export.report_template import (
+            ShortReportConditions,
+            _write_short_picture_conditions,
+        )
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+
+        ws = Workbook().active
+        for col, label in enumerate(
+            ("Vce", "Imax", "Cdesat", "Rdesat", "Vdesat"),
+            start=1,
+        ):
+            ws.cell(1, col, label)
+            ws.cell(2, col, "旧值")
+        result = ExtractResult(
+            source_path="UH_750V_short.tss",
+            short_circuit=ShortCircuitResult(ic_max=600.0),
+        )
+        _write_short_picture_conditions(
+            ws,
+            1,
+            result,
+            ShortReportConditions(
+                vce_v=750.0,
+                imax_a=593.0,
+                cdesat_pf=100.0,
+                rdesat_kohm=1.0,
+                vdesat_v=9.0,
+            ),
+        )
+        self.assertEqual(
+            [ws.cell(2, col).value for col in range(1, 6)],
+            ["750V", "593A", "100pF", "1K", "9V"],
+        )
+
+        _write_short_picture_conditions(
+            ws,
+            1,
+            result,
+            ShortReportConditions(),
+        )
+        self.assertEqual(
+            [ws.cell(2, col).value for col in range(1, 6)],
+            [None, None, None, None, None],
+        )
+
     def test_report_condition_overrides_are_validated_before_path_fallback(self):
         from dpt_extractor.export.report_template import (
             _resolve_phase_code,

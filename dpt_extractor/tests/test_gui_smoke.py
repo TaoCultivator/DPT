@@ -1013,6 +1013,177 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
         plot.close()
 
+    def test_scope_waveform_is_displayed_when_parameter_extraction_has_no_gate_pulse(self):
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import MainWindow, _WaveformLoadOutcome
+        from dpt_extractor.gui.main_window import NONCOMMERCIAL_NOTICE_SETTINGS_KEY
+
+        bundle, profile = self._make_synthetic_bundle()
+        bundle.meta.source_kind = "scope"
+        bundle.meta.source_path = "scope://C078514"
+        bundle.meta.instrument_resource = "USB0::SCOPE::INSTR"
+        settings = QSettings("DPT", "DPTExtractor")
+        old_value = settings.value(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, None)
+        settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+        try:
+            win = MainWindow()
+            self.app.processEvents()
+            outcome = _WaveformLoadOutcome(
+                path=bundle.meta.source_path,
+                bundle=bundle,
+                guessed=profile,
+                profile=profile,
+                inferred=None,
+                inferred_source="",
+                mapping_custom=False,
+                result=None,
+                short_circuit_not_ready=False,
+                extraction_error="未识别到门极脉冲",
+                load_ms=1.0,
+                extract_ms=1.0,
+            )
+
+            win._apply_loaded_waveform(outcome)
+            self.app.processEvents()
+
+            self.assertIs(win.bundle, bundle)
+            self.assertIsNone(win.result)
+            self.assertTrue(
+                set(bundle.channels).issubset(win.wave_plot._trace_raw),
+            )
+            self.assertIn("示波器当前波形已完整加载并显示", win.result_table.summary.text())
+            status = win.statusBar().currentMessage()
+            self.assertIn("已读取示波器", status)
+            self.assertIn("当前波形已完整加载", status)
+            self.assertNotIn("参数未计算：未识别到门极脉冲", status)
+            win.close()
+            self.app.processEvents()
+        finally:
+            if old_value is None:
+                settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
+            else:
+                settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
+
+    def test_scope_channel_labels_set_phase_bridge_and_mapping_defaults(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import _compute_waveform_load_outcome
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 32
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 2e-6, n),
+            channels={f"CH{i}": np.zeros(n) for i in range(1, 7)},
+            meta=TekMetadata(
+                source_kind="scope",
+                source_path="scope://UNIT_TEST_LABEL_PROFILE",
+                instrument_idn="TEKTRONIX,MSO46B,UNIT_TEST_LABEL_PROFILE,1.0",
+                channel_labels={
+                    "CH1": "WH-Vge",
+                    "CH2": "WH-Vce",
+                    "CH3": "Ic",
+                    "CH4": "IL",
+                },
+            ),
+        )
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.OFFSET_MEASUREMENT.value
+
+        outcome = _compute_waveform_load_outcome(
+            "UL_USB_示波器",
+            cfg,
+            waveform_reader=lambda _progress: bundle,
+        )
+
+        self.assertEqual(outcome.guessed.code, "WH")
+        self.assertEqual(outcome.profile.code, "WH")
+        self.assertEqual(outcome.inferred_source, "label")
+        self.assertIsNotNone(outcome.inferred)
+        assert outcome.inferred is not None
+        self.assertEqual(outcome.inferred.vge, "CH1")
+        self.assertEqual(outcome.inferred.vce, "CH2")
+        self.assertEqual(outcome.inferred.irr, "CH3")
+        self.assertEqual(outcome.inferred.il, "CH4")
+
+    def test_scope_labels_with_both_bridges_choose_active_dpt_bridge(self):
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import _compute_waveform_load_outcome
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.tests.sample_paths import sample_tss
+
+        path = sample_tss("UH_750V_1048A_000.tss")
+        if not path.exists():
+            self.skipTest("UH 750V/1048A sample missing")
+        bundle = load_waveform(path)
+        bundle.meta.source_kind = "scope"
+        bundle.meta.source_path = "scope://UNIT_TEST_ACTIVE_BRIDGE"
+        bundle.meta.instrument_idn = "TEKTRONIX,MSO46B,UNIT_TEST_ACTIVE_BRIDGE,1.0"
+
+        outcome = _compute_waveform_load_outcome(
+            "UL_USB_示波器",
+            load_config(),
+            waveform_reader=lambda _progress: bundle,
+        )
+
+        self.assertEqual(outcome.guessed.code, "UH")
+        self.assertEqual(outcome.profile.code, "UH")
+        self.assertIsNotNone(outcome.result)
+
+    def test_saved_scope_mapping_overrides_incorrect_scope_labels(self):
+        import numpy as np
+        from unittest.mock import Mock, patch
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import _compute_waveform_load_outcome
+        from dpt_extractor.models.channel_mapping import ChannelMapping
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        n = 32
+        bundle = WaveformBundle(
+            t=np.linspace(0.0, 2e-6, n),
+            channels={f"CH{i}": np.zeros(n) for i in range(1, 7)},
+            meta=TekMetadata(
+                source_kind="scope",
+                source_path="scope://UNIT_TEST_MANUAL_PROFILE",
+                instrument_idn="TEKTRONIX,MSO46B,UNIT_TEST_MANUAL_PROFILE,1.0",
+                channel_labels={"CH1": "WH-Vge", "CH2": "WH-Vce"},
+            ),
+        )
+        manual = ChannelMapping(
+            vge="CH6",
+            vce="CH5",
+            ic="CH3",
+            il="CH4",
+            irr="",
+            v_diode="CH2",
+            vge_other="CH1",
+            irr_from_ic_minus_il=True,
+        )
+        store = Mock()
+        store.get.side_effect = lambda phase, bridge, source_path=None: (
+            manual if (phase, bridge) == ("U", "lower") else None
+        )
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.OFFSET_MEASUREMENT.value
+
+        with patch(
+            "dpt_extractor.gui.main_window.ChannelMappingStore",
+            return_value=store,
+        ):
+            outcome = _compute_waveform_load_outcome(
+                "UL_USB_示波器",
+                cfg,
+                waveform_reader=lambda _progress: bundle,
+            )
+
+        self.assertEqual(outcome.guessed.code, "UL")
+        self.assertEqual(outcome.profile.code, "UL")
+        self.assertTrue(outcome.mapping_custom)
+
     def test_offset_measurement_mode_adds_custom_waveform_metric(self):
         from PyQt6.QtCore import QSettings
         from PyQt6.QtWidgets import QComboBox
@@ -2195,7 +2366,8 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         win._apply_toolbar_density(860)
         self.app.processEvents()
 
-        self.assertEqual(win.btn_open.text(), "打开")
+        self.assertEqual(win.btn_scope.text(), "示波器")
+        self.assertEqual(win.btn_open.text(), "TSS")
         self.assertEqual(win.btn_recalc.text(), "重算")
         self.assertEqual(win.btn_export.text(), "导出")
         self.assertTrue(win._context_menu_label.isHidden())
@@ -2210,7 +2382,8 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         assert_test_mode_children_contained()
 
         win._apply_toolbar_density(1600)
-        self.assertEqual(win.btn_open.text(), "打开文件")
+        self.assertEqual(win.btn_scope.text(), "读取示波器")
+        self.assertEqual(win.btn_open.text(), "打开 TSS")
         self.assertEqual(win.btn_recalc.text(), "重新计算")
         self.assertEqual(win.btn_export.text(), "导出 Excel")
         self.assertTrue(win._context_menu_label.isHidden())
@@ -2219,6 +2392,15 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertEqual(win.combo_bridge.minimumWidth(), 84)
         self.assertEqual(win.combo_temp.minimumWidth(), 68)
         self.assertEqual(win.spin_temp_value.minimumWidth(), 72)
+        self.assertEqual(win.report_condition_group.height(), win.combo_phase.height())
+        for label in (
+            win.lbl_report_conditions,
+            *win._report_condition_field_labels,
+            *win._report_condition_unit_labels,
+        ):
+            self.assertEqual(label.font().pixelSize(), win.lbl_phase.font().pixelSize())
+        for edit in win._report_condition_edits:
+            self.assertEqual(edit.font().pixelSize(), win.combo_phase.font().pixelSize())
         assert_test_mode_children_contained()
         win.close()
 
@@ -2933,6 +3115,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             temperature_code=None,
             temperature_labels=None,
             phase_code=None,
+            report_conditions=None,
             image_result_index=None,
         ):
             self.assertEqual(len(images), len(params))
@@ -2978,6 +3161,10 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         win.close()
 
     def test_toolbar_temperature_values_are_editable_and_persisted(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
         from PyQt6.QtCore import QSettings
 
         from dpt_extractor.gui.main_window import (
@@ -2985,40 +3172,44 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             TEMP_CONDITION_SETTINGS_PREFIX,
         )
 
-        settings = QSettings("DPT", "DPTExtractor")
-        keys = [f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}" for code in ("RT", "HT", "LT")]
-        old_values = {key: settings.value(key, None) for key in keys}
-        for key in keys:
-            settings.remove(key)
-        try:
-            win = MainWindow()
-            self.assertEqual(win.combo_temp.currentData(), "RT")
-            self.assertAlmostEqual(win.spin_temp_value.value(), 25.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "DPTExtractor.ini"
 
-            win.spin_temp_value.setValue(32.0)
-            self.assertAlmostEqual(
-                float(settings.value(f"{TEMP_CONDITION_SETTINGS_PREFIX}RT")),
-                32.0,
-            )
-            win._set_temperature_code("HT")
-            self.assertAlmostEqual(win.spin_temp_value.value(), 150.0)
-            win.spin_temp_value.setValue(155.0)
-            win.close()
+            def settings_factory() -> QSettings:
+                return QSettings(str(settings_path), QSettings.Format.IniFormat)
 
-            win2 = MainWindow()
-            win2._set_temperature_code("RT")
-            self.assertAlmostEqual(win2.spin_temp_value.value(), 32.0)
-            win2._set_temperature_code("HT")
-            self.assertAlmostEqual(win2.spin_temp_value.value(), 155.0)
-            win2.close()
-        finally:
-            for key, value in old_values.items():
-                if value is None:
-                    settings.remove(key)
-                else:
-                    settings.setValue(key, value)
+            with patch(
+                "dpt_extractor.gui.main_window._app_settings",
+                settings_factory,
+            ):
+                settings = settings_factory()
+                win = MainWindow()
+                self.assertEqual(win.combo_temp.currentData(), "RT")
+                self.assertAlmostEqual(win.spin_temp_value.value(), 25.0)
+
+                win.spin_temp_value.setValue(32.0)
+                settings.sync()
+                self.assertAlmostEqual(
+                    float(settings.value(f"{TEMP_CONDITION_SETTINGS_PREFIX}RT")),
+                    32.0,
+                )
+                win._set_temperature_code("HT")
+                self.assertAlmostEqual(win.spin_temp_value.value(), 150.0)
+                win.spin_temp_value.setValue(155.0)
+                win.close()
+
+                win2 = MainWindow()
+                win2._set_temperature_code("RT")
+                self.assertAlmostEqual(win2.spin_temp_value.value(), 32.0)
+                win2._set_temperature_code("HT")
+                self.assertAlmostEqual(win2.spin_temp_value.value(), 155.0)
+                win2.close()
 
     def test_main_window_shows_noncommercial_notice(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
         from PyQt6.QtCore import QSettings
 
         from dpt_extractor.gui.main_window import (
@@ -3032,23 +3223,31 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn("禁止任何商业使用", message)
         self.assertIn(COMMERCIAL_AUTH_QQ, message)
 
-        settings = QSettings("DPT", "DPTExtractor")
-        old_value = settings.value(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, None)
-        settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
-        try:
-            win = MainWindow()
-            self.app.processEvents()
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "DPTExtractor.ini"
 
-            self.assertFalse(hasattr(win, "license_notice"))
-            self.assertTrue(win._should_show_license_notice())
-            win._mark_license_notice_shown()
-            self.assertFalse(win._should_show_license_notice())
-            win.close()
-        finally:
-            if old_value is None:
-                settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
-            else:
-                settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
+            def settings_factory() -> QSettings:
+                return QSettings(str(settings_path), QSettings.Format.IniFormat)
+
+            with patch(
+                "dpt_extractor.gui.main_window._app_settings",
+                settings_factory,
+            ):
+                win = MainWindow()
+                self.app.processEvents()
+
+                self.assertFalse(hasattr(win, "license_notice"))
+                self.assertTrue(win._should_show_license_notice())
+                win._mark_license_notice_shown()
+                self.assertFalse(win._should_show_license_notice())
+                self.assertTrue(
+                    settings_factory().value(
+                        NONCOMMERCIAL_NOTICE_SETTINGS_KEY,
+                        False,
+                        type=bool,
+                    )
+                )
+                win.close()
 
     def test_irr_interactive_peak_uses_actual_spike(self):
         import numpy as np
@@ -6385,6 +6584,14 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 assert after is not None
                 self.assertAlmostEqual(after[0], before[0], places=6)
                 self.assertAlmostEqual(after[1], before[1], places=6)
+
+                win._on_value_clicked(section, name)
+                QApplication.processEvents()
+                after_reclick = plot.current_x_range_us()
+                self.assertIsNotNone(after_reclick)
+                assert after_reclick is not None
+                self.assertAlmostEqual(after_reclick[0], before[0], places=6)
+                self.assertAlmostEqual(after_reclick[1], before[1], places=6)
                 win.close()
 
     @unittest.skipUnless(
@@ -6609,7 +6816,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             finally:
                 win.close()
 
-    def test_restored_trr_refocuses_and_restored_err_keeps_current_view(self):
+    def test_restored_trr_and_err_keep_current_view(self):
         from PyQt6.QtWidgets import QApplication
 
         from dpt_extractor.config.loader import load_config
@@ -6642,22 +6849,25 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         plot.focus_parameter_window_us = _record_focus
         try:
             win._on_value_clicked("反向恢复", "Trr")
+            self.assertIsNotNone(plot._cursor_a)
+            assert plot._cursor_a is not None
+            plot._cursor_a.setPos(float(plot._cursor_a.value()) + 0.01)
+            QApplication.processEvents()
             plot._emit_trr_measure_changed()
             self.assertIsNotNone(win._manual_trr_measure)
             assert win._manual_trr_measure is not None
-            saved_trr_a = float(win._manual_trr_measure[2])
-            plot.focus_interval_us(float(bundle.t[0] * 1e6), float(bundle.t[1] * 1e6))
+            plot.focus_interval_us(12.0, 14.0)
+            before_trr_view = plot.current_x_range_us()
             calls.clear()
             win._on_value_clicked("反向恢复", "Trr")
             QApplication.processEvents()
-            self.assertTrue(calls)
-            expected_anchor = win._switching_focus_anchor_us("反向恢复")
-            self.assertIsNotNone(expected_anchor)
-            assert expected_anchor is not None
-            self.assertAlmostEqual(calls[-1][0], expected_anchor, places=6)
-            self.assertTrue(
-                any(abs(value - saved_trr_a) <= 1e-6 for value in calls[-1][1])
-            )
+            self.assertFalse(calls)
+            after_trr_view = plot.current_x_range_us()
+            self.assertIsNotNone(before_trr_view)
+            self.assertIsNotNone(after_trr_view)
+            assert before_trr_view is not None and after_trr_view is not None
+            self.assertAlmostEqual(after_trr_view[0], before_trr_view[0], places=6)
+            self.assertAlmostEqual(after_trr_view[1], before_trr_view[1], places=6)
 
             win._on_value_clicked("反向恢复", "Err")
             plot._emit_energy_loss_changed()
