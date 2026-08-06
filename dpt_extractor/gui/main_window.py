@@ -275,10 +275,12 @@ def _app_settings() -> QSettings:
 _REPORT_MANUAL_STATE_ATTRS = (
     "_manual_intervals",
     "_manual_extreme_values",
+    "_manual_short_current",
     "_manual_turn_on_current",
     "_manual_energy",
     "_manual_delta_vce",
     "_manual_waveform_source",
+    "_manual_pulse_pair",
     "_manual_dvdt",
     "_manual_didt",
     "_manual_trr_measure",
@@ -1630,6 +1632,10 @@ class MainWindow(QMainWindow):
         self._manual_intervals: dict[tuple[str, str], tuple[float, float]] = {}
         # Maximum 类参数：保存用户手动拖动的主横向光标值 (line_value, metric_value)
         self._manual_extreme_values: dict[tuple[str, str], tuple[float, float]] = {}
+        # 短路 Imax/Tsc：保存 A/B 时刻 + Hb/Ha 电平 (µs, µs, A, A)
+        self._manual_short_current: dict[
+            tuple[str, str], tuple[float, float, float, float]
+        ] = {}
         # 开通电流：保存 A/B 时刻 + Hb/Ha 电平 (µs, µs, A, A)
         self._manual_turn_on_current: tuple[float, float, float, float] | None = None
         # Eoff/Eon 四光标 (A_t, B_t, Ha_v, Hb_a)
@@ -1638,6 +1644,8 @@ class MainWindow(QMainWindow):
         self._manual_delta_vce: dict[tuple[str, str], tuple[float, float, float, float]] = {}
         # 手动光标绑定的波形源路径；换文件后不再恢复旧光标位置
         self._manual_waveform_source: str = ""
+        # 同一原始记录的不同脉冲组合互不复用手调状态。
+        self._manual_pulse_pair: tuple[int, int] | None = None
         # dv/dt、di/dt：段窗 (µs,µs) + Ha Top + Hb Base
         self._manual_dvdt: dict[tuple[str, str], tuple[float, float, float, float]] = {}
         self._manual_didt: dict[tuple[str, str], tuple[float, float, float, float]] = {}
@@ -3797,6 +3805,7 @@ class MainWindow(QMainWindow):
     def _clear_manual_adjustments(self, *, reset_plot: bool = True) -> None:
         self._manual_intervals.clear()
         self._manual_extreme_values.clear()
+        self._manual_short_current.clear()
         self._manual_turn_on_current = None
         self._manual_energy.clear()
         self._manual_delta_vce.clear()
@@ -3804,6 +3813,7 @@ class MainWindow(QMainWindow):
         self._manual_didt.clear()
         self._manual_trr_measure = None
         self._manual_waveform_source = ""
+        self._manual_pulse_pair = None
         self._active_slope_param = None
         if reset_plot:
             self.wave_plot.reset_interaction_state()
@@ -3931,6 +3941,7 @@ class MainWindow(QMainWindow):
         for cache_name in (
             "_manual_intervals",
             "_manual_extreme_values",
+            "_manual_short_current",
             "_manual_energy",
             "_manual_delta_vce",
             "_manual_dvdt",
@@ -4456,13 +4467,24 @@ class MainWindow(QMainWindow):
 
     def _on_slope_range_changed(self, key: str, sr: SlopeRange) -> None:
         old = self._slope_ranges.get(key)
-        self._slope_ranges[key] = normalize_slope_range(key, sr)
-        if key == "rr_didt":
-            new = self._slope_ranges[key]
-            if old is None or old.ic_reference != new.ic_reference:
-                self._manual_didt.pop(("反向恢复", "di/dt"), None)
-            elif old.label() != new.label():
-                self._manual_didt.pop(("反向恢复", "di/dt"), None)
+        new = normalize_slope_range(key, sr)
+        self._slope_ranges[key] = new
+        if old != new:
+            for param_key, row_key in SLOPE_ROW_KEYS.items():
+                if row_key != key:
+                    continue
+                section, metric = param_key
+                cache = self._manual_dvdt if metric == "dv/dt" else self._manual_didt
+                cache.pop(param_key, None)
+                self._manual_intervals.pop(param_key, None)
+                if metric == "di/dt":
+                    ls_name = {
+                        "关断过程": "Ls_off",
+                        "开通": "Ls_on",
+                    }.get(section)
+                    if ls_name is not None:
+                        self._manual_intervals.pop((section, ls_name), None)
+                break
         self.cfg.slope_ranges = dict(self._slope_ranges)
         self._recalculate()
 
@@ -4473,17 +4495,30 @@ class MainWindow(QMainWindow):
     def _on_short_circuit_tsc_range_changed(self, label: str) -> None:
         normalized = self._save_short_circuit_tsc_range(label)
         self.cfg.short_circuit_tsc_range = normalized
-        self._manual_intervals.pop(("短路过程", "短路时间Tsc"), None)
+        key = ("短路过程", "短路时间Tsc")
+        self._manual_intervals.pop(key, None)
+        self._manual_short_current.pop(key, None)
         self._recalculate()
 
     def _touch_manual_waveform_source(self) -> None:
         if self.bundle is not None:
             self._manual_waveform_source = self.bundle.meta.source_path
+        if self.result is not None:
+            self._manual_pulse_pair = (
+                int(self.result.off_pulse_index),
+                int(self.result.on_pulse_index),
+            )
 
     def _manual_cursors_apply_to_current_waveform(self) -> bool:
-        if self.bundle is None:
+        if self.bundle is None or self.result is None:
             return False
-        return self.bundle.meta.source_path == self._manual_waveform_source
+        if self.bundle.meta.source_path != self._manual_waveform_source:
+            return False
+        current_pair = (
+            int(self.result.off_pulse_index),
+            int(self.result.on_pulse_index),
+        )
+        return self._manual_pulse_pair in (None, current_pair)
 
     def _save_manual_delta_vce(
         self,
@@ -7253,8 +7288,16 @@ class MainWindow(QMainWindow):
         if cursors is None:
             return
         t_a_us, t_b_us, hb, ha = cursors
-        restored = self._manual_intervals.get(("短路过程", name))
-        if restored is not None:
+        key = ("短路过程", name)
+        restored_state = (
+            self._manual_short_current.get(key)
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
+        restored = self._manual_intervals.get(key)
+        if restored_state is not None:
+            t_a_us, t_b_us, hb, ha = restored_state
+        elif restored is not None:
             t_a_us, t_b_us = restored
         t = self.bundle.t
         gate0, gate1 = self.result.segments.turn_off
@@ -7271,12 +7314,22 @@ class MainWindow(QMainWindow):
                 float(cur_a_us), float(cur_b_us)
             )
             self._touch_manual_waveform_source()
-            self._manual_intervals[("短路过程", name)] = (ta, tb)
+            self._manual_intervals[key] = (ta, tb)
+            self._manual_short_current[key] = (
+                float(cur_a_us),
+                float(cur_b_us),
+                float(cur_hb),
+                float(cur_ha),
+            )
             sc = self.result.short_circuit
             if name == "短路电流Imax":
                 sc.ic_max = float(cur_ha)
                 self.result.idc = float(cur_ha)
                 self.result.idc_set = float(cur_ha)
+                # The detected Imax report condition must follow the final
+                # hand-adjusted measurement as well as the result/table.  The
+                # picture sheet prefers this explicit snapshot over sc.ic_max.
+                self._apply_detected_short_imax(self.result)
                 self.result_table.set_metric_value("短路过程", name, float(cur_ha))
                 self.statusBar().showMessage(
                     f"短路过程-短路电流Imax: Hb={cur_hb:.3f}A, "
@@ -7303,9 +7356,9 @@ class MainWindow(QMainWindow):
             ha=ha,
             on_change=_on_change,
             channel="ic",
-            emit_result_on_enter=restored is not None,
+            emit_result_on_enter=restored_state is not None or restored is not None,
         )
-        if restored is None:
+        if restored_state is None and restored is None:
             self._show_stored_metric_status("短路过程", name)
 
     def _enable_generic_parameter_interaction(self, section: str, name: str) -> None:
@@ -8978,6 +9031,209 @@ class MainWindow(QMainWindow):
 
         return None
 
+    def _restore_manual_result_values_after_recalculation(
+        self,
+        previous: ExtractResult,
+    ) -> None:
+        """Keep valid hand-adjusted metrics materialized after re-extraction.
+
+        Cursor caches and ``ExtractResult`` are two views of one user action.
+        A non-reset recalculation may refresh automatic metrics, but it must not
+        leave preserved manual cursors paired with default report values.
+        Only fields owned by an existing manual cache are copied; every other
+        freshly extracted metric remains untouched.
+        """
+
+        current = self.result
+        if current is None or not self._manual_cursors_apply_to_current_waveform():
+            return
+        if bool(previous.short_circuit_mode) != bool(current.short_circuit_mode):
+            return
+        previous_pair = (
+            int(previous.off_pulse_index),
+            int(previous.on_pulse_index),
+        )
+        current_pair = (
+            int(current.off_pulse_index),
+            int(current.on_pulse_index),
+        )
+        if previous_pair != current_pair:
+            return
+
+        def _restore_metric_availability(section: str, name: str) -> None:
+            key = (section, name)
+            if previous.is_metric_unavailable(section, name):
+                current.unavailable_metrics.add(key)
+            else:
+                current.unavailable_metrics.discard(key)
+
+        intervals = set(self._manual_intervals)
+        extremes = set(self._manual_extreme_values)
+        energies = set(self._manual_energy)
+        deltas = set(self._manual_delta_vce)
+        dvdts = set(self._manual_dvdt)
+        didts = set(self._manual_didt)
+        short_current = set(self._manual_short_current)
+
+        if current.short_circuit_mode:
+            old_sc = previous.short_circuit
+            new_sc = current.short_circuit
+            manual_keys = intervals | extremes | short_current
+            if ("短路过程", "短路电流Imax") in manual_keys:
+                new_sc.ic_max = float(old_sc.ic_max)
+                current.idc = float(previous.idc)
+                current.idc_set = previous.idc_set
+            if ("短路过程", "短路时间Tsc") in manual_keys:
+                new_sc.tsc = float(old_sc.tsc)
+                new_sc.tsc_start_us = old_sc.tsc_start_us
+                new_sc.tsc_end_us = old_sc.tsc_end_us
+                new_sc.tsc_range = str(old_sc.tsc_range)
+            if ("短路过程", "短路能量Esc_本管") in manual_keys:
+                new_sc.esc_dut = float(old_sc.esc_dut)
+                new_sc.energy_dut_channel = str(old_sc.energy_dut_channel)
+            if ("短路过程", "应力Vpeak_本管") in manual_keys:
+                new_sc.vpeak_dut = float(old_sc.vpeak_dut)
+            if ("短路过程", "短路能量Esc_对管") in manual_keys:
+                new_sc.esc_other = float(old_sc.esc_other)
+                new_sc.energy_other_channel = str(old_sc.energy_other_channel)
+            if ("短路过程", "应力Vpeak_对管") in manual_keys:
+                new_sc.vpeak_other = float(old_sc.vpeak_other)
+            if ("短路过程", "Desat动作时间") in manual_keys:
+                new_sc.desat_time = old_sc.desat_time
+                new_sc.desat_range = str(old_sc.desat_range)
+            return
+
+        old_off, new_off = previous.turn_off, current.turn_off
+        old_on, new_on = previous.turn_on, current.turn_on
+        old_rr, new_rr = previous.reverse_recovery, current.reverse_recovery
+
+        off_delta_manual = ("关断过程", "ΔVce") in deltas
+        off_didt_manual = ("关断过程", "di/dt") in didts
+        off_ls_manual = ("关断过程", "Ls_off") in intervals
+        if off_delta_manual:
+            new_off.delta_vce = float(old_off.delta_vce)
+        if ("关断过程", "Ic_off_max") in intervals | extremes:
+            new_off.ic_off_max = float(old_off.ic_off_max)
+        if ("关断过程", "Vce_off_max") in intervals | extremes:
+            new_off.vce_off_max = float(old_off.vce_off_max)
+        if ("关断过程", "dv/dt") in dvdts:
+            new_off.dvdt = float(old_off.dvdt)
+            new_off.dvdt_range = str(old_off.dvdt_range)
+        if off_didt_manual:
+            new_off.didt = float(old_off.didt)
+            new_off.didt_range = str(old_off.didt_range)
+            _restore_metric_availability("关断过程", "di/dt")
+        if off_ls_manual:
+            new_off.didt = float(old_off.didt)
+            new_off.didt_range = str(old_off.didt_range)
+            _restore_metric_availability("关断过程", "di/dt")
+
+        off_timing_keys = {
+            ("关断过程", "Toff"),
+            ("关断过程", "Td_off"),
+            ("关断过程", "Tf"),
+        }
+        if intervals & off_timing_keys:
+            new_off.toff = float(old_off.toff)
+            new_off.td_off = float(old_off.td_off)
+            new_off.tf = float(old_off.tf)
+        if ("关断过程", "串扰电压") in intervals:
+            new_off.crosstalk_v = float(old_off.crosstalk_v)
+            new_off.crosstalk_vmax = float(old_off.crosstalk_vmax)
+            new_off.crosstalk_vmin = float(old_off.crosstalk_vmin)
+        if (
+            ("关断过程", "Pmax") in intervals
+            or ("关断过程", "Eoff") in energies
+        ):
+            new_off.pmax = float(old_off.pmax)
+        if ("关断过程", "Eoff") in energies:
+            new_off.eoff = float(old_off.eoff)
+
+        on_delta_manual = ("开通", "ΔVce") in deltas
+        on_didt_manual = ("开通", "di/dt") in didts
+        on_ls_manual = ("开通", "Ls_on") in intervals
+        if on_delta_manual:
+            new_on.delta_vce = float(old_on.delta_vce)
+        if ("开通", "Ic_on_max") in intervals | extremes:
+            new_on.ic_on_max = float(old_on.ic_on_max)
+        if ("开通", "Vce_on_max") in intervals | extremes:
+            new_on.vce_on_max = float(old_on.vce_on_max)
+        if self._manual_turn_on_current is not None:
+            new_on.turn_on_current = float(old_on.turn_on_current)
+        if ("开通", "dv/dt") in dvdts:
+            new_on.dvdt = float(old_on.dvdt)
+            new_on.dvdt_range = str(old_on.dvdt_range)
+        if on_didt_manual:
+            new_on.didt = float(old_on.didt)
+            new_on.didt_range = str(old_on.didt_range)
+            _restore_metric_availability("开通", "di/dt")
+        if on_ls_manual:
+            new_on.didt = float(old_on.didt)
+            new_on.didt_range = str(old_on.didt_range)
+            _restore_metric_availability("开通", "di/dt")
+
+        on_timing_keys = {
+            ("开通", "Ton"),
+            ("开通", "Td_on"),
+            ("开通", "Tr"),
+        }
+        if intervals & on_timing_keys:
+            new_on.ton = float(old_on.ton)
+            new_on.td_on = float(old_on.td_on)
+            new_on.tr = float(old_on.tr)
+        if ("开通", "串扰电压") in intervals:
+            new_on.crosstalk_v = float(old_on.crosstalk_v)
+            new_on.crosstalk_vmax = float(old_on.crosstalk_vmax)
+            new_on.crosstalk_vmin = float(old_on.crosstalk_vmin)
+        if ("开通", "Pmax") in intervals or ("开通", "Eon") in energies:
+            new_on.pmax = float(old_on.pmax)
+        if ("开通", "Eon") in energies:
+            new_on.eon = float(old_on.eon)
+
+        if ("反向恢复", "Irr") in intervals:
+            new_rr.irr = float(old_rr.irr)
+        if self._manual_trr_measure is not None:
+            new_rr.trr = float(old_rr.trr)
+        if ("反向恢复", "Vrr") in intervals | extremes:
+            new_rr.vrr = float(old_rr.vrr)
+        if ("反向恢复", "dv/dt") in dvdts:
+            new_rr.dvdt_max = float(old_rr.dvdt_max)
+            new_rr.dvdt_range = str(old_rr.dvdt_range)
+        if ("反向恢复", "di/dt") in didts:
+            new_rr.didt_irr = float(old_rr.didt_irr)
+            new_rr.didt_range = str(old_rr.didt_range)
+            _restore_metric_availability("反向恢复", "di/dt")
+        if (
+            ("反向恢复", "Pdmax") in intervals
+            or ("反向恢复", "Err") in energies
+        ):
+            new_rr.pdmax = float(old_rr.pdmax)
+        if ("反向恢复", "Err") in energies:
+            new_rr.err = float(old_rr.err)
+
+        if off_delta_manual or off_didt_manual or off_ls_manual:
+            unavailable = current.is_metric_unavailable("关断过程", "di/dt")
+            new_off.ls_off = (
+                float(new_off.delta_vce / new_off.didt)
+                if not unavailable and new_off.didt > 1e-9
+                else 0.0
+            )
+            if unavailable:
+                current.unavailable_metrics.add(("关断过程", "Ls_off"))
+            else:
+                current.unavailable_metrics.discard(("关断过程", "Ls_off"))
+        if on_delta_manual or on_didt_manual or on_ls_manual:
+            unavailable = current.is_metric_unavailable("开通", "di/dt")
+            new_on.ls_on = (
+                float(new_on.delta_vce / new_on.didt)
+                if not unavailable and new_on.didt > 1e-9
+                else 0.0
+            )
+            if unavailable:
+                current.unavailable_metrics.add(("开通", "Ls_on"))
+            else:
+                current.unavailable_metrics.discard(("开通", "Ls_on"))
+
     def _recalculate(self, *, reset_manual: bool = False) -> None:
         if self.bundle is None:
             QMessageBox.warning(self, "提示", "请先打开波形文件")
@@ -8995,6 +9251,7 @@ class MainWindow(QMainWindow):
             if reset_manual:
                 self._clear_manual_adjustments()
                 active_param = None
+            previous_result = deepcopy(self.result) if self.result is not None else None
             try:
                 self.result = run_extraction(self.bundle, self.profile, self.cfg)
             except Exception as exc:
@@ -9014,6 +9271,33 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+            pulse_pair_changed = bool(
+                previous_result is not None
+                and not previous_result.short_circuit_mode
+                and not self.result.short_circuit_mode
+                and (
+                    int(previous_result.off_pulse_index),
+                    int(previous_result.on_pulse_index),
+                )
+                != (
+                    int(self.result.off_pulse_index),
+                    int(self.result.on_pulse_index),
+                )
+            )
+            if pulse_pair_changed:
+                # Manual card state belongs to one concrete measurement pair.
+                # A different pair starts from its own automatic result instead
+                # of inheriting cursor caches or report values from the old pair.
+                self._clear_manual_adjustments(reset_plot=False)
+
+            if previous_result is not None and not pulse_pair_changed:
+                self._restore_manual_result_values_after_recalculation(
+                    previous_result
+                )
+            # Sync the report condition only after manual values have been
+            # rematerialized; otherwise a non-reset extraction leaves the
+            # picture condition at the automatic Imax while the data row uses
+            # the restored hand-adjusted value.
             self._apply_detected_short_imax(self.result)
             self.result_table.set_result(self.result)
             if self.result.detected_pulse_count > 0:

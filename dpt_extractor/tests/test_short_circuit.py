@@ -1364,8 +1364,13 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
         win._apply_test_mode_ui()
         win._load_file(str(DL_UH), background=False)
         self.app.processEvents()
+        tsc_key = ("短路过程", "短路时间Tsc")
+        win._manual_intervals[tsc_key] = (1.0, 2.0)
+        win._manual_short_current[tsc_key] = (1.0, 2.0, 3.0, 4.0)
         win._on_short_circuit_tsc_range_changed(SHORT_CIRCUIT_TSC_RANGE_10)
         self.app.processEvents()
+        self.assertNotIn(tsc_key, win._manual_intervals)
+        self.assertNotIn(tsc_key, win._manual_short_current)
         self.assertEqual(
             self._tsc_settings.value(SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY),
             SHORT_CIRCUIT_TSC_RANGE_10,

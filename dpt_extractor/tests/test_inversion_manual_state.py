@@ -57,6 +57,10 @@ class _ManualStateHarness:
             ("开通", "Vce_on_max"): (3.0, 3.0),
             ("开通", "Ic_on_max"): (3.0, 3.0),
         }
+        self._manual_short_current = {
+            ("短路过程", "短路电流Imax"): marker,
+            ("短路过程", "短路时间Tsc"): marker,
+        }
         self._manual_energy = {
             ("反向恢复", "Err"): marker,
             ("开通", "Eon"): marker,
@@ -102,6 +106,8 @@ def test_upper_ch3_inversion_drops_current_related_manual_state_only() -> None:
     assert ("反向恢复", "Err") not in owner._manual_intervals
     assert ("反向恢复", "Pdmax") not in owner._manual_intervals
     assert ("开通", "Eon") not in owner._manual_intervals
+    assert ("短路过程", "短路电流Imax") not in owner._manual_short_current
+    assert ("短路过程", "短路时间Tsc") not in owner._manual_short_current
     assert owner._manual_turn_on_current is None
     assert owner._manual_trr_measure is None
 
@@ -131,6 +137,8 @@ def test_vdiode_inversion_drops_err_vrr_but_preserves_rr_current_state() -> None
     assert owner._manual_trr_measure is not None
     assert ("开通", "Eon") in owner._manual_energy
     assert owner._manual_turn_on_current is not None
+    assert ("短路过程", "短路电流Imax") in owner._manual_short_current
+    assert ("短路过程", "短路时间Tsc") in owner._manual_short_current
 
 
 def test_math_dependency_and_handler_invalidate_before_fresh_recalculation() -> None:
@@ -154,6 +162,7 @@ def test_unmapped_channel_inversion_preserves_every_manual_cache() -> None:
         for name in (
             "_manual_intervals",
             "_manual_extreme_values",
+            "_manual_short_current",
             "_manual_energy",
             "_manual_delta_vce",
             "_manual_dvdt",

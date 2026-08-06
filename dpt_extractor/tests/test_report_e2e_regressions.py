@@ -451,6 +451,211 @@ class TestReportEndToEndRegressions(unittest.TestCase):
             win._load_pool = original_pool
             win.close()
 
+    def test_report_snapshot_keeps_inactive_manual_eon_after_nonreset_recalculation(
+        self,
+    ) -> None:
+        """A preserved cursor cache must also remain materialized in report data."""
+
+        win, _result = self._load_real_window()
+        pool = _RecordingPool()
+        original_pool = win._load_pool
+        try:
+            original_eon = float(win.result.turn_on.eon)
+            untouched_eoff = float(win.result.turn_off.eoff)
+
+            win._on_value_clicked("开通", "Eon")
+            plot = win.wave_plot
+            self.assertIsNotNone(plot._cursor_a)
+            assert plot._cursor_a is not None
+            plot._cursor_a.setPos(float(plot._cursor_a.value()) + 0.031)
+            self.app.processEvents()
+
+            adjusted_eon = float(win.result.turn_on.eon)
+            self.assertNotAlmostEqual(adjusted_eon, original_eon, places=6)
+            self.assertIn(("开通", "Eon"), win._manual_energy)
+
+            # A non-reset recalculation is reachable through range, pulse and
+            # channel operations.  Keep Eon inactive so merely restoring the
+            # selected card cannot hide a stale result/manual-cache split.
+            win._on_value_clicked("关断过程", "Eoff")
+            win._recalculate(reset_manual=False)
+            self.assertIn(("开通", "Eon"), win._manual_energy)
+
+            win._load_pool = pool  # type: ignore[assignment]
+            win._start_report_prepare_task()
+            self.assertEqual(len(pool.tasks), 1)
+            prepare = pool.tasks[0]
+            self.assertIsInstance(prepare, _ReportPrepareTask)
+            assert isinstance(prepare, _ReportPrepareTask)
+
+            self.assertAlmostEqual(
+                prepare.current_result.turn_on.eon,
+                adjusted_eon,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                prepare.current_result.turn_off.eoff,
+                untouched_eoff,
+                places=9,
+            )
+
+            # Exercise the production workbook writer with the request-frozen
+            # object, not just the in-memory prepare boundary.
+            from openpyxl import load_workbook
+
+            from dpt_extractor.export.mcu2506_layout import (
+                COL_OFF,
+                COL_ON,
+                DATA_ROW,
+                build_mcu2506_workbook,
+            )
+            from dpt_extractor.export.report_template import write_report_template
+
+            frozen = prepare.current_result
+            phase_code = str(prepare.phase_code or frozen.profile_code).upper()
+            temp_code = str(prepare.temperature_code or "HT").upper()
+            temp_label = prepare.temperature_labels[temp_code]
+            with tempfile.TemporaryDirectory() as td:
+                report = Path(td) / "manual_cursor_report.xlsx"
+                workbook = build_mcu2506_workbook(frozen)
+                worksheet = workbook.active
+                worksheet.title = f"{phase_code[0]}相_双脉冲数据"
+                worksheet.merge_cells(
+                    start_row=DATA_ROW,
+                    start_column=1,
+                    end_row=DATA_ROW + 3,
+                    end_column=1,
+                )
+                worksheet.merge_cells(
+                    start_row=DATA_ROW,
+                    start_column=2,
+                    end_row=DATA_ROW + 3,
+                    end_column=2,
+                )
+                worksheet.cell(DATA_ROW, 1, phase_code)
+                worksheet.cell(DATA_ROW, 2, temp_label)
+                workbook.save(report)
+
+                summary = write_report_template(
+                    frozen,
+                    report,
+                    temperature_code=temp_code,
+                    temperature_labels=prepare.temperature_labels,
+                    phase_code=phase_code,
+                    report_conditions=prepare.report_conditions,
+                )
+                saved = load_workbook(report, data_only=True)[worksheet.title]
+                self.assertEqual(summary.data_row, DATA_ROW)
+                self.assertEqual(
+                    saved.cell(summary.data_row, COL_ON["eon"]).value,
+                    round(adjusted_eon, 3),
+                )
+                self.assertEqual(
+                    saved.cell(summary.data_row, COL_OFF["eoff"]).value,
+                    round(untouched_eoff, 3),
+                )
+        finally:
+            win._report_prepare_tasks.clear()
+            win._load_pool = original_pool
+            win.close()
+
+    def test_manual_measurements_do_not_leak_between_pulse_pairs(self) -> None:
+        win, original = self._load_real_window()
+        try:
+            key = ("开通", "Eon")
+            win.result.turn_on.eon = 123.456
+            win._manual_energy[key] = (1.0, 2.0, 3.0, 4.0)
+            win._touch_manual_waveform_source()
+
+            next_pair = deepcopy(original)
+            next_pair.detected_pulse_count = 3
+            next_pair.off_pulse_index = 2
+            next_pair.on_pulse_index = 3
+            next_pair.turn_on.eon = 456.789
+            with patch(
+                "dpt_extractor.gui.main_window.run_extraction",
+                return_value=next_pair,
+            ):
+                win._recalculate(reset_manual=False)
+
+            self.assertAlmostEqual(win.result.turn_on.eon, 456.789, places=9)
+            self.assertEqual(win._manual_energy, {})
+            self.assertEqual(win._manual_waveform_source, "")
+            self.assertIsNone(win._manual_pulse_pair)
+
+            first_pair = deepcopy(original)
+            first_pair.detected_pulse_count = 3
+            first_pair.turn_on.eon = 789.123
+            with patch(
+                "dpt_extractor.gui.main_window.run_extraction",
+                return_value=first_pair,
+            ):
+                win._recalculate(reset_manual=False)
+
+            self.assertAlmostEqual(win.result.turn_on.eon, 789.123, places=9)
+            self.assertEqual(win._manual_energy, {})
+        finally:
+            win.close()
+
+    def test_manual_didt_restores_value_and_report_availability_together(self) -> None:
+        win, original = self._load_real_window()
+        try:
+            keys = {
+                "off": ("关断过程", "di/dt"),
+                "on": ("开通", "di/dt"),
+                "rr": ("反向恢复", "di/dt"),
+            }
+            for key in keys.values():
+                win._manual_didt[key] = (1.0, 2.0, 3.0, 4.0)
+            win._touch_manual_waveform_source()
+
+            previous = deepcopy(original)
+            previous.turn_off.didt = 11.0
+            previous.turn_on.didt = 12.0
+            previous.reverse_recovery.didt_irr = 13.0
+            previous.unavailable_metrics.update(
+                {
+                    keys["off"],
+                    ("关断过程", "Ls_off"),
+                    keys["rr"],
+                }
+            )
+            previous.unavailable_metrics.discard(keys["on"])
+            previous.unavailable_metrics.discard(("开通", "Ls_on"))
+
+            current = deepcopy(original)
+            current.turn_off.didt = 101.0
+            current.turn_on.didt = 102.0
+            current.reverse_recovery.didt_irr = 103.0
+            current.unavailable_metrics.discard(keys["off"])
+            current.unavailable_metrics.discard(("关断过程", "Ls_off"))
+            current.unavailable_metrics.discard(keys["rr"])
+            current.unavailable_metrics.update(
+                {keys["on"], ("开通", "Ls_on")}
+            )
+            win.result = current
+
+            win._restore_manual_result_values_after_recalculation(previous)
+
+            self.assertEqual(win.result.turn_off.didt, 11.0)
+            self.assertEqual(win.result.turn_on.didt, 12.0)
+            self.assertEqual(win.result.reverse_recovery.didt_irr, 13.0)
+            self.assertTrue(win.result.is_metric_unavailable(*keys["off"]))
+            self.assertTrue(
+                win.result.is_metric_unavailable("关断过程", "Ls_off")
+            )
+            self.assertTrue(win.result.is_metric_unavailable(*keys["rr"]))
+            self.assertFalse(win.result.is_metric_unavailable(*keys["on"]))
+            self.assertFalse(win.result.is_metric_unavailable("开通", "Ls_on"))
+            self.assertEqual(win.result.turn_off.ls_off, 0.0)
+            self.assertAlmostEqual(
+                win.result.turn_on.ls_on,
+                win.result.turn_on.delta_vce / 12.0,
+                places=9,
+            )
+        finally:
+            win.close()
+
     def test_real_capture_uses_frozen_result_and_restores_later_page(self) -> None:
         win, original_result = self._load_real_window()
         snapshot_result = deepcopy(original_result)

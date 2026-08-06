@@ -7779,6 +7779,245 @@ class TestMainWindowSmoke(unittest.TestCase):
             win.close()
 
     @unittest.skipUnless(SHORT_VH_750.exists(), "750V VH short sample missing")
+    def test_short_imax_reclick_keeps_reachable_manual_cursor_state(self) -> None:
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.test_mode import TestMode
+
+        win = MainWindow()
+        try:
+            mode_index = win.combo_test_mode.findData(TestMode.SHORT_CIRCUIT.value)
+            self.assertGreaterEqual(mode_index, 0)
+            win.combo_test_mode.setCurrentIndex(mode_index)
+            win._apply_test_mode_ui()
+            win._load_file(str(SHORT_VH_750), background=False)
+            self.assertIsNotNone(win.result)
+            assert win.result is not None
+
+            key = ("短路过程", "短路电流Imax")
+            win._on_value_clicked(*key)
+            plot = win.wave_plot
+            self.assertIsNotNone(plot._cursor_a)
+            self.assertIsNotNone(plot._cursor_b)
+            self.assertIsNotNone(plot._h_cursor_a)
+            self.assertIsNotNone(plot._h_cursor_b)
+            assert plot._cursor_a is not None
+            assert plot._cursor_b is not None
+            assert plot._h_cursor_a is not None
+            assert plot._h_cursor_b is not None
+
+            self.assertTrue(plot._cursor_a.movable)
+            self.assertTrue(plot._cursor_b.movable)
+            self.assertFalse(plot._h_cursor_a.movable)
+            self.assertTrue(plot._h_cursor_b.movable)
+
+            default_imax = float(win.result.short_circuit.ic_max)
+            default_a = float(plot._cursor_a.value())
+            default_b = float(plot._cursor_b.value())
+            default_hb = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+            default_ha = plot._from_disp("ic", float(plot._h_cursor_a.value()))
+            span_t = default_b - default_a
+            span_y = default_ha - default_hb
+            plot._cursor_a.setPos(default_a + 0.18 * span_t)
+            plot._cursor_b.setPos(default_b - 0.13 * span_t)
+            plot._h_cursor_b.setPos(
+                plot._to_disp("ic", default_hb + 0.16 * span_y)
+            )
+            self.app.processEvents()
+
+            manual_state = (
+                float(plot._cursor_a.value()),
+                float(plot._cursor_b.value()),
+                plot._from_disp("ic", float(plot._h_cursor_b.value())),
+                plot._from_disp("ic", float(plot._h_cursor_a.value())),
+            )
+            self.assertEqual(win._manual_short_current[key], manual_state)
+            self.assertAlmostEqual(
+                win.result.short_circuit.ic_max,
+                default_imax,
+                places=6,
+            )
+
+            win._on_value_clicked("短路过程", "短路时间Tsc")
+            win._on_value_clicked(*key)
+            self.app.processEvents()
+
+            restored_state = (
+                float(plot._cursor_a.value()),
+                float(plot._cursor_b.value()),
+                plot._from_disp("ic", float(plot._h_cursor_b.value())),
+                plot._from_disp("ic", float(plot._h_cursor_a.value())),
+            )
+            for restored, manual in zip(restored_state, manual_state):
+                self.assertAlmostEqual(restored, manual, places=9)
+            self.assertAlmostEqual(
+                win.result.short_circuit.ic_max,
+                default_imax,
+                places=6,
+            )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(SHORT_VH_750.exists(), "750V VH short sample missing")
+    def test_short_manual_imax_survives_recalculation_and_report_conditions(
+        self,
+    ) -> None:
+        from copy import deepcopy
+        import tempfile
+
+        from openpyxl import load_workbook
+
+        from dpt_extractor.export.report_template import (
+            ShortReportConditions,
+            write_report_template,
+        )
+        from dpt_extractor.export.short_circuit_layout import (
+            COL_ICMAX,
+            COL_PHASE,
+            DATA_START_ROW,
+            TEMPLATE_ROWS,
+            build_short_circuit_workbook,
+        )
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.test_mode import TestMode
+
+        win = MainWindow()
+        try:
+            mode_index = win.combo_test_mode.findData(TestMode.SHORT_CIRCUIT.value)
+            self.assertGreaterEqual(mode_index, 0)
+            win.combo_test_mode.setCurrentIndex(mode_index)
+            win._apply_test_mode_ui()
+            win._load_file(str(SHORT_VH_750), background=False)
+            self.assertIsNotNone(win.result)
+            assert win.result is not None
+
+            key = ("短路过程", "短路电流Imax")
+            win._on_value_clicked(*key)
+            plot = win.wave_plot
+            self.assertIsNotNone(plot._cursor_a)
+            self.assertIsNotNone(plot._cursor_b)
+            self.assertIsNotNone(plot._h_cursor_b)
+            assert plot._cursor_a is not None
+            assert plot._cursor_b is not None
+            assert plot._h_cursor_b is not None
+
+            default_imax = float(win.result.short_circuit.ic_max)
+            a_t = float(plot._cursor_a.value())
+            b_t = float(plot._cursor_b.value())
+            hb = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+            manual_imax = round(default_imax - 123.455, 2)
+
+            # Ha is intentionally locked in the current UI.  Seed the exact
+            # post-callback state boundary here so this regression isolates the
+            # ordering bug: automatic re-extraction first updates the report
+            # condition, then manual result materialization must replace it.
+            win.result.short_circuit.ic_max = manual_imax
+            win.result.idc = manual_imax
+            win.result.idc_set = manual_imax
+            win._manual_intervals[key] = (min(a_t, b_t), max(a_t, b_t))
+            win._manual_short_current[key] = (a_t, b_t, hb, manual_imax)
+            win._touch_manual_waveform_source()
+            win._apply_detected_short_imax(win.result)
+            current_conditions = win._current_report_conditions()
+            self.assertIsInstance(current_conditions, ShortReportConditions)
+            assert isinstance(current_conditions, ShortReportConditions)
+            self.assertAlmostEqual(current_conditions.imax_a, manual_imax, places=9)
+
+            # Keep Imax inactive so restoring only the selected card cannot hide
+            # a stale automatic report-condition value.
+            win._on_value_clicked("短路过程", "短路时间Tsc")
+            win._recalculate(reset_manual=False)
+            self.assertAlmostEqual(
+                win.result.short_circuit.ic_max,
+                manual_imax,
+                places=9,
+            )
+            frozen = deepcopy(win.result)
+            report_conditions = win._current_report_conditions()
+            self.assertIsInstance(report_conditions, ShortReportConditions)
+            assert isinstance(report_conditions, ShortReportConditions)
+            self.assertAlmostEqual(report_conditions.imax_a, manual_imax, places=9)
+
+            phase_code = win._current_report_phase_code()
+            temperature_code = win._current_temperature_code()
+            temperature_labels = win._temperature_display_labels()
+            with tempfile.TemporaryDirectory() as td:
+                report = Path(td) / "short_manual_imax_report.xlsx"
+                workbook = build_short_circuit_workbook()
+                data_sheet = workbook["短路测试"]
+                for offset, (_temp, code) in enumerate(TEMPLATE_ROWS):
+                    data_sheet.cell(DATA_START_ROW + offset, COL_PHASE, code)
+                picture = workbook.create_sheet("短路测试图片")
+                picture.merge_cells("A1:E1")
+                picture["A1"] = (
+                    f"{phase_code}_{temperature_labels[temperature_code]}"
+                )
+                for col, label in enumerate(
+                    ("Vce", "Imax", "Cdesat", "Rdesat", "Vdesat"),
+                    start=1,
+                ):
+                    picture.cell(2, col, label)
+                workbook.save(report)
+
+                summary = write_report_template(
+                    frozen,
+                    report,
+                    phase_code=phase_code,
+                    temperature_code=temperature_code,
+                    temperature_labels=temperature_labels,
+                    report_conditions=report_conditions,
+                )
+                saved = load_workbook(report, data_only=True)
+                data_imax = saved["短路测试"].cell(
+                    summary.data_row,
+                    COL_ICMAX,
+                ).value
+                picture_ws = saved["短路测试图片"]
+                picture_imax = next(
+                    picture_ws.cell(row + 1, col).value
+                    for row in range(1, picture_ws.max_row + 1)
+                    for col in range(1, 6)
+                    if str(picture_ws.cell(row, col).value or "")
+                    .strip()
+                    .upper()
+                    .startswith("IMAX")
+                )
+
+            expected_number = round(manual_imax, 3)
+            expected_picture = (
+                f"{expected_number:.3f}".rstrip("0").rstrip(".") + "A"
+            )
+            self.assertEqual(data_imax, expected_number)
+            self.assertEqual(picture_imax, expected_picture)
+        finally:
+            win.close()
+
+    def test_short_tsc_range_change_discards_both_manual_cursor_caches(self) -> None:
+        from unittest.mock import patch
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            key = ("短路过程", "短路时间Tsc")
+            win._manual_intervals[key] = (1.0, 2.0)
+            win._manual_short_current[key] = (1.0, 2.0, 3.0, 4.0)
+            with (
+                patch.object(
+                    win,
+                    "_save_short_circuit_tsc_range",
+                    return_value="10%-10%",
+                ),
+                patch.object(win, "_recalculate") as recalculate,
+            ):
+                win._on_short_circuit_tsc_range_changed("10%-10%")
+
+            self.assertNotIn(key, win._manual_intervals)
+            self.assertNotIn(key, win._manual_short_current)
+            recalculate.assert_called_once_with()
+        finally:
+            win.close()
+
+    @unittest.skipUnless(SHORT_VH_750.exists(), "750V VH short sample missing")
     def test_short_vpeak_and_esc_keep_independent_horizontal_channels(self) -> None:
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.models.test_mode import TestMode

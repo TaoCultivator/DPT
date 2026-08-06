@@ -134,6 +134,54 @@ class TestSlopeRangeDialog(unittest.TestCase):
         self.assertEqual(selected.as_fractions(), (0.9, 0.1))
         self.assertEqual(preset_index_for_range("on_dvdt", selected), 0)
 
+    def test_range_change_discards_only_the_affected_manual_slope(self) -> None:
+        from unittest.mock import patch
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.slope_range import (
+            SLOPE_RANGE_PRESETS,
+            SLOPE_ROW_KEYS,
+            preset_to_range,
+        )
+
+        for param_key, row_key in SLOPE_ROW_KEYS.items():
+            with self.subTest(row_key=row_key):
+                win = MainWindow()
+                try:
+                    section, metric = param_key
+                    cache = (
+                        win._manual_dvdt
+                        if metric == "dv/dt"
+                        else win._manual_didt
+                    )
+                    cache[param_key] = (1.0, 2.0, 3.0, 4.0)
+                    win._manual_intervals[param_key] = (1.0, 2.0)
+                    win._manual_energy[("开通", "Eon")] = (
+                        1.0,
+                        2.0,
+                        3.0,
+                        4.0,
+                    )
+                    ls_key = {
+                        ("关断过程", "di/dt"): ("关断过程", "Ls_off"),
+                        ("开通", "di/dt"): ("开通", "Ls_on"),
+                    }.get(param_key)
+                    if ls_key is not None:
+                        win._manual_intervals[ls_key] = (1.0, 2.0)
+
+                    changed = preset_to_range(SLOPE_RANGE_PRESETS[row_key][1])
+                    with patch.object(win, "_recalculate") as recalculate:
+                        win._on_slope_range_changed(row_key, changed)
+
+                    recalculate.assert_called_once_with()
+                    self.assertNotIn(param_key, cache)
+                    self.assertNotIn(param_key, win._manual_intervals)
+                    if ls_key is not None:
+                        self.assertNotIn(ls_key, win._manual_intervals)
+                    self.assertIn(("开通", "Eon"), win._manual_energy)
+                finally:
+                    win.close()
+
 
 if __name__ == "__main__":
     unittest.main()
