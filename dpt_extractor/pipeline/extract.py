@@ -44,7 +44,11 @@ from dpt_extractor.metrics.slopes import (
     turn_off_didt_measurement_context,
     turn_off_dvdt_measurement_context,
 )
-from dpt_extractor.models.slope_range import SlopeRange, default_slope_ranges
+from dpt_extractor.models.slope_range import (
+    SlopeRange,
+    default_slope_ranges,
+    slope_range_result_label,
+)
 from dpt_extractor.models.bridge_profile import BridgeProfile
 from dpt_extractor.models.results import (
     ExtractResult,
@@ -572,6 +576,7 @@ def extract_all(
         dv_hi,
         rise_start=ic_f0,
         rise_end=ic_f1,
+        auto_max=off_dv.is_auto_max,
     )
     dvdt_o = float(off_dvdt_context.crossing.dvdt)
     off_didt_context = turn_off_didt_measurement_context(
@@ -589,6 +594,7 @@ def extract_all(
         off_di_p1,
         edge=off_di.ic_direction,
         next_pulse_on=edges.next_pulse_on,
+        auto_max=off_di.is_auto_max,
     )
     # One canonical source keeps Ic_off_max, the displayed Ha/Top, percentage
     # thresholds, GUI cursors and report values identical even on the fallback
@@ -640,8 +646,12 @@ def extract_all(
         vce_off_max=vce_off_max,
         dvdt=dvdt_o,
         didt=didt_o,
-        dvdt_range=off_dv.label(),
-        didt_range=off_di.label(),
+        dvdt_range=slope_range_result_label(
+            off_dv, off_dvdt_context.crossing
+        ),
+        didt_range=slope_range_result_label(
+            off_di, off_didt_context.crossing
+        ),
         ls_off=ls_off,
         toff=toff,
         td_off=td_off,
@@ -729,6 +739,7 @@ def extract_all(
         on_dv_hi,
         on_dv_lo,
         event_end_idx=edges.pulse2_off,
+        auto_max=on_dv.is_auto_max,
     )
     dvdt_on_v = float(on_dvdt_context.crossing.dvdt)
     on_didt_context = turn_on_didt_measurement_context(
@@ -741,6 +752,7 @@ def extract_all(
         on_di_p1,
         edge=on_di.ic_direction,
         event_end_idx=edges.pulse2_off,
+        auto_max=on_di.is_auto_max,
     )
     turn_on_current = float(on_didt_context.top_a)
     didt_on_v = float(on_didt_context.crossing.didt)
@@ -813,8 +825,12 @@ def extract_all(
         turn_on_current=turn_on_current,
         dvdt=dvdt_on_v,
         didt=didt_on_v,
-        dvdt_range=on_dv.label(),
-        didt_range=on_di.label(),
+        dvdt_range=slope_range_result_label(
+            on_dv, on_dvdt_context.crossing
+        ),
+        didt_range=slope_range_result_label(
+            on_di, on_didt_context.crossing
+        ),
         ls_on=ls_on,
         ton=ton,
         td_on=td_on,
@@ -876,6 +892,7 @@ def extract_all(
             fallback_i1=rr_context_i1,
             use_settled_platform=rr_dvdt_settled_platform,
             event_end_idx=on1,
+            auto_max=rr_dv.is_auto_max,
         )
         if v_diode is not None
         else None
@@ -900,6 +917,7 @@ def extract_all(
         rr_i1=rr_context_i1,
         fallback_i0=rr0,
         fallback_i1=rr_context_i1,
+        auto_max=rr_di.is_auto_max,
     )
     didt_rr = float(rr_didt_context.crossing.didt)
     # Trr 与 GUI 默认卡尺共用同一套 Ha/A/B 主恢复瓣交点逻辑
@@ -953,8 +971,14 @@ def extract_all(
         vrr=vrr,
         dvdt_max=dvdt_rr,
         didt_irr=didt_rr,
-        dvdt_range=rr_dv.label(),
-        didt_range=rr_di.label(),
+        dvdt_range=(
+            slope_range_result_label(rr_dv, rr_dvdt_context.crossing)
+            if rr_dvdt_context is not None
+            else rr_dv.label()
+        ),
+        didt_range=slope_range_result_label(
+            rr_di, rr_didt_context.crossing
+        ),
         pdmax=pdmax_rr,
         err=err,
         err_check=err_math,

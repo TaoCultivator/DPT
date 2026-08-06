@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.ndimage import median_filter
@@ -59,7 +59,7 @@ def _rr_dvdt_settled_base_top(
     i1: int,
     event_end_idx: int | None,
     dt: float,
-) -> tuple[float, float] | None:
+) -> tuple[float, float, float, float] | None:
     """Return event-local stable Vd Base/Top for a ringing-polluted RR edge."""
     t_arr = np.asarray(t, dtype=np.float64)
     y = np.asarray(vd_abs, dtype=np.float64)
@@ -255,6 +255,8 @@ class DvdtCrossingResult:
     t_pct_b_s: float | None
     th_a: float
     th_b: float
+    resolved_pct_a: float | None = None
+    resolved_pct_b: float | None = None
 
 
 def dvdt_between_base_top(
@@ -348,6 +350,290 @@ class DidtCrossingResult:
     th_b: float
     idm: float | None = None
     irm: float | None = None
+    resolved_pct_a: float | None = None
+    resolved_pct_b: float | None = None
+
+
+def _linear_window_quality(
+    t_s: np.ndarray,
+    progress: np.ndarray,
+    start: int,
+    end: int,
+    reversal_tolerance: float,
+) -> tuple[float, float, float, float]:
+    """Return fitted slope, R², monotonic share and fitted amplitude."""
+
+    x = np.asarray(t_s[start : end + 1], dtype=np.float64)
+    y = np.asarray(progress[start : end + 1], dtype=np.float64)
+    if len(x) < 3 or not np.isfinite(x).all() or not np.isfinite(y).all():
+        return 0.0, 0.0, 0.0, 0.0
+    x = x - float(x[0])
+    duration = float(x[-1])
+    if duration <= 0.0:
+        return 0.0, 0.0, 0.0, 0.0
+    design = np.column_stack((x, np.ones_like(x)))
+    slope, intercept = np.linalg.lstsq(design, y, rcond=None)[0]
+    fitted = slope * x + intercept
+    residual = float(np.sum((y - fitted) ** 2))
+    total = float(np.sum((y - float(np.mean(y))) ** 2))
+    r2 = 1.0 - residual / total if total > 1e-18 else 0.0
+    monotonic = float(np.mean(np.diff(y) >= -float(reversal_tolerance)))
+    amplitude = float(slope * duration)
+    return float(slope), float(r2), monotonic, amplitude
+
+
+def _auto_max_slope_percentages(
+    t: np.ndarray,
+    y: np.ndarray,
+    base_v: float,
+    top_v: float,
+    edge: str,
+    anchor: DvdtCrossingResult,
+    *,
+    use_abs: bool = False,
+) -> tuple[float, float] | None:
+    """Select the fastest continuous, monotonic and near-linear main-edge band.
+
+    The broad ``anchor`` is supplied by each parameter's existing episode
+    detector, so this locator cannot jump to a different pulse or later
+    ringing packet.  Filtering is used only to choose the band.  Callers then
+    run their established raw crossing routine again at the resolved levels.
+    """
+
+    if anchor.t_pct_a_s is None or anchor.t_pct_b_s is None:
+        return None
+    tt = np.asarray(t, dtype=np.float64)
+    yy = np.asarray(y, dtype=np.float64)
+    n = min(len(tt), len(yy))
+    if n < 7:
+        return None
+    tt = tt[:n]
+    yy = yy[:n]
+    if use_abs:
+        yy = np.abs(yy)
+    lo_t = min(float(anchor.t_pct_a_s), float(anchor.t_pct_b_s))
+    hi_t = max(float(anchor.t_pct_a_s), float(anchor.t_pct_b_s))
+    i0 = max(0, int(np.searchsorted(tt, lo_t, side="left")) - 1)
+    i1 = min(n - 1, int(np.searchsorted(tt, hi_t, side="right")))
+    if i1 - i0 + 1 < 7:
+        return None
+    seg_t = tt[i0 : i1 + 1]
+    seg_y = yy[i0 : i1 + 1]
+    if not np.isfinite(seg_t).all() or not np.isfinite(seg_y).all():
+        return None
+    if np.any(np.diff(seg_t) <= 0.0):
+        return None
+
+    low = float(min(base_v, top_v))
+    high = float(max(base_v, top_v))
+    span = high - low
+    if not np.isfinite(span) or span <= 1e-12:
+        return None
+    level = (seg_y - low) / span
+    progress = level if edge == "rise" else 1.0 - level
+
+    # A small sample-count-derived median kernel rejects isolated spikes while
+    # preserving the duration of a genuinely short switching edge.  It never
+    # sets the reported A/B levels or the final slope.
+    kernel = max(3, 2 * max(1, len(progress) // 50) + 1)
+    kernel = min(9, kernel)
+    if kernel >= len(progress):
+        kernel = len(progress) if len(progress) % 2 == 1 else len(progress) - 1
+    located = median_filter(progress, size=max(1, kernel), mode="nearest")
+    if len(located) >= 3:
+        padded = np.pad(located, (1, 1), mode="edge")
+        located = (
+            0.25 * padded[:-2] + 0.50 * padded[1:-1] + 0.25 * padded[2:]
+        )
+
+    increments = np.diff(located)
+    curvature = np.diff(located, n=2)
+    median_curvature = float(np.median(curvature)) if len(curvature) else 0.0
+    noise = (
+        0.5
+        * 1.4826
+        * float(np.median(np.abs(curvature - median_curvature)))
+        if len(curvature)
+        else 0.0
+    )
+    reversal_tolerance = max(0.003, 3.0 * noise)
+    minimum_amplitude = max(0.015, 4.0 * noise)
+    min_points = max(5, int(np.ceil(np.sqrt(len(located)))))
+    min_points = min(len(located), min(21, min_points))
+    if min_points < 5:
+        return None
+
+    best: tuple[float, int, int, float] | None = None
+    for start in range(0, len(located) - min_points + 1):
+        end = start + min_points - 1
+        slope, r2, monotonic, amplitude = _linear_window_quality(
+            seg_t, located, start, end, reversal_tolerance
+        )
+        if (
+            slope <= 0.0
+            or r2 < 0.90
+            or monotonic < 0.70
+            or amplitude < minimum_amplitude
+        ):
+            continue
+        if best is None or slope > best[0]:
+            best = (slope, start, end, r2)
+    if best is None:
+        return None
+
+    seed_slope, start, end, _seed_r2 = best
+    # Grow around the fastest valid seed until either direction ceases to be
+    # near-linear/monotonic or its fitted slope drops materially.  Thus the
+    # selected width follows the waveform shape instead of a fixed 20% span.
+    while True:
+        candidates: list[tuple[float, float, int, int]] = []
+        for next_start, next_end in ((start - 1, end), (start, end + 1)):
+            if next_start < 0 or next_end >= len(located):
+                continue
+            slope, r2, monotonic, amplitude = _linear_window_quality(
+                seg_t,
+                located,
+                next_start,
+                next_end,
+                reversal_tolerance,
+            )
+            if (
+                slope >= 0.95 * seed_slope
+                and r2 >= 0.90
+                and monotonic >= 0.70
+                and amplitude >= minimum_amplitude
+            ):
+                candidates.append((r2, slope, next_start, next_end))
+        if not candidates:
+            break
+        _r2, _slope, start, end = max(candidates)
+
+    fit_t = seg_t[start : end + 1] - float(seg_t[start])
+    fit_y = located[start : end + 1]
+    fit_design = np.column_stack((fit_t, np.ones_like(fit_t)))
+    fit_slope, fit_intercept = np.linalg.lstsq(
+        fit_design, fit_y, rcond=None
+    )[0]
+    observed_min = float(np.min(fit_y))
+    observed_max = float(np.max(fit_y))
+    start_progress = float(
+        np.clip(max(float(fit_intercept), observed_min), 0.01, 0.99)
+    )
+    end_progress = float(
+        np.clip(
+            min(
+                float(fit_slope * float(fit_t[-1]) + fit_intercept),
+                observed_max,
+            ),
+            0.01,
+            0.99,
+        )
+    )
+    if end_progress - start_progress < max(0.005, minimum_amplitude / 3.0):
+        return None
+    start_t = float(seg_t[start])
+    end_t = float(seg_t[end])
+    if edge == "rise":
+        return start_progress, end_progress, start_t, end_t
+    return 1.0 - start_progress, 1.0 - end_progress, start_t, end_t
+
+
+def auto_dvdt_between_base_top(
+    t: np.ndarray,
+    y: np.ndarray,
+    i0: int,
+    i1: int,
+    base_v: float,
+    top_v: float,
+    edge: str,
+    *,
+    use_abs: bool = False,
+) -> DvdtCrossingResult:
+    """Automatic valid-band variant of :func:`dvdt_between_base_top`."""
+
+    anchor: DvdtCrossingResult | None = None
+    for low_pct, high_pct in (
+        (0.02, 0.98),
+        (0.05, 0.95),
+        (0.10, 0.90),
+        (0.20, 0.80),
+    ):
+        broad_a, broad_b = (
+            (low_pct, high_pct)
+            if edge == "rise"
+            else (high_pct, low_pct)
+        )
+        candidate = dvdt_between_base_top(
+            t,
+            y,
+            i0,
+            i1,
+            base_v,
+            top_v,
+            broad_a,
+            broad_b,
+            edge,
+            use_abs=use_abs,
+        )
+        if candidate.t_pct_a_s is not None and candidate.t_pct_b_s is not None:
+            anchor = candidate
+            break
+    if anchor is None:
+        return DvdtCrossingResult(0.0, None, None, float(base_v), float(top_v))
+    percentages = _auto_max_slope_percentages(
+        t, y, base_v, top_v, edge, anchor, use_abs=use_abs
+    )
+    if percentages is None:
+        return DvdtCrossingResult(0.0, None, None, anchor.th_a, anchor.th_b)
+    pct_a, pct_b, selected_t0, selected_t1 = percentages
+    local_i0 = max(
+        int(i0), int(np.searchsorted(np.asarray(t), selected_t0, side="left")) - 2
+    )
+    local_i1 = min(
+        int(i1), int(np.searchsorted(np.asarray(t), selected_t1, side="right")) + 1
+    )
+    result = dvdt_between_base_top(
+        t,
+        y,
+        local_i0,
+        local_i1,
+        base_v,
+        top_v,
+        pct_a,
+        pct_b,
+        edge,
+        use_abs=use_abs,
+    )
+    if result.t_pct_a_s is None or result.t_pct_b_s is None:
+        return result
+    return replace(result, resolved_pct_a=pct_a, resolved_pct_b=pct_b)
+
+
+def auto_didt_between_base_top(
+    t: np.ndarray,
+    ic: np.ndarray,
+    i0: int,
+    i1: int,
+    base_a: float,
+    top_a: float,
+    edge: str,
+    *,
+    use_abs: bool = True,
+) -> DidtCrossingResult:
+    """Automatic valid-band variant of :func:`didt_between_base_top`."""
+
+    raw = auto_dvdt_between_base_top(
+        t, ic, i0, i1, base_a, top_a, edge, use_abs=use_abs
+    )
+    return DidtCrossingResult(
+        raw.dvdt,
+        raw.t_pct_a_s,
+        raw.t_pct_b_s,
+        raw.th_a,
+        raw.th_b,
+        resolved_pct_a=raw.resolved_pct_a,
+        resolved_pct_b=raw.resolved_pct_b,
+    )
 
 
 def _didt_fall_robust(
@@ -694,6 +980,7 @@ def turn_on_dvdt_measurement_context(
     pct_lo: float,
     *,
     event_end_idx: int | None = None,
+    auto_max: bool = False,
 ) -> DvdtMeasurementContext:
     """Build the canonical turn-on Vce dv/dt context.
 
@@ -713,6 +1000,42 @@ def turn_on_dvdt_measurement_context(
     i0 = max(0, min(int(i0), n - 2))
     i1 = max(i0 + 1, min(int(i1), n - 1))
     top = float(top_v)
+    if auto_max:
+        crossing = auto_dvdt_between_base_top(
+            t_arr,
+            vce_arr,
+            i0,
+            i1,
+            0.0,
+            top,
+            "fall",
+        )
+        if (
+            (crossing.t_pct_a_s is None or crossing.t_pct_b_s is None)
+            and event_end_idx is not None
+        ):
+            extended_i1 = max(i1, min(int(event_end_idx), n - 1))
+            if extended_i1 > i1:
+                extended = auto_dvdt_between_base_top(
+                    t_arr,
+                    vce_arr,
+                    i0,
+                    extended_i1,
+                    0.0,
+                    top,
+                    "fall",
+                )
+                if (
+                    extended.t_pct_a_s is not None
+                    and extended.t_pct_b_s is not None
+                ):
+                    crossing = extended
+        return DvdtMeasurementContext(
+            0.0,
+            top,
+            crossing,
+            crossing.t_pct_a_s is None or crossing.t_pct_b_s is None,
+        )
     high_pct = max(float(pct_hi), float(pct_lo))
     low_pct = min(float(pct_hi), float(pct_lo))
     th_hi = high_pct * top
@@ -791,6 +1114,7 @@ def rr_dvdt_measurement_context(
     fallback_i1: int | None = None,
     use_settled_platform: bool = False,
     event_end_idx: int | None = None,
+    auto_max: bool = False,
 ) -> DvdtMeasurementContext:
     """Build the canonical reverse-recovery ``|Vd|`` dv/dt context.
 
@@ -825,6 +1149,23 @@ def rr_dvdt_measurement_context(
         )
         if settled_levels is not None:
             base, top = settled_levels
+    if auto_max:
+        crossing = auto_dvdt_between_base_top(
+            t_arr,
+            vd_arr,
+            i0,
+            i1 - 1,
+            base,
+            top,
+            "rise",
+            use_abs=True,
+        )
+        return DvdtMeasurementContext(
+            base,
+            top,
+            crossing,
+            crossing.t_pct_a_s is None or crossing.t_pct_b_s is None,
+        )
     span = float(top) - float(base)
     th_lo = float(base) + float(pct_lo) * span
     th_hi = float(base) + float(pct_hi) * span
@@ -841,7 +1182,7 @@ def rr_dvdt_measurement_context(
         else 0.0
     )
     used_fallback = value < 1e-6
-    if used_fallback:
+    if used_fallback and not auto_max:
         fb0 = i0 if fallback_i0 is None else int(fallback_i0)
         fb1 = i1 if fallback_i1 is None else int(fallback_i1)
         value = dvdt_max(t_arr, vd_arr, fb0, fb1, dt, cfg)
@@ -922,6 +1263,7 @@ def turn_off_dvdt_measurement_context(
     *,
     rise_start: int | None = None,
     rise_end: int | None = None,
+    auto_max: bool = False,
 ) -> DvdtMeasurementContext:
     """用同一参数本地窗口生成关断 dv/dt 的完整默认测量上下文。"""
     from dpt_extractor.metrics.plateau_level import turn_off_dvdt_base_top_levels
@@ -935,6 +1277,85 @@ def turn_off_dvdt_measurement_context(
     search0 = i0 if rise_start is None else max(i0, min(int(rise_start), i1 - 1))
     search1 = i1 if rise_end is None else max(search0 + 1, min(int(rise_end), i1))
     base_v, top_v = turn_off_dvdt_base_top_levels(t, vce, i0, i1)
+    if auto_max:
+        anchor: DvdtCrossingResult | None = None
+        for low_pct, high_pct in (
+            (0.02, 0.98),
+            (0.05, 0.95),
+            (0.10, 0.90),
+            (0.20, 0.80),
+        ):
+            anchor = _sustained_rise_between_base_top(
+                t,
+                vce,
+                search0,
+                i1,
+                base_v,
+                top_v,
+                low_pct,
+                high_pct,
+                dt,
+            )
+            if anchor is None:
+                candidate = dvdt_between_base_top(
+                    t,
+                    vce,
+                    search0,
+                    i1,
+                    base_v,
+                    top_v,
+                    low_pct,
+                    high_pct,
+                    "rise",
+                )
+                if (
+                    candidate.t_pct_a_s is not None
+                    and candidate.t_pct_b_s is not None
+                ):
+                    anchor = candidate
+            if anchor is not None:
+                break
+        if anchor is None:
+            crossing = DvdtCrossingResult(0.0, None, None, base_v, top_v)
+            return DvdtMeasurementContext(
+                float(base_v), float(top_v), crossing, True
+            )
+        percentages = _auto_max_slope_percentages(
+            t, vce, base_v, top_v, "rise", anchor
+        )
+        if percentages is None:
+            crossing = DvdtCrossingResult(
+                0.0, None, None, anchor.th_a, anchor.th_b
+            )
+        else:
+            auto_a, auto_b, _selected_t0, _selected_t1 = percentages
+            crossing = _sustained_rise_between_base_top(
+                t, vce, search0, i1, base_v, top_v, auto_a, auto_b, dt
+            )
+            if crossing is None:
+                crossing = dvdt_between_base_top(
+                    t,
+                    vce,
+                    search0,
+                    i1,
+                    base_v,
+                    top_v,
+                    auto_a,
+                    auto_b,
+                    "rise",
+                )
+            if crossing.t_pct_a_s is not None and crossing.t_pct_b_s is not None:
+                crossing = replace(
+                    crossing,
+                    resolved_pct_a=auto_a,
+                    resolved_pct_b=auto_b,
+                )
+        return DvdtMeasurementContext(
+            float(base_v),
+            float(top_v),
+            crossing,
+            crossing.t_pct_a_s is None or crossing.t_pct_b_s is None,
+        )
     crossing = _sustained_rise_between_base_top(
         t, vce, search0, search1, base_v, top_v, pct_a, pct_b, dt
     )
@@ -1011,6 +1432,7 @@ def turn_off_didt_measurement_context(
     edge: str = "fall",
     *,
     next_pulse_on: int | None = None,
+    auto_max: bool = False,
 ) -> DidtMeasurementContext:
     """用同一参数本地窗口生成关断 di/dt 的完整默认测量上下文。"""
     from dpt_extractor.metrics.plateau_level import (
@@ -1046,6 +1468,24 @@ def turn_off_didt_measurement_context(
         next_pulse_on=next_pulse_on,
         base_window=base_window,
     )
+    if auto_max:
+        crossing = auto_didt_between_base_top(
+            t,
+            ic,
+            search0,
+            i1,
+            base_a,
+            top_a,
+            "fall",
+            use_abs=False,
+        )
+        return DidtMeasurementContext(
+            float(base_a),
+            float(top_a),
+            crossing,
+            crossing.t_pct_a_s is None or crossing.t_pct_b_s is None,
+            base_window,
+        )
     # Turn-off is always the physical falling Ic edge. ``edge`` is retained
     # for saved configuration compatibility; custom percentage order must not
     # redirect the measurement to a rising edge.
@@ -1088,7 +1528,7 @@ def turn_off_didt_measurement_context(
         if extended.t_pct_a_s is not None and extended.t_pct_b_s is not None:
             crossing = extended
     used_fallback = crossing.didt < 1e-6
-    if used_fallback:
+    if used_fallback and not auto_max:
         fallback = didt_max(t, ic, search0, search1 + 1, dt, cfg)
         crossing = DidtCrossingResult(
             float(fallback),
@@ -1117,6 +1557,7 @@ def turn_on_didt_measurement_context(
     base_override: float | None = None,
     top_override: float | None = None,
     event_end_idx: int | None = None,
+    auto_max: bool = False,
 ) -> DidtMeasurementContext:
     """Build one canonical turn-on di/dt context on the logical signed Ic.
 
@@ -1200,6 +1641,79 @@ def turn_on_didt_measurement_context(
             pct_a,
             pct_b,
             dt,
+        )
+
+    if auto_max:
+        broad: DvdtCrossingResult | None = None
+        for low_pct, high_pct in (
+            (0.02, 0.98),
+            (0.05, 0.95),
+            (0.10, 0.90),
+            (0.20, 0.80),
+        ):
+            broad, search_window = _turn_on_main_rise_between_base_top(
+                t_arr,
+                ic_arr,
+                search0,
+                top_window,
+                base_a,
+                top_a,
+                low_pct,
+                high_pct,
+                dt,
+            )
+            if broad is not None:
+                break
+        percentages = (
+            _auto_max_slope_percentages(
+                t_arr, ic_arr, base_a, top_a, "rise", broad
+            )
+            if broad is not None
+            else None
+        )
+        if percentages is None:
+            crossing = DidtCrossingResult(0.0, None, None, th_a, th_b)
+            return DidtMeasurementContext(
+                base_a,
+                top_a,
+                crossing,
+                True,
+                base_window,
+                top_window,
+                search_window,
+            )
+        auto_a, auto_b, _selected_t0, _selected_t1 = percentages
+        selected, search_window = _turn_on_main_rise_between_base_top(
+            t_arr,
+            ic_arr,
+            search0,
+            top_window,
+            base_a,
+            top_a,
+            auto_a,
+            auto_b,
+            dt,
+        )
+        if selected is None:
+            crossing = DidtCrossingResult(0.0, None, None, th_a, th_b)
+        else:
+            crossing = DidtCrossingResult(
+                float(selected.dvdt),
+                selected.t_pct_a_s,
+                selected.t_pct_b_s,
+                selected.th_a,
+                selected.th_b,
+                resolved_pct_a=auto_a,
+                resolved_pct_b=auto_b,
+            )
+        return DidtMeasurementContext(
+            base_a,
+            top_a,
+            crossing,
+            crossing.t_pct_a_s is None or crossing.t_pct_b_s is None,
+            base_window,
+            top_window,
+            search_window,
         )
 
     if raw is None:
@@ -2129,6 +2643,91 @@ def rr_didt_between_prepared_levels(
     )
 
 
+def auto_rr_didt_between_prepared_levels(
+    prepared: RrDidtPreparedSeries,
+    *,
+    forward_a: float,
+    base_a: float,
+) -> DidtCrossingResult:
+    """Select the maximum valid interval on the signed IDM commutation edge."""
+
+    forward = float(forward_a) if np.isfinite(forward_a) else 0.0
+    base = float(base_a) if np.isfinite(base_a) else 0.0
+    polarity = 1 if forward >= base else -1
+    oriented = prepared.positive_a if polarity > 0 else prepared.negative_a
+    oriented_base = float(polarity) * base
+    oriented_top = float(polarity) * forward
+    anchor: DidtCrossingResult | None = None
+    for high_pct, low_pct in (
+        (0.98, 0.02),
+        (0.95, 0.05),
+        (0.90, 0.10),
+        (0.80, 0.20),
+    ):
+        candidate = _rr_idm_crossings_from_prepared(
+            prepared,
+            forward,
+            base,
+            high_pct,
+            low_pct,
+        )
+        if candidate.t_pct_a_s is not None and candidate.t_pct_b_s is not None:
+            anchor = candidate
+            break
+    if anchor is None:
+        return DidtCrossingResult(0.0, None, None, forward, base)
+    percentages = _auto_max_slope_percentages(
+        prepared.t_s,
+        oriented,
+        oriented_base,
+        oriented_top,
+        "fall",
+        anchor,
+    )
+    if percentages is None:
+        return DidtCrossingResult(
+            0.0,
+            None,
+            None,
+            anchor.th_a,
+            anchor.th_b,
+            anchor.idm,
+            anchor.irm,
+        )
+    pct_a, pct_b, _selected_t0, _selected_t1 = percentages
+    result = _rr_idm_crossings_from_prepared(
+        prepared,
+        forward,
+        base,
+        pct_a,
+        pct_b,
+    )
+    if result.t_pct_a_s is None or result.t_pct_b_s is None:
+        return result
+    return replace(
+        result,
+        resolved_pct_a=pct_a,
+        resolved_pct_b=pct_b,
+    )
+
+
+def auto_rr_didt_between_levels(
+    t: np.ndarray,
+    i_d: np.ndarray,
+    i0: int,
+    i1: int,
+    *,
+    forward_a: float,
+    base_a: float,
+) -> DidtCrossingResult:
+    prepared = prepare_rr_didt_series(t, i_d, i0, i1)
+    return auto_rr_didt_between_prepared_levels(
+        prepared,
+        forward_a=forward_a,
+        base_a=base_a,
+    )
+
+
 def rr_didt_between_levels(
     t: np.ndarray,
     i_d: np.ndarray,
@@ -2171,6 +2770,7 @@ def rr_didt_measurement_context(
     rr_i1: int | None = None,
     fallback_i0: int | None = None,
     fallback_i1: int | None = None,
+    auto_max: bool = False,
 ) -> RrDidtMeasurementContext:
     """Build the one authoritative RR di/dt context for pipeline and GUI."""
     t_arr = np.asarray(t, dtype=np.float64)
@@ -2275,7 +2875,17 @@ def rr_didt_measurement_context(
                     and candidate_mag <= 1.50 * detected_mag
                 ):
                     forward = float(candidate)
-    if measure == "if_irm":
+    if auto_max:
+        crossing = auto_rr_didt_between_levels(
+            repaired_t if repaired_t is not None else t_arr,
+            i_arr,
+            i0,
+            i1,
+            forward_a=forward,
+            base_a=base,
+        )
+        zero_out = None
+    elif measure == "if_irm":
         crossing = rr_didt_between_levels(
             repaired_t if repaired_t is not None else t_arr,
             i_arr,
@@ -2304,7 +2914,7 @@ def rr_didt_measurement_context(
         zero_out = None
 
     used_fallback = crossing.didt < 1e-6
-    if used_fallback:
+    if used_fallback and not auto_max:
         fb0 = i0 if fallback_i0 is None else int(fallback_i0)
         fb1 = i1 if fallback_i1 is None else int(fallback_i1)
         fb0 = max(0, min(fb0, n - 1))

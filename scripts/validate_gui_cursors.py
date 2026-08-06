@@ -48,6 +48,10 @@ from dpt_extractor.models.waveform import (  # noqa: E402
 from dpt_extractor.models.results import (  # noqa: E402
     SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
 )
+from dpt_extractor.models.slope_range import (  # noqa: E402
+    SLOPE_ROW_KEYS,
+    auto_max_slope_range,
+)
 from dpt_extractor.models.test_mode import TestMode  # noqa: E402
 from dpt_extractor.utils.sample_corpus import discover_sample_waveforms  # noqa: E402
 
@@ -1869,6 +1873,17 @@ def audit_short_circuit_file(MainWindow, QApplication, app, path: Path) -> list[
 def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
     sample_id = _sample_trace_id(path)
     mw = MainWindow()
+    if os.environ.get("DPT_VALIDATE_AUTO_SLOPES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        mw._slope_ranges = {
+            row_key: auto_max_slope_range(row_key)
+            for row_key in SLOPE_ROW_KEYS.values()
+        }
+        mw.cfg.slope_ranges = dict(mw._slope_ranges)
+        mw.result_table.set_slope_ranges(mw._slope_ranges)
     mw._load_file(str(path))
     if mw.bundle is None or mw.result is None or mw.result.segments is None:
         detail = mw.statusBar().currentMessage() if mw.statusBar() is not None else "参数未计算"
@@ -2487,10 +2502,6 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                                         f"{float(context.forward_a):.9g}≠"
                                         f"{float(expected_stable_forward):.9g}A"
                                     )
-                                from dpt_extractor.models.slope_range import (
-                                    SLOPE_ROW_KEYS,
-                                )
-
                                 row_key = SLOPE_ROW_KEYS[("反向恢复", "di/dt")]
                                 slope_ranges = getattr(
                                     mw,
@@ -2605,8 +2616,6 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                         )
                     )
                     problems.extend(context_problems)
-
-                    from dpt_extractor.models.slope_range import SLOPE_ROW_KEYS
 
                     row_key = SLOPE_ROW_KEYS[("开通", "di/dt")]
                     slope_ranges = getattr(mw, "_slope_ranges", mw.cfg.slope_ranges)

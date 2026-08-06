@@ -1545,6 +1545,7 @@ class WaveformPlot(QWidget):
     channelInversionChanged = pyqtSignal(str, bool)
     cursorVisibilityChanged = pyqtSignal(bool)
     selectionZoomChanged = pyqtSignal(bool)
+    scopeZoomSyncRequested = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1932,6 +1933,7 @@ class WaveformPlot(QWidget):
         self._cursor_ha_v_label: pg.TextItem | None = None
         self._cursor_hb_v_label: pg.TextItem | None = None
         self._cursor_hb_ha_delta_label: pg.TextItem | None = None
+        self._cursor_slope_delta_label: pg.TextItem | None = None
         self._cursor_ha_name_label: pg.TextItem | None = None
         self._cursor_hb_name_label: pg.TextItem | None = None
         self._cursor_a_wave_marker: pg.ScatterPlotItem | None = None
@@ -2165,6 +2167,30 @@ class WaveformPlot(QWidget):
             "level_b": level_b,
         }
 
+    def scope_view_snapshot(self) -> dict[str, object] | None:
+        """Return the current view, with parameter cursors when available."""
+
+        snapshot = self.scope_cursor_snapshot()
+        if snapshot is not None:
+            return {**snapshot, "sync_cursors": True}
+        window = self._current_x_window_for_display()
+        if window is None:
+            return None
+        x0_us, x1_us = (float(window[0]), float(window[1]))
+        if not (np.isfinite(x0_us) and np.isfinite(x1_us) and x1_us > x0_us):
+            return None
+        return {
+            "x_start_s": x0_us * 1e-6,
+            "x_stop_s": x1_us * 1e-6,
+            "cursor_a_s": None,
+            "cursor_b_s": None,
+            "source_a": None,
+            "source_b": None,
+            "level_a": None,
+            "level_b": None,
+            "sync_cursors": False,
+        }
+
     def current_x_range_us(self) -> tuple[float, float] | None:
         try:
             x0, x1 = self.plot.getPlotItem().getViewBox().viewRange()[0]
@@ -2283,6 +2309,7 @@ class WaveformPlot(QWidget):
             self._cursor_ha_v_label,
             self._cursor_hb_v_label,
             self._cursor_hb_ha_delta_label,
+            self._cursor_slope_delta_label,
             self._cursor_a_wave_marker,
             self._cursor_b_wave_marker,
         ):
@@ -2496,6 +2523,14 @@ class WaveformPlot(QWidget):
             item = getattr(self, attr)
             if item is not None:
                 item.setVisible(show_h and self._cursor_readout_overlay and valid)
+        if self._cursor_slope_delta_label is not None:
+            self._cursor_slope_delta_label.setVisible(
+                show_v
+                and show_h
+                and self._cursor_readout_overlay
+                and self._interactive_mode in self._BASE_TOP_SLOPE_MODES
+                and self._horizontal_quantities_comparable()
+            )
         for attr, valid in (
             ("_cursor_ha_name_label", self._horizontal_line_valid("ha")),
             ("_cursor_hb_name_label", self._horizontal_line_valid("hb")),
@@ -3882,6 +3917,7 @@ class WaveformPlot(QWidget):
         if self._full_x_range is None:
             return
         self._fit_full_range()
+        self.scopeZoomSyncRequested.emit(False)
 
     def _toggle_zoom_preview(self) -> None:
         if self._full_x_range is None:
@@ -3893,11 +3929,13 @@ class WaveformPlot(QWidget):
         if self._is_local_x_window(float(x0), float(x1)):
             self._recent_local_x_window = self._clamp_x_window(float(x0), float(x1))
             self._fit_full_range()
+            self.scopeZoomSyncRequested.emit(False)
             return
         if self._recent_local_x_window is None:
             return
         lx0, lx1 = self._clamp_x_window(*self._recent_local_x_window)
         self.plot.getPlotItem().getViewBox().setXRange(lx0, lx1, padding=0.0)
+        self.scopeZoomSyncRequested.emit(True)
 
     def _position_zoom_toggle_button(self) -> None:
         if not hasattr(self, "_zoom_toggle_btn"):
@@ -6738,6 +6776,7 @@ class WaveformPlot(QWidget):
             "_cursor_hb_v_label",
             "_cursor_hb_ha_delta_label",
             "_cursor_ab_delta_label",
+            "_cursor_slope_delta_label",
             "_cursor_a_t_label",
             "_cursor_b_t_label",
         ):
@@ -6802,6 +6841,10 @@ class WaveformPlot(QWidget):
                     CURSOR_READOUT_LABEL_GUARD_PX,
                 )
             )
+        # The slope-range card is a deliberate horizontal pair with the Δt
+        # card.  If generic overlap handling moved the time card vertically,
+        # restore their adjacency after all other labels have settled.
+        self._position_slope_parameter_plot_label()
 
     def _plot_label_x_left_edge(self) -> float:
         """横向光标读数框：贴在当前视图最左侧，避免压在波形中间。"""
@@ -6925,16 +6968,41 @@ class WaveformPlot(QWidget):
             )
         if not comparable:
             return ha_html, hb_html, None
-        delta = hb_val - ha_val
-        if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
-            a_sample = self._sample_cursor_channel(ha_ch, a_us)
-            b_sample = self._sample_cursor_channel(ha_ch, b_us)
-            if a_sample is not None and b_sample is not None:
-                # A/B sit on the configured percentage thresholds.  The
-                # slope readout must therefore use their waveform values,
-                # not the full Ha↔Hb 100% span.
-                delta = abs(float(b_sample[0]) - float(a_sample[0]))
+        # The horizontal-cursor card is a manual scope measurement.  It must
+        # always report the complete absolute Ha↔Hb span, independently from
+        # any parameter's configured percentage range.
+        delta = abs(hb_val - ha_val)
         return ha_html, hb_html, _delta_html(delta, u_ha)
+
+    def _slope_parameter_plot_html(
+        self,
+        a_us: float,
+        b_us: float,
+        dt_us: float,
+    ) -> str | None:
+        """Return the selected slope-range readout kept separate from Ha/Hb."""
+
+        if (
+            self._interactive_mode not in self._BASE_TOP_SLOPE_MODES
+            or not self._cursor_vertical_visible()
+            or not self._cursor_horizontal_visible()
+            or not self._horizontal_quantities_comparable()
+        ):
+            return None
+        channel = self._slope_channel
+        a_sample = self._sample_cursor_channel(channel, a_us)
+        b_sample = self._sample_cursor_channel(channel, b_us)
+        if channel is None or a_sample is None or b_sample is None:
+            return None
+        delta = abs(float(b_sample[0]) - float(a_sample[0]))
+        unit = self._unit_for_channel(channel)
+        sym = self._scope_wave_letter(unit)
+        text = (
+            f"Δ {sym}: {self._scope_quantity_text(delta, unit)}<br/>"
+            f"Δ {sym}/ Δ t: "
+            f"{self._scope_rate_text(delta, dt_us, is_current=unit == 'A')}"
+        )
+        return self._cursor_plot_label_html(text, "#CDD6F4")
 
     def _remove_cursor_plot_labels(self) -> None:
         for attr in (
@@ -6944,6 +7012,7 @@ class WaveformPlot(QWidget):
             "_cursor_ha_v_label",
             "_cursor_hb_v_label",
             "_cursor_hb_ha_delta_label",
+            "_cursor_slope_delta_label",
             "_cursor_ha_name_label",
             "_cursor_hb_name_label",
         ):
@@ -7183,6 +7252,41 @@ class WaveformPlot(QWidget):
             self._cursor_hb_ha_delta_label = pg.TextItem(anchor=(0.0, 0.5))
             self._cursor_hb_ha_delta_label.setZValue(CURSOR_READOUT_OVERLAY_Z)
             self.plot.scene().addItem(self._cursor_hb_ha_delta_label)
+        if self._cursor_slope_delta_label is None:
+            self._cursor_slope_delta_label = pg.TextItem(anchor=(0.0, 0.0))
+            self._cursor_slope_delta_label.setZValue(CURSOR_READOUT_OVERLAY_Z)
+            self.plot.scene().addItem(self._cursor_slope_delta_label)
+
+    def _position_slope_parameter_plot_label(self) -> None:
+        """Place the parameter-range card beside the top Δt card."""
+
+        if (
+            self._cursor_slope_delta_label is None
+            or self._cursor_ab_delta_label is None
+            or not self._cursor_slope_delta_label.isVisible()
+        ):
+            return
+        scene_rect = self._cursor_readout_scene_rect()
+        time_rect = self._cursor_text_scene_rect(self._cursor_ab_delta_label)
+        gap = (
+            CURSOR_READOUT_STACK_GAP_PX
+            + 2.0 * CURSOR_READOUT_LABEL_GUARD_PX
+        )
+        y_top = float(time_rect.top())
+
+        self._cursor_slope_delta_label.setAnchor((0.0, 0.0))
+        self._cursor_slope_delta_label.setPos(
+            QPointF(float(time_rect.right()) + gap, y_top)
+        )
+        range_rect = self._cursor_text_scene_rect(self._cursor_slope_delta_label)
+        right_limit = float(scene_rect.right()) - CURSOR_READOUT_EDGE_INSET_PX
+        if float(range_rect.right()) <= right_limit:
+            return
+
+        self._cursor_slope_delta_label.setAnchor((1.0, 0.0))
+        self._cursor_slope_delta_label.setPos(
+            QPointF(float(time_rect.left()) - gap, y_top)
+        )
 
     def _position_h_cursor_plot_labels(
         self, a_us: float, b_us: float, ha_div: float, hb_div: float
@@ -7217,6 +7321,7 @@ class WaveformPlot(QWidget):
             delta_y = self._cursor_readout_bottom_scene_y()
             self._cursor_hb_ha_delta_label.setAnchor((0.0, 1.0))
         self._cursor_hb_ha_delta_label.setPos(QPointF(x_left, delta_y))
+        self._position_slope_parameter_plot_label()
 
     def _update_h_cursor_plot_labels(
         self, a_us: float, b_us: float, ha_div: float, hb_div: float, dt_us: float
@@ -7228,6 +7333,7 @@ class WaveformPlot(QWidget):
                 "_cursor_ha_v_label",
                 "_cursor_hb_v_label",
                 "_cursor_hb_ha_delta_label",
+                "_cursor_slope_delta_label",
                 "_cursor_ha_name_label",
                 "_cursor_hb_name_label",
             ):
@@ -7240,6 +7346,7 @@ class WaveformPlot(QWidget):
                 "_cursor_ha_v_label",
                 "_cursor_hb_v_label",
                 "_cursor_hb_ha_delta_label",
+                "_cursor_slope_delta_label",
                 "_cursor_ha_name_label",
                 "_cursor_hb_name_label",
             ):
@@ -7253,6 +7360,7 @@ class WaveformPlot(QWidget):
                 "_cursor_ha_v_label",
                 "_cursor_hb_v_label",
                 "_cursor_hb_ha_delta_label",
+                "_cursor_slope_delta_label",
             ):
                 item = getattr(self, attr)
                 if item is not None:
@@ -7271,7 +7379,6 @@ class WaveformPlot(QWidget):
             self._cursor_ha_v_label.setHtml(ha_html)
         if hb_html is not None:
             self._cursor_hb_v_label.setHtml(hb_html)
-        self._position_h_cursor_plot_labels(a_us, b_us, ha_div, hb_div)
         self._cursor_ha_v_label.setVisible(ha_html is not None)
         self._cursor_hb_v_label.setVisible(hb_html is not None)
         if delta_html is not None:
@@ -7279,6 +7386,13 @@ class WaveformPlot(QWidget):
             self._cursor_hb_ha_delta_label.show()
         else:
             self._cursor_hb_ha_delta_label.hide()
+        slope_html = self._slope_parameter_plot_html(a_us, b_us, dt_us)
+        if slope_html is not None:
+            self._cursor_slope_delta_label.setHtml(slope_html)
+            self._cursor_slope_delta_label.show()
+        else:
+            self._cursor_slope_delta_label.hide()
+        self._position_h_cursor_plot_labels(a_us, b_us, ha_div, hb_div)
 
     def _on_view_geometry_changed(self, *_) -> None:
         self._queue_plot_geometry_sync(force_traces=True)

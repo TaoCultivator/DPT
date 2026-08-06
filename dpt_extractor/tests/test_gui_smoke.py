@@ -3731,6 +3731,8 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         from PyQt6.QtWidgets import QSizePolicy
 
         plot = self._make_synthetic_plot()
+        scope_zoom_requests: list[bool] = []
+        plot.scopeZoomSyncRequested.connect(scope_zoom_requests.append)
         self.assertTrue(plot._overview_plot.isHidden())
 
         plot._apply_x_us_per_div(0.02, center_us=0.5)
@@ -3758,20 +3760,23 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertAlmostEqual(x0, 0.2, places=3)
         self.assertAlmostEqual(x1, 0.4, places=3)
 
-        plot._fit_full_range()
+        plot._toggle_zoom_preview()
         self.assertTrue(plot._overview_plot.isHidden())
         self.assertTrue(plot._scope_scale_bar.isHidden())
         self.assertFalse(plot._zoom_toggle_btn.isHidden())
         self.assertIs(plot._zoom_toggle_btn.parentWidget(), plot.plot)
+        self.assertEqual(scope_zoom_requests, [False])
 
         plot._toggle_zoom_preview()
         self.assertFalse(plot._overview_plot.isHidden())
         self.assertFalse(plot._scope_scale_bar.isHidden())
         self.assertIs(plot._zoom_toggle_btn.parentWidget(), plot._overview_plot)
+        self.assertEqual(scope_zoom_requests, [False, True])
 
         plot._exit_local_zoom()
         self.assertTrue(plot._overview_plot.isHidden())
         self.assertTrue(plot._scope_scale_bar.isHidden())
+        self.assertEqual(scope_zoom_requests, [False, True, False])
 
     def test_tss_derived_ic_max_cursor_uses_imported_math_trace(self):
         import numpy as np
@@ -5354,6 +5359,66 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertIn("Δ a:", wave_delta)
         self.assertIn("Δ a/ Δ t:", wave_delta)
         self.assertFalse(plot._h_cursor_a.isVisible())
+
+    def test_slope_cursor_keeps_full_span_and_parameter_range_in_separate_cards(self):
+        plot = self._make_synthetic_plot()
+        try:
+            plot.resize(900, 520)
+            plot.show()
+            self.app.processEvents()
+            plot.enable_dvdt_interaction(
+                0.0,
+                1.0,
+                1000.0,
+                100.0,
+                "vce",
+                lambda *_args: None,
+                mode="dvdt",
+            )
+            plot.apply_dvdt_ab_times(0.2, 0.4)
+            plot._set_cursor_type("both")
+            plot._update_readout()
+            self.app.processEvents()
+
+            full_readout = (
+                plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+            )
+            parameter_readout = (
+                plot._cursor_slope_delta_label.textItem.toPlainText()
+            )
+            self.assertIn("900.000 V", full_readout)
+            self.assertIn("4.50 GV/s", full_readout)
+            self.assertIn("240.000 V", parameter_readout)
+            self.assertIn("1.20 GV/s", parameter_readout)
+            self.assertNotIn("240.000 V", full_readout)
+            self.assertTrue(plot._cursor_slope_delta_label.isVisible())
+
+            time_rect = plot._cursor_text_scene_rect(
+                plot._cursor_ab_delta_label
+            )
+            parameter_rect = plot._cursor_text_scene_rect(
+                plot._cursor_slope_delta_label
+            )
+            self.assertAlmostEqual(
+                float(parameter_rect.top()), float(time_rect.top()), delta=1.0
+            )
+            self.assertFalse(parameter_rect.intersects(time_rect))
+            self.assertTrue(
+                float(parameter_rect.left()) > float(time_rect.right())
+                or float(parameter_rect.right()) < float(time_rect.left())
+            )
+
+            ha_rect = plot._cursor_text_scene_rect(plot._cursor_ha_v_label)
+            hb_rect = plot._cursor_text_scene_rect(plot._cursor_hb_v_label)
+            full_rect = plot._cursor_text_scene_rect(
+                plot._cursor_hb_ha_delta_label
+            )
+            self.assertAlmostEqual(
+                float(full_rect.left()), float(ha_rect.left()), delta=1.0
+            )
+            self.assertGreater(float(full_rect.top()), float(hb_rect.bottom()))
+        finally:
+            plot.close()
 
     def test_interval_horizontal_lines_keep_independent_channels_and_units(self):
         """Esc may use MATH/Ic, while Desat keeps a same-channel Δ readout."""
@@ -7538,19 +7603,44 @@ class TestMainWindowSmoke(unittest.TestCase):
                     self.assertAlmostEqual(raw_a, crossing.th_a, places=9)
                     self.assertAlmostEqual(raw_b, crossing.th_b, places=9)
 
-                    # 斜率框用 A/B 的百分比交点差，不得误用完整 Ha↔Hb 跨度。
-                    expected_delta = abs(raw_b - raw_a)
-                    expected_rate = expected_delta / (
-                        (crossing.t_pct_b_s - crossing.t_pct_a_s) * 1e6
+                    # 顶部参数框保留 A/B 百分比交点口径；左侧横向
+                    # 光标框独立显示完整 |Ha-Hb|，二者不可互相替代。
+                    expected_parameter_delta = abs(raw_b - raw_a)
+                    parameter_readout = (
+                        plot._cursor_slope_delta_label.textItem.toPlainText()
                     )
-                    readout = (
+                    self.assertIn(
+                        plot._scope_quantity_text(expected_parameter_delta, "A"),
+                        parameter_readout,
+                    )
+                    self.assertIn(
+                        plot._scope_rate_text(
+                            expected_parameter_delta,
+                            (crossing.t_pct_b_s - crossing.t_pct_a_s) * 1e6,
+                            is_current=True,
+                        ),
+                        parameter_readout,
+                    )
+
+                    full_delta = abs(context.forward_a - context.base_a)
+                    cursor_readout = (
                         plot._cursor_hb_ha_delta_label.textItem.toPlainText()
                     )
-                    self.assertIn(f"{expected_delta:.3f} A", readout)
-                    self.assertIn(f"{expected_rate / 1000.0:.2f} GA/s", readout)
+                    self.assertIn(
+                        plot._scope_quantity_text(full_delta, "A"),
+                        cursor_readout,
+                    )
+                    self.assertIn(
+                        plot._scope_rate_text(
+                            full_delta,
+                            (crossing.t_pct_b_s - crossing.t_pct_a_s) * 1e6,
+                            is_current=True,
+                        ),
+                        cursor_readout,
+                    )
                     self.assertNotIn(
-                        f"{abs(context.forward_a - context.base_a):.3f} A",
-                        readout,
+                        plot._scope_quantity_text(expected_parameter_delta, "A"),
+                        cursor_readout,
                     )
                 finally:
                     win.close()

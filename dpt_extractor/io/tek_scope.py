@@ -64,6 +64,8 @@ class ScopeViewState:
     source_b: str | None = None
     level_a: float | None = None
     level_b: float | None = None
+    zoom_enabled: bool = True
+    sync_cursors: bool = True
 
 
 def _clean_text(value: object) -> str:
@@ -347,6 +349,8 @@ def sync_tektronix_scope(resource: str, state: ScopeViewState) -> dict[str, obje
         "source_b": _scope_source(state.source_b),
         "level_a": state.level_a,
         "level_b": state.level_b,
+        "zoom_enabled": bool(state.zoom_enabled),
+        "sync_cursors": bool(state.sync_cursors),
     }
     with tempfile.TemporaryDirectory(prefix="dpt_scope_sync_") as temp_dir:
         state_path = Path(temp_dir) / "state.json"

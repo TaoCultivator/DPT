@@ -5,14 +5,22 @@ import sys
 import unittest
 
 from dpt_extractor.models.slope_range import (
+    AUTO_MAX_SLOPE_LABEL,
     CUSTOM_RANGE_LABEL,
     SlopeRange,
+    auto_max_slope_range,
     default_slope_ranges,
     preset_index_for_range,
 )
 
 
 class TestSlopeRangePresetMatch(unittest.TestCase):
+    def test_auto_mode_never_collapses_to_a_percentage_preset(self):
+        sr = auto_max_slope_range("on_dvdt")
+        self.assertTrue(sr.is_auto_max)
+        self.assertEqual(sr.label(), AUTO_MAX_SLOPE_LABEL)
+        self.assertEqual(preset_index_for_range("on_dvdt", sr), -1)
+
     def test_on_dvdt_default_matches_first_preset(self):
         sr = default_slope_ranges()["on_dvdt"]
         self.assertEqual(preset_index_for_range("on_dvdt", sr), 0)
@@ -68,6 +76,27 @@ class TestSlopeRangeDialog(unittest.TestCase):
         self.assertIsNotNone(selected)
         assert selected is not None
         self.assertEqual(selected.label(), "50%→70%")
+
+    def test_auto_max_selection_is_available_for_every_slope_row(self) -> None:
+        from dpt_extractor.gui.slope_range_dialog import SlopeRangeDialog
+        from dpt_extractor.models.slope_range import SLOPE_ROW_KEYS
+
+        for row_key in SLOPE_ROW_KEYS.values():
+            with self.subTest(row_key=row_key):
+                dialog = SlopeRangeDialog(
+                    initial=default_slope_ranges()[row_key],
+                    row_key=row_key,
+                )
+                self.addCleanup(dialog.close)
+                dialog.range_selector.setCurrentText(AUTO_MAX_SLOPE_LABEL)
+                dialog._accept()
+                selected = dialog.range_value()
+                self.assertIsNotNone(selected)
+                assert selected is not None
+                self.assertTrue(selected.is_auto_max)
+                self.assertFalse(dialog.custom_editor.isVisible())
+                if row_key == "rr_didt":
+                    self.assertEqual(selected.ic_reference, "idm")
 
     def test_custom_didt_keeps_the_existing_current_reference(self) -> None:
         from dpt_extractor.gui.slope_range_dialog import SlopeRangeDialog

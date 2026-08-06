@@ -13,11 +13,13 @@ from PyQt6.QtWidgets import (
 
 from dpt_extractor.gui.theme import DARK_STYLESHEET
 from dpt_extractor.models.slope_range import (
+    AUTO_MAX_SLOPE_LABEL,
     CUSTOM_RANGE_LABEL,
     RR_DIDT_CUSTOM_IDM,
     RR_DIDT_CUSTOM_IF_IRM,
     SLOPE_RANGE_PRESETS,
     SlopeRange,
+    auto_max_slope_range,
     preset_index_for_range,
     preset_to_range,
 )
@@ -51,12 +53,18 @@ class SlopeRangeDialog(QDialog):
         if row_key is not None:
             presets = SLOPE_RANGE_PRESETS.get(row_key, [])
             self.range_selector.addItems(
-                [str(preset[0]) for preset in presets] + [CUSTOM_RANGE_LABEL]
+                [str(preset[0]) for preset in presets]
+                + [AUTO_MAX_SLOPE_LABEL, CUSTOM_RANGE_LABEL]
             )
             preset_index = preset_index_for_range(row_key, self._initial)
-            self.range_selector.setCurrentIndex(
-                preset_index if preset_index >= 0 else self.range_selector.count() - 1
-            )
+            if self._initial.is_auto_max:
+                self.range_selector.setCurrentText(AUTO_MAX_SLOPE_LABEL)
+            else:
+                self.range_selector.setCurrentIndex(
+                    preset_index
+                    if preset_index >= 0
+                    else self.range_selector.count() - 1
+                )
             selector_form = QFormLayout()
             selector_form.addRow("选择范围", self.range_selector)
             layout.addLayout(selector_form)
@@ -148,6 +156,9 @@ class SlopeRangeDialog(QDialog):
     def _is_custom(self) -> bool:
         return self.range_selector.currentText() == CUSTOM_RANGE_LABEL
 
+    def _is_auto_max(self) -> bool:
+        return self.range_selector.currentText() == AUTO_MAX_SLOPE_LABEL
+
     def _current_ic_reference(self) -> str:
         if self._row_key == "rr_didt" and self._is_custom():
             if self.algorithm_selector.currentText() == RR_DIDT_CUSTOM_IF_IRM:
@@ -156,6 +167,12 @@ class SlopeRangeDialog(QDialog):
         return self._ic_reference
 
     def _update_hint(self) -> None:
+        if self._is_auto_max():
+            self.hint.setText(
+                "在该参数既有主沿内，自动寻找斜率最大且连续、单调、近似直线的有效区间；"
+                "最终数值和 A/B 光标仍由原始波形交点计算。"
+            )
+            return
         ic_reference = self._current_ic_reference()
         if ic_reference == "if_irm":
             text = (
@@ -184,6 +201,10 @@ class SlopeRangeDialog(QDialog):
         self._update_hint()
 
     def _accept(self) -> None:
+        if self._is_auto_max() and self._row_key is not None:
+            self._result = auto_max_slope_range(self._row_key)
+            self.accept()
+            return
         if not self._is_custom() and self._row_key is not None:
             selected = self.range_selector.currentText()
             for preset in SLOPE_RANGE_PRESETS.get(self._row_key, []):

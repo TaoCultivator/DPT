@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import struct
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -78,6 +79,8 @@ class TekScopeIOTests(unittest.TestCase):
         state_on = sync.index("$zoom`:STATE ON", position)
         self.assertLess(win_scale, position)
         self.assertLess(position, state_on)
+        self.assertIn('Write-Command $session "$zoom`:STATE OFF"', sync)
+        self.assertIn("Oscilloscope did not disable the Zoom1 view", sync)
         self.assertNotIn("Write-Command $session 'HORIZONTAL:DELAY:MODE ON'", sync)
         self.assertNotIn('Write-Command $session ("HORIZONTAL:MODE:SCALE', sync)
         self.assertNotIn('Write-Command $session ("HORIZONTAL:DELAY:TIME', sync)
@@ -240,8 +243,35 @@ class TekScopeIOTests(unittest.TestCase):
                 "source_b": "MATH1",
                 "level_a": -4.0,
                 "level_b": 12.5,
+                "zoom_enabled": True,
+                "sync_cursors": True,
             },
         )
+
+    @patch("dpt_extractor.io.tek_scope._run_bridge")
+    def test_sync_serializes_zoom_disabled_view(self, run_bridge) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_bridge(operation: str, **kwargs):
+            captured.update(
+                json.loads(Path(kwargs["state_path"]).read_text(encoding="utf-8"))
+            )
+            return {"synced": True}
+
+        run_bridge.side_effect = fake_bridge
+        sync_tektronix_scope(
+            "USB::SCOPE",
+            ScopeViewState(
+                x_start_s=-12e-6,
+                x_stop_s=28e-6,
+                record_start_s=-12e-6,
+                record_stop_s=28e-6,
+                zoom_enabled=False,
+                sync_cursors=False,
+            ),
+        )
+        self.assertIs(captured["zoom_enabled"], False)
+        self.assertIs(captured["sync_cursors"], False)
 
 
 class _Line:
@@ -257,6 +287,70 @@ class _Line:
 
 
 class ScopeInteractionTests(unittest.TestCase):
+    def test_plot_view_snapshot_is_available_without_parameter_cursors(self) -> None:
+        class FakePlot:
+            @staticmethod
+            def scope_cursor_snapshot():
+                return None
+
+            @staticmethod
+            def _current_x_window_for_display():
+                return -12.0, 28.0
+
+        snapshot = WaveformPlot.scope_view_snapshot(FakePlot())
+        assert snapshot is not None
+        self.assertEqual(snapshot["x_start_s"], -12e-6)
+        self.assertEqual(snapshot["x_stop_s"], 28e-6)
+        self.assertIsNone(snapshot["cursor_a_s"])
+        self.assertIsNone(snapshot["source_a"])
+        self.assertIs(snapshot["sync_cursors"], False)
+
+    @patch("dpt_extractor.gui.main_window._ScopeSyncTask")
+    def test_full_view_request_builds_zoom_disabled_scope_task(self, task_type) -> None:
+        class FakeWavePlot:
+            @staticmethod
+            def scope_view_snapshot():
+                return {
+                    "x_start_s": -12e-6,
+                    "x_stop_s": 28e-6,
+                    "cursor_a_s": None,
+                    "cursor_b_s": None,
+                    "source_a": None,
+                    "source_b": None,
+                    "level_a": None,
+                    "level_b": None,
+                    "sync_cursors": False,
+                }
+
+            @staticmethod
+            def scope_cursor_snapshot():
+                raise AssertionError("explicit view sync must not require parameter cursors")
+
+        pool = SimpleNamespace(start=lambda _task: None)
+        status_bar = SimpleNamespace(showMessage=lambda _message: None)
+        window = SimpleNamespace(
+            bundle=SimpleNamespace(
+                t=np.array([-12e-6, 28e-6]),
+                meta=SimpleNamespace(
+                    source_kind="scope",
+                    instrument_resource="USB::SCOPE",
+                ),
+            ),
+            wave_plot=FakeWavePlot(),
+            _scope_sync_request_id=0,
+            _scope_sync_tasks={},
+            _scope_io_pool=pool,
+            _on_scope_sync_finished=lambda _request_id: None,
+            _on_scope_sync_failed=lambda _request_id, _message: None,
+            statusBar=lambda: status_bar,
+        )
+
+        MainWindow._start_scope_sync_from_plot(window, False)
+
+        state = task_type.call_args.args[2]
+        self.assertIs(state.zoom_enabled, False)
+        self.assertIs(state.sync_cursors, False)
+
     def test_plot_snapshot_uses_current_window_and_physical_sources(self) -> None:
         class FakePlot:
             _interactive_mode = "interval"

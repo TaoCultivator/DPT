@@ -475,12 +475,28 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
             float(off_context.crossing.t_pct_b_s),
         )
         window._on_value_clicked("关断过程", "di/dt")
-        off_readout = (
-            window.wave_plot._cursor_hb_ha_delta_label.textItem.toPlainText()
+        plot = window.wave_plot
+        off_parameter_readout = (
+            plot._cursor_slope_delta_label.textItem.toPlainText()
+        )
+        off_cursor_readout = (
+            plot._cursor_hb_ha_delta_label.textItem.toPlainText()
         )
         self.assertIn(
             f"{window.result.turn_off.didt:.2f} GA/s",
-            off_readout,
+            off_parameter_readout,
+        )
+        off_full_delta = abs(float(off_context.top_a) - float(off_context.base_a))
+        off_dt_us = abs(
+            float(plot._cursor_b.value()) - float(plot._cursor_a.value())
+        )
+        self.assertIn(
+            plot._scope_quantity_text(off_full_delta, "A"),
+            off_cursor_readout,
+        )
+        self.assertIn(
+            plot._scope_rate_text(off_full_delta, off_dt_us, is_current=True),
+            off_cursor_readout,
         )
         preserved = (
             window.result.turn_off.delta_vce,
@@ -489,19 +505,37 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
             window.result.reverse_recovery.didt_irr,
         )
         before_drag = window.result.turn_off.didt
-        plot = window.wave_plot
         assert plot._h_cursor_a is not None
         plot._h_cursor_a.setValue(
             plot._to_disp("ic", float(off_context.top_a) * 0.95)
         )
         self.app.processEvents()
         self.assertNotEqual(window.result.turn_off.didt, before_drag)
-        dragged_readout = (
+        dragged_parameter_readout = (
+            plot._cursor_slope_delta_label.textItem.toPlainText()
+        )
+        dragged_cursor_readout = (
             plot._cursor_hb_ha_delta_label.textItem.toPlainText()
         )
         self.assertIn(
             f"{window.result.turn_off.didt:.2f} GA/s",
-            dragged_readout,
+            dragged_parameter_readout,
+        )
+        dragged_ha = plot._from_disp("ic", float(plot._h_cursor_a.value()))
+        dragged_hb = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+        dragged_dt_us = abs(
+            float(plot._cursor_b.value()) - float(plot._cursor_a.value())
+        )
+        dragged_full_delta = abs(dragged_hb - dragged_ha)
+        self.assertIn(
+            plot._scope_quantity_text(dragged_full_delta, "A"),
+            dragged_cursor_readout,
+        )
+        self.assertIn(
+            plot._scope_rate_text(
+                dragged_full_delta, dragged_dt_us, is_current=True
+            ),
+            dragged_cursor_readout,
         )
         self.assertEqual(
             (
@@ -532,12 +566,27 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
             float(on_context.crossing.t_pct_b_s),
         )
         window._on_value_clicked("开通", "dv/dt")
-        on_readout = (
+        on_parameter_readout = (
+            window.wave_plot._cursor_slope_delta_label.textItem.toPlainText()
+        )
+        on_cursor_readout = (
             window.wave_plot._cursor_hb_ha_delta_label.textItem.toPlainText()
         )
         self.assertIn(
             f"{window.result.turn_on.dvdt:.2f} GV/s",
-            on_readout,
+            on_parameter_readout,
+        )
+        on_full_delta = abs(float(on_context.top_v) - float(on_context.base_v))
+        on_dt_us = abs(
+            float(plot._cursor_b.value()) - float(plot._cursor_a.value())
+        )
+        self.assertIn(
+            plot._scope_quantity_text(on_full_delta, "V"),
+            on_cursor_readout,
+        )
+        self.assertIn(
+            plot._scope_rate_text(on_full_delta, on_dt_us),
+            on_cursor_readout,
         )
         preserved = (
             window.result.turn_off.didt,
@@ -552,12 +601,29 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         )
         self.app.processEvents()
         self.assertNotEqual(window.result.turn_on.dvdt, before_drag)
-        dragged_readout = (
+        dragged_parameter_readout = (
+            plot._cursor_slope_delta_label.textItem.toPlainText()
+        )
+        dragged_cursor_readout = (
             plot._cursor_hb_ha_delta_label.textItem.toPlainText()
         )
         self.assertIn(
             f"{window.result.turn_on.dvdt:.2f} GV/s",
-            dragged_readout,
+            dragged_parameter_readout,
+        )
+        dragged_ha = plot._from_disp("vce", float(plot._h_cursor_a.value()))
+        dragged_hb = plot._from_disp("vce", float(plot._h_cursor_b.value()))
+        dragged_dt_us = abs(
+            float(plot._cursor_b.value()) - float(plot._cursor_a.value())
+        )
+        dragged_full_delta = abs(dragged_hb - dragged_ha)
+        self.assertIn(
+            plot._scope_quantity_text(dragged_full_delta, "V"),
+            dragged_cursor_readout,
+        )
+        self.assertIn(
+            plot._scope_rate_text(dragged_full_delta, dragged_dt_us),
+            dragged_cursor_readout,
         )
         self.assertEqual(
             (

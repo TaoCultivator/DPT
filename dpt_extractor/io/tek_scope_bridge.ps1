@@ -402,6 +402,8 @@ function Sync-Scope([object]$Manager, [object]$Identity, [string]$JsonPath) {
     $recordStart = [double]$state.record_start_s
     $recordStop = [double]$state.record_stop_s
     if ($recordStop -le $recordStart) { throw 'The software full-record window is invalid' }
+    $zoomEnabled = $state.zoom_enabled -ne $false
+    $syncCursors = $state.sync_cursors -ne $false
     $scale = ($stop - $start) / 10.0
     $center = ($start + $stop) / 2.0
     $position = 100.0 * ($center - $recordStart) / ($recordStop - $recordStart)
@@ -412,30 +414,43 @@ function Sync-Scope([object]$Manager, [object]$Identity, [string]$JsonPath) {
         # retains the full-record overview and gives the operator a one-click
         # path back to the original waveform by closing Zoom on the scope.
         $zoom = 'DISPLAY:WAVEVIEW1:ZOOM:ZOOM1'
+        if (-not $zoomEnabled) {
+            Write-Command $session "$zoom`:STATE OFF"
+            $zoomState = [int](Invoke-Query $session "$zoom`:STATE?")
+            if ($zoomState -ne 0) { throw 'Oscilloscope did not disable the Zoom1 view' }
+            return [ordered]@{
+                resource = $Identity.resource
+                idn = $Identity.idn
+                synced = $true
+                zoom_enabled = $false
+            }
+        }
         Write-Command $session ("$zoom`:HORIZONTAL:WINSCALE {0:R}" -f $scale)
         Write-Command $session ("$zoom`:HORIZONTAL:POSITION {0:R}" -f $position)
         Write-Command $session "$zoom`:STATE ON"
-        $base = 'DISPLAY:WAVEVIEW1:CURSOR:CURSOR1'
-        # SCREEN cursors are the scope equivalent of the app's independent
-        # A/B vertical lines plus Ha/Hb horizontal lines. Their X/Y positions
-        # are still expressed in the selected sources' physical units.
-        Write-Command $session "$base`:FUNCTION SCREEN"
-        Write-Command $session "$base`:MODE INDEPENDENT"
-        $sourceA = [string]$state.source_a
-        $sourceB = [string]$state.source_b
-        if (-not [string]::IsNullOrWhiteSpace($sourceA) -and -not [string]::IsNullOrWhiteSpace($sourceB)) {
-            $splitMode = if ($sourceA -eq $sourceB) { 'SAME' } else { 'SPLIT' }
-            Write-Command $session "$base`:SPLITMODE $splitMode"
+        if ($syncCursors) {
+            $base = 'DISPLAY:WAVEVIEW1:CURSOR:CURSOR1'
+            # SCREEN cursors are the scope equivalent of the app's independent
+            # A/B vertical lines plus Ha/Hb horizontal lines. Their X/Y positions
+            # are still expressed in the selected sources' physical units.
+            Write-Command $session "$base`:FUNCTION SCREEN"
+            Write-Command $session "$base`:MODE INDEPENDENT"
+            $sourceA = [string]$state.source_a
+            $sourceB = [string]$state.source_b
+            if (-not [string]::IsNullOrWhiteSpace($sourceA) -and -not [string]::IsNullOrWhiteSpace($sourceB)) {
+                $splitMode = if ($sourceA -eq $sourceB) { 'SAME' } else { 'SPLIT' }
+                Write-Command $session "$base`:SPLITMODE $splitMode"
+            }
+            # Changing split mode resets source assignments on MSO4B. Apply the
+            # A/B sources afterwards so independent Ha/Hb bindings survive.
+            if (-not [string]::IsNullOrWhiteSpace($sourceA)) { Write-Command $session "$base`:ASOURCE $sourceA" }
+            if (-not [string]::IsNullOrWhiteSpace($sourceB)) { Write-Command $session "$base`:BSOURCE $sourceB" }
+            if (Test-JsonValue $state.cursor_a_s) { Write-Command $session ("$base`:SCREEN:AXPOSITION {0:R}" -f [double]$state.cursor_a_s) }
+            if (Test-JsonValue $state.cursor_b_s) { Write-Command $session ("$base`:SCREEN:BXPOSITION {0:R}" -f [double]$state.cursor_b_s) }
+            if (-not [string]::IsNullOrWhiteSpace($sourceA) -and (Test-JsonValue $state.level_a)) { Write-Command $session ("$base`:SCREEN:AYPOSITION {0:R}" -f [double]$state.level_a) }
+            if (-not [string]::IsNullOrWhiteSpace($sourceB) -and (Test-JsonValue $state.level_b)) { Write-Command $session ("$base`:SCREEN:BYPOSITION {0:R}" -f [double]$state.level_b) }
+            Write-Command $session "$base`:STATE ON"
         }
-        # Changing split mode resets source assignments on MSO4B. Apply the
-        # A/B sources afterwards so independent Ha/Hb bindings survive.
-        if (-not [string]::IsNullOrWhiteSpace($sourceA)) { Write-Command $session "$base`:ASOURCE $sourceA" }
-        if (-not [string]::IsNullOrWhiteSpace($sourceB)) { Write-Command $session "$base`:BSOURCE $sourceB" }
-        if (Test-JsonValue $state.cursor_a_s) { Write-Command $session ("$base`:SCREEN:AXPOSITION {0:R}" -f [double]$state.cursor_a_s) }
-        if (Test-JsonValue $state.cursor_b_s) { Write-Command $session ("$base`:SCREEN:BXPOSITION {0:R}" -f [double]$state.cursor_b_s) }
-        if (-not [string]::IsNullOrWhiteSpace($sourceA) -and (Test-JsonValue $state.level_a)) { Write-Command $session ("$base`:SCREEN:AYPOSITION {0:R}" -f [double]$state.level_a) }
-        if (-not [string]::IsNullOrWhiteSpace($sourceB) -and (Test-JsonValue $state.level_b)) { Write-Command $session ("$base`:SCREEN:BYPOSITION {0:R}" -f [double]$state.level_b) }
-        Write-Command $session "$base`:STATE ON"
         $zoomState = [int](Invoke-Query $session "$zoom`:STATE?")
         if ($zoomState -eq 0) { throw 'Oscilloscope did not enable the Zoom1 view' }
         return [ordered]@{

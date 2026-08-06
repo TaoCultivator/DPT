@@ -120,6 +120,7 @@ from dpt_extractor.models.slope_range import (
     SlopeRange,
     default_slope_ranges,
     normalize_slope_range,
+    slope_range_result_label,
 )
 from dpt_extractor.models.waveform import WaveformBundle, normalize_channel_reference
 from dpt_extractor.metrics.iec_windows import (
@@ -152,6 +153,10 @@ from dpt_extractor.metrics.slopes import (
     RrDidtMeasurementContext,
     RrDidtPreparedSeries,
     analyze_rr_recovery_current,
+    auto_didt_between_base_top,
+    auto_dvdt_between_base_top,
+    auto_rr_didt_between_levels,
+    auto_rr_didt_between_prepared_levels,
     didt_between_base_top,
     didt_max,
     dvdt_between_base_top,
@@ -1724,6 +1729,9 @@ class MainWindow(QMainWindow):
         )
         self.wave_plot.channelInversionChanged.connect(
             self._on_waveform_channel_inversion_changed
+        )
+        self.wave_plot.scopeZoomSyncRequested.connect(
+            self._start_scope_sync_from_plot
         )
         self._license_notice_timer.start(0)
 
@@ -4629,7 +4637,7 @@ class MainWindow(QMainWindow):
             return
         QTimer.singleShot(0, self._start_scope_sync_from_plot)
 
-    def _start_scope_sync_from_plot(self) -> None:
+    def _start_scope_sync_from_plot(self, zoom_enabled: bool | None = None) -> None:
         bundle = self.bundle
         if (
             bundle is None
@@ -4637,12 +4645,17 @@ class MainWindow(QMainWindow):
             or not bundle.meta.instrument_resource
         ):
             return
-        snapshot = self.wave_plot.scope_cursor_snapshot()
+        snapshot = (
+            self.wave_plot.scope_view_snapshot()
+            if zoom_enabled is not None
+            else self.wave_plot.scope_cursor_snapshot()
+        )
         if snapshot is None:
             return
         state = ScopeViewState(
             record_start_s=float(bundle.t[0]),
             record_stop_s=float(bundle.t[-1]),
+            zoom_enabled=True if zoom_enabled is None else bool(zoom_enabled),
             **snapshot,
         )
         self._scope_sync_request_id += 1
@@ -4971,6 +4984,7 @@ class MainWindow(QMainWindow):
             pct_hi,
             pct_lo,
             event_end_idx=segs.pulse2_off,
+            auto_max=bool(sr and sr.is_auto_max),
         )
 
     def _rr_dvdt_context(self) -> DvdtMeasurementContext | None:
@@ -5011,6 +5025,7 @@ class MainWindow(QMainWindow):
             fallback_i1=rr_context_i1,
             use_settled_platform=use_settled_platform,
             event_end_idx=self.result.segments.turn_on[1],
+            auto_max=bool(sr and sr.is_auto_max),
         )
 
     def _turn_off_dvdt_context(
@@ -5050,6 +5065,7 @@ class MainWindow(QMainWindow):
             pct_b,
             rise_start=rise_start,
             rise_end=rise_end,
+            auto_max=bool(sr and sr.is_auto_max),
         )
 
     def _default_dvdt_base_top_v(
@@ -5155,6 +5171,17 @@ class MainWindow(QMainWindow):
             y = self.bundle.get(self.profile.v_diode)
         else:
             y = self.bundle.get(self.profile.vce)
+        if sr and sr.is_auto_max:
+            return auto_dvdt_between_base_top(
+                t,
+                y,
+                i0,
+                i1,
+                float(base_v),
+                float(top_v),
+                edge,
+                use_abs=use_abs,
+            )
         return dvdt_between_base_top(
             t,
             y,
@@ -5182,7 +5209,7 @@ class MainWindow(QMainWindow):
         val = float(res.dvdt)
         row_key = SLOPE_ROW_KEYS.get((section, "dv/dt"))
         sr = self._slope_ranges.get(row_key) if row_key else None
-        range_disp = sr.label() if sr else ""
+        range_disp = slope_range_result_label(sr, res) if sr else ""
         if section == "关断过程":
             self.result.turn_off.dvdt = val
             self.result.turn_off.dvdt_range = range_disp
@@ -5195,6 +5222,7 @@ class MainWindow(QMainWindow):
             self.result.reverse_recovery.dvdt_max = val
             self.result.reverse_recovery.dvdt_range = range_disp
             self.result_table.set_metric_value("反向恢复", "dv/dt", val)
+        self.result_table.set_range_text(section, "dv/dt", range_disp)
         ta_us = res.t_pct_a_s * 1e6 if res.t_pct_a_s is not None else None
         tb_us = res.t_pct_b_s * 1e6 if res.t_pct_b_s is not None else None
         ab_msg = (
@@ -5206,7 +5234,7 @@ class MainWindow(QMainWindow):
             f"{section}-dv/dt: Ha(Top)={top_v:.2f}V Hb(Base)={base_v:.2f}V, "
             f"段窗[{min(search_t0_us, search_t1_us):.3f},"
             f"{max(search_t0_us, search_t1_us):.3f}]µs, "
-            f"{sr.label() if sr else ''}, {ab_msg}, 值={val:.3f} V/ns"
+            f"{range_disp}, {ab_msg}, 值={val:.3f} V/ns"
         )
 
     def _enable_dvdt_interaction(self, section: str) -> None:
@@ -5516,6 +5544,7 @@ class MainWindow(QMainWindow):
             pct_b,
             edge=edge,
             next_pulse_on=segs.next_pulse_on,
+            auto_max=bool(sr and sr.is_auto_max),
         )
 
     def _turn_on_didt_context(
@@ -5553,6 +5582,7 @@ class MainWindow(QMainWindow):
             base_override=base_override,
             top_override=top_override,
             event_end_idx=segs.pulse2_off,
+            auto_max=bool(sr and sr.is_auto_max),
         )
 
     def _rr_didt_context(
@@ -5610,6 +5640,7 @@ class MainWindow(QMainWindow):
             rr_i1=rr_context_i1,
             fallback_i0=rr0,
             fallback_i1=rr_context_i1,
+            auto_max=bool(sr and sr.is_auto_max),
         )
 
     def _default_didt_top_a(self, section: str, t0_us: float, t1_us: float) -> float:
@@ -5716,6 +5747,40 @@ class MainWindow(QMainWindow):
             pct_a, pct_b = max(pct_a, pct_b), min(pct_a, pct_b)
             edge = "fall"
         if section == "反向恢复":
+            if sr and sr.is_auto_max:
+                # IDM horizontal semantics are Ha=tail base, Hb=signed IDM.
+                forward_a = float(base_a)
+                idm_base_a = float(top_a)
+                if rr_prepared is not None:
+                    return auto_rr_didt_between_prepared_levels(
+                        rr_prepared,
+                        forward_a=forward_a,
+                        base_a=idm_base_a,
+                    )
+                from dpt_extractor.models.waveform import (
+                    bundle_reverse_recovery_current,
+                )
+
+                wave_plot = self.__dict__.get("wave_plot")
+                y = (
+                    wave_plot.logical_reverse_recovery_current(
+                        self.bundle, self.profile
+                    )
+                    if wave_plot is not None
+                    else None
+                )
+                if y is None:
+                    y = bundle_reverse_recovery_current(
+                        self.bundle, self.profile
+                    )
+                return auto_rr_didt_between_levels(
+                    t,
+                    y,
+                    i0,
+                    i1,
+                    forward_a=forward_a,
+                    base_a=idm_base_a,
+                )
             measure = "idm"
             if sr and sr.ic_reference == "if_irm":
                 measure = "if_irm"
@@ -5773,6 +5838,17 @@ class MainWindow(QMainWindow):
         from dpt_extractor.models.waveform import bundle_total_current
 
         y = bundle_total_current(self.bundle, self.profile)
+        if sr and sr.is_auto_max:
+            return auto_didt_between_base_top(
+                t,
+                y,
+                i0,
+                i1,
+                float(base_a),
+                float(top_a),
+                "fall",
+                use_abs=False,
+            )
         return didt_between_base_top(
             t,
             y,
@@ -5855,7 +5931,7 @@ class MainWindow(QMainWindow):
         row_key = SLOPE_ROW_KEYS.get((section, "di/dt"))
         sr = self._slope_ranges.get(row_key) if row_key else None
         is_if_irm = bool(sr and sr.ic_reference == "if_irm")
-        range_disp = sr.label() if sr else ""
+        range_disp = slope_range_result_label(sr, res) if sr else ""
         if section == "关断过程":
             self.result.turn_off.didt = val
             self.result.turn_off.didt_range = range_disp
@@ -5876,6 +5952,7 @@ class MainWindow(QMainWindow):
             self.result_table.set_metric_value(
                 "反向恢复", "di/dt", val if available else None
             )
+        self.result_table.set_range_text(section, "di/dt", range_disp)
         ta_us = res.t_pct_a_s * 1e6 if res.t_pct_a_s is not None else None
         tb_us = res.t_pct_b_s * 1e6 if res.t_pct_b_s is not None else None
         if section == "反向恢复" and ta_us is not None and tb_us is not None:
@@ -5910,7 +5987,7 @@ class MainWindow(QMainWindow):
         if section == "反向恢复":
             irm = res.irm if res.irm is not None else 0.0
             idm = res.idm if res.idm is not None else 0.0
-            mode = sr.label() if sr else ""
+            mode = range_disp
             zero_msg = f" H0={zero_a:.2f}A" if zero_a is not None else ""
             id_vals = (
                 f"IF={idm:.2f}A IRM={irm:.2f}A"
@@ -5929,7 +6006,7 @@ class MainWindow(QMainWindow):
                 f"{section}-di/dt: Ha(Top)={top_a:.2f}A Hb(Base)={base_a:.2f}A, "
                 f"段窗[{min(search_t0_us, search_t1_us):.3f},"
                 f"{max(search_t0_us, search_t1_us):.3f}]µs, "
-                f"{sr.label() if sr else ''}, {ab_msg}, 值={val:.3f} A/ns"
+                f"{range_disp}, {ab_msg}, 值={val:.3f} A/ns"
             )
 
     def _enable_didt_interaction(self, section: str) -> None:

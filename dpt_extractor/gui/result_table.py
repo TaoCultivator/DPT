@@ -1590,6 +1590,16 @@ class ResultTable(QWidget):
             section, name, format_metric_display(section, name, value)
         )
 
+    def set_range_text(self, section: str, name: str, text: str) -> None:
+        """Update one range cell without rebuilding the result table."""
+
+        for row, (row_section, row_name) in enumerate(self._row_meta):
+            if row_section == section and row_name == name:
+                item = self.table.item(row, 3)
+                if item is not None:
+                    item.setText(text or "—")
+                return
+
     def set_metric_unavailable(
         self, section: str, name: str, unavailable: bool
     ) -> None:

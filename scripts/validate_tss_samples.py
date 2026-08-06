@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import dataclass
 import re
 import sys
@@ -45,7 +46,11 @@ from dpt_extractor.models.channel_mapping import (
     infer_short_circuit_mapping_from_bundle,
 )
 from dpt_extractor.models.test_mode import TestMode
-from dpt_extractor.models.slope_range import default_slope_ranges
+from dpt_extractor.models.slope_range import (
+    SLOPE_ROW_KEYS,
+    auto_max_slope_range,
+    default_slope_ranges,
+)
 from dpt_extractor.models.waveform import (
     bundle_reverse_recovery_current,
     bundle_total_current,
@@ -68,6 +73,7 @@ _VOLTAGE_TOL_ABS = 60.0
 _VOLTAGE_TOL_REL = 0.18
 _CURRENT_TOL_ABS = 30.0
 _CURRENT_TOL_REL = 0.18
+_VALIDATE_AUTO_SLOPES = False
 
 
 @dataclass(frozen=True)
@@ -92,11 +98,42 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="批量验证示例 TSS 波形兼容性")
     parser.add_argument("--limit", type=int, default=None, help="仅验证前 N 个样本，便于快速冒烟")
     parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="从排序后的第 N 个样本开始，便于对全量语料分段复核",
+    )
+    parser.add_argument(
+        "--match",
+        default="",
+        help="仅验证路径中包含给定文本的样本（不区分大小写）",
+    )
+    parser.add_argument(
+        "--warnings-only",
+        action="store_true",
+        help="仅逐项输出 WARN/ERROR，结尾仍保留完整分类统计",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="发现失败或警告样本时返回非零；默认只输出报告，便于训练集扫描",
     )
+    parser.add_argument(
+        "--auto-slopes",
+        action="store_true",
+        help="将六项 dv/dt、di/dt 全部切换为自动最大斜率并校验实际区间/A-B",
+    )
     return parser.parse_args()
+
+
+def _validation_config():
+    cfg = load_config()
+    if _VALIDATE_AUTO_SLOPES:
+        cfg.slope_ranges = {
+            row_key: auto_max_slope_range(row_key)
+            for row_key in SLOPE_ROW_KEYS.values()
+        }
+    return cfg
 
 
 def _sample_label(path: Path) -> str:
@@ -568,7 +605,7 @@ def _validate_dpt_sample(
     mapping_method: str = "default",
     allow_mapping_fallback: bool = True,
 ) -> SampleValidation:
-    cfg = load_config()
+    cfg = _validation_config()
     base_prof = guess_profile_from_path(path)
     b = load_waveform(path)
     prof = profile_override or base_prof
@@ -626,6 +663,15 @@ def _validate_dpt_sample(
             problems.append(f"关断dv/dt={r.turn_off.dvdt:.3f}V/ns")
         if r.turn_off.didt <= 0.0:
             problems.append(f"关断di/dt={r.turn_off.didt:.3f}A/ns")
+        if _VALIDATE_AUTO_SLOPES:
+            for name, value, label in (
+                ("关断dv/dt", r.turn_off.dvdt, r.turn_off.dvdt_range),
+                ("关断di/dt", r.turn_off.didt, r.turn_off.didt_range),
+            ):
+                if not np.isfinite(float(value)) or float(value) <= 0.0:
+                    problems.append(f"{name}自动区间值不可用={value}")
+                if not str(label).startswith("自动 "):
+                    problems.append(f"{name}自动A/B区间不可用={label!r}")
         if r.turn_off.eoff <= 0.0:
             problems.append(f"Eoff={r.turn_off.eoff:.3f}mJ")
         _append_condition_checks(
@@ -793,7 +839,13 @@ def _validate_dpt_sample(
         rr_i1=rr_context_i1,
         fallback_i0=rr0,
         fallback_i1=rr_context_i1,
+        auto_max=rr_di.is_auto_max,
     )
+    if rr_di.is_auto_max:
+        if rr_context.crossing.resolved_pct_a is not None:
+            di_a = float(rr_context.crossing.resolved_pct_a)
+        if rr_context.crossing.resolved_pct_b is not None:
+            di_b = float(rr_context.crossing.resolved_pct_b)
     rr_problems, rr_detail = _audit_rr_didt_context(
         b.t,
         irr,
@@ -804,6 +856,27 @@ def _validate_dpt_sample(
         measure=rr_measure,
     )
     problems.extend(rr_problems)
+    if _VALIDATE_AUTO_SLOPES:
+        for name, value, label in (
+            ("关断dv/dt", r.turn_off.dvdt, r.turn_off.dvdt_range),
+            ("关断di/dt", r.turn_off.didt, r.turn_off.didt_range),
+            ("开通dv/dt", r.turn_on.dvdt, r.turn_on.dvdt_range),
+            ("开通di/dt", r.turn_on.didt, r.turn_on.didt_range),
+            (
+                "反向恢复dv/dt",
+                r.reverse_recovery.dvdt_max,
+                r.reverse_recovery.dvdt_range,
+            ),
+            (
+                "反向恢复di/dt",
+                r.reverse_recovery.didt_irr,
+                r.reverse_recovery.didt_range,
+            ),
+        ):
+            if not np.isfinite(float(value)) or float(value) <= 0.0:
+                problems.append(f"{name}自动区间值不可用={value}")
+            if not str(label).startswith("自动 "):
+                problems.append(f"{name}自动A/B区间不可用={label!r}")
     eoff_tol = max(0.02, 0.02 * max(abs(eoff_chk), 1e-9))
     if abs(r.turn_off.eoff - eoff_chk) > eoff_tol:
         problems.append(f"Eoff校验={r.turn_off.eoff:.3f}/{eoff_chk:.3f}mJ")
@@ -911,7 +984,7 @@ def _short_metric_state_problem(
 
 
 def _validate_short_circuit_sample(path: Path) -> SampleValidation:
-    cfg = load_config()
+    cfg = _validation_config()
     cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
     base_prof = guess_profile_from_path(path)
     b = load_waveform(path)
@@ -998,8 +1071,14 @@ def _validate_sample(path: Path) -> SampleValidation:
 
 
 def main() -> None:
+    global _VALIDATE_AUTO_SLOPES
     args = _parse_args()
+    _VALIDATE_AUTO_SLOPES = bool(args.auto_slopes)
     samples = discover_sample_waveforms(ROOT)
+    if args.match:
+        match_text = str(args.match).casefold()
+        samples = [p for p in samples if match_text in str(p).casefold()]
+    samples = samples[max(0, int(args.offset)) :]
     if args.limit is not None:
         samples = samples[: max(0, args.limit)]
     if not samples:
@@ -1016,6 +1095,7 @@ def main() -> None:
         "rr_polarity_positive": 0,
         "rr_polarity_negative": 0,
     }
+    warning_causes: Counter[str] = Counter()
     print(f"发现 TSS 样本 {len(samples)} 个，开始兼容性扫描...")
     for path in samples:
         result = _validate_sample(path)
@@ -1037,12 +1117,16 @@ def main() -> None:
             stats["rr_polarity_positive"] += 1
         elif result.kind == "DPT" and result.rr_polarity == -1:
             stats["rr_polarity_negative"] += 1
-        print(
-            _sample_label(result.path),
-            result.kind,
-            result.status,
-            result.detail,
-        )
+        if result.warned and " | " in result.detail:
+            for problem in result.detail.split(" | ", 1)[1].split("; "):
+                warning_causes[problem.split("=", 1)[0]] += 1
+        if not args.warnings_only or result.failed or result.warned:
+            print(
+                _sample_label(result.path),
+                result.kind,
+                result.status,
+                result.detail,
+            )
     warnings = stats["dpt_warn"] + stats["dpt_single_warn"] + stats["sc_warn"]
     print(
         "扫描完成："
@@ -1058,6 +1142,14 @@ def main() -> None:
         f"failed={stats['failed']} "
         f"warnings={warnings}"
     )
+    if warning_causes:
+        print(
+            "warning_causes="
+            + ", ".join(
+                f"{name}:{count}"
+                for name, count in warning_causes.most_common()
+            )
+        )
     if args.strict and (stats["failed"] or warnings):
         raise SystemExit(1)
 

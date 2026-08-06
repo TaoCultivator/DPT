@@ -56,6 +56,9 @@ SLOPE_RANGE_PRESETS: dict[str, list[SlopePreset]] = {
 }
 
 CUSTOM_RANGE_LABEL = "自定义…"
+AUTO_MAX_SLOPE_LABEL = "自动最大斜率"
+AUTO_MAX_SLOPE_MODE = "auto_max"
+PERCENTAGE_SLOPE_MODE = "percentage"
 RR_DIDT_CUSTOM_IDM = "IDM 百分比（Ha=尾基准, Hb=带符号IDM）"
 RR_DIDT_CUSTOM_IF_IRM = "零基准百分比（H0=0, Ha=IF, Hb=IRM）"
 
@@ -71,8 +74,16 @@ class SlopeRange:
     ic_direction: str = "rise"
     #: 非空时覆盖 label()（如 50%IF→50%IRM）
     preset_label: str = ""
+    #: percentage=现有固定百分比；auto_max=在既有主沿内自适应选择最大有效斜率段
+    selection_mode: str = PERCENTAGE_SLOPE_MODE
+
+    @property
+    def is_auto_max(self) -> bool:
+        return self.selection_mode == AUTO_MAX_SLOPE_MODE
 
     def label(self) -> str:
+        if self.is_auto_max:
+            return AUTO_MAX_SLOPE_LABEL
         if self.preset_label:
             return self.preset_label
         return f"{self.start_pct:g}%→{self.end_pct:g}%"
@@ -99,6 +110,19 @@ def preset_to_range(preset: SlopePreset) -> SlopeRange:
     )
 
 
+def auto_max_slope_range(key: str) -> SlopeRange:
+    """Return the automatic mode while retaining the row's physical edge semantics."""
+
+    default = default_slope_ranges()[key]
+    return SlopeRange(
+        default.start_pct,
+        default.end_pct,
+        ic_reference="idm" if key == "rr_didt" else default.ic_reference,
+        ic_direction=default.ic_direction,
+        selection_mode=AUTO_MAX_SLOPE_MODE,
+    )
+
+
 def default_slope_ranges() -> dict[str, SlopeRange]:
     return {
         "off_didt": SlopeRange(90.0, 10.0, ic_reference="top", ic_direction="fall"),
@@ -112,6 +136,8 @@ def default_slope_ranges() -> dict[str, SlopeRange]:
 
 def slope_range_matches_preset(key: str, sr: SlopeRange, pr: SlopeRange) -> bool:
     """dv/dt 仅比较百分比；di/dt 还需比较电流参考与沿方向。"""
+    if sr.is_auto_max or pr.is_auto_max:
+        return False
     if abs(pr.start_pct - sr.start_pct) >= 0.05 or abs(pr.end_pct - sr.end_pct) >= 0.05:
         return False
     # 反向恢复 dv/dt：只按百分比匹配
@@ -126,6 +152,8 @@ def slope_range_matches_preset(key: str, sr: SlopeRange, pr: SlopeRange) -> bool
 
 def normalize_slope_range(key: str, sr: SlopeRange) -> SlopeRange:
     """若与某条预设百分比一致，则对齐为预设完整字段（避免误判为自定义）。"""
+    if sr.is_auto_max:
+        return auto_max_slope_range(key)
     idx = preset_index_for_range(key, sr)
     if idx < 0:
         return sr
@@ -133,9 +161,32 @@ def normalize_slope_range(key: str, sr: SlopeRange) -> SlopeRange:
 
 
 def preset_index_for_range(key: str, sr: SlopeRange) -> int:
+    if sr.is_auto_max:
+        return -1
     presets = SLOPE_RANGE_PRESETS.get(key, [])
     for i, p in enumerate(presets):
         pr = preset_to_range(p)
         if slope_range_matches_preset(key, sr, pr):
             return i
     return -1
+
+
+def slope_range_result_label(sr: SlopeRange, crossing: object) -> str:
+    """Display the resolved automatic percentage band and its real A/B span."""
+
+    if not sr.is_auto_max:
+        return sr.label()
+    pct_a = getattr(crossing, "resolved_pct_a", None)
+    pct_b = getattr(crossing, "resolved_pct_b", None)
+    t_a = getattr(crossing, "t_pct_a_s", None)
+    t_b = getattr(crossing, "t_pct_b_s", None)
+    if pct_a is None or pct_b is None or t_a is None or t_b is None:
+        return sr.label()
+
+    def _pct(value: float) -> str:
+        text = f"{100.0 * float(value):.1f}".rstrip("0").rstrip(".")
+        return f"{text}%"
+
+    duration_ns = abs(float(t_b) - float(t_a)) * 1e9
+    duration = f"{duration_ns:.1f}".rstrip("0").rstrip(".")
+    return f"自动 {_pct(float(pct_a))}→{_pct(float(pct_b))}（{duration} ns）"
