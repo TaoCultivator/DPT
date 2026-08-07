@@ -129,6 +129,48 @@ class TestEnergyManualPersist(unittest.TestCase):
             with self.subTest(section=section, name=name):
                 self._assert_energy_reclick_keeps_current_view(section, name, manual)
 
+    def test_x_exit_then_reclick_restores_manual_local_page(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        section, name = "开通", "Eon"
+        manual = (18.360, 18.920, 35.0, 8.0)
+        win = self._window()
+        try:
+            win._on_result_value_clicked(section, name)
+            plot = win.wave_plot
+            assert plot._interactive_on_change is not None
+            plot._interactive_on_change(*manual)
+
+            plot.focus_interval_us(12.0, 14.0)
+            QApplication.processEvents()
+            expected_view = plot.current_x_range_us()
+            self.assertIsNotNone(expected_view)
+            assert expected_view is not None
+
+            plot._exit_local_zoom()
+            QApplication.processEvents()
+            full_view = plot.current_x_range_us()
+            self.assertIsNotNone(full_view)
+            assert full_view is not None
+            self.assertGreater(
+                full_view[1] - full_view[0],
+                expected_view[1] - expected_view[0],
+            )
+
+            win._on_result_value_clicked(section, name)
+            QApplication.processEvents()
+            restored_view = plot.current_x_range_us()
+            self.assertIsNotNone(restored_view)
+            assert restored_view is not None
+            self.assertAlmostEqual(restored_view[0], expected_view[0], places=6)
+            self.assertAlmostEqual(restored_view[1], expected_view[1], places=6)
+
+            assert plot._cursor_a is not None and plot._cursor_b is not None
+            self.assertAlmostEqual(float(plot._cursor_a.value()), manual[0], places=6)
+            self.assertAlmostEqual(float(plot._cursor_b.value()), manual[1], places=6)
+        finally:
+            win.close()
+
     def test_energy_adjustment_feeds_power_window(self) -> None:
         win = self._window()
         section, name = "开通", "Eon"

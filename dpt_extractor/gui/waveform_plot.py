@@ -2200,6 +2200,31 @@ class WaveformPlot(QWidget):
             return None
         return min(float(x0), float(x1)), max(float(x0), float(x1))
 
+    def recent_local_x_window_us(self) -> tuple[float, float] | None:
+        """Return the latest exact local X window without changing the view."""
+
+        if self._recent_local_x_window is None:
+            return None
+        x0, x1 = self._recent_local_x_window
+        return float(x0), float(x1)
+
+    def restore_local_x_window_us(self, window: tuple[float, float]) -> bool:
+        """Restore a saved local X window while leaving cursor state untouched."""
+
+        if self._full_x_range is None:
+            return False
+        x0, x1 = self._clamp_x_window(*window)
+        if not self._is_local_x_window(x0, x1):
+            return False
+        scale_us = _exact_x_us_per_div(x1 - x0)
+        self._x_target_us_per_div = scale_us
+        self._x_us_per_div = scale_us
+        self._last_x_window = (x0, x1)
+        self._recent_local_x_window = (x0, x1)
+        self.plot.getPlotItem().getViewBox().setXRange(x0, x1, padding=0.0)
+        self._sync_x_scale_readout(scale_us)
+        return True
+
     def trace_color(self, channel: str) -> str:
         key = self._display_key_for_channel(str(channel))
         return self._trace_style.get(key, (WAVEFORM_PLOT_FG, 1.0))[0]
@@ -3916,6 +3941,9 @@ class WaveformPlot(QWidget):
     def _exit_local_zoom(self) -> None:
         if self._full_x_range is None:
             return
+        current = self.current_x_range_us()
+        if current is not None and self._is_local_x_window(*current):
+            self._recent_local_x_window = self._clamp_x_window(*current)
         self._fit_full_range()
         self.scopeZoomSyncRequested.emit(False)
 
@@ -3933,9 +3961,8 @@ class WaveformPlot(QWidget):
             return
         if self._recent_local_x_window is None:
             return
-        lx0, lx1 = self._clamp_x_window(*self._recent_local_x_window)
-        self.plot.getPlotItem().getViewBox().setXRange(lx0, lx1, padding=0.0)
-        self.scopeZoomSyncRequested.emit(True)
+        if self.restore_local_x_window_us(self._recent_local_x_window):
+            self.scopeZoomSyncRequested.emit(True)
 
     def _position_zoom_toggle_button(self) -> None:
         if not hasattr(self, "_zoom_toggle_btn"):
@@ -5089,6 +5116,8 @@ class WaveformPlot(QWidget):
         full_max = float(t[-1] * 1e6)
         full_span = full_max - full_min
         self._full_x_range = (full_min, full_max)
+        if is_new_source:
+            self._recent_local_x_window = None
 
         vb = self.plot.getPlotItem().getViewBox()
         # 缩小不能超出全部双脉冲波形窗口；放大允许至 MIN_X_SPAN_US

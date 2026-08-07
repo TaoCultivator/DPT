@@ -1666,6 +1666,9 @@ class MainWindow(QMainWindow):
         self._load_tasks: dict[int, QRunnable] = {}
         self._scope_sync_request_id = 0
         self._scope_sync_tasks: dict[int, _ScopeSyncTask] = {}
+        self._pending_parameter_local_view_restore: tuple[
+            tuple[str, str], tuple[float, float]
+        ] | None = None
         self._report_request_id = 0
         self._report_prepare_tasks: dict[int, _ReportPrepareTask] = {}
         self._report_tasks: dict[int, _ReportWriteTask] = {}
@@ -1731,7 +1734,7 @@ class MainWindow(QMainWindow):
             self._on_waveform_channel_inversion_changed
         )
         self.wave_plot.scopeZoomSyncRequested.connect(
-            self._start_scope_sync_from_plot
+            self._on_plot_zoom_sync_requested
         )
         self._license_notice_timer.start(0)
 
@@ -3823,6 +3826,7 @@ class MainWindow(QMainWindow):
         self._manual_waveform_source = ""
         self._manual_pulse_pair = None
         self._active_slope_param = None
+        self._pending_parameter_local_view_restore = None
         if reset_plot:
             self.wave_plot.reset_interaction_state()
 
@@ -4632,10 +4636,33 @@ class MainWindow(QMainWindow):
     def _on_result_value_clicked(self, section: str, name: str) -> None:
         """Handle a real table click, then perform one live-scope refresh."""
 
+        key = (section, name)
+        pending = getattr(self, "_pending_parameter_local_view_restore", None)
+        restore_window = (
+            pending[1]
+            if pending is not None and pending[0] == key
+            else None
+        )
+        self._pending_parameter_local_view_restore = None
         self._on_value_clicked(section, name)
         if self._metric_unavailable(section, name):
             return
+        if restore_window is not None:
+            self.wave_plot.restore_local_x_window_us(restore_window)
         QTimer.singleShot(0, self._start_scope_sync_from_plot)
+
+    def _on_plot_zoom_sync_requested(self, zoom_enabled: bool) -> None:
+        if zoom_enabled:
+            self._pending_parameter_local_view_restore = None
+        else:
+            active_metric = self.result_table._active_metric
+            recent_window = self.wave_plot.recent_local_x_window_us()
+            self._pending_parameter_local_view_restore = (
+                (active_metric, recent_window)
+                if active_metric is not None and recent_window is not None
+                else None
+            )
+        self._start_scope_sync_from_plot(zoom_enabled)
 
     def _start_scope_sync_from_plot(self, zoom_enabled: bool | None = None) -> None:
         bundle = self.bundle
