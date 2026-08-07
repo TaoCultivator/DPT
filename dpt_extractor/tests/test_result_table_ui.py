@@ -7,7 +7,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFontMetrics, QPalette
+from PyQt6.QtGui import QColor, QFontMetrics, QPalette
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -17,6 +17,10 @@ from PyQt6.QtWidgets import (
 )
 
 from dpt_extractor.gui.result_table import (
+    AUTO_RANGE_MARKER_MAX_FONT_PX,
+    AUTO_RANGE_MARKER_MIN_FONT_PX,
+    AUTO_RANGE_MARKER_COLOR,
+    AUTO_RANGE_MARKER_ROLE,
     ENERGY_TEXT_COLOR,
     MISSING_TEXT_COLOR,
     MISSING_VALUE_TEXT,
@@ -29,7 +33,10 @@ from dpt_extractor.gui.result_table import (
 )
 from dpt_extractor.gui.slope_range_dialog import SlopeRangeDialog
 from dpt_extractor.gui.theme import SECTION_OFF, SECTION_ON, SECTION_RR
-from dpt_extractor.models.slope_range import CUSTOM_RANGE_LABEL
+from dpt_extractor.models.slope_range import (
+    CUSTOM_RANGE_LABEL,
+    auto_max_slope_range,
+)
 from dpt_extractor.models.results import (
     ExtractResult,
     ReverseRecoveryResult,
@@ -145,6 +152,120 @@ class TestResultTableUi(unittest.TestCase):
             table.table.item(on_start, 0).foreground().color().name(),
             SECTION_ACTIVE_TEXT,
         )
+        table.close()
+
+    def test_auto_range_is_centered_with_red_nonoverlap_markers(self) -> None:
+        result = _sample_result()
+        result.turn_off.didt_range = "自动 57%→37%（6.2 ns）"
+
+        table = ResultTable()
+        table.set_slope_ranges(
+            {"off_didt": auto_max_slope_range("off_didt")}
+        )
+        table.set_result(result)
+        table.resize(460, 620)
+        table.show()
+        self.app.processEvents()
+
+        row = _row_for(table, "关断过程", "di/dt")
+        item = table.table.item(row, 3)
+        self.assertEqual(item.text(), "57%→37%")
+        self.assertTrue(item.data(AUTO_RANGE_MARKER_ROLE))
+        self.assertEqual(AUTO_RANGE_MARKER_MAX_FONT_PX, 8)
+        self.assertEqual(AUTO_RANGE_MARKER_MIN_FONT_PX, 7)
+        needed = QFontMetrics(item.font()).horizontalAdvance(item.text()) + 2
+        self.assertLessEqual(needed, table.table.columnWidth(3))
+        self.assertLessEqual(table.table.columnWidth(3), 90)
+
+        plain = ResultTable()
+        plain.set_result(result)
+        plain.resize(460, 620)
+        plain.show()
+        self.app.processEvents()
+        self.assertEqual(
+            table.table.columnWidth(3),
+            plain.table.columnWidth(3),
+        )
+
+        rect = table.table.visualItemRect(item)
+        image = table.table.viewport().grab(rect).toImage()
+        plain_item = plain.table.item(row, 3)
+        plain_rect = plain.table.visualItemRect(plain_item)
+        plain_image = plain.table.viewport().grab(plain_rect).toImage()
+        marker_red = QColor(AUTO_RANGE_MARKER_COLOR)
+
+        def red_count(x0: int, x1: int, y0: int, y1: int) -> int:
+            count = 0
+            for y in range(max(0, y0), min(image.height(), y1)):
+                for x in range(max(0, x0), min(image.width(), x1)):
+                    pixel = image.pixelColor(x, y)
+                    if (
+                        abs(pixel.red() - marker_red.red()) <= 12
+                        and abs(pixel.green() - marker_red.green()) <= 12
+                        and abs(pixel.blue() - marker_red.blue()) <= 12
+                    ):
+                        count += 1
+            return count
+
+        background = image.pixelColor(image.width() // 2, image.height() - 2)
+
+        def non_background_count(x0: int, x1: int, y0: int, y1: int) -> int:
+            count = 0
+            for y in range(max(0, y0), min(image.height(), y1)):
+                for x in range(max(0, x0), min(image.width(), x1)):
+                    pixel = image.pixelColor(x, y)
+                    if pixel != background:
+                        count += 1
+            return count
+
+        def center_text_rows(cell_image) -> tuple[int, int]:
+            cell_background = cell_image.pixelColor(
+                cell_image.width() // 2,
+                cell_image.height() - 2,
+            )
+            x0 = cell_image.width() // 3
+            x1 = cell_image.width() - x0
+            rows = [
+                y
+                for y in range(cell_image.height() - 1)
+                if any(
+                    cell_image.pixelColor(x, y) != cell_background
+                    for x in range(x0, x1)
+                )
+            ]
+            self.assertTrue(rows)
+            return min(rows), max(rows)
+
+        third = max(1, image.width() // 3)
+        marker_top = max(0, image.height() - 10)
+        self.assertGreater(red_count(0, third, marker_top, image.height()), 0)
+        self.assertGreater(
+            red_count(
+                image.width() - third,
+                image.width(),
+                marker_top,
+                image.height(),
+            ),
+            0,
+        )
+        self.assertEqual(red_count(0, image.width(), 0, marker_top), 0)
+        self.assertEqual(
+            non_background_count(
+                third,
+                image.width() - third,
+                marker_top,
+                image.height() - 1,
+            ),
+            0,
+        )
+        auto_top, auto_bottom = center_text_rows(image)
+        plain_top, plain_bottom = center_text_rows(plain_image)
+        self.assertAlmostEqual(
+            (auto_top + auto_bottom) / 2,
+            (plain_top + plain_bottom) / 2,
+            delta=1.0,
+        )
+        plain.close()
         table.close()
 
     def test_slope_custom_range_is_entered_in_the_selection_dialog(self) -> None:

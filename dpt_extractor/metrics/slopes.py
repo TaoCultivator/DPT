@@ -10,6 +10,7 @@ from dpt_extractor.metrics.plateau_level import (
     _plateau_mid_without_isolated_spikes,
     dvdt_rr_vd_plateau_top,
 )
+from dpt_extractor.models.slope_range import AUTO_MAX_SLOPE_SPAN_PERCENT
 from dpt_extractor.utils.signal import (
     crossing_time,
     max_slope_filtered,
@@ -391,13 +392,15 @@ def _auto_max_slope_percentages(
     anchor: DvdtCrossingResult,
     *,
     use_abs: bool = False,
-) -> tuple[float, float] | None:
-    """Select the fastest continuous, monotonic and near-linear main-edge band.
+) -> tuple[float, float, float, float] | None:
+    """Select the fastest valid fixed-percentage band on the main edge.
 
     The broad ``anchor`` is supplied by each parameter's existing episode
     detector, so this locator cannot jump to a different pulse or later
-    ringing packet.  Filtering is used only to choose the band.  Callers then
-    run their established raw crossing routine again at the resolved levels.
+    ringing packet.  A fixed 20 percentage-point window is slid through that
+    anchor and ranked by its average slope.  Filtering and quality gates are
+    used only to choose the band.  Callers then run their established raw
+    crossing routine again at the resolved levels.
     """
 
     if anchor.t_pct_a_s is None or anchor.t_pct_b_s is None:
@@ -457,85 +460,114 @@ def _auto_max_slope_percentages(
         else 0.0
     )
     reversal_tolerance = max(0.003, 3.0 * noise)
-    minimum_amplitude = max(0.015, 4.0 * noise)
-    min_points = max(5, int(np.ceil(np.sqrt(len(located)))))
-    min_points = min(len(located), min(21, min_points))
-    if min_points < 5:
+    fixed_span = float(AUTO_MAX_SLOPE_SPAN_PERCENT) / 100.0
+    if fixed_span + 1e-12 < max(0.015, 4.0 * noise):
         return None
 
-    best: tuple[float, int, int, float] | None = None
-    for start in range(0, len(located) - min_points + 1):
-        end = start + min_points - 1
+    # Derive the usable progress bounds from the anchored times rather than
+    # ``anchor.th_*``.  RR di/dt keeps those thresholds in the original
+    # signed probe coordinate while ``located`` is polarity-normalized.
+    anchor_progress = (
+        float(np.interp(lo_t, seg_t, located)),
+        float(np.interp(hi_t, seg_t, located)),
+    )
+    progress_lo = max(0.01, min(anchor_progress))
+    progress_hi = min(0.99, max(anchor_progress))
+    latest_start = progress_hi - fixed_span
+    if latest_start < progress_lo - 1e-12:
+        return None
+
+    # Half-percent placement resolution keeps the automatic result stable and
+    # still lets the fixed 20% band follow the fastest part of a curved edge.
+    grid_step = 0.005
+    first_grid = np.ceil((progress_lo - 1e-12) / grid_step) * grid_step
+    last_grid = np.floor((latest_start + 1e-12) / grid_step) * grid_step
+    candidate_starts = list(
+        np.arange(first_grid, last_grid + 0.5 * grid_step, grid_step)
+    )
+    for boundary in (progress_lo, latest_start):
+        if not any(
+            abs(float(value) - boundary) < 1e-9
+            for value in candidate_starts
+        ):
+            candidate_starts.append(boundary)
+    candidate_starts.sort()
+
+    best: tuple[float, float, float, float] | None = None
+    for start_progress in candidate_starts:
+        start_progress = float(start_progress)
+        end_progress = start_progress + fixed_span
+        start_t = crossing_time(
+            seg_t, located, start_progress, "rising", start=0
+        )
+        if start_t is None:
+            continue
+        start_search = max(
+            0,
+            min(
+                len(seg_t) - 2,
+                int(np.searchsorted(seg_t, start_t, side="left")) - 1,
+            ),
+        )
+        end_t = crossing_time(
+            seg_t,
+            located,
+            end_progress,
+            "rising",
+            start=start_search,
+        )
+        if end_t is None or end_t <= start_t:
+            continue
+        quality_start = max(
+            0, int(np.searchsorted(seg_t, start_t, side="left")) - 1
+        )
+        quality_end = min(
+            len(seg_t) - 1,
+            int(np.searchsorted(seg_t, end_t, side="right")),
+        )
         slope, r2, monotonic, amplitude = _linear_window_quality(
-            seg_t, located, start, end, reversal_tolerance
+            seg_t,
+            located,
+            quality_start,
+            quality_end,
+            reversal_tolerance,
         )
         if (
             slope <= 0.0
-            or r2 < 0.90
+            or r2 < 0.80
             or monotonic < 0.70
-            or amplitude < minimum_amplitude
+            or amplitude < 0.70 * fixed_span
         ):
             continue
-        if best is None or slope > best[0]:
-            best = (slope, start, end, r2)
+        average_slope = fixed_span / (float(end_t) - float(start_t))
+        candidate = (average_slope, r2, start_progress, float(start_t))
+        if best is None or candidate[:2] > best[:2]:
+            best = candidate
     if best is None:
         return None
 
-    seed_slope, start, end, _seed_r2 = best
-    # Grow around the fastest valid seed until either direction ceases to be
-    # near-linear/monotonic or its fitted slope drops materially.  Thus the
-    # selected width follows the waveform shape instead of a fixed 20% span.
-    while True:
-        candidates: list[tuple[float, float, int, int]] = []
-        for next_start, next_end in ((start - 1, end), (start, end + 1)):
-            if next_start < 0 or next_end >= len(located):
-                continue
-            slope, r2, monotonic, amplitude = _linear_window_quality(
-                seg_t,
-                located,
-                next_start,
-                next_end,
-                reversal_tolerance,
-            )
-            if (
-                slope >= 0.95 * seed_slope
-                and r2 >= 0.90
-                and monotonic >= 0.70
-                and amplitude >= minimum_amplitude
-            ):
-                candidates.append((r2, slope, next_start, next_end))
-        if not candidates:
-            break
-        _r2, _slope, start, end = max(candidates)
-
-    fit_t = seg_t[start : end + 1] - float(seg_t[start])
-    fit_y = located[start : end + 1]
-    fit_design = np.column_stack((fit_t, np.ones_like(fit_t)))
-    fit_slope, fit_intercept = np.linalg.lstsq(
-        fit_design, fit_y, rcond=None
-    )[0]
-    observed_min = float(np.min(fit_y))
-    observed_max = float(np.max(fit_y))
-    start_progress = float(
-        np.clip(max(float(fit_intercept), observed_min), 0.01, 0.99)
+    _average_slope, _r2, start_progress, start_t = best
+    end_progress = start_progress + fixed_span
+    start_search = max(
+        0,
+        min(
+            len(seg_t) - 2,
+            int(np.searchsorted(seg_t, start_t, side="left")) - 1,
+        ),
     )
-    end_progress = float(
-        np.clip(
-            min(
-                float(fit_slope * float(fit_t[-1]) + fit_intercept),
-                observed_max,
-            ),
-            0.01,
-            0.99,
-        )
+    end_t = crossing_time(
+        seg_t, located, end_progress, "rising", start=start_search
     )
-    if end_progress - start_progress < max(0.005, minimum_amplitude / 3.0):
+    if end_t is None or end_t <= start_t:
         return None
-    start_t = float(seg_t[start])
-    end_t = float(seg_t[end])
     if edge == "rise":
-        return start_progress, end_progress, start_t, end_t
-    return 1.0 - start_progress, 1.0 - end_progress, start_t, end_t
+        return start_progress, end_progress, float(start_t), float(end_t)
+    return (
+        1.0 - start_progress,
+        1.0 - end_progress,
+        float(start_t),
+        float(end_t),
+    )
 
 
 def auto_dvdt_between_base_top(

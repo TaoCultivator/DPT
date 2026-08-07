@@ -49,6 +49,7 @@ from dpt_extractor.models.results import (  # noqa: E402
     SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
 )
 from dpt_extractor.models.slope_range import (  # noqa: E402
+    AUTO_MAX_SLOPE_SPAN_PERCENT,
     SLOPE_ROW_KEYS,
     auto_max_slope_range,
 )
@@ -188,6 +189,39 @@ DPT_ENDPOINT_CHANNELS = {
     ("反向恢复", "di/dt"): ("irr", "irr"),
     ("反向恢复", "Err"): ("irr", "v_diode"),
 }
+
+_AUTO_SLOPE_LABEL_RE = re.compile(
+    r"^自动\s+(-?\d+(?:\.\d+)?)%→(-?\d+(?:\.\d+)?)%"
+    r"（(\d+(?:\.\d+)?)\s+ns）$"
+)
+
+
+def _auto_slope_label_has_fixed_span(label: object) -> bool:
+    match = _AUTO_SLOPE_LABEL_RE.fullmatch(str(label))
+    if match is None:
+        return False
+    pct_a = float(match.group(1))
+    pct_b = float(match.group(2))
+    duration_ns = float(match.group(3))
+    return (
+        abs(abs(pct_a - pct_b) - AUTO_MAX_SLOPE_SPAN_PERCENT) <= 0.11
+        and duration_ns > 0.0
+    )
+
+
+def _effective_slope_percentages(
+    slope_range,
+    crossing,
+    fallback: tuple[float, float],
+) -> tuple[float, float]:
+    if slope_range is not None and slope_range.is_auto_max:
+        pct_a = getattr(crossing, "resolved_pct_a", None)
+        pct_b = getattr(crossing, "resolved_pct_b", None)
+        if pct_a is not None and pct_b is not None:
+            return float(pct_a), float(pct_b)
+    if slope_range is not None:
+        return slope_range.as_fractions()
+    return fallback
 
 # (channel, valid) for Ha/Hb.  An invalid cursor must remain hidden and must
 # not inherit a stale line from the previously selected parameter card.
@@ -1873,18 +1907,26 @@ def audit_short_circuit_file(MainWindow, QApplication, app, path: Path) -> list[
 def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
     sample_id = _sample_trace_id(path)
     mw = MainWindow()
-    if os.environ.get("DPT_VALIDATE_AUTO_SLOPES", "").lower() in {
+    validate_auto_slopes = os.environ.get(
+        "DPT_VALIDATE_AUTO_SLOPES", ""
+    ).lower() in {
         "1",
         "true",
         "yes",
-    }:
+    }
+    mw._load_file(str(path))
+    if validate_auto_slopes:
+        # Loading a new waveform intentionally restores the application's
+        # historical default ranges.  Inject the audit mode afterward and use
+        # the production recalculation path so the GUI, result and report
+        # labels all exercise the requested automatic range.
         mw._slope_ranges = {
             row_key: auto_max_slope_range(row_key)
             for row_key in SLOPE_ROW_KEYS.values()
         }
         mw.cfg.slope_ranges = dict(mw._slope_ranges)
         mw.result_table.set_slope_ranges(mw._slope_ranges)
-    mw._load_file(str(path))
+        mw._recalculate(reset_manual=True)
     if mw.bundle is None or mw.result is None or mw.result.segments is None:
         detail = mw.statusBar().currentMessage() if mw.statusBar() is not None else "参数未计算"
         mw.close()
@@ -2155,6 +2197,27 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 )
 
         if name in ("dv/dt", "di/dt"):
+            if validate_auto_slopes:
+                row_key = SLOPE_ROW_KEYS[(section, name)]
+                selected_range = mw._slope_ranges.get(row_key)
+                if selected_range is None or not selected_range.is_auto_max:
+                    problems.append("GUI 自动斜率范围未保持 auto_max 模式")
+                result_section = {
+                    "关断过程": result.turn_off,
+                    "开通": result.turn_on,
+                    "反向恢复": result.reverse_recovery,
+                }[section]
+                range_label = (
+                    result_section.dvdt_range
+                    if name == "dv/dt"
+                    else result_section.didt_range
+                )
+                if not _auto_slope_label_has_fixed_span(range_label):
+                    problems.append(
+                        "GUI 自动"
+                        f"{AUTO_MAX_SLOPE_SPAN_PERCENT:g}%"
+                        f"范围标签无效={range_label!r}"
+                    )
             c = calls.get("enable_dvdt_interaction")
             if c is None:
                 record(section, name, "FAIL", "未触发 enable_dvdt_interaction")
@@ -2509,10 +2572,10 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                                     mw.cfg.slope_ranges,
                                 )
                                 slope_range = slope_ranges.get(row_key)
-                                pct_a, pct_b = (
-                                    slope_range.as_fractions()
-                                    if slope_range is not None
-                                    else (0.9, 0.1)
+                                pct_a, pct_b = _effective_slope_percentages(
+                                    slope_range,
+                                    context.crossing,
+                                    (0.9, 0.1),
                                 )
                                 independent_crossing = rr_didt_between_levels(
                                     t,
@@ -2620,10 +2683,10 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     row_key = SLOPE_ROW_KEYS[("开通", "di/dt")]
                     slope_ranges = getattr(mw, "_slope_ranges", mw.cfg.slope_ranges)
                     slope_range = slope_ranges.get(row_key)
-                    pct_a, pct_b = (
-                        slope_range.as_fractions()
-                        if slope_range is not None
-                        else (0.1, 0.9)
+                    pct_a, pct_b = _effective_slope_percentages(
+                        slope_range,
+                        context.crossing,
+                        (0.1, 0.9),
                     )
                     span = float(context.top_a - context.base_a)
                     expected_th_a = float(
@@ -4103,7 +4166,14 @@ def run_all() -> list[tuple]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtWidgets import QApplication
 
-    from dpt_extractor.gui.main_window import MainWindow
+    from dpt_extractor.gui import main_window as main_window_module
+
+    # Corpus audits load many real files through the production path, but must
+    # not replace the user's persisted "last opened TSS" with the final audit
+    # sample.  Patch only this validator process; production behavior remains
+    # unchanged.
+    main_window_module.set_last_open_path = lambda _path: None
+    MainWindow = main_window_module.MainWindow
 
     app = QApplication.instance() or QApplication([])
     all_rows: list[tuple] = []

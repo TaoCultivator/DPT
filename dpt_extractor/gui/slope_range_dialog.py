@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 from dpt_extractor.gui.theme import DARK_STYLESHEET
 from dpt_extractor.models.slope_range import (
     AUTO_MAX_SLOPE_LABEL,
+    AUTO_MAX_SLOPE_SPAN_PERCENT,
     CUSTOM_RANGE_LABEL,
     RR_DIDT_CUSTOM_IDM,
     RR_DIDT_CUSTOM_IF_IRM,
@@ -169,7 +170,8 @@ class SlopeRangeDialog(QDialog):
     def _update_hint(self) -> None:
         if self._is_auto_max():
             self.hint.setText(
-                "在该参数既有主沿内，自动寻找斜率最大且连续、单调、近似直线的有效区间；"
+                f"在该参数既有主沿内滑动 {AUTO_MAX_SLOPE_SPAN_PERCENT:g}% 幅度窗口，"
+                "自动选择平均斜率最大且连续、单调、近似直线的区间；"
                 "最终数值和 A/B 光标仍由原始波形交点计算。"
             )
             return

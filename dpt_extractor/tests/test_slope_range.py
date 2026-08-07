@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from dpt_extractor.models.slope_range import (
     AUTO_MAX_SLOPE_LABEL,
@@ -50,6 +54,23 @@ class TestSlopeRangeDialog(unittest.TestCase):
         from PyQt6.QtWidgets import QApplication
 
         cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from PyQt6.QtCore import QSettings
+
+        self._settings_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._settings_tmp.cleanup)
+        settings_path = Path(self._settings_tmp.name) / "DPTExtractor.ini"
+
+        def settings_factory() -> QSettings:
+            return QSettings(str(settings_path), QSettings.Format.IniFormat)
+
+        settings_patcher = patch(
+            "dpt_extractor.gui.main_window._app_settings",
+            settings_factory,
+        )
+        settings_patcher.start()
+        self.addCleanup(settings_patcher.stop)
 
     def test_custom_selection_exposes_start_end_in_same_dialog(self) -> None:
         from dpt_extractor.gui.slope_range_dialog import SlopeRangeDialog
@@ -164,8 +185,6 @@ class TestSlopeRangeDialog(unittest.TestCase):
         self.assertEqual(preset_index_for_range("on_dvdt", selected), 0)
 
     def test_range_change_discards_only_the_affected_manual_slope(self) -> None:
-        from unittest.mock import patch
-
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.models.slope_range import (
             SLOPE_RANGE_PRESETS,
@@ -208,6 +227,129 @@ class TestSlopeRangeDialog(unittest.TestCase):
                     if ls_key is not None:
                         self.assertNotIn(ls_key, win._manual_intervals)
                     self.assertIn(("开通", "Eon"), win._manual_energy)
+                finally:
+                    win.close()
+
+    def test_ranges_persist_across_restart_and_new_file_config(self) -> None:
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            SLOPE_RANGES_SETTINGS_KEY,
+        )
+        from dpt_extractor.models.slope_range import (
+            SLOPE_RANGE_PRESETS,
+            auto_max_slope_range,
+            normalize_slope_range,
+            preset_to_range,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "DPTExtractor.ini"
+
+            def settings_factory() -> QSettings:
+                return QSettings(str(settings_path), QSettings.Format.IniFormat)
+
+            selected = {
+                "off_dvdt": auto_max_slope_range("off_dvdt"),
+                "off_didt": SlopeRange(
+                    70.0,
+                    30.0,
+                    ic_reference="top",
+                    ic_direction="fall",
+                ),
+                "on_dvdt": SlopeRange(75.0, 25.0),
+                "on_didt": preset_to_range(SLOPE_RANGE_PRESETS["on_didt"][1]),
+                "rr_dvdt": auto_max_slope_range("rr_dvdt"),
+                "rr_didt": preset_to_range(SLOPE_RANGE_PRESETS["rr_didt"][2]),
+            }
+            expected = {
+                key: normalize_slope_range(key, value)
+                for key, value in selected.items()
+            }
+
+            with patch(
+                "dpt_extractor.gui.main_window._app_settings",
+                settings_factory,
+            ):
+                win = MainWindow()
+                try:
+                    with patch.object(win, "_recalculate") as recalculate:
+                        for key, value in selected.items():
+                            win._on_slope_range_changed(key, value)
+                    self.assertEqual(recalculate.call_count, len(selected))
+                    self.assertEqual(win._slope_ranges, expected)
+                finally:
+                    win.close()
+
+                stored = settings_factory().value(SLOPE_RANGES_SETTINGS_KEY, "")
+                self.assertIn('"selection_mode":"auto_max"', str(stored))
+                stored_payload = json.loads(str(stored))
+                self.assertEqual(
+                    stored_payload["off_dvdt"],
+                    {"selection_mode": "auto_max"},
+                )
+                self.assertNotIn("start_pct", stored_payload["rr_dvdt"])
+
+                win2 = MainWindow()
+                try:
+                    self.assertEqual(win2._slope_ranges, expected)
+                    self.assertEqual(win2.cfg.slope_ranges, expected)
+                    self.assertEqual(win2.result_table.slope_ranges(), expected)
+                    self.assertEqual(
+                        win2._load_cfg_for_new_file().slope_ranges,
+                        expected,
+                    )
+                finally:
+                    win2.close()
+
+    def test_invalid_persisted_ranges_fall_back_per_item(self) -> None:
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            SLOPE_RANGES_SETTINGS_KEY,
+        )
+        from dpt_extractor.models.slope_range import AUTO_MAX_SLOPE_MODE
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "DPTExtractor.ini"
+
+            def settings_factory() -> QSettings:
+                return QSettings(str(settings_path), QSettings.Format.IniFormat)
+
+            settings = settings_factory()
+            settings.setValue(
+                SLOPE_RANGES_SETTINGS_KEY,
+                json.dumps(
+                    {
+                        "off_dvdt": {
+                            "start_pct": 999.0,
+                            "end_pct": 10.0,
+                            "selection_mode": "percentage",
+                        },
+                        "rr_dvdt": {
+                            "selection_mode": AUTO_MAX_SLOPE_MODE,
+                        },
+                    }
+                ),
+            )
+            settings.sync()
+
+            with patch(
+                "dpt_extractor.gui.main_window._app_settings",
+                settings_factory,
+            ):
+                win = MainWindow()
+                try:
+                    defaults = default_slope_ranges()
+                    self.assertEqual(
+                        win._slope_ranges["off_dvdt"],
+                        defaults["off_dvdt"],
+                    )
+                    self.assertTrue(win._slope_ranges["rr_dvdt"].is_auto_max)
+                    for key in defaults.keys() - {"rr_dvdt"}:
+                        self.assertEqual(win._slope_ranges[key], defaults[key])
                 finally:
                     win.close()
 

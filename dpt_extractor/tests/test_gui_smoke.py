@@ -2407,7 +2407,11 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
     def test_result_table_uses_compact_content_widths(self):
         from PyQt6.QtGui import QFontMetrics
 
-        from dpt_extractor.gui.result_table import ResultTable
+        from dpt_extractor.gui.result_table import (
+            AUTO_RANGE_MARKER_ROLE,
+            ResultTable,
+        )
+        from dpt_extractor.models.slope_range import auto_max_slope_range
         from dpt_extractor.models.results import (
             ExtractResult,
             ReverseRecoveryResult,
@@ -2432,7 +2436,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 dvdt=7.594,
                 didt=10.623,
                 dvdt_range="10%→90%",
-                didt_range="90%→10%",
+                didt_range="自动 57%→37%（6.2 ns）",
                 crosstalk_vmax=-2.78,
                 crosstalk_vmin=-8.05,
                 eoff=88.884,
@@ -2455,6 +2459,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             ),
         )
         table = ResultTable()
+        table.set_slope_ranges({"off_didt": auto_max_slope_range("off_didt")})
         table.set_result(result)
 
         widths = [table.table.columnWidth(c) for c in range(table.table.columnCount())]
@@ -2464,6 +2469,12 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertLessEqual(widths[2], 50)
         self.assertLessEqual(widths[3], 90)
         self.assertLessEqual(widths[4], 135)
+        auto_range_row = table._row_meta.index(("关断过程", "di/dt"))
+        auto_range_item = table.table.item(auto_range_row, 3)
+        self.assertEqual(auto_range_item.text(), "57%→37%")
+        self.assertNotIn("自动", auto_range_item.text())
+        self.assertNotIn("ns", auto_range_item.text())
+        self.assertTrue(auto_range_item.data(AUTO_RANGE_MARKER_ROLE))
 
         max_font_height = 0
         for row in range(table.table.rowCount()):

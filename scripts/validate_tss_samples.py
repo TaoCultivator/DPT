@@ -47,6 +47,7 @@ from dpt_extractor.models.channel_mapping import (
 )
 from dpt_extractor.models.test_mode import TestMode
 from dpt_extractor.models.slope_range import (
+    AUTO_MAX_SLOPE_SPAN_PERCENT,
     SLOPE_ROW_KEYS,
     auto_max_slope_range,
     default_slope_ranges,
@@ -74,6 +75,10 @@ _VOLTAGE_TOL_REL = 0.18
 _CURRENT_TOL_ABS = 30.0
 _CURRENT_TOL_REL = 0.18
 _VALIDATE_AUTO_SLOPES = False
+_AUTO_SLOPE_LABEL_RE = re.compile(
+    r"^自动\s+(-?\d+(?:\.\d+)?)%→(-?\d+(?:\.\d+)?)%"
+    r"（(\d+(?:\.\d+)?)\s+ns）$"
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +139,21 @@ def _validation_config():
             for row_key in SLOPE_ROW_KEYS.values()
         }
     return cfg
+
+
+def _auto_slope_label_has_fixed_span(label: object) -> bool:
+    """Return whether an automatic result reports the configured compact band."""
+
+    match = _AUTO_SLOPE_LABEL_RE.fullmatch(str(label))
+    if match is None:
+        return False
+    pct_a = float(match.group(1))
+    pct_b = float(match.group(2))
+    duration_ns = float(match.group(3))
+    return (
+        abs(abs(pct_a - pct_b) - AUTO_MAX_SLOPE_SPAN_PERCENT) <= 0.11
+        and duration_ns > 0.0
+    )
 
 
 def _sample_label(path: Path) -> str:
@@ -670,8 +690,11 @@ def _validate_dpt_sample(
             ):
                 if not np.isfinite(float(value)) or float(value) <= 0.0:
                     problems.append(f"{name}自动区间值不可用={value}")
-                if not str(label).startswith("自动 "):
-                    problems.append(f"{name}自动A/B区间不可用={label!r}")
+                if not _auto_slope_label_has_fixed_span(label):
+                    problems.append(
+                        f"{name}自动{AUTO_MAX_SLOPE_SPAN_PERCENT:g}% "
+                        f"A/B区间不可用={label!r}"
+                    )
         if r.turn_off.eoff <= 0.0:
             problems.append(f"Eoff={r.turn_off.eoff:.3f}mJ")
         _append_condition_checks(
@@ -875,8 +898,11 @@ def _validate_dpt_sample(
         ):
             if not np.isfinite(float(value)) or float(value) <= 0.0:
                 problems.append(f"{name}自动区间值不可用={value}")
-            if not str(label).startswith("自动 "):
-                problems.append(f"{name}自动A/B区间不可用={label!r}")
+            if not _auto_slope_label_has_fixed_span(label):
+                problems.append(
+                    f"{name}自动{AUTO_MAX_SLOPE_SPAN_PERCENT:g}% "
+                    f"A/B区间不可用={label!r}"
+                )
     eoff_tol = max(0.02, 0.02 * max(abs(eoff_chk), 1e-9))
     if abs(r.turn_off.eoff - eoff_chk) > eoff_tol:
         problems.append(f"Eoff校验={r.turn_off.eoff:.3f}/{eoff_chk:.3f}mJ")

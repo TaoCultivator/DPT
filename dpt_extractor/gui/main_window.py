@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 import math
 from pathlib import Path
 import re
@@ -116,8 +117,11 @@ from dpt_extractor.models.results import (
     power_metric_name,
 )
 from dpt_extractor.models.slope_range import (
+    AUTO_MAX_SLOPE_MODE,
+    PERCENTAGE_SLOPE_MODE,
     SLOPE_ROW_KEYS,
     SlopeRange,
+    auto_max_slope_range,
     default_slope_ranges,
     normalize_slope_range,
     slope_range_result_label,
@@ -255,6 +259,7 @@ TEMP_CONDITION_DEFAULTS = {
 }
 TEMP_CONDITION_SETTINGS_PREFIX = "conditions/temperature/"
 SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY = "short_circuit/tsc_range"
+SLOPE_RANGES_SETTINGS_KEY = "measurements/slope_ranges_v1"
 REPORT_CONDITION_SETTINGS_PREFIX = "conditions/report/"
 DPT_REPORT_CONDITION_FIELDS = (
     ("voltage_v", "Vdc", "V"),
@@ -1631,7 +1636,8 @@ class MainWindow(QMainWindow):
         self._report_output_path: Path | None = report_output_path()
         self._channel_store = ChannelMappingStore()
         self._mapping_custom = False
-        self._slope_ranges = default_slope_ranges()
+        self._slope_ranges = self._load_slope_ranges()
+        self.cfg.slope_ranges = dict(self._slope_ranges)
         self.cfg.short_circuit_tsc_range = self._load_short_circuit_tsc_range()
         # 记忆每个参数手动调整的光标区间（µs），再次点击时恢复而非回退默认窗口
         self._manual_intervals: dict[tuple[str, str], tuple[float, float]] = {}
@@ -2107,6 +2113,100 @@ class MainWindow(QMainWindow):
             SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
         )
         _start, _end, normalized = short_circuit_tsc_range_percentages(str(raw))
+        return normalized
+
+    def _load_slope_ranges(self) -> dict[str, SlopeRange]:
+        defaults = default_slope_ranges()
+        raw = _app_settings().value(SLOPE_RANGES_SETTINGS_KEY, "")
+        try:
+            stored = json.loads(str(raw)) if str(raw).strip() else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return defaults
+        if not isinstance(stored, dict):
+            return defaults
+
+        restored = dict(defaults)
+        allowed_references = {"plateau", "peak", "top", "idm", "if_irm"}
+        allowed_directions = {"rise", "fall"}
+        allowed_modes = {PERCENTAGE_SLOPE_MODE, AUTO_MAX_SLOPE_MODE}
+        for key, fallback in defaults.items():
+            item = stored.get(key)
+            if not isinstance(item, dict):
+                continue
+            try:
+                selection_mode = str(
+                    item.get("selection_mode", fallback.selection_mode)
+                )
+                if selection_mode not in allowed_modes:
+                    continue
+                if selection_mode == AUTO_MAX_SLOPE_MODE:
+                    # Automatic percentages are waveform results, not user
+                    # settings.  Persist only the selected automatic mode.
+                    restored[key] = auto_max_slope_range(key)
+                    continue
+                start_pct = float(item["start_pct"])
+                end_pct = float(item["end_pct"])
+                if not (
+                    math.isfinite(start_pct)
+                    and math.isfinite(end_pct)
+                    and 0.0 <= start_pct <= 100.0
+                    and 0.0 <= end_pct <= 100.0
+                ):
+                    continue
+                ic_reference = str(
+                    item.get("ic_reference", fallback.ic_reference)
+                )
+                ic_direction = str(
+                    item.get("ic_direction", fallback.ic_direction)
+                )
+                if (
+                    ic_reference not in allowed_references
+                    or ic_direction not in allowed_directions
+                ):
+                    continue
+                restored[key] = normalize_slope_range(
+                    key,
+                    SlopeRange(
+                        start_pct,
+                        end_pct,
+                        ic_reference=ic_reference,
+                        ic_direction=ic_direction,
+                        preset_label=str(item.get("preset_label", "")),
+                        selection_mode=selection_mode,
+                    ),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return restored
+
+    def _save_slope_ranges(
+        self,
+        ranges: dict[str, SlopeRange],
+    ) -> dict[str, SlopeRange]:
+        defaults = default_slope_ranges()
+        normalized = {
+            key: normalize_slope_range(key, ranges.get(key, fallback))
+            for key, fallback in defaults.items()
+        }
+        payload: dict[str, dict[str, object]] = {}
+        for key, slope_range in normalized.items():
+            if slope_range.is_auto_max:
+                payload[key] = {"selection_mode": AUTO_MAX_SLOPE_MODE}
+                continue
+            payload[key] = {
+                "start_pct": slope_range.start_pct,
+                "end_pct": slope_range.end_pct,
+                "ic_reference": slope_range.ic_reference,
+                "ic_direction": slope_range.ic_direction,
+                "preset_label": slope_range.preset_label,
+                "selection_mode": PERCENTAGE_SLOPE_MODE,
+            }
+        settings = _app_settings()
+        settings.setValue(
+            SLOPE_RANGES_SETTINGS_KEY,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        )
+        settings.sync()
         return normalized
 
     def _save_short_circuit_tsc_range(self, label: str) -> str:
@@ -3454,7 +3554,7 @@ class MainWindow(QMainWindow):
     def _load_cfg_for_new_file(self) -> AppConfig:
         cfg = deepcopy(self.cfg)
         cfg.vdc_override = None
-        cfg.slope_ranges = default_slope_ranges()
+        cfg.slope_ranges = deepcopy(self._slope_ranges)
         cfg.short_circuit_tsc_range = self._load_short_circuit_tsc_range()
         return cfg
 
@@ -4419,7 +4519,8 @@ class MainWindow(QMainWindow):
                 self._merge_recognized_report_conditions(
                     infer_short_report_conditions(path)
                 )
-        self._slope_ranges = default_slope_ranges()
+        self._slope_ranges = self._load_slope_ranges()
+        self.cfg.slope_ranges = dict(self._slope_ranges)
         self.cfg.short_circuit_tsc_range = self._load_short_circuit_tsc_range()
         self.result_table.set_slope_ranges(self._slope_ranges)
         self._clear_manual_adjustments()
@@ -4497,6 +4598,7 @@ class MainWindow(QMainWindow):
                     if ls_name is not None:
                         self._manual_intervals.pop((section, ls_name), None)
                 break
+        self._slope_ranges = self._save_slope_ranges(self._slope_ranges)
         self.cfg.slope_ranges = dict(self._slope_ranges)
         self._recalculate()
 

@@ -6,9 +6,10 @@ from pathlib import Path
 import re
 
 from PyQt6.QtCore import Qt, QSize, QRect
-from PyQt6.QtGui import QColor, QFont, QPalette
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPalette, QRegion
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QComboBox,
     QDialog,
@@ -54,6 +55,7 @@ from dpt_extractor.models.results import (
     power_metric_name,
 )
 from dpt_extractor.models.slope_range import (
+    AUTO_MAX_SLOPE_LABEL,
     SLOPE_ROW_KEYS,
     SlopeRange,
     default_slope_ranges,
@@ -86,6 +88,10 @@ RESULT_OFFSET_POPUP_SELECTED = "#d9e5e6"
 RESULT_SCROLLBAR_RESERVE = 10
 ENERGY_NAMES = {"Eoff", "Eon", "Err"}
 ENERGY_TEXT_COLOR = "#ffd34d"
+AUTO_RANGE_MARKER_COLOR = "#ff3b30"
+AUTO_RANGE_MARKER_ROLE = Qt.ItemDataRole.UserRole.value + 101
+AUTO_RANGE_MARKER_MAX_FONT_PX = 8
+AUTO_RANGE_MARKER_MIN_FONT_PX = 7
 MISSING_VALUE_TEXT = "-"
 MISSING_TEXT_COLOR = "#ff4d4d"
 SECTION_ACTIVE_BG = "#22b8cc"
@@ -137,6 +143,24 @@ def format_metric_display(section: str, name: str, value: float | None) -> str:
     return _fmt(value)
 
 
+_AUTO_RESOLVED_RANGE_RE = re.compile(
+    r"^自动\s+(-?\d+(?:\.\d+)?%→-?\d+(?:\.\d+)?%)"
+    r"(?:（\d+(?:\.\d+)?\s+ns）)?$"
+)
+
+
+def _compact_slope_range_display(label: object) -> str:
+    """Keep the table cell preset-sized while result/report retain details."""
+
+    text = str(label or "").strip()
+    match = _AUTO_RESOLVED_RANGE_RE.fullmatch(text)
+    if match is not None:
+        return match.group(1)
+    if text == AUTO_MAX_SLOPE_LABEL:
+        return "—"
+    return text or "—"
+
+
 def _range_label_for_row(section: str, name: str, result: ExtractResult) -> str:
     off, on, rr = result.turn_off, result.turn_on, result.reverse_recovery
     if result.short_circuit_mode:
@@ -154,17 +178,17 @@ def _range_label_for_row(section: str, name: str, result: ExtractResult) -> str:
         }:
             return "Max"
     if section == "关断过程" and name == "dv/dt":
-        return off.dvdt_range
+        return _compact_slope_range_display(off.dvdt_range)
     if section == "关断过程" and name == "di/dt":
-        return off.didt_range
+        return _compact_slope_range_display(off.didt_range)
     if section == "开通" and name == "dv/dt":
-        return on.dvdt_range
+        return _compact_slope_range_display(on.dvdt_range)
     if section == "开通" and name == "di/dt":
-        return on.didt_range
+        return _compact_slope_range_display(on.didt_range)
     if section == "反向恢复" and name == "dv/dt":
-        return rr.dvdt_range
+        return _compact_slope_range_display(rr.dvdt_range)
     if section == "反向恢复" and name == "di/dt":
-        return rr.didt_range
+        return _compact_slope_range_display(rr.didt_range)
     if section == "关断过程" and name == "Eoff":
         return off.eoff_range
     if name in {"Pmax", "Pdmax"}:
@@ -240,11 +264,107 @@ class _ResultCellDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index) -> None:  # type: ignore[override]
         opt = QStyleOptionViewItem(option)
-        if self._offset_mode():
+        offset_mode = self._offset_mode()
+        auto_range = bool(
+            not offset_mode
+            and index.column() == 3
+            and index.data(AUTO_RANGE_MARKER_ROLE)
+        )
+        if offset_mode:
             opt.state &= ~QStyle.StateFlag.State_Selected
             opt.state &= ~QStyle.StateFlag.State_HasFocus
-        super().paint(painter, opt, index)
-        if not self._offset_mode():
+        if auto_range:
+            self.initStyleOption(opt, index)
+            range_text = opt.text
+            opt.text = ""
+        if auto_range:
+            # QStyledItemDelegate.paint() calls initStyleOption() internally and
+            # would restore the display text, causing the percentage to be drawn
+            # once by Qt and once below.  Draw the prepared, text-free cell
+            # directly so the percentage has exactly one owner.
+            style = (
+                opt.widget.style()
+                if opt.widget is not None
+                else QApplication.style()
+            )
+            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter)
+        else:
+            super().paint(painter, opt, index)
+        if auto_range:
+            painter.save()
+            rect = option.rect.adjusted(1, 0, -1, -1)
+            main_font = QFont(opt.font)
+            main_metrics = QFontMetrics(main_font)
+            main_rect = QRect(rect)
+            main_text_bounds = QStyle.alignedRect(
+                opt.direction,
+                Qt.AlignmentFlag.AlignCenter,
+                QSize(
+                    main_metrics.horizontalAdvance(range_text),
+                    main_metrics.height(),
+                ),
+                main_rect,
+            )
+
+            marker_font = QFont(main_font)
+            marker_px = AUTO_RANGE_MARKER_MAX_FONT_PX
+            while True:
+                marker_font.setPixelSize(marker_px)
+                marker_metrics = QFontMetrics(marker_font)
+                marker_height = marker_metrics.height()
+                marker_width = marker_metrics.horizontalAdvance("自") + 2
+                marker_top = rect.bottom() - marker_height + 1
+                left_marker_rect = QRect(
+                    rect.left() + 1,
+                    marker_top,
+                    marker_width,
+                    marker_height,
+                )
+                right_marker_rect = QRect(
+                    rect.right() - marker_width,
+                    marker_top,
+                    marker_width,
+                    marker_height,
+                )
+                text_guard = main_text_bounds.adjusted(-1, -1, 1, 1)
+                overlaps = (
+                    left_marker_rect.intersects(text_guard)
+                    or right_marker_rect.intersects(text_guard)
+                )
+                if not overlaps or marker_px <= AUTO_RANGE_MARKER_MIN_FONT_PX:
+                    break
+                marker_px -= 1
+            text_role = (
+                QPalette.ColorRole.HighlightedText
+                if opt.state & QStyle.StateFlag.State_Selected
+                else QPalette.ColorRole.Text
+            )
+            painter.setFont(main_font)
+            painter.setPen(opt.palette.color(text_role))
+            painter.setClipRect(main_rect)
+            painter.drawText(main_rect, Qt.AlignmentFlag.AlignCenter, range_text)
+
+            # Keep the percentage vertically centered like every preset.  The
+            # marker size is reduced only when its real bounds approach the
+            # text, and this exclusion clip is a final no-overlap guarantee.
+            painter.setClipRegion(
+                QRegion(rect).subtracted(QRegion(text_guard))
+            )
+            painter.setFont(marker_font)
+            painter.setPen(QColor(AUTO_RANGE_MARKER_COLOR))
+            painter.drawText(
+                left_marker_rect,
+                Qt.AlignmentFlag.AlignCenter,
+                "自",
+            )
+            painter.drawText(
+                right_marker_rect,
+                Qt.AlignmentFlag.AlignCenter,
+                "动",
+            )
+            painter.restore()
+            return
+        if not offset_mode:
             return
         painter.save()
         grid = QColor(RESULT_OFFSET_GRID)
@@ -1056,8 +1176,6 @@ class ResultTable(QWidget):
         return width
 
     def _apply_compact_column_widths(self) -> None:
-        from PyQt6.QtGui import QFontMetrics
-
         if self._is_offset_measurement_table():
             widths = [
                 min(
@@ -1157,6 +1275,19 @@ class ResultTable(QWidget):
         self._slope_ranges = dict(default_slope_ranges())
         for key, sr in ranges.items():
             self._slope_ranges[key] = normalize_slope_range(key, sr)
+        self._refresh_auto_range_markers()
+
+    def _refresh_auto_range_markers(self) -> None:
+        for row, row_key in enumerate(self._row_keys):
+            item = self.table.item(row, 3)
+            if item is None:
+                continue
+            selected_range = self._slope_ranges.get(row_key) if row_key else None
+            item.setData(
+                AUTO_RANGE_MARKER_ROLE,
+                bool(selected_range and selected_range.is_auto_max),
+            )
+        self.table.viewport().update()
 
     def _set_summary(self, result: ExtractResult) -> None:
         if result.short_circuit_mode:
@@ -1441,6 +1572,11 @@ class ResultTable(QWidget):
             range_item.setForeground(text_color)
             range_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             range_item.setFont(utility_font)
+            selected_range = self._slope_ranges.get(row_key) if row_key else None
+            range_item.setData(
+                AUTO_RANGE_MARKER_ROLE,
+                bool(selected_range and selected_range.is_auto_max),
+            )
             if (
                 row_key
                 or (section == "关断过程" and name == "Eoff")
@@ -1597,7 +1733,8 @@ class ResultTable(QWidget):
             if row_section == section and row_name == name:
                 item = self.table.item(row, 3)
                 if item is not None:
-                    item.setText(text or "—")
+                    item.setText(_compact_slope_range_display(text))
+                    self._refresh_auto_range_markers()
                 return
 
     def set_metric_unavailable(
@@ -1709,5 +1846,6 @@ class ResultTable(QWidget):
         assert new_range is not None
 
         self._slope_ranges[row_key] = normalize_slope_range(row_key, new_range)
+        self._refresh_auto_range_markers()
         if self._on_range_changed:
             self._on_range_changed(row_key, self._slope_ranges[row_key])

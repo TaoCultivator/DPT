@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -332,6 +334,23 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         from PyQt6.QtWidgets import QApplication
 
         cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self) -> None:
+        from PyQt6.QtCore import QSettings
+
+        self._settings_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._settings_tmp.cleanup)
+        settings_path = Path(self._settings_tmp.name) / "DPTExtractor.ini"
+
+        def settings_factory() -> QSettings:
+            return QSettings(str(settings_path), QSettings.Format.IniFormat)
+
+        settings_patcher = patch(
+            "dpt_extractor.gui.main_window._app_settings",
+            settings_factory,
+        )
+        settings_patcher.start()
+        self.addCleanup(settings_patcher.stop)
 
     def test_pipeline_and_gui_share_the_same_measurement_context(self) -> None:
         from dpt_extractor.gui.main_window import MainWindow

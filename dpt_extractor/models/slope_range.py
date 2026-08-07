@@ -58,6 +58,7 @@ SLOPE_RANGE_PRESETS: dict[str, list[SlopePreset]] = {
 CUSTOM_RANGE_LABEL = "自定义…"
 AUTO_MAX_SLOPE_LABEL = "自动最大斜率"
 AUTO_MAX_SLOPE_MODE = "auto_max"
+AUTO_MAX_SLOPE_SPAN_PERCENT = 20.0
 PERCENTAGE_SLOPE_MODE = "percentage"
 RR_DIDT_CUSTOM_IDM = "IDM 百分比（Ha=尾基准, Hb=带符号IDM）"
 RR_DIDT_CUSTOM_IF_IRM = "零基准百分比（H0=0, Ha=IF, Hb=IRM）"
@@ -74,7 +75,7 @@ class SlopeRange:
     ic_direction: str = "rise"
     #: 非空时覆盖 label()（如 50%IF→50%IRM）
     preset_label: str = ""
-    #: percentage=现有固定百分比；auto_max=在既有主沿内自适应选择最大有效斜率段
+    #: percentage=现有固定百分比；auto_max=在既有主沿内滑动固定 20% 幅度窗
     selection_mode: str = PERCENTAGE_SLOPE_MODE
 
     @property
