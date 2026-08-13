@@ -13,6 +13,9 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -50,9 +53,14 @@ from dpt_extractor.gui.theme import (
 )
 from dpt_extractor.models.results import (
     ExtractResult,
+    SHORT_CIRCUIT_TSC_CUSTOM_MAX_PERCENT,
+    SHORT_CIRCUIT_TSC_CUSTOM_MIN_PERCENT,
+    SHORT_CIRCUIT_TSC_RANGE_CUSTOM,
     SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
     SHORT_CIRCUIT_TSC_RANGE_OPTIONS,
+    format_short_circuit_tsc_symmetric_range,
     power_metric_name,
+    short_circuit_tsc_symmetric_percent,
 )
 from dpt_extractor.models.slope_range import (
     AUTO_MAX_SLOPE_LABEL,
@@ -88,6 +96,77 @@ RESULT_OFFSET_POPUP_SELECTED = "#d9e5e6"
 RESULT_SCROLLBAR_RESERVE = 10
 ENERGY_NAMES = {"Eoff", "Eon", "Err"}
 ENERGY_TEXT_COLOR = "#ffd34d"
+
+
+class ShortCircuitTscRangeDialog(QDialog):
+    """Select a fixed or symmetric custom short-circuit Tsc threshold."""
+
+    def __init__(
+        self,
+        parent=None,
+        *,
+        current: str = SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("短路时间 Tsc 取值范围")
+        self.setMinimumWidth(330)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.range_selector = QComboBox()
+        self.range_selector.setAccessibleName("选择范围")
+        self.range_selector.addItems(list(SHORT_CIRCUIT_TSC_RANGE_OPTIONS))
+        form.addRow("选择范围", self.range_selector)
+
+        current_percent = short_circuit_tsc_symmetric_percent(current)
+        if current in SHORT_CIRCUIT_TSC_RANGE_OPTIONS[:-1]:
+            self.range_selector.setCurrentText(current)
+        else:
+            self.range_selector.setCurrentText(SHORT_CIRCUIT_TSC_RANGE_CUSTOM)
+
+        self.custom_percent = QDoubleSpinBox()
+        self.custom_percent.setAccessibleName("自定义对称阈值")
+        self.custom_percent.setRange(
+            SHORT_CIRCUIT_TSC_CUSTOM_MIN_PERCENT,
+            SHORT_CIRCUIT_TSC_CUSTOM_MAX_PERCENT,
+        )
+        self.custom_percent.setDecimals(1)
+        self.custom_percent.setSingleStep(1.0)
+        self.custom_percent.setSuffix(" %")
+        self.custom_percent.setValue(
+            current_percent if current_percent is not None else 5.0
+        )
+        self.custom_label = QLabel("对称阈值")
+        form.addRow(self.custom_label, self.custom_percent)
+        layout.addLayout(form)
+
+        hint = QLabel("A、B 分别取原始短路电流上升沿和下降沿与同一阈值的交点。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.range_selector.currentIndexChanged.connect(self._update_custom_editor)
+        self._update_custom_editor()
+
+    def _update_custom_editor(self, _index: int = 0) -> None:
+        custom = self.range_selector.currentText() == SHORT_CIRCUIT_TSC_RANGE_CUSTOM
+        self.custom_label.setVisible(custom)
+        self.custom_percent.setVisible(custom)
+
+    def range_label(self) -> str:
+        selected = self.range_selector.currentText()
+        if selected != SHORT_CIRCUIT_TSC_RANGE_CUSTOM:
+            return selected
+        return format_short_circuit_tsc_symmetric_range(self.custom_percent.value())
+
+
 AUTO_RANGE_MARKER_COLOR = "#ff3b30"
 AUTO_RANGE_MARKER_ROLE = Qt.ItemDataRole.UserRole.value + 101
 AUTO_RANGE_MARKER_MAX_FONT_PX = 8
@@ -1778,18 +1857,10 @@ class ResultTable(QWidget):
         if section == "短路过程" and name == "短路时间Tsc":
             item = self.table.item(row, col)
             current = item.text() if item else SHORT_CIRCUIT_TSC_RANGE_DEFAULT
-            options = list(SHORT_CIRCUIT_TSC_RANGE_OPTIONS)
-            current_idx = options.index(current) if current in options else 0
-            selected, ok = QInputDialog.getItem(
-                self,
-                "短路时间 Tsc 取值范围",
-                "选择范围：",
-                options,
-                current_idx,
-                False,
-            )
-            if not ok:
+            dialog = ShortCircuitTscRangeDialog(self, current=current)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
+            selected = dialog.range_label()
             if item:
                 item.setText(selected)
             if self._on_short_circuit_tsc_range_changed:

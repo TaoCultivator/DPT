@@ -648,11 +648,7 @@ class TestReportEndToEndRegressions(unittest.TestCase):
             self.assertFalse(win.result.is_metric_unavailable(*keys["on"]))
             self.assertFalse(win.result.is_metric_unavailable("开通", "Ls_on"))
             self.assertEqual(win.result.turn_off.ls_off, 0.0)
-            self.assertAlmostEqual(
-                win.result.turn_on.ls_on,
-                win.result.turn_on.delta_vce / 12.0,
-                places=9,
-            )
+            self.assertEqual(win.result.turn_on.ls_on, previous.turn_on.ls_on)
         finally:
             win.close()
 

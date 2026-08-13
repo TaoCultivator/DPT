@@ -1103,17 +1103,18 @@ class TestTurnOffDeltaVceExtendedPlatformGuiAudit(unittest.TestCase):
         delta_rows = [
             row
             for row in rows
-            if row[1:3]
-            in {
-                ("关断过程", "ΔVce"),
-                ("关断过程", "Ls_off"),
-            }
+            if row[1:3] == ("关断过程", "ΔVce")
         ]
+        ls_rows = [row for row in rows if row[1:3] == ("关断过程", "Ls_off")]
 
-        self.assertEqual(len(delta_rows), 2)
+        self.assertEqual(len(delta_rows), 1)
         for row in delta_rows:
             self.assertEqual(row[3], "OK", row[4])
             self.assertIn("B/Hb=9.386us/895.3V", row[4])
+        self.assertEqual(len(ls_rows), 1)
+        self.assertEqual(ls_rows[0][3], "OK", ls_rows[0][4])
+        self.assertIn("ch=ic", ls_rows[0][4])
+        self.assertIn("area=", ls_rows[0][4])
 
 
 class TestTurnOnDeltaVcePreRiseTopGuiAudit(unittest.TestCase):
@@ -1138,17 +1139,18 @@ class TestTurnOnDeltaVcePreRiseTopGuiAudit(unittest.TestCase):
         delta_rows = [
             row
             for row in rows
-            if row[1:3]
-            in {
-                ("开通", "ΔVce"),
-                ("开通", "Ls_on"),
-            }
+            if row[1:3] == ("开通", "ΔVce")
         ]
+        ls_rows = [row for row in rows if row[1:3] == ("开通", "Ls_on")]
 
-        self.assertEqual(len(delta_rows), 2)
+        self.assertEqual(len(delta_rows), 1)
         for row in delta_rows:
             self.assertEqual(row[3], "OK", row[4])
             self.assertIn("A/Ha=7.883us/906.6V", row[4])
+        self.assertEqual(len(ls_rows), 1)
+        self.assertEqual(ls_rows[0][3], "OK", ls_rows[0][4])
+        self.assertIn("ch=ic", ls_rows[0][4])
+        self.assertIn("area=", ls_rows[0][4])
 
 
 if __name__ == "__main__":

@@ -32,6 +32,12 @@ from dpt_extractor.gui.waveform_plot import (  # noqa: E402
     _is_power_unit,
     _solve_parameter_x_window,
 )
+from dpt_extractor.metrics.commutation_inductance import (  # noqa: E402
+    turn_on_commutation_inductance,
+)
+from dpt_extractor.metrics.iec_timings import (  # noqa: E402
+    turn_on_vce_top_from_ic_rise,
+)
 from dpt_extractor.metrics.plateau_level import (  # noqa: E402
     _plateau_mid_without_isolated_spikes,
     turn_on_current_hb_ha_window_indices,
@@ -95,7 +101,7 @@ INTERACTIVE_PARAMS = [
 # 人工验收矩阵：每个参数卡必须说明 A/B 与 Ha/Hb 的物理角色。
 # “不适用”表示该卡按规范只显示纵向区间或单条峰值参考线，并非漏检。
 DPT_PARAMETER_CURSOR_ROLES = {
-    ("关断过程", "Ls_off"): "A/Ha=Vce尖峰；B/Hb=Vce阻断平台；逻辑=ΔVce÷di/dt",
+    ("关断过程", "Ls_off"): "A/B=主Vce正过冲与Ic同步积分窗；Ha/Hb=不适用；逻辑=∫max(Vce−Top,0)dt÷|ΔIc|，受手动ΔVce幅值校准",
     ("关断过程", "Toff"): "A=Vge下降90%；B=Ic下降10%；Ha/Hb=不适用",
     ("关断过程", "Td_off"): "A=Vge下降90%；B=Ic下降90%；Ha/Hb=不适用",
     ("关断过程", "Tf"): "A=Ic下降90%；B=Ic下降10%；Ha/Hb=不适用",
@@ -115,7 +121,7 @@ DPT_PARAMETER_CURSOR_ROLES = {
     ("开通", "Ic_on_max"): "A=Ic上升沿；B=Vce基线；Ha=Ic最大值；Hb=Ic最小值",
     ("开通", "Vce_on_max"): "A=Vge上升沿；B=Vce基线；Ha=Vce最大值；Hb=Vce最小值",
     ("开通", "串扰电压"): "A/B=对管Vge取值窗；Ha=Vge最大值；Hb=Vge最小值",
-    ("开通", "Ls_on"): "A/Ha=Vce高平台；B/Hb=Vce下降拐点；逻辑=ΔVce÷di/dt",
+    ("开通", "Ls_on"): "A/B=Ic斜率交点同步积分窗；Ha/Hb=不适用；逻辑=∫max(Top−Vce,0)dt÷|ΔIc|，受手动ΔVce幅值校准",
     ("开通", "Ton"): "A=Vge上升10%；B=Ic上升90%；Ha/Hb=不适用",
     ("开通", "Td_on"): "A=Vge上升10%；B=Ic上升10%；Ha/Hb=不适用",
     ("开通", "Tr"): "A=Ic上升10%；B=Ic上升90%；Ha/Hb=不适用",
@@ -168,7 +174,7 @@ GENERIC_MAX_ENDPOINT_CHANNELS = {
 # trace is visible both endpoints belong to that trace; otherwise they bind to
 # the two raw V/I boundary waves and are filled in by the power branch below.
 DPT_ENDPOINT_CHANNELS = {
-    ("关断过程", "Ls_off"): ("vce", "vce"),
+    ("关断过程", "Ls_off"): ("ic", "ic"),
     **IEC_TIMING_ENDPOINT_CHANNELS,
     ("关断过程", "dv/dt"): ("vce", "vce"),
     ("关断过程", "di/dt"): ("ic", "ic"),
@@ -182,7 +188,7 @@ DPT_ENDPOINT_CHANNELS = {
     ("开通", "ΔVce"): ("vce", "vce"),
     ("开通", "开通电流"): ("ic", "ic"),
     ("开通", "串扰电压"): ("vge_other", "vge_other"),
-    ("开通", "Ls_on"): ("vce", "vce"),
+    ("开通", "Ls_on"): ("ic", "ic"),
     ("反向恢复", "Irr"): ("irr", "irr"),
     ("反向恢复", "Trr"): ("irr", "irr"),
     ("反向恢复", "dv/dt"): ("v_diode", "v_diode"),
@@ -226,7 +232,7 @@ def _effective_slope_percentages(
 # (channel, valid) for Ha/Hb.  An invalid cursor must remain hidden and must
 # not inherit a stale line from the previously selected parameter card.
 DPT_HORIZONTAL_BINDINGS = {
-    ("关断过程", "Ls_off"): (("vce", True), ("vce", True)),
+    ("关断过程", "Ls_off"): ((None, False), (None, False)),
     ("关断过程", "Toff"): ((None, False), (None, False)),
     ("关断过程", "Td_off"): ((None, False), (None, False)),
     ("关断过程", "Tf"): ((None, False), (None, False)),
@@ -248,7 +254,7 @@ DPT_HORIZONTAL_BINDINGS = {
     ("开通", "Ic_on_max"): (("ic", True), ("ic", True)),
     ("开通", "Vce_on_max"): (("vce", True), ("vce", True)),
     ("开通", "串扰电压"): (("vge_other", True), ("vge_other", True)),
-    ("开通", "Ls_on"): (("vce", True), ("vce", True)),
+    ("开通", "Ls_on"): ((None, False), (None, False)),
     ("开通", "Ton"): ((None, False), (None, False)),
     ("开通", "Td_on"): ((None, False), (None, False)),
     ("开通", "Tr"): ((None, False), (None, False)),
@@ -2763,14 +2769,34 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                             f"{float(context.top_a):.12g}≠"
                             f"{float(result.turn_on.turn_on_current):.12g}"
                         )
-                    if float(context.crossing.didt) > 1e-9:
-                        expected_ls = float(
-                            result.turn_on.delta_vce / context.crossing.didt
+                    if (
+                        context.crossing.t_pct_a_s is not None
+                        and context.crossing.t_pct_b_s is not None
+                    ):
+                        segs = result.segments
+                        assert segs is not None
+                        vce_top = turn_on_vce_top_from_ic_rise(
+                            chan["ic"],
+                            chan["vce"],
+                            segs.pulse2_on,
+                            segs.pulse2_off,
+                            bundle.dt,
                         )
-                        if float(result.turn_on.ls_on) != expected_ls:
+                        ls_context = turn_on_commutation_inductance(
+                            t,
+                            chan["vce"],
+                            chan["ic"],
+                            vce_top,
+                            context.crossing.t_pct_a_s,
+                            context.crossing.t_pct_b_s,
+                        )
+                        if ls_context is None:
+                            problems.append("Ls_on同步积分context不可用")
+                        elif float(result.turn_on.ls_on) != float(ls_context.value_nh):
                             problems.append(
-                                "Ls_on未绑定开通di/dt共用context: "
-                                f"{float(result.turn_on.ls_on):.12g}≠{expected_ls:.12g}"
+                                "Ls_on未绑定开通di/dt共用时间窗积分: "
+                                f"{float(result.turn_on.ls_on):.12g}≠"
+                                f"{float(ls_context.value_nh):.12g}"
                             )
                     detail += " | " + context_detail
                     if stable_detail:
@@ -3410,7 +3436,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 f"haWin={ha_win_us[0]:.6f}/{ha_win_us[1]:.6f}us"
             )
 
-        elif name in {"ΔVce", "Ls_on", "Ls_off"}:
+        elif name == "ΔVce":
             c = calls.get("enable_delta_vce_interaction")
             if c is None:
                 record(section, name, "FAIL", "未触发 enable_delta_vce_interaction")
@@ -3448,14 +3474,14 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                             f"[{search_window_us[0]:.3f},{search_window_us[1]:.3f}]"
                         )
             if not float(fixed_t) < float(move_t):
-                problems.append(f"ΔVce/Ls A({fixed_t:.6f})应早于B({move_t:.6f})")
+                problems.append(f"ΔVce A({fixed_t:.6f})应早于B({move_t:.6f})")
             check_level(fixed_v, "vce", "Ha", win_us=search_window_us)
             if move_v is None:
-                problems.append("ΔVce/Ls 缺少 Hb 电平")
+                problems.append("ΔVce 缺少 Hb 电平")
             else:
                 check_level(move_v, "vce", "Hb", win_us=search_window_us)
             if str(getattr(mw.wave_plot, "_active_channel", "")) != "vce":
-                problems.append("ΔVce/Ls A/B/Ha/Hb 未绑定 vce 活动通道")
+                problems.append("ΔVce A/B/Ha/Hb 未绑定 vce 活动通道")
             for label, cursor_us, level in (
                 ("A/Ha", fixed_t, fixed_v),
                 ("B/Hb", move_t, move_v),
@@ -3482,25 +3508,58 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     float(process_result.delta_vce), delta, floor=1e-6
                 ):
                     problems.append("ΔVce结果未绑定 abs(Ha-Hb)")
-                if name in {"Ls_on", "Ls_off"}:
-                    expected_ls = (
-                        delta / float(process_result.didt)
-                        if float(process_result.didt) > 0.0
-                        else float("nan")
-                    )
-                    actual_ls = (
-                        process_result.ls_on
-                        if name == "Ls_on"
-                        else process_result.ls_off
-                    )
-                    if not _short_values_close(
-                        float(actual_ls), expected_ls, floor=1e-6
-                    ):
-                        problems.append("Ls结果未绑定 ΔVce÷di/dt")
             detail = (
                 f"ch=vce A/Ha={fixed_t:.3f}us/{fixed_v:.1f}V "
                 f"B/Hb={move_t:.3f}us/{move_text}V"
             )
+
+        elif name in {"Ls_on", "Ls_off"}:
+            c = calls.get("enable_interval_interaction")
+            if c is None:
+                record(section, name, "FAIL", "未触发 Ls 同步积分窗交互")
+                continue
+            b = c["bound"]
+            ta = float(b["start_t_us"])
+            tb = float(b["end_t_us"])
+            if b.get("mode") != "interval":
+                problems.append(f"Ls交互模式={b.get('mode')!r}≠interval")
+            if not ta < tb:
+                problems.append(f"Ls A({ta:.6f})应早于B({tb:.6f})")
+            if (b.get("a_channel") or b.get("channel")) != "ic":
+                problems.append("Ls A 未绑定 ic")
+            if (b.get("b_channel") or b.get("channel")) != "ic":
+                problems.append("Ls B 未绑定 ic")
+            if str(getattr(mw.wave_plot, "_active_channel", "")) != "ic":
+                problems.append("Ls A/B 未绑定 ic 活动通道")
+            context = mw._commutation_inductance_context(section)
+            if context is None:
+                problems.append("Ls同步电压/电流积分context不可用")
+                detail = f"ch=ic A={ta:.6f}us B={tb:.6f}us context=none"
+            else:
+                expected_a = float(context.t_start_s * 1e6)
+                expected_b = float(context.t_end_s * 1e6)
+                if not _short_values_close(ta, expected_a, floor=1e-9):
+                    problems.append(f"Ls A={ta:.9f}us≠积分窗起点{expected_a:.9f}us")
+                if not _short_values_close(tb, expected_b, floor=1e-9):
+                    problems.append(f"Ls B={tb:.9f}us≠积分窗终点{expected_b:.9f}us")
+                process_result = (
+                    result.turn_off if section == "关断过程" else result.turn_on
+                )
+                actual_ls = (
+                    process_result.ls_off if name == "Ls_off" else process_result.ls_on
+                )
+                if not _short_values_close(
+                    float(actual_ls), float(context.value_nh), floor=1e-9
+                ):
+                    problems.append(
+                        f"Ls结果未绑定同步积分context: {float(actual_ls):.12g}≠"
+                        f"{float(context.value_nh):.12g}"
+                    )
+                detail = (
+                    f"ch=ic A={ta:.6f}us B={tb:.6f}us "
+                    f"area={context.voltage_area_vs * 1e9:.6f}Vns "
+                    f"dI={context.delta_current_a:.6f}A L={context.value_nh:.6f}nH"
+                )
 
         elif name in {"Pmax", "Pdmax"}:
             c = calls.get("enable_interval_interaction")

@@ -4820,6 +4820,8 @@ class WaveformPlot(QWidget):
         bundle: WaveformBundle,
         profile: BridgeProfile,
         result: ExtractResult | None = None,
+        *,
+        reset_source_display_settings: bool = False,
     ) -> None:
         # Invalidate provenance before rebuilding logical arrays.  This also
         # makes an interrupted replot fail closed instead of exposing stale Irr.
@@ -4827,7 +4829,14 @@ class WaveformPlot(QWidget):
         self._interactive_waveform_profile = None
         self._interactive_waveform_inversions = None
         source = bundle.meta.source_path
-        is_new_source = source != self._loaded_source_path
+        # Every USB acquisition is a fresh oscilloscope record even though the
+        # stable ``scope://<serial>`` source path is unchanged.  The load
+        # boundary explicitly requests a reset so the current record's scale,
+        # position, unit and inversion metadata win for every returned CH/MATH
+        # channel.  Ordinary replots of the same record keep user adjustments.
+        is_new_source = bool(reset_source_display_settings) or (
+            source != self._loaded_source_path
+        )
         computed_math_channels = {
             str(ch or "").upper() for ch in bundle.meta.computed_math_channels
         }

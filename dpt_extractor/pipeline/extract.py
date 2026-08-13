@@ -34,6 +34,10 @@ from dpt_extractor.metrics.iec_windows import (
 )
 from dpt_extractor.metrics.energy import peak_power_kw
 from dpt_extractor.metrics.irr_measure import irr_parameter_peak_value
+from dpt_extractor.metrics.commutation_inductance import (
+    turn_off_commutation_inductance,
+    turn_on_commutation_inductance,
+)
 from dpt_extractor.metrics.plateau_level import turn_off_delta_vce_blocking_top
 from dpt_extractor.metrics.slopes import (
     rr_dvdt_measurement_context,
@@ -602,8 +606,19 @@ def extract_all(
     ic_off_max = float(off_didt_context.top_a)
     didt_o = float(off_didt_context.crossing.didt)
 
-    # 关断尖峰相关量基于 Vce Top（尖峰减 Top）
-    ls_off = (vce_off_max - vce_off_top) / (didt_o * 1e9) * 1e9 if didt_o > 1e-9 else 0.0
+    # 换流回路杂散电感：Vce 正过冲与 Ic 变化必须使用同一时间子窗。
+    # di/dt 的 A/B 只限定搜索边界；积分只覆盖包含主尖峰的连续正过冲区间。
+    off_ls_context = turn_off_commutation_inductance(
+        t,
+        vce,
+        ic,
+        vce_off_top,
+        off_didt_context.crossing.t_pct_a_s,
+        off_didt_context.crossing.t_pct_b_s,
+    )
+    ls_off = float(off_ls_context.value_nh) if off_ls_context is not None else 0.0
+    if off_ls_context is None:
+        unavailable.add(("关断过程", "Ls_off"))
 
     td_off, tf, toff = turn_off_timings(
         t,
@@ -774,9 +789,24 @@ def extract_all(
         unavailable.add(("开通", "开通电流"))
         turn_on_current = 0.0
 
-    # 开通杂散电感：Ls_on = 开通 ΔVce / (开通 di/dt)，与 Ls_off 口径对称（ΔVce 可光标卡值）
+    # 换流回路杂散电感：在开通 Ic 百分比 A/B 的同一窗口内积分
+    # max(Vce Top - Vce(t), 0)，再除以同窗实际 ΔIc。
     delta_vce_on = _turn_on_delta_vce(vce, on0, on1, dt, vce_top_on)
-    ls_on = delta_vce_on / didt_on_v if on_didt_available else 0.0
+    on_ls_context = (
+        turn_on_commutation_inductance(
+            t,
+            vce,
+            ic,
+            vce_top_on,
+            on_didt_context.crossing.t_pct_a_s,
+            on_didt_context.crossing.t_pct_b_s,
+        )
+        if on_didt_available
+        else None
+    )
+    ls_on = float(on_ls_context.value_nh) if on_ls_context is not None else 0.0
+    if on_ls_context is None:
+        unavailable.add(("开通", "Ls_on"))
 
     on_timing = turn_on_timing_instants(
         t,

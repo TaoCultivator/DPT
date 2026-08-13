@@ -1065,6 +1065,120 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             else:
                 settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
 
+    def test_each_scope_reload_refreshes_display_settings_for_all_channels(self):
+        from copy import deepcopy
+
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import (
+            NONCOMMERCIAL_NOTICE_SETTINGS_KEY,
+            MainWindow,
+            _WaveformLoadOutcome,
+        )
+
+        first, profile = self._make_synthetic_bundle()
+        first.meta.source_kind = "scope"
+        first.meta.source_path = "scope://C078514"
+        first.meta.instrument_resource = "USB0::SCOPE::INSTR"
+        first.meta.channel_vdiv = {
+            key: float(index + 1) * 10.0
+            for index, key in enumerate(first.channels)
+        }
+        first.meta.channel_y_position = {
+            key: -1.0 for key in first.channels
+        }
+        first.meta.channel_units = {
+            key: "V" for key in first.channels
+        }
+
+        second = deepcopy(first)
+        expected_vdiv = {
+            key: float(index + 1) * 100.0
+            for index, key in enumerate(second.channels)
+        }
+        expected_position = {
+            key: -2.5 + index * 0.5
+            for index, key in enumerate(second.channels)
+        }
+        second.meta.channel_vdiv = dict(expected_vdiv)
+        second.meta.channel_y_position = dict(expected_position)
+        second.meta.channel_units = {
+            key: ("W" if key.startswith("MATH") else "A")
+            for key in second.channels
+        }
+        second.meta.channel_display_inversions = {"CH1", "MATH1"}
+
+        def outcome_for(bundle):
+            return _WaveformLoadOutcome(
+                path=bundle.meta.source_path,
+                bundle=bundle,
+                guessed=profile,
+                profile=profile,
+                inferred=None,
+                inferred_source="",
+                mapping_custom=False,
+                result=None,
+                short_circuit_not_ready=False,
+                extraction_error="测试波形不执行参数提取",
+                load_ms=1.0,
+                extract_ms=1.0,
+            )
+
+        settings = QSettings("DPT", "DPTExtractor")
+        old_value = settings.value(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, None)
+        settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
+        try:
+            win = MainWindow()
+            self.app.processEvents()
+            win._apply_loaded_waveform(outcome_for(first))
+            self.app.processEvents()
+
+            # Simulate arbitrary display edits on the previous acquisition.
+            for key in first.channels:
+                win.wave_plot._set_channel_scale(key, 1.0)
+                win.wave_plot._disp_offset[key] = 4.0
+            win.wave_plot.set_channel_unit_override("CH6", "V")
+            win.wave_plot.set_channel_inversion_enabled("CH6", True)
+
+            # The same oscilloscope serial returns a new record with different
+            # settings.  Every returned channel must use the new metadata.
+            win._apply_loaded_waveform(outcome_for(second))
+            self.app.processEvents()
+
+            for key in second.channels:
+                self.assertAlmostEqual(
+                    win.wave_plot._disp_scale[key],
+                    expected_vdiv[key],
+                    places=9,
+                    msg=key,
+                )
+                self.assertAlmostEqual(
+                    win.wave_plot._disp_offset[key],
+                    expected_position[key],
+                    places=9,
+                    msg=key,
+                )
+                expected_unit = "W" if key.startswith("MATH") else "A"
+                self.assertEqual(win.wave_plot._trace_units[key], expected_unit)
+            self.assertTrue(win.wave_plot.channel_inversion_enabled("CH1"))
+            self.assertTrue(win.wave_plot.channel_inversion_enabled("MATH1"))
+            self.assertFalse(win.wave_plot.channel_inversion_enabled("CH6"))
+
+            # Internal redraws of the current record still retain user edits.
+            win.wave_plot._set_channel_scale("CH1", 7.0)
+            win.wave_plot._disp_offset["CH1"] = 1.25
+            win.wave_plot.plot_waveforms(second, profile, None)
+            self.assertEqual(win.wave_plot._disp_scale["CH1"], 7.0)
+            self.assertEqual(win.wave_plot._disp_offset["CH1"], 1.25)
+
+            win.close()
+            self.app.processEvents()
+        finally:
+            if old_value is None:
+                settings.remove(NONCOMMERCIAL_NOTICE_SETTINGS_KEY)
+            else:
+                settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, old_value)
+
     def test_scope_channel_labels_set_phase_bridge_and_mapping_defaults(self):
         import numpy as np
 
@@ -2403,6 +2517,39 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             self.assertEqual(edit.font().pixelSize(), win.combo_phase.font().pixelSize())
         assert_test_mode_children_contained()
         win.close()
+
+    def test_report_condition_edits_fit_long_values_within_existing_budget(self):
+        from dpt_extractor.gui.main_window import (
+            REPORT_CONDITION_EDIT_TEXT_PADDING,
+            MainWindow,
+        )
+
+        win = MainWindow()
+        try:
+            win._apply_toolbar_density(1600)
+            for edit in win._report_condition_edits:
+                edit.clear()
+
+            short_edit = win._report_condition_edits[0]
+            long_edit = win._report_condition_edits[1]
+            empty_edit = win._report_condition_edits[2]
+            short_edit.setText("750")
+            long_edit.setText("7297.5")
+            self.app.processEvents()
+
+            required_long_width = (
+                long_edit.fontMetrics().horizontalAdvance(long_edit.text())
+                + REPORT_CONDITION_EDIT_TEXT_PADDING
+            )
+            self.assertGreaterEqual(long_edit.width(), required_long_width)
+            self.assertGreater(long_edit.width(), short_edit.width())
+            self.assertLess(empty_edit.width(), 50)
+            self.assertLessEqual(
+                sum(edit.width() for edit in win._report_condition_edits),
+                win._report_condition_edit_width_budget,
+            )
+        finally:
+            win.close()
 
     def test_result_table_uses_compact_content_widths(self):
         from PyQt6.QtGui import QFontMetrics
@@ -6367,7 +6514,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertIsNotNone(plot_lo)
         self.assertAlmostEqual(float(plot._h_cursor_a.value()), plot_hi, places=2)
         self.assertAlmostEqual(float(plot._h_cursor_b.value()), plot_lo, places=2)
-    def test_ls_on_uses_delta_vce_interaction(self):
+    def test_ls_on_uses_synchronized_interval_and_delta_calibration(self):
         from dpt_extractor.gui.main_window import MainWindow
 
         if not UH.exists():
@@ -6383,19 +6530,73 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         win.wave_plot = plot
         win.result_table.set_result(result)
         ls_before = float(result.turn_on.ls_on)
+        delta_before = float(result.turn_on.delta_vce)
+        didt_before = float(result.turn_on.didt)
         win._on_value_clicked("开通", "Ls_on")
-        self.assertEqual(plot._interactive_mode, "delta_vce")
-        self.assertEqual(plot._cursor_endpoint_channel("a"), "vce")
-        self.assertEqual(plot._cursor_endpoint_channel("b"), "vce")
-        self.assertEqual(plot._horizontal_cursor_binding("ha"), ("vce", True))
-        self.assertEqual(plot._horizontal_cursor_binding("hb"), ("vce", True))
+        self.assertEqual(plot._interactive_mode, "interval")
+        self.assertEqual(plot._cursor_endpoint_channel("a"), "ic")
+        self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
+        self.assertFalse(plot._horizontal_cursor_binding("ha")[1])
+        self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
         self.assertFalse(plot._active_channel_can_follow_selection())
         self.assertTrue(plot._cursor_a.movable)
-        self.assertTrue(plot._h_cursor_a.movable)
+        self.assertTrue(plot._cursor_b.movable)
+        a_us = float(plot._cursor_a.value())
+        b_us = float(plot._cursor_b.value())
+        moved_b_us = a_us + 0.9 * (b_us - a_us)
+        plot._interactive_on_change(a_us, moved_b_us)
+        self.assertNotEqual(float(result.turn_on.ls_on), ls_before)
+        self.assertEqual(float(result.turn_on.delta_vce), delta_before)
+        self.assertEqual(float(result.turn_on.didt), didt_before)
+
+        ls_before_delta_edit = float(result.turn_on.ls_on)
+        win._on_value_clicked("开通", "ΔVce")
+        self.assertEqual(plot._interactive_mode, "delta_vce")
         ha_disp = float(plot._h_cursor_a.value())
         plot._h_cursor_a.setPos(ha_disp + 5.0)
         plot._on_horizontal_cursor_moved()
-        self.assertNotEqual(float(result.turn_on.ls_on), ls_before)
+        delta_after = float(result.turn_on.delta_vce)
+        ls_after = float(result.turn_on.ls_on)
+        self.assertNotEqual(delta_after, delta_before)
+        self.assertNotEqual(ls_after, ls_before_delta_edit)
+        self.assertAlmostEqual(
+            ls_after,
+            ls_before_delta_edit * delta_after / delta_before,
+            places=6,
+        )
+
+    def test_ls_off_tracks_manual_delta_vce_amplitude_calibration(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        if not UH.exists():
+            self.skipTest("UH sample missing")
+        plot, bundle, profile, result = self._load_and_plot(UH)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = __import__(
+            "dpt_extractor.config.loader", fromlist=["load_config"]
+        ).load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+        delta_before = float(result.turn_off.delta_vce)
+        ls_before = float(result.turn_off.ls_off)
+
+        win._on_value_clicked("关断过程", "ΔVce")
+        self.assertEqual(plot._interactive_mode, "delta_vce")
+        ha_disp = float(plot._h_cursor_a.value())
+        plot._h_cursor_a.setPos(ha_disp + 5.0)
+        plot._on_horizontal_cursor_moved()
+
+        delta_after = float(result.turn_off.delta_vce)
+        ls_after = float(result.turn_off.ls_off)
+        self.assertNotEqual(delta_after, delta_before)
+        self.assertAlmostEqual(
+            ls_after,
+            ls_before * delta_after / delta_before,
+            places=6,
+        )
 
     @unittest.skipUnless(
         SONG_DCU_LT_WH_450_800.exists(),

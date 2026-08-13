@@ -15,6 +15,8 @@ from dpt_extractor.models.results import (
     ShortCircuitResult,
     SHORT_CIRCUIT_TSC_RANGE_10,
     SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
+    format_short_circuit_tsc_symmetric_range,
+    short_circuit_tsc_symmetric_percent,
 )
 from dpt_extractor.models.waveform import (
     WaveformBundle,
@@ -39,9 +41,15 @@ class ShortCircuitCurrentCursors:
 
 def short_circuit_tsc_range_percentages(label: str | None) -> tuple[float, float, str]:
     """Return (rise pct, fall pct, normalized label) for short-circuit Tsc."""
-    if str(label or "").strip() == SHORT_CIRCUIT_TSC_RANGE_10:
+    percent = short_circuit_tsc_symmetric_percent(label)
+    if percent is None:
+        return 0.0, 0.0, SHORT_CIRCUIT_TSC_RANGE_DEFAULT
+    if abs(percent) <= 1e-12:
+        return 0.0, 0.0, SHORT_CIRCUIT_TSC_RANGE_DEFAULT
+    if abs(percent - 10.0) <= 1e-12:
         return 10.0, 10.0, SHORT_CIRCUIT_TSC_RANGE_10
-    return 0.0, 0.0, SHORT_CIRCUIT_TSC_RANGE_DEFAULT
+    normalized = format_short_circuit_tsc_symmetric_range(percent)
+    return percent, percent, normalized
 
 
 def _smooth_edge_padded(y: np.ndarray, window: int) -> np.ndarray:

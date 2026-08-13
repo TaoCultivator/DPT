@@ -1,13 +1,59 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
+import re
 
 SHORT_CIRCUIT_TSC_RANGE_DEFAULT = "0%-0%"
 SHORT_CIRCUIT_TSC_RANGE_10 = "10%-10%"
+SHORT_CIRCUIT_TSC_RANGE_CUSTOM = "自定义…"
+SHORT_CIRCUIT_TSC_CUSTOM_MIN_PERCENT = 0.0
+SHORT_CIRCUIT_TSC_CUSTOM_MAX_PERCENT = 99.9
 SHORT_CIRCUIT_TSC_RANGE_OPTIONS = (
     SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
     SHORT_CIRCUIT_TSC_RANGE_10,
+    SHORT_CIRCUIT_TSC_RANGE_CUSTOM,
 )
+
+
+def short_circuit_tsc_symmetric_percent(label: str | None) -> float | None:
+    """Parse a valid symmetric ``X%-X%`` Tsc threshold label."""
+
+    text = str(label or "").strip()
+    match = re.fullmatch(
+        r"([0-9]+(?:\.[0-9]+)?)%\s*-\s*([0-9]+(?:\.[0-9]+)?)%",
+        text,
+    )
+    if match is None:
+        return None
+    start = float(match.group(1))
+    end = float(match.group(2))
+    if not (math.isfinite(start) and math.isfinite(end)):
+        return None
+    if abs(start - end) > 1e-9:
+        return None
+    if not (
+        SHORT_CIRCUIT_TSC_CUSTOM_MIN_PERCENT
+        <= start
+        <= SHORT_CIRCUIT_TSC_CUSTOM_MAX_PERCENT
+    ):
+        return None
+    return start
+
+
+def format_short_circuit_tsc_symmetric_range(percent: float) -> str:
+    """Format a validated symmetric Tsc percentage without redundant zeros."""
+
+    value = float(percent)
+    if not math.isfinite(value) or not (
+        SHORT_CIRCUIT_TSC_CUSTOM_MIN_PERCENT
+        <= value
+        <= SHORT_CIRCUIT_TSC_CUSTOM_MAX_PERCENT
+    ):
+        raise ValueError(f"无效的短路 Tsc 自定义百分比：{percent!r}")
+    number = f"{value:.6f}".rstrip("0").rstrip(".")
+    return f"{number}%-{number}%"
+
 
 POWER_METRIC_SECTIONS = {"关断过程", "开通", "反向恢复"}
 

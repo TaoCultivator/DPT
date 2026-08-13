@@ -67,6 +67,7 @@ SONG_LCG_DDD_RT_UL = (
     / "RT"
     / "UL_750V_000.tss"
 )
+SONG_LCG_DDD_RT_UH = SONG_LCG_DDD_RT_UL.with_name("UH_750V_000.tss")
 
 
 class TestShortCircuitLabelMapping(unittest.TestCase):
@@ -210,6 +211,43 @@ class TestShortCircuitSyntheticRegressions(unittest.TestCase):
             meta=TekMetadata(sample_interval=dt),
         )
         return bundle, make_short_circuit_profile("U", "upper")
+
+    def test_tsc_symmetric_custom_range_normalization(self):
+        from dpt_extractor.models.results import (
+            format_short_circuit_tsc_symmetric_range,
+            short_circuit_tsc_symmetric_percent,
+        )
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_tsc_range_percentages,
+        )
+
+        self.assertEqual(
+            format_short_circuit_tsc_symmetric_range(25.0),
+            "25%-25%",
+        )
+        self.assertEqual(
+            format_short_circuit_tsc_symmetric_range(12.5),
+            "12.5%-12.5%",
+        )
+        self.assertEqual(short_circuit_tsc_symmetric_percent("25%-25%"), 25.0)
+        self.assertIsNone(short_circuit_tsc_symmetric_percent("20%-30%"))
+        self.assertIsNone(short_circuit_tsc_symmetric_percent("100%-100%"))
+        self.assertEqual(
+            short_circuit_tsc_range_percentages("25%-25%"),
+            (25.0, 25.0, "25%-25%"),
+        )
+        self.assertEqual(
+            short_circuit_tsc_range_percentages("0.0%-0.0%"),
+            (0.0, 0.0, "0%-0%"),
+        )
+        self.assertEqual(
+            short_circuit_tsc_range_percentages("10.0%-10.0%"),
+            (10.0, 10.0, "10%-10%"),
+        )
+        self.assertEqual(
+            short_circuit_tsc_range_percentages("20%-30%"),
+            (0.0, 0.0, "0%-0%"),
+        )
 
     def test_raw_fall_crossing_uses_smooth_anchor_and_rejects_two_point_glitch(
         self,
@@ -440,6 +478,229 @@ class TestShortCircuitSyntheticRegressions(unittest.TestCase):
             self.assertTrue(result.is_metric_unavailable("短路过程", name), name)
 
 
+@unittest.skipUnless(
+    SONG_LCG_DDD_RT_UH.exists() and SONG_LCG_DDD_RT_UL.exists(),
+    "songzhenxi short-circuit upper/lower samples missing",
+)
+class TestShortCircuitCustomTscRange(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from PyQt6.QtCore import QSettings
+
+        from dpt_extractor.gui.main_window import (
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+        )
+        from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_DEFAULT
+
+        self._tsc_settings = QSettings("DPT", "DPTExtractor")
+        self._old_tsc_range = self._tsc_settings.value(
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+            None,
+        )
+        self._tsc_settings.setValue(
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+            SHORT_CIRCUIT_TSC_RANGE_DEFAULT,
+        )
+
+    def tearDown(self):
+        from dpt_extractor.gui.main_window import (
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+        )
+
+        if self._old_tsc_range is None:
+            self._tsc_settings.remove(SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY)
+        else:
+            self._tsc_settings.setValue(
+                SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+                self._old_tsc_range,
+            )
+
+    def test_custom_range_covers_upper_and_lower_without_linkage(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import (
+            as_short_circuit_profile,
+            guess_profile_from_path,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.models.waveform import bundle_total_current
+        from dpt_extractor.pipeline.run_extract import run_extraction
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_current_percent_cursors,
+        )
+
+        for path, expected_profile in (
+            (SONG_LCG_DDD_RT_UH, "UH"),
+            (SONG_LCG_DDD_RT_UL, "UL"),
+        ):
+            with self.subTest(path=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(path)
+
+                cfg_default = load_config()
+                cfg_default.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+                default_result = run_extraction(bundle, profile, cfg_default)
+
+                cfg_custom = load_config()
+                cfg_custom.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+                cfg_custom.short_circuit_tsc_range = "25%-25%"
+                custom_result = run_extraction(bundle, profile, cfg_custom)
+                custom = custom_result.short_circuit
+
+                self.assertEqual(custom_result.profile_code, expected_profile)
+                self.assertEqual(custom.tsc_range, "25%-25%")
+                self.assertGreater(custom.tsc, 0.0)
+                self.assertLess(custom.tsc, default_result.short_circuit.tsc)
+                self.assertIsNotNone(custom.tsc_start_us)
+                self.assertIsNotNone(custom.tsc_end_us)
+                assert custom_result.segments is not None
+                i0, i1 = custom_result.segments.turn_off
+                current = bundle_total_current(
+                    bundle,
+                    as_short_circuit_profile(profile),
+                )
+                cursors = short_circuit_current_percent_cursors(
+                    bundle.t,
+                    current,
+                    i0,
+                    i1,
+                    bundle.dt,
+                    smooth_ns=cfg_custom.smoothing.detect_window_ns,
+                    percent=25.0,
+                )
+                if cursors is None:
+                    cursors = short_circuit_current_percent_cursors(
+                        bundle.t,
+                        current,
+                        0,
+                        len(bundle.t) - 1,
+                        bundle.dt,
+                        smooth_ns=cfg_custom.smoothing.detect_window_ns,
+                        percent=25.0,
+                    )
+                self.assertIsNotNone(cursors)
+                assert cursors is not None
+                self.assertAlmostEqual(
+                    custom.tsc_start_us,
+                    cursors.t_a_s * 1e6,
+                    delta=1e-6,
+                )
+                self.assertAlmostEqual(
+                    custom.tsc_end_us,
+                    cursors.t_b_s * 1e6,
+                    delta=1e-6,
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(cursors.t_a_s, bundle.t, current)),
+                    cursors.hb_a,
+                    delta=1e-3,
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(cursors.t_b_s, bundle.t, current)),
+                    cursors.hb_a,
+                    delta=1e-3,
+                )
+                for attr in (
+                    "ic_max",
+                    "esc_dut",
+                    "esc_other",
+                    "vpeak_dut",
+                    "vpeak_other",
+                    "desat_time",
+                ):
+                    expected_value = getattr(default_result.short_circuit, attr)
+                    actual_value = getattr(custom, attr)
+                    if expected_value is None:
+                        self.assertIsNone(actual_value, attr)
+                        continue
+                    expected = float(expected_value)
+                    actual = float(actual_value)
+                    if np.isnan(expected):
+                        self.assertTrue(np.isnan(actual), attr)
+                    else:
+                        self.assertAlmostEqual(
+                            actual,
+                            expected,
+                            delta=1e-6,
+                            msg=attr,
+                        )
+
+    def test_custom_range_persists_across_restart_and_file_load(self):
+        from dpt_extractor.gui.main_window import (
+            MainWindow,
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+        )
+        from dpt_extractor.models.test_mode import TestMode
+
+        custom_range = "25%-25%"
+        win = MainWindow()
+        try:
+            win.cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+            win._apply_test_mode_ui()
+            win._load_file(str(SONG_LCG_DDD_RT_UH), background=False)
+            self.app.processEvents()
+            tsc_key = ("短路过程", "短路时间Tsc")
+            win._manual_intervals[tsc_key] = (1.0, 2.0)
+            win._manual_short_current[tsc_key] = (1.0, 2.0, 3.0, 4.0)
+            win._on_short_circuit_tsc_range_changed(custom_range)
+            self.app.processEvents()
+            self.assertNotIn(tsc_key, win._manual_intervals)
+            self.assertNotIn(tsc_key, win._manual_short_current)
+            self.assertEqual(
+                self._tsc_settings.value(SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY),
+                custom_range,
+            )
+        finally:
+            win.close()
+
+        win2 = MainWindow()
+        try:
+            self.assertEqual(win2.cfg.short_circuit_tsc_range, custom_range)
+            win2.cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+            win2._apply_test_mode_ui()
+            win2._load_file(str(SONG_LCG_DDD_RT_UH), background=False)
+            self.app.processEvents()
+            self.assertEqual(win2.cfg.short_circuit_tsc_range, custom_range)
+            assert win2.result is not None
+            self.assertEqual(win2.result.short_circuit.tsc_range, custom_range)
+            self.assertEqual(
+                win2._load_cfg_for_new_file().short_circuit_tsc_range,
+                custom_range,
+            )
+        finally:
+            win2.close()
+
+    def test_range_dialog_uses_one_symmetric_custom_value(self):
+        from dpt_extractor.gui.result_table import ShortCircuitTscRangeDialog
+        from dpt_extractor.models.results import (
+            SHORT_CIRCUIT_TSC_RANGE_10,
+            SHORT_CIRCUIT_TSC_RANGE_CUSTOM,
+        )
+
+        dialog = ShortCircuitTscRangeDialog(current="25%-25%")
+        try:
+            self.assertEqual(
+                dialog.range_selector.currentText(),
+                SHORT_CIRCUIT_TSC_RANGE_CUSTOM,
+            )
+            self.assertAlmostEqual(dialog.custom_percent.value(), 25.0)
+            self.assertFalse(dialog.custom_percent.isHidden())
+            self.assertEqual(dialog.range_label(), "25%-25%")
+
+            dialog.range_selector.setCurrentText(SHORT_CIRCUIT_TSC_RANGE_10)
+            self.assertTrue(dialog.custom_percent.isHidden())
+            self.assertEqual(dialog.range_label(), SHORT_CIRCUIT_TSC_RANGE_10)
+        finally:
+            dialog.close()
+
+
 @unittest.skipUnless(DL_UH.exists() and DL_UL.exists(), "short-circuit DL samples missing")
 class TestShortCircuitExtract(unittest.TestCase):
     def _extract(self, path: Path):
@@ -460,7 +721,10 @@ class TestShortCircuitExtract(unittest.TestCase):
         sc = result.short_circuit
         i0, i1 = result.segments.turn_off
         from dpt_extractor.config.loader import load_config
-        from dpt_extractor.models.bridge_profile import as_short_circuit_profile, guess_profile_from_path
+        from dpt_extractor.models.bridge_profile import (
+            as_short_circuit_profile,
+            guess_profile_from_path,
+        )
         from dpt_extractor.models.waveform import bundle_total_current
         from dpt_extractor.pipeline.short_circuit_extract import (
             short_circuit_current_cursors,
@@ -716,6 +980,97 @@ class TestShortCircuitExtract(unittest.TestCase):
         self.assertAlmostEqual(sc.ic_max, default_result.short_circuit.ic_max, delta=1e-6)
         self.assertAlmostEqual(sc.esc_dut, default_result.short_circuit.esc_dut, delta=1e-6)
         self.assertAlmostEqual(sc.esc_other, default_result.short_circuit.esc_other, delta=1e-6)
+
+    def test_custom_symmetric_tsc_range_covers_upper_and_lower_without_linkage(self):
+        import numpy as np
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.io.waveform_loader import load_waveform
+        from dpt_extractor.models.bridge_profile import as_short_circuit_profile, guess_profile_from_path
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.models.waveform import bundle_total_current
+        from dpt_extractor.pipeline.run_extract import run_extraction
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_current_percent_cursors,
+        )
+
+        for path, expected_profile in ((DL_UH, "UH"), (DL_UL, "UL")):
+            with self.subTest(path=path.name):
+                bundle = load_waveform(path)
+                profile = guess_profile_from_path(path)
+
+                cfg_default = load_config()
+                cfg_default.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+                default_result = run_extraction(bundle, profile, cfg_default)
+
+                cfg_custom = load_config()
+                cfg_custom.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+                cfg_custom.short_circuit_tsc_range = "25%-25%"
+                custom_result = run_extraction(bundle, profile, cfg_custom)
+                custom = custom_result.short_circuit
+
+                self.assertEqual(custom_result.profile_code, expected_profile)
+                self.assertEqual(custom.tsc_range, "25%-25%")
+                self.assertGreater(custom.tsc, 0.0)
+                self.assertLess(custom.tsc, default_result.short_circuit.tsc)
+                self.assertIsNotNone(custom.tsc_start_us)
+                self.assertIsNotNone(custom.tsc_end_us)
+                assert custom_result.segments is not None
+                i0, i1 = custom_result.segments.turn_off
+                current = bundle_total_current(
+                    bundle,
+                    as_short_circuit_profile(profile),
+                )
+                cursors = short_circuit_current_percent_cursors(
+                    bundle.t,
+                    current,
+                    i0,
+                    i1,
+                    bundle.dt,
+                    smooth_ns=cfg_custom.smoothing.detect_window_ns,
+                    percent=25.0,
+                )
+                self.assertIsNotNone(cursors)
+                assert cursors is not None
+                self.assertAlmostEqual(
+                    custom.tsc_start_us,
+                    cursors.t_a_s * 1e6,
+                    delta=1e-6,
+                )
+                self.assertAlmostEqual(
+                    custom.tsc_end_us,
+                    cursors.t_b_s * 1e6,
+                    delta=1e-6,
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(cursors.t_a_s, bundle.t, current)),
+                    cursors.hb_a,
+                    delta=1e-3,
+                )
+                self.assertAlmostEqual(
+                    float(np.interp(cursors.t_b_s, bundle.t, current)),
+                    cursors.hb_a,
+                    delta=1e-3,
+                )
+                for attr in (
+                    "ic_max",
+                    "esc_dut",
+                    "esc_other",
+                    "vpeak_dut",
+                    "vpeak_other",
+                    "desat_time",
+                ):
+                    expected_value = getattr(default_result.short_circuit, attr)
+                    actual_value = getattr(custom, attr)
+                    if expected_value is None:
+                        self.assertIsNone(actual_value, attr)
+                        continue
+                    expected = float(expected_value)
+                    actual = float(actual_value)
+                    if np.isnan(expected):
+                        self.assertTrue(np.isnan(actual), attr)
+                    else:
+                        self.assertAlmostEqual(actual, expected, delta=1e-6, msg=attr)
 
     def test_extracts_lower_short_circuit_uses_lower_vce_as_dut(self):
         _bundle, result = self._extract(DL_UL)
@@ -1375,22 +1730,56 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
             self._tsc_settings.value(SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY),
             SHORT_CIRCUIT_TSC_RANGE_10,
         )
+        custom_range = "25%-25%"
+        win._manual_intervals[tsc_key] = (1.0, 2.0)
+        win._manual_short_current[tsc_key] = (1.0, 2.0, 3.0, 4.0)
+        win._on_short_circuit_tsc_range_changed(custom_range)
+        self.app.processEvents()
+        self.assertNotIn(tsc_key, win._manual_intervals)
+        self.assertNotIn(tsc_key, win._manual_short_current)
+        self.assertEqual(
+            self._tsc_settings.value(SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY),
+            custom_range,
+        )
         win.close()
 
         win2 = MainWindow()
-        self.assertEqual(win2.cfg.short_circuit_tsc_range, SHORT_CIRCUIT_TSC_RANGE_10)
+        self.assertEqual(win2.cfg.short_circuit_tsc_range, custom_range)
         win2.cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
         win2._apply_test_mode_ui()
         win2._load_file(str(DL_UH), background=False)
         self.app.processEvents()
-        self.assertEqual(win2.cfg.short_circuit_tsc_range, SHORT_CIRCUIT_TSC_RANGE_10)
+        self.assertEqual(win2.cfg.short_circuit_tsc_range, custom_range)
         assert win2.result is not None
-        self.assertEqual(win2.result.short_circuit.tsc_range, SHORT_CIRCUIT_TSC_RANGE_10)
+        self.assertEqual(win2.result.short_circuit.tsc_range, custom_range)
         self.assertEqual(
             win2._load_cfg_for_new_file().short_circuit_tsc_range,
-            SHORT_CIRCUIT_TSC_RANGE_10,
+            custom_range,
         )
         win2.close()
+
+    def test_short_circuit_tsc_range_dialog_uses_one_symmetric_custom_value(self):
+        from dpt_extractor.gui.result_table import ShortCircuitTscRangeDialog
+        from dpt_extractor.models.results import (
+            SHORT_CIRCUIT_TSC_RANGE_10,
+            SHORT_CIRCUIT_TSC_RANGE_CUSTOM,
+        )
+
+        dialog = ShortCircuitTscRangeDialog(current="25%-25%")
+        try:
+            self.assertEqual(
+                dialog.range_selector.currentText(),
+                SHORT_CIRCUIT_TSC_RANGE_CUSTOM,
+            )
+            self.assertAlmostEqual(dialog.custom_percent.value(), 25.0)
+            self.assertFalse(dialog.custom_percent.isHidden())
+            self.assertEqual(dialog.range_label(), "25%-25%")
+
+            dialog.range_selector.setCurrentText(SHORT_CIRCUIT_TSC_RANGE_10)
+            self.assertTrue(dialog.custom_percent.isHidden())
+            self.assertEqual(dialog.range_label(), SHORT_CIRCUIT_TSC_RANGE_10)
+        finally:
+            dialog.close()
 
     def test_initial_short_circuit_cursors_use_tsc_window_without_edge_markers(self):
         if not DDD_RT_VH.exists():

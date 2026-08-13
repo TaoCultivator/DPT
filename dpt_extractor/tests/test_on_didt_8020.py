@@ -7,6 +7,10 @@ import numpy as np
 
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.io.waveform_loader import load_waveform
+from dpt_extractor.metrics.commutation_inductance import (
+    turn_on_commutation_inductance,
+)
+from dpt_extractor.metrics.iec_timings import turn_on_vce_top_from_ic_rise
 from dpt_extractor.metrics.plateau_level import (
     _plateau_mid_without_isolated_spikes,
     turn_on_current_baseline_and_plateau,
@@ -279,10 +283,24 @@ class TestTurnOnDidtRealSharedContext(unittest.TestCase):
         self.assertFalse(result.is_metric_unavailable("开通", "di/dt"))
         self.assertEqual(result.turn_on.didt, context.crossing.didt)
         self.assertEqual(result.turn_on.turn_on_current, context.top_a)
-        self.assertEqual(
-            result.turn_on.ls_on,
-            result.turn_on.delta_vce / context.crossing.didt,
+        vce = bundle.get(profile.vce)
+        vce_top = turn_on_vce_top_from_ic_rise(
+            ic,
+            vce,
+            result.segments.pulse2_on,
+            result.segments.pulse2_off,
+            bundle.dt,
         )
+        ls_context = turn_on_commutation_inductance(
+            bundle.t,
+            vce,
+            ic,
+            vce_top,
+            context.crossing.t_pct_a_s,
+            context.crossing.t_pct_b_s,
+        )
+        self.assertIsNotNone(ls_context)
+        self.assertEqual(result.turn_on.ls_on, ls_context.value_nh)
         self.assertIsNotNone(context.base_window)
         self.assertIsNotNone(context.top_window)
         hb_win, ha_win = turn_on_current_hb_ha_window_indices(

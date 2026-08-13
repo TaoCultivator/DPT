@@ -138,6 +138,11 @@ from dpt_extractor.metrics.iec_windows import (
     integrate_vi_window,
 )
 from dpt_extractor.metrics.energy import peak_power_kw
+from dpt_extractor.metrics.commutation_inductance import (
+    CommutationInductanceContext,
+    turn_off_commutation_inductance,
+    turn_on_commutation_inductance,
+)
 from dpt_extractor.metrics.rr_tail import reverse_recovery_tail_end_index
 from dpt_extractor.metrics.offset_measurement import (
     OFFSET_MEASUREMENT_BY_KEY,
@@ -185,9 +190,15 @@ from dpt_extractor.metrics.iec_timings import (
     turn_on_timing_instants,
 )
 from dpt_extractor.utils.signal import crossing_time, smooth, threshold_value
-from dpt_extractor.metrics.plateau_level import turn_on_vce_on_max_window_indices
+from dpt_extractor.metrics.plateau_level import (
+    turn_off_delta_vce_blocking_top,
+    turn_on_vce_on_max_window_indices,
+)
 from dpt_extractor.models.test_mode import MODE_UI_LABELS, TestMode, parse_test_mode
-from dpt_extractor.pipeline.extract import _turn_on_delta_vce_knee_point
+from dpt_extractor.pipeline.extract import (
+    _turn_on_delta_vce,
+    _turn_on_delta_vce_knee_point,
+)
 from dpt_extractor.pipeline.pulse_sequence import (
     dpt_export_pulse_pairs,
     dpt_export_results,
@@ -261,6 +272,8 @@ TEMP_CONDITION_SETTINGS_PREFIX = "conditions/temperature/"
 SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY = "short_circuit/tsc_range"
 SLOPE_RANGES_SETTINGS_KEY = "measurements/slope_ranges_v1"
 REPORT_CONDITION_SETTINGS_PREFIX = "conditions/report/"
+REPORT_CONDITION_EDIT_TEXT_PADDING = 12
+REPORT_CONDITION_EDIT_MIN_WIDTH = 34
 DPT_REPORT_CONDITION_FIELDS = (
     ("voltage_v", "Vdc", "V"),
     ("current_a", "Idc", "A"),
@@ -1835,6 +1848,8 @@ class MainWindow(QMainWindow):
         self._report_condition_edits: list[ReportConditionEdit] = []
         self._report_condition_field_labels: list[QLabel] = []
         self._report_condition_unit_labels: list[QLabel] = []
+        self._report_condition_edit_width_budget = 0
+        self._report_condition_edit_min_width = REPORT_CONDITION_EDIT_MIN_WIDTH
         for _key, label_text, unit_text in DPT_REPORT_CONDITION_FIELDS:
             label = QLabel(label_text)
             label.setObjectName("reportConditionLabel")
@@ -1845,6 +1860,7 @@ class MainWindow(QMainWindow):
             report_condition_layout.addWidget(label)
             report_condition_layout.addWidget(edit)
             report_condition_layout.addWidget(unit)
+            edit.textChanged.connect(self._update_report_condition_edit_widths)
             edit.editingFinished.connect(self._save_current_report_conditions)
             self._report_condition_edits.append(edit)
             self._report_condition_field_labels.append(label)
@@ -2273,6 +2289,53 @@ class MainWindow(QMainWindow):
             else:
                 settings.setValue(key, float(value))
         settings.sync()
+
+    def _update_report_condition_edit_widths(self, _text: str = "") -> None:
+        """Fit each condition editor to its text without growing the toolbar."""
+
+        edits = self._report_condition_edits
+        budget = int(self._report_condition_edit_width_budget)
+        if not edits or budget <= 0:
+            return
+
+        minimum = max(1, int(self._report_condition_edit_min_width))
+        required: list[int] = []
+        for edit in edits:
+            text = edit.text().strip()
+            text_width = edit.fontMetrics().horizontalAdvance(text) if text else 0
+            required.append(
+                max(minimum, text_width + REPORT_CONDITION_EDIT_TEXT_PADDING)
+            )
+
+        if sum(required) <= budget:
+            widths = required
+        else:
+            available_extra = max(0, budget - minimum * len(edits))
+            needs = [max(0, width - minimum) for width in required]
+            total_need = sum(needs)
+            if total_need <= 0:
+                widths = [minimum] * len(edits)
+            else:
+                scaled = [need * available_extra / total_need for need in needs]
+                allocated = [min(need, int(value)) for need, value in zip(needs, scaled)]
+                remainder = available_extra - sum(allocated)
+                order = sorted(
+                    range(len(edits)),
+                    key=lambda index: scaled[index] - allocated[index],
+                    reverse=True,
+                )
+                for index in order:
+                    if remainder <= 0:
+                        break
+                    if allocated[index] >= needs[index]:
+                        continue
+                    allocated[index] += 1
+                    remainder -= 1
+                widths = [minimum + extra for extra in allocated]
+
+        for edit, width in zip(edits, widths):
+            edit.setFixedWidth(width)
+        self.report_condition_group.updateGeometry()
 
     def _switch_report_condition_context(self) -> None:
         mode_key = self._report_condition_mode_key()
@@ -2723,11 +2786,18 @@ class MainWindow(QMainWindow):
             if window_width >= 1180
             else 54
         )
+        self._report_condition_edit_width_budget = (
+            condition_edit_w * len(self._report_condition_edits)
+            + (4 if self._report_condition_edits else 0)
+        )
+        self._report_condition_edit_min_width = min(
+            condition_edit_w,
+            REPORT_CONDITION_EDIT_MIN_WIDTH,
+        )
         condition_layout = self.report_condition_group.layout()
         if condition_layout is not None:
             condition_layout.setSpacing(2 if window_width < 1180 else 3)
-        for index, edit in enumerate(self._report_condition_edits):
-            edit.setFixedWidth(condition_edit_w + (4 if index == 4 else 0))
+        for edit in self._report_condition_edits:
             edit.setFixedHeight(max(20, control_h - 6))
         for label in (
             self.lbl_report_conditions,
@@ -3051,6 +3121,7 @@ class MainWindow(QMainWindow):
             "QPushButton#contextMenuSelectorButton:checked{background:#28bce8;"
             "color:#061014;border-color:#63dff2;font-weight:800;}"
         )
+        self._update_report_condition_edit_widths()
 
     def _set_temperature_code(self, code: str) -> None:
         code = code if code in TEMP_CONDITION_DEFAULTS else "RT"
@@ -4390,7 +4461,15 @@ class MainWindow(QMainWindow):
         outcome: _WaveformLoadOutcome | None = None,
     ) -> None:
         self.result = None
-        self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
+        self.wave_plot.plot_waveforms(
+            self.bundle,
+            self.profile,
+            None,
+            reset_source_display_settings=bool(
+                outcome is not None
+                and outcome.bundle.meta.source_kind == "scope"
+            ),
+        )
         self.wave_plot.enable_global_cursor_interaction()
         self._apply_offset_cursor_mode_defaults()
         self._restore_offset_cursor_window_to_plot()
@@ -4547,7 +4626,14 @@ class MainWindow(QMainWindow):
             )
             if not self._splitter_user_moved:
                 self._sync_splitter_sizes()
-            self.wave_plot.plot_waveforms(self.bundle, self.profile, None)
+            self.wave_plot.plot_waveforms(
+                self.bundle,
+                self.profile,
+                None,
+                reset_source_display_settings=(
+                    self.bundle.meta.source_kind == "scope"
+                ),
+            )
             self.statusBar().showMessage(self._loaded_status_message(outcome, inferred))
             return
         self.result = outcome.result
@@ -4562,7 +4648,14 @@ class MainWindow(QMainWindow):
         self.result_table.setMaximumWidth(self.result_table.preferred_panel_width())
         if not self._splitter_user_moved:
             self._sync_splitter_sizes()
-        self.wave_plot.plot_waveforms(self.bundle, self.profile, self.result)
+        self.wave_plot.plot_waveforms(
+            self.bundle,
+            self.profile,
+            self.result,
+            reset_source_display_settings=(
+                self.bundle.meta.source_kind == "scope"
+            ),
+        )
         self.statusBar().showMessage(self._loaded_status_message(outcome, inferred))
 
     def _load_file(self, path: str, *, background: bool = False) -> None:
@@ -4703,11 +4796,17 @@ class MainWindow(QMainWindow):
                 f"{section}-{name}: 单脉冲模式下该参数不适用"
             )
             return
-        if section == "开通" and name in {"ΔVce", "Ls_on"}:
-            self._enable_turn_on_delta_vce_interaction(focus_name=name)
+        if section == "开通" and name == "Ls_on":
+            self._enable_commutation_inductance_interaction(section, name)
             return
-        if section == "关断过程" and name in {"ΔVce", "Ls_off"}:
-            self._enable_turn_off_delta_vce_interaction(focus_name=name)
+        if section == "关断过程" and name == "Ls_off":
+            self._enable_commutation_inductance_interaction(section, name)
+            return
+        if section == "开通" and name == "ΔVce":
+            self._enable_turn_on_delta_vce_interaction()
+            return
+        if section == "关断过程" and name == "ΔVce":
+            self._enable_turn_off_delta_vce_interaction()
             return
         if name == "dv/dt":
             self._enable_dvdt_interaction(section)
@@ -6067,14 +6166,14 @@ class MainWindow(QMainWindow):
             self.result_table.set_metric_value(
                 "关断过程", "di/dt", val if available else None
             )
-            self._sync_ls_off()
+            self._sync_ls_off(res)
         elif section == "开通":
             self.result.turn_on.didt = val
             self.result.turn_on.didt_range = range_disp
             self.result_table.set_metric_value(
                 "开通", "di/dt", val if available else None
             )
-            self._sync_ls_on()
+            self._sync_ls_on(res)
         else:
             self.result.reverse_recovery.didt_irr = val
             self.result.reverse_recovery.didt_range = range_disp
@@ -6294,6 +6393,253 @@ class MainWindow(QMainWindow):
         else:
             self._show_stored_metric_status(section, "di/dt")
 
+    def _commutation_inductance_context(
+        self,
+        section: str,
+        t_start_s: float | None = None,
+        t_end_s: float | None = None,
+        *,
+        exact_off_interval: bool = False,
+    ) -> CommutationInductanceContext | None:
+        """Rebuild the Ls-only voltage/current-coincident measurement context."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        t = self.bundle.t
+        segs = self.result.segments
+        ic = bundle_total_current(self.bundle, self.profile)
+        vce = self.bundle.get(self.profile.vce)
+        if t_start_s is None or t_end_s is None:
+            if section == "关断过程":
+                i0, i1 = segs.turn_off
+                didt_context = self._turn_off_didt_context(
+                    float(t[i0]) * 1e6,
+                    float(t[i1]) * 1e6,
+                )
+            elif section == "开通":
+                i0, i1 = segs.turn_on
+                didt_context = self._turn_on_didt_context(
+                    float(t[i0]) * 1e6,
+                    float(t[i1]) * 1e6,
+                )
+            else:
+                return None
+            if didt_context is None:
+                return None
+            t_start_s = didt_context.crossing.t_pct_a_s
+            t_end_s = didt_context.crossing.t_pct_b_s
+
+        if section == "开通":
+            vce_top = turn_on_vce_top_from_ic_rise(
+                ic,
+                vce,
+                segs.pulse2_on,
+                segs.pulse2_off,
+                self.bundle.dt,
+            )
+            context = turn_on_commutation_inductance(
+                t,
+                vce,
+                ic,
+                vce_top,
+                t_start_s,
+                t_end_s,
+            )
+            return self._scale_commutation_inductance_context(section, context)
+        if section == "关断过程":
+            if self.result.single_pulse_mode:
+                i0, i1 = segs.turn_off
+                blocking_top = turn_off_delta_vce_blocking_top(
+                    vce,
+                    i0,
+                    i1,
+                    self.bundle.dt,
+                )
+            else:
+                # Keep the automatic DPT definition used by extract_all(): the
+                # canonical inter-pulse bus plateau, independent of a manual
+                # DeltaVce horizontal-cursor edit.
+                blocking_top = float(self.result.vdc)
+            context = turn_off_commutation_inductance(
+                t,
+                vce,
+                ic,
+                blocking_top,
+                t_start_s,
+                t_end_s,
+                select_main_support=not exact_off_interval,
+            )
+            return self._scale_commutation_inductance_context(section, context)
+        return None
+
+    def _automatic_delta_vce_for_ls(self, section: str) -> float | None:
+        """Return the raw automatic DeltaVce that calibrated the Ls voltage shape."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        vce = self.bundle.get(self.profile.vce)
+        segs = self.result.segments
+        if section == "开通":
+            ic = bundle_total_current(self.bundle, self.profile)
+            vce_top = turn_on_vce_top_from_ic_rise(
+                ic,
+                vce,
+                segs.pulse2_on,
+                segs.pulse2_off,
+                self.bundle.dt,
+            )
+            i0, i1 = segs.turn_on
+            return float(_turn_on_delta_vce(vce, i0, i1, self.bundle.dt, vce_top))
+        if section == "关断过程":
+            i0, i1 = segs.turn_off
+            if i1 <= i0:
+                return None
+            if self.result.single_pulse_mode:
+                blocking_top = turn_off_delta_vce_blocking_top(
+                    vce,
+                    i0,
+                    i1,
+                    self.bundle.dt,
+                )
+            else:
+                blocking_top = float(self.result.vdc)
+            return float(np.max(vce[i0:i1]) - blocking_top)
+        return None
+
+    def _scale_commutation_inductance_context(
+        self,
+        section: str,
+        context: CommutationInductanceContext | None,
+    ) -> CommutationInductanceContext | None:
+        """Apply a manual DeltaVce amplitude calibration to the raw voltage area."""
+
+        if context is None or self.result is None:
+            return context
+        automatic_delta = self._automatic_delta_vce_for_ls(section)
+        manual_delta = (
+            float(self.result.turn_on.delta_vce)
+            if section == "开通"
+            else float(self.result.turn_off.delta_vce)
+        )
+        if (
+            automatic_delta is None
+            or not np.isfinite(automatic_delta)
+            or automatic_delta <= 1e-9
+            or not np.isfinite(manual_delta)
+            or manual_delta <= 0.0
+        ):
+            return None
+        scale = manual_delta / automatic_delta
+        return CommutationInductanceContext(
+            value_nh=float(context.value_nh * scale),
+            t_start_s=context.t_start_s,
+            t_end_s=context.t_end_s,
+            voltage_area_vs=float(context.voltage_area_vs * scale),
+            delta_current_a=context.delta_current_a,
+            voltage_reference_v=context.voltage_reference_v,
+            support_threshold_v=float(context.support_threshold_v * scale),
+        )
+
+    def _enable_commutation_inductance_interaction(
+        self,
+        section: str,
+        name: str,
+    ) -> None:
+        """Expose the actual Ls integration interval without editing ΔVce/di/dt."""
+
+        self._active_slope_param = None
+        if self.bundle is None or self.result is None:
+            return
+        key = (section, name)
+        default_context = self._commutation_inductance_context(section)
+        if default_context is None:
+            self.result.unavailable_metrics.add(key)
+            self.result_table.set_metric_unavailable(*key, True)
+            self.wave_plot.clear_parameter_cursor_context()
+            self.statusBar().showMessage(f"{section}-{name}: 同步电压/电流积分窗不可用")
+            return
+
+        restored = (
+            self._manual_intervals.get(key)
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
+        if restored is None:
+            start_us = float(default_context.t_start_s * 1e6)
+            end_us = float(default_context.t_end_s * 1e6)
+            self._focus_switching_local_view(section, start_us, end_us)
+        else:
+            start_us, end_us = map(float, restored)
+
+        def _apply_interval(
+            a_us: float,
+            b_us: float,
+            *,
+            remember: bool,
+        ) -> CommutationInductanceContext | None:
+            context = self._commutation_inductance_context(
+                section,
+                float(a_us) * 1e-6,
+                float(b_us) * 1e-6,
+                exact_off_interval=section == "关断过程",
+            )
+            if self.result is None:
+                return None
+            unavailable = context is None
+            if unavailable:
+                self.result.unavailable_metrics.add(key)
+                self.result_table.set_metric_unavailable(*key, True)
+                self.result_table.set_metric_value(*key, None)
+                self.statusBar().showMessage(
+                    f"{section}-{name}: 当前 A/B 内没有有效的同步电压面积或 ΔIc"
+                )
+                return None
+            assert context is not None
+            if section == "开通":
+                self.result.turn_on.ls_on = float(context.value_nh)
+            else:
+                self.result.turn_off.ls_off = float(context.value_nh)
+            self.result.unavailable_metrics.discard(key)
+            self.result_table.set_metric_unavailable(*key, False)
+            self.result_table.set_metric_value(*key, context.value_nh)
+            if remember:
+                self._touch_manual_waveform_source()
+                self._manual_intervals[key] = (
+                    float(context.t_start_s * 1e6),
+                    float(context.t_end_s * 1e6),
+                )
+            area_v_ns = context.voltage_area_vs * 1e9
+            self.statusBar().showMessage(
+                f"{section}-{name}: ∫uLdt={area_v_ns:.3f} V·ns, "
+                f"ΔIc={context.delta_current_a:.3f} A, "
+                f"{name}={context.value_nh:.3f} nH"
+            )
+            return context
+
+        self.wave_plot.enable_interval_interaction(
+            start_t_us=start_us,
+            end_t_us=end_us,
+            on_change=lambda ta, tb: _apply_interval(ta, tb, remember=True),
+            mode="interval",
+            channel="ic",
+            a_channel="ic",
+            b_channel="ic",
+        )
+        if restored is not None:
+            _apply_interval(start_us, end_us, remember=False)
+        else:
+            area_v_ns = default_context.voltage_area_vs * 1e9
+            self.statusBar().showMessage(
+                f"{section}-{name}: A/B 为同步积分窗；"
+                f"∫uLdt={area_v_ns:.3f} V·ns, "
+                f"ΔIc={default_context.delta_current_a:.3f} A, "
+                f"{name}={default_context.value_nh:.3f} nH"
+            )
+
     def _enable_turn_on_delta_vce_interaction(self, *, focus_name: str = "ΔVce") -> None:
         self._active_slope_param = None
         if self.bundle is None or self.result is None or self.result.segments is None:
@@ -6397,18 +6743,12 @@ class MainWindow(QMainWindow):
             if self.result is not None:
                 self.result.turn_on.delta_vce = float(delta)
             self.result_table.set_metric_value("开通", "ΔVce", delta)
-            # 开通 ΔVce 变化 → Ls_on = 开通 ΔVce / (开通 di/dt) 实时重算
             self._sync_ls_on()
-            if self.result is not None and focus_name == "Ls_on":
-                on = self.result.turn_on
-                self.statusBar().showMessage(
-                    f"开通Ls_on: Ha={_fx_v:.2f} V, Hb={_mv_v:.2f} V, "
-                    f"ΔVce={delta:.3f} V, di/dt={on.didt:.3f} A/ns, Ls_on={on.ls_on:.3f} nH"
-                )
-            else:
-                self.statusBar().showMessage(
-                    f"开通ΔVce交互: A={_fx_v:.2f} V, B={_mv_v:.2f} V, ΔVce={delta:.3f} V"
-                )
+            ls_on = self.result.turn_on.ls_on if self.result is not None else 0.0
+            self.statusBar().showMessage(
+                f"开通ΔVce交互: A={_fx_v:.2f} V, B={_mv_v:.2f} V, "
+                f"ΔVce={delta:.3f} V, Ls_on={ls_on:.3f} nH"
+            )
 
         if restored is not None:
             a_t, b_t, ha_v, hb_v = restored
@@ -6432,7 +6772,7 @@ class MainWindow(QMainWindow):
             search_t0_us=delta_search_t0_us,
             search_t1_us=delta_search_t1_us,
         )
-        self._show_stored_metric_status("开通", focus_name if focus_name == "Ls_on" else "ΔVce")
+        self._show_stored_metric_status("开通", "ΔVce")
 
     def _enable_turn_off_delta_vce_interaction(self, *, focus_name: str = "ΔVce") -> None:
         self._active_slope_param = None
@@ -6503,18 +6843,12 @@ class MainWindow(QMainWindow):
             if self.result is not None:
                 self.result.turn_off.delta_vce = float(delta)
             self.result_table.set_metric_value("关断过程", "ΔVce", delta)
-            # ΔVce 变化只影响 Ls_off（与 di/dt 无直接关联）
             self._sync_ls_off()
-            if self.result is not None and focus_name == "Ls_off":
-                off = self.result.turn_off
-                self.statusBar().showMessage(
-                    f"关断Ls_off: Ha(尖峰)={_fx_v:.2f} V, Hb(Top)={_mv_v:.2f} V, "
-                    f"ΔVce={delta:.3f} V, di/dt={off.didt:.3f} A/ns, Ls_off={off.ls_off:.3f} nH"
-                )
-            else:
-                self.statusBar().showMessage(
-                    f"关断ΔVce交互: A(尖峰)={_fx_v:.2f} V, B(Top)={_mv_v:.2f} V, ΔVce={delta:.3f} V"
-                )
+            ls_off = self.result.turn_off.ls_off if self.result is not None else 0.0
+            self.statusBar().showMessage(
+                f"关断ΔVce交互: A(尖峰)={_fx_v:.2f} V, B(Top)={_mv_v:.2f} V, "
+                f"ΔVce={delta:.3f} V, Ls_off={ls_off:.3f} nH"
+            )
 
         if restored is not None:
             a_t, b_t, ha_v, hb_v = restored
@@ -6539,9 +6873,7 @@ class MainWindow(QMainWindow):
             search_t0_us=float(t[off0] * 1e6),
             search_t1_us=float(t[blocking_end] * 1e6),
         )
-        self._show_stored_metric_status(
-            "关断过程", focus_name if focus_name == "Ls_off" else "ΔVce"
-        )
+        self._show_stored_metric_status("关断过程", "ΔVce")
 
     def _enable_energy_interaction(self, section: str, name: str) -> None:
         if self.bundle is None or self.result is None or self.result.segments is None:
@@ -8022,16 +8354,24 @@ class MainWindow(QMainWindow):
             if name == "di/dt":
                 v = float(didt_max(t, ic, i0, i1 + 1, dt, self.cfg))
                 self.result.turn_off.didt = v
-                # 仅 di/dt 变化 → 重算 Ls_off（不影响 ΔVce / 开通侧）
+                # The generic path retains the automatic coincident Ls window;
+                # the dedicated di/dt cursor path supplies its exact crossings.
                 self._sync_ls_off()
                 return v
             if name == "Ls_off":
-                # 在所选窗口重算 di/dt，并按 Ls_off = ΔVce / (di/dt) 同步
-                didt = float(didt_max(t, ic, i0, i1 + 1, dt, self.cfg))
-                self.result.turn_off.didt = didt
-                self.result_table.set_metric_value("关断过程", "di/dt", didt)
-                self._sync_ls_off()
-                return self.result.turn_off.ls_off
+                context = self._commutation_inductance_context(
+                    "关断过程",
+                    float(t[i0]),
+                    float(t[i1]),
+                    exact_off_interval=True,
+                )
+                if context is None:
+                    return None
+                self.result.turn_off.ls_off = float(context.value_nh)
+                self.result_table.set_metric_value(
+                    "关断过程", "Ls_off", context.value_nh
+                )
+                return context.value_nh
             if name == "Toff":
                 self.result.turn_off.toff = dur_ns
                 self._sync_off_time_relations(changed="toff")
@@ -8081,16 +8421,23 @@ class MainWindow(QMainWindow):
             if name == "di/dt":
                 v = float(didt_max(t, ic, i0, i1 + 1, dt, self.cfg))
                 self.result.turn_on.didt = v
-                # 仅 di/dt 变化 → 重算 Ls_on（不影响 ΔVce / 关断侧）
+                # The generic path retains the automatic coincident Ls window;
+                # the dedicated di/dt cursor path supplies its exact crossings.
                 self._sync_ls_on()
                 return v
             if name == "Ls_on":
-                # 在所选窗口重算 di/dt，并按 Ls_on = ΔV / (di/dt) 同步
-                didt = float(didt_max(t, ic, i0, i1 + 1, dt, self.cfg))
-                self.result.turn_on.didt = didt
-                self.result_table.set_metric_value("开通", "di/dt", didt)
-                self._sync_ls_on()
-                return self.result.turn_on.ls_on
+                context = self._commutation_inductance_context(
+                    "开通",
+                    float(t[i0]),
+                    float(t[i1]),
+                )
+                if context is None:
+                    return None
+                self.result.turn_on.ls_on = float(context.value_nh)
+                self.result_table.set_metric_value(
+                    "开通", "Ls_on", context.value_nh
+                )
+                return context.value_nh
             if name == "Ton":
                 self.result.turn_on.ton = dur_ns
                 self._sync_on_time_relations(changed="ton")
@@ -8476,18 +8823,40 @@ class MainWindow(QMainWindow):
             return i0 + neg_i
         return i0 + pos_i
 
-    def _sync_ls_off(self) -> None:
-        """Ls_off = 关断 ΔVce / (关断 di/dt)，单位 nH（ΔVce[V] / di/dt[A/ns]）。"""
+    def _sync_ls_off(self, crossing: DidtCrossingResult | None = None) -> None:
+        """Refresh Ls_off from one voltage/current-coincident integration window."""
         if self.result is None:
             return
-        off = self.result.turn_off
-        unavailable = self.result.is_metric_unavailable("关断过程", "di/dt")
-        off.ls_off = (
-            float(off.delta_vce / off.didt)
-            if not unavailable and off.didt > 1e-9
-            else 0.0
-        )
         key = ("关断过程", "Ls_off")
+        manual = (
+            self._manual_intervals.get(key)
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
+        if manual is not None:
+            context = self._commutation_inductance_context(
+                "关断过程",
+                float(manual[0]) * 1e-6,
+                float(manual[1]) * 1e-6,
+                exact_off_interval=True,
+            )
+        elif (
+            crossing is not None
+            and crossing.t_pct_a_s is not None
+            and crossing.t_pct_b_s is not None
+        ):
+            context = self._commutation_inductance_context(
+                "关断过程",
+                crossing.t_pct_a_s,
+                crossing.t_pct_b_s,
+            )
+        elif crossing is not None:
+            context = None
+        else:
+            context = self._commutation_inductance_context("关断过程")
+        off = self.result.turn_off
+        unavailable = context is None
+        off.ls_off = float(context.value_nh) if context is not None else 0.0
         if unavailable:
             self.result.unavailable_metrics.add(key)
         else:
@@ -8495,18 +8864,39 @@ class MainWindow(QMainWindow):
         self.result_table.set_metric_unavailable(*key, unavailable)
         self.result_table.set_metric_value(*key, None if unavailable else off.ls_off)
 
-    def _sync_ls_on(self) -> None:
-        """Ls_on = 开通 ΔVce / (开通 di/dt)，单位 nH，与 Ls_off 对称（ΔVce 可光标卡值）。"""
+    def _sync_ls_on(self, crossing: DidtCrossingResult | None = None) -> None:
+        """Refresh Ls_on from one voltage/current-coincident integration window."""
         if self.result is None:
             return
-        on = self.result.turn_on
-        unavailable = self.result.is_metric_unavailable("开通", "di/dt")
-        on.ls_on = (
-            float(on.delta_vce / on.didt)
-            if not unavailable and on.didt > 1e-9
-            else 0.0
-        )
         key = ("开通", "Ls_on")
+        manual = (
+            self._manual_intervals.get(key)
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
+        if manual is not None:
+            context = self._commutation_inductance_context(
+                "开通",
+                float(manual[0]) * 1e-6,
+                float(manual[1]) * 1e-6,
+            )
+        elif (
+            crossing is not None
+            and crossing.t_pct_a_s is not None
+            and crossing.t_pct_b_s is not None
+        ):
+            context = self._commutation_inductance_context(
+                "开通",
+                crossing.t_pct_a_s,
+                crossing.t_pct_b_s,
+            )
+        elif crossing is not None:
+            context = None
+        else:
+            context = self._commutation_inductance_context("开通")
+        on = self.result.turn_on
+        unavailable = context is None
+        on.ls_on = float(context.value_nh) if context is not None else 0.0
         if unavailable:
             self.result.unavailable_metrics.add(key)
         else:
@@ -9329,10 +9719,6 @@ class MainWindow(QMainWindow):
             new_off.didt = float(old_off.didt)
             new_off.didt_range = str(old_off.didt_range)
             _restore_metric_availability("关断过程", "di/dt")
-        if off_ls_manual:
-            new_off.didt = float(old_off.didt)
-            new_off.didt_range = str(old_off.didt_range)
-            _restore_metric_availability("关断过程", "di/dt")
 
         off_timing_keys = {
             ("关断过程", "Toff"),
@@ -9370,10 +9756,6 @@ class MainWindow(QMainWindow):
             new_on.dvdt = float(old_on.dvdt)
             new_on.dvdt_range = str(old_on.dvdt_range)
         if on_didt_manual:
-            new_on.didt = float(old_on.didt)
-            new_on.didt_range = str(old_on.didt_range)
-            _restore_metric_availability("开通", "di/dt")
-        if on_ls_manual:
             new_on.didt = float(old_on.didt)
             new_on.didt_range = str(old_on.didt_range)
             _restore_metric_availability("开通", "di/dt")
@@ -9417,25 +9799,34 @@ class MainWindow(QMainWindow):
         if ("反向恢复", "Err") in energies:
             new_rr.err = float(old_rr.err)
 
-        if off_delta_manual or off_didt_manual or off_ls_manual:
-            unavailable = current.is_metric_unavailable("关断过程", "di/dt")
+        # DeltaVce calibrates the Ls voltage amplitude.  A manual di/dt cursor
+        # changes the automatic integration boundary, while a dedicated Ls A/B
+        # edit owns that boundary directly.
+        if off_didt_manual or off_ls_manual:
+            _restore_metric_availability("关断过程", "Ls_off")
             new_off.ls_off = (
-                float(new_off.delta_vce / new_off.didt)
-                if not unavailable and new_off.didt > 1e-9
-                else 0.0
+                0.0
+                if current.is_metric_unavailable("关断过程", "Ls_off")
+                else float(old_off.ls_off)
             )
-            if unavailable:
+        elif off_delta_manual:
+            context = self._commutation_inductance_context("关断过程")
+            new_off.ls_off = float(context.value_nh) if context is not None else 0.0
+            if context is None:
                 current.unavailable_metrics.add(("关断过程", "Ls_off"))
             else:
                 current.unavailable_metrics.discard(("关断过程", "Ls_off"))
-        if on_delta_manual or on_didt_manual or on_ls_manual:
-            unavailable = current.is_metric_unavailable("开通", "di/dt")
+        if on_didt_manual or on_ls_manual:
+            _restore_metric_availability("开通", "Ls_on")
             new_on.ls_on = (
-                float(new_on.delta_vce / new_on.didt)
-                if not unavailable and new_on.didt > 1e-9
-                else 0.0
+                0.0
+                if current.is_metric_unavailable("开通", "Ls_on")
+                else float(old_on.ls_on)
             )
-            if unavailable:
+        elif on_delta_manual:
+            context = self._commutation_inductance_context("开通")
+            new_on.ls_on = float(context.value_nh) if context is not None else 0.0
+            if context is None:
                 current.unavailable_metrics.add(("开通", "Ls_on"))
             else:
                 current.unavailable_metrics.discard(("开通", "Ls_on"))
