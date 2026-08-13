@@ -104,11 +104,11 @@ from dpt_extractor.io.tek_scope import (
 )
 from dpt_extractor.models.bridge_profile import (
     PHASES,
-    UPPER_BRIDGE,
     BridgeProfile,
     as_short_circuit_profile,
     guess_profile_from_path,
     has_bridge_hint_from_path,
+    infer_profile_hint_from_path,
     make_profile,
 )
 from dpt_extractor.models.results import (
@@ -205,6 +205,7 @@ from dpt_extractor.pipeline.pulse_sequence import (
 )
 from dpt_extractor.pipeline.run_extract import run_extraction
 from dpt_extractor.pipeline.short_circuit_extract import (
+    ShortCircuitCurrentCursors,
     find_desat_voltage_channel,
     short_circuit_current_cursors,
     short_circuit_current_percent_cursors,
@@ -269,6 +270,10 @@ TEMP_CONDITION_DEFAULTS = {
     "LT": -40.0,
 }
 TEMP_CONDITION_SETTINGS_PREFIX = "conditions/temperature/"
+TEMP_CODE_SETTINGS_PREFIX = "conditions/temperature_code/"
+LAST_PHASE_SETTINGS_KEY = "conditions/last_phase"
+LAST_BRIDGE_SETTINGS_KEY = "conditions/last_bridge"
+LAST_TEMPERATURE_CODE_SETTINGS_KEY = "conditions/last_temperature_code"
 SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY = "short_circuit/tsc_range"
 SLOPE_RANGES_SETTINGS_KEY = "measurements/slope_ranges_v1"
 REPORT_CONDITION_SETTINGS_PREFIX = "conditions/report/"
@@ -995,7 +1000,7 @@ def _configure_combo_popup(combo: QComboBox) -> None:
     apply_combo_popup_style(combo)
 
 
-def _infer_temp_code_from_path(path: str) -> str:
+def _infer_temp_code_from_path(path: str) -> str | None:
     for part in reversed([p for p in re.split(r"[\\/]+", str(path)) if p]):
         stem = Path(part).stem.upper()
         for code in TEMP_CONDITION_DEFAULTS:
@@ -1007,7 +1012,18 @@ def _infer_temp_code_from_path(path: str) -> str:
             return "HT"
         if re.search(r"(?<!\d)-?40(?:℃|C|DEG)?(?!\d)", stem):
             return "LT"
-    return "RT"
+    return None
+
+
+def _profile_from_path_with_fallback(
+    path: str,
+    fallback: BridgeProfile,
+) -> BridgeProfile:
+    phase_hint, bridge_hint = infer_profile_hint_from_path(path)
+    return make_profile(
+        phase_hint or fallback.phase,
+        bridge_hint or fallback.bridge,
+    )
 
 
 def commercial_authorization_message() -> str:
@@ -1149,6 +1165,7 @@ def _compute_waveform_load_outcome(
     cfg: AppConfig,
     progress_callback: Callable[[int, int, str, str, int, int], None] | None = None,
     *,
+    fallback_profile: BridgeProfile | None = None,
     waveform_reader: Callable[[Callable[[int, int, str], None]], WaveformBundle]
     | None = None,
 ) -> _WaveformLoadOutcome:
@@ -1199,7 +1216,13 @@ def _compute_waveform_load_outcome(
     load_t1 = time.perf_counter()
     emit_progress(LOAD_PROGRESS_PARSE_DONE, "读取完成，正在识别通道...")
 
-    guessed = guess_profile_from_path(profile_hint_path)
+    if fallback_profile is None:
+        guessed = guess_profile_from_path(profile_hint_path)
+    else:
+        guessed = _profile_from_path_with_fallback(
+            profile_hint_path,
+            fallback_profile,
+        )
     scope_phase_hint: str | None = None
     scope_bridge_hint: str | None = None
     mapping_store = ChannelMappingStore()
@@ -1279,8 +1302,7 @@ def _compute_waveform_load_outcome(
                 inferred = selected.inferred
                 inferred_source = selected.inferred_source
                 result = selected.result
-                if bundle.meta.source_kind == "scope":
-                    guessed = make_profile(guessed.phase, profile.bridge)
+                guessed = make_profile(guessed.phase, profile.bridge)
             else:
                 result = run_extraction(bundle, profile, cfg)
             short_circuit_not_ready = False
@@ -1322,11 +1344,13 @@ class _WaveformLoadTask(QRunnable):
         request_id: int,
         path: str,
         cfg: AppConfig,
+        fallback_profile: BridgeProfile | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
         self.path = path
         self.cfg = cfg
+        self.fallback_profile = fallback_profile
         self.signals = _WaveformLoadSignals()
 
     def run(self) -> None:
@@ -1334,6 +1358,7 @@ class _WaveformLoadTask(QRunnable):
             outcome = _compute_waveform_load_outcome(
                 self.path,
                 self.cfg,
+                fallback_profile=self.fallback_profile,
                 progress_callback=lambda value, total, label, eta_phase, eta_completed, eta_total: self.signals.progress.emit(
                     self.request_id,
                     value,
@@ -1351,11 +1376,18 @@ class _WaveformLoadTask(QRunnable):
 
 
 class _ScopeLoadTask(QRunnable):
-    def __init__(self, request_id: int, cfg: AppConfig, profile_code: str) -> None:
+    def __init__(
+        self,
+        request_id: int,
+        cfg: AppConfig,
+        profile_code: str,
+        fallback_profile: BridgeProfile | None = None,
+    ) -> None:
         super().__init__()
         self.request_id = request_id
         self.cfg = cfg
         self.profile_code = profile_code
+        self.fallback_profile = fallback_profile
         self.signals = _WaveformLoadSignals()
 
     def run(self) -> None:
@@ -1363,6 +1395,7 @@ class _ScopeLoadTask(QRunnable):
             outcome = _compute_waveform_load_outcome(
                 f"{self.profile_code}_USB_示波器",
                 self.cfg,
+                fallback_profile=self.fallback_profile,
                 progress_callback=lambda value, total, label, eta_phase, eta_completed, eta_total: self.signals.progress.emit(
                     self.request_id,
                     value,
@@ -1642,7 +1675,7 @@ class MainWindow(QMainWindow):
 
         self.cfg: AppConfig = load_config()
         self.bundle: WaveformBundle | None = None
-        self.profile: BridgeProfile = UPPER_BRIDGE
+        self.profile: BridgeProfile = self._load_last_profile_selection()
         self.result: ExtractResult | None = None
         self._current_path: str = ""
         self._report_template_source_path: Path | None = report_template_source_path()
@@ -1715,7 +1748,13 @@ class MainWindow(QMainWindow):
         self._license_notice_timer = QTimer(self)
         self._license_notice_timer.setSingleShot(True)
         self._license_notice_timer.timeout.connect(self._show_first_run_license_notice)
-        self._temperature_values = self._load_temperature_values()
+        self._temperature_context = self.profile.bridge
+        self._temperature_values = self._load_temperature_values(
+            self._temperature_context
+        )
+        self._last_temperature_code = self._load_last_temperature_code(
+            self._temperature_context
+        )
         self._report_condition_context: tuple[str, str] | None = None
 
         self._build_ui()
@@ -1803,6 +1842,9 @@ class MainWindow(QMainWindow):
         self.combo_phase.setMinimumContentsLength(4)
         for p in PHASES:
             self.combo_phase.addItem(f"{p}相", p)
+        phase_index = self.combo_phase.findData(self.profile.phase)
+        if phase_index >= 0:
+            self.combo_phase.setCurrentIndex(phase_index)
         _configure_combo_popup(self.combo_phase)
         self.combo_phase.currentIndexChanged.connect(self._on_phase_bridge_changed)
 
@@ -1810,6 +1852,9 @@ class MainWindow(QMainWindow):
         self.combo_bridge.setMinimumContentsLength(4)
         self.combo_bridge.addItem("上桥", "upper")
         self.combo_bridge.addItem("下桥", "lower")
+        bridge_index = self.combo_bridge.findData(self.profile.bridge)
+        if bridge_index >= 0:
+            self.combo_bridge.setCurrentIndex(bridge_index)
         _configure_combo_popup(self.combo_bridge)
         self.combo_bridge.currentIndexChanged.connect(self._on_phase_bridge_changed)
 
@@ -1817,6 +1862,9 @@ class MainWindow(QMainWindow):
         self.combo_temp.setObjectName("tempSelector")
         for code in TEMP_CONDITION_DEFAULTS:
             self.combo_temp.addItem(code, code)
+        temp_index = self.combo_temp.findData(self._last_temperature_code)
+        if temp_index >= 0:
+            self.combo_temp.setCurrentIndex(temp_index)
         _configure_combo_popup(self.combo_temp)
         self.combo_temp.setToolTip(
             "当前报告温度工况；加载时按路径识别，手动选择后以当前选择为准"
@@ -1834,7 +1882,9 @@ class MainWindow(QMainWindow):
         self.spin_temp_value.setToolTip(
             "自定义当前工况温度；写入报告时采用，单位固定为 ℃"
         )
-        self.spin_temp_value.setValue(self._temperature_values["RT"])
+        self.spin_temp_value.setValue(
+            self._temperature_values[self._last_temperature_code]
+        )
         self.spin_temp_value.valueChanged.connect(self._on_temperature_value_changed)
 
         self.report_condition_group = QFrame()
@@ -2112,16 +2162,84 @@ class MainWindow(QMainWindow):
         settings.setValue(NONCOMMERCIAL_NOTICE_SETTINGS_KEY, True)
         settings.sync()
 
-    def _load_temperature_values(self) -> dict[str, float]:
+    def _load_temperature_values(self, bridge: str) -> dict[str, float]:
         settings = _app_settings()
         values = dict(TEMP_CONDITION_DEFAULTS)
         for code, default in TEMP_CONDITION_DEFAULTS.items():
-            raw = settings.value(f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}", default)
+            raw = settings.value(
+                f"{TEMP_CONDITION_SETTINGS_PREFIX}{bridge}/{code}",
+                settings.value(f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}", default),
+            )
             try:
                 values[code] = float(raw)
             except (TypeError, ValueError):
                 values[code] = float(default)
         return values
+
+    def _load_last_profile_selection(self) -> BridgeProfile:
+        settings = _app_settings()
+        phase = str(settings.value(LAST_PHASE_SETTINGS_KEY, "U") or "U").upper()
+        bridge = str(
+            settings.value(LAST_BRIDGE_SETTINGS_KEY, "upper") or "upper"
+        ).lower()
+        if phase not in PHASES:
+            phase = "U"
+        if bridge not in {"upper", "lower"}:
+            bridge = "upper"
+        return make_profile(phase, bridge)
+
+    def _load_last_temperature_code(self, bridge: str) -> str:
+        settings = _app_settings()
+        raw = settings.value(f"{TEMP_CODE_SETTINGS_PREFIX}{bridge}", None)
+        if raw is None:
+            other_bridge = "lower" if bridge == "upper" else "upper"
+            other_raw = settings.value(
+                f"{TEMP_CODE_SETTINGS_PREFIX}{other_bridge}",
+                None,
+            )
+            raw = (
+                settings.value(LAST_TEMPERATURE_CODE_SETTINGS_KEY, "RT")
+                if other_raw is None
+                else "RT"
+            )
+        code = str(raw or "RT").upper()
+        return code if code in TEMP_CONDITION_DEFAULTS else "RT"
+
+    def _save_current_temperature_context(self) -> None:
+        bridge = self._temperature_context
+        if not bridge:
+            return
+        code = self._current_temperature_code()
+        settings = _app_settings()
+        settings.setValue(f"{TEMP_CODE_SETTINGS_PREFIX}{bridge}", code)
+        for temp_code, value in self._temperature_values.items():
+            settings.setValue(
+                f"{TEMP_CONDITION_SETTINGS_PREFIX}{bridge}/{temp_code}",
+                float(value),
+            )
+        settings.sync()
+
+    def _switch_temperature_context(self) -> None:
+        bridge = str(self.combo_bridge.currentData() or "upper").lower()
+        if bridge == self._temperature_context:
+            return
+        self._save_current_temperature_context()
+        self._temperature_context = bridge
+        self._temperature_values = self._load_temperature_values(bridge)
+        code = self._load_last_temperature_code(bridge)
+        self._last_temperature_code = code
+        self._set_temperature_code(code)
+
+    def _save_current_setup_selection(self) -> None:
+        phase = str(self.combo_phase.currentData() or "U").upper()
+        bridge = str(self.combo_bridge.currentData() or "upper").lower()
+        if phase not in PHASES or bridge not in {"upper", "lower"}:
+            return
+        self._save_current_temperature_context()
+        settings = _app_settings()
+        settings.setValue(LAST_PHASE_SETTINGS_KEY, phase)
+        settings.setValue(LAST_BRIDGE_SETTINGS_KEY, bridge)
+        settings.sync()
 
     def _load_short_circuit_tsc_range(self) -> str:
         raw = _app_settings().value(
@@ -2238,7 +2356,7 @@ class MainWindow(QMainWindow):
             return
         settings = _app_settings()
         settings.setValue(
-            f"{TEMP_CONDITION_SETTINGS_PREFIX}{code}",
+            f"{TEMP_CONDITION_SETTINGS_PREFIX}{self._temperature_context}/{code}",
             float(value),
         )
         settings.sync()
@@ -2273,7 +2391,7 @@ class MainWindow(QMainWindow):
     def _save_current_report_conditions(self) -> None:
         if self._report_condition_context is None:
             return
-        mode_key, phase_code = self._report_condition_context
+        mode_key, bridge = self._report_condition_context
         settings = _app_settings()
         for (field, _label, _unit), edit in zip(
             self._report_condition_specs(mode_key),
@@ -2281,7 +2399,7 @@ class MainWindow(QMainWindow):
         ):
             key = (
                 f"{REPORT_CONDITION_SETTINGS_PREFIX}"
-                f"{mode_key}/{phase_code}/{field}"
+                f"{mode_key}/{bridge}/{field}"
             )
             value = edit.numeric_value()
             if value is None:
@@ -2339,8 +2457,9 @@ class MainWindow(QMainWindow):
 
     def _switch_report_condition_context(self) -> None:
         mode_key = self._report_condition_mode_key()
+        bridge = str(self.combo_bridge.currentData() or "upper").lower()
         phase_code = self._current_report_phase_code()
-        context = (mode_key, phase_code)
+        context = (mode_key, bridge)
         if context == self._report_condition_context:
             return
         self._save_current_report_conditions()
@@ -2353,9 +2472,27 @@ class MainWindow(QMainWindow):
             self._report_condition_unit_labels[index].setText(unit_text)
             key = (
                 f"{REPORT_CONDITION_SETTINGS_PREFIX}"
-                f"{mode_key}/{phase_code}/{field}"
+                f"{mode_key}/{bridge}/{field}"
             )
             raw = settings.value(key, None)
+            if raw is None:
+                legacy_phase_codes = [
+                    phase_code,
+                    *(
+                        f"{phase}{'H' if bridge == 'upper' else 'L'}"
+                        for phase in PHASES
+                        if f"{phase}{'H' if bridge == 'upper' else 'L'}"
+                        != phase_code
+                    ),
+                ]
+                for legacy_phase_code in legacy_phase_codes:
+                    legacy_key = (
+                        f"{REPORT_CONDITION_SETTINGS_PREFIX}"
+                        f"{mode_key}/{legacy_phase_code}/{field}"
+                    )
+                    raw = settings.value(legacy_key, None)
+                    if raw is not None:
+                        break
             try:
                 value = None if raw is None or str(raw).strip() == "" else float(raw)
             except (TypeError, ValueError):
@@ -2604,6 +2741,8 @@ class MainWindow(QMainWindow):
         self._sync_splitter_sizes()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self._save_current_report_conditions()
+        self._save_current_setup_selection()
         if self._license_notice_timer.isActive():
             self._license_notice_timer.stop()
         if self._license_notice_dialog is not None:
@@ -3146,6 +3285,7 @@ class MainWindow(QMainWindow):
         finally:
             self.spin_temp_value.blockSignals(False)
         self.result_table.set_temperature_labels(self._temperature_display_labels())
+        self._save_current_setup_selection()
         if self.result is not None:
             self.result_table.set_result(self.result)
 
@@ -3413,7 +3553,9 @@ class MainWindow(QMainWindow):
         self._recalculate()
 
     def _on_phase_bridge_changed(self) -> None:
+        self._switch_temperature_context()
         self._switch_report_condition_context()
+        self._save_current_setup_selection()
         self.profile = self._current_profile()
         if self.bundle:
             self._recalculate(reset_manual=True)
@@ -3582,6 +3724,7 @@ class MainWindow(QMainWindow):
             source_path=self._current_mapping_source_path(),
         )
         self.profile = _profile_for_test_mode(self.profile, self.cfg)
+        self._switch_temperature_context()
         if parse_test_mode(self.cfg.test_mode.mode) != TestMode.OFFSET_MEASUREMENT:
             self._switch_report_condition_context()
         self._update_map_status_label()
@@ -3613,6 +3756,10 @@ class MainWindow(QMainWindow):
             request_id,
             self._load_cfg_for_new_file(),
             profile_code,
+            make_profile(
+                str(self.combo_phase.currentData() or self.profile.phase),
+                str(self.combo_bridge.currentData() or self.profile.bridge),
+            ),
         )
         task.signals.progress.connect(self._on_background_load_progress)
         task.signals.finished.connect(self._on_background_load_finished)
@@ -3623,6 +3770,8 @@ class MainWindow(QMainWindow):
         self._scope_io_pool.start(task)
 
     def _load_cfg_for_new_file(self) -> AppConfig:
+        self._save_current_report_conditions()
+        self._save_current_setup_selection()
         cfg = deepcopy(self.cfg)
         cfg.vdc_override = None
         cfg.slope_ranges = deepcopy(self._slope_ranges)
@@ -3915,6 +4064,10 @@ class MainWindow(QMainWindow):
             request_id,
             path,
             cfg,
+            make_profile(
+                str(self.combo_phase.currentData() or self.profile.phase),
+                str(self.combo_bridge.currentData() or self.profile.bridge),
+            ),
         )
         task.signals.progress.connect(self._on_background_load_progress)
         task.signals.finished.connect(self._on_background_load_finished)
@@ -4587,7 +4740,10 @@ class MainWindow(QMainWindow):
         self.cfg.vdc_override = None
         self.lbl_current_file.setText(Path(path).name)
         self.lbl_current_file.setToolTip(path)
-        self._set_temperature_code(_infer_temp_code_from_path(path))
+        detected_temp_code = _infer_temp_code_from_path(path)
+        if detected_temp_code is not None:
+            self._set_temperature_code(detected_temp_code)
+        self._save_current_setup_selection()
         if self.bundle.meta.source_kind == "file":
             mode = parse_test_mode(self.cfg.test_mode.mode)
             if mode == TestMode.DPT:
@@ -4666,6 +4822,10 @@ class MainWindow(QMainWindow):
             outcome = _compute_waveform_load_outcome(
                 path,
                 self._load_cfg_for_new_file(),
+                fallback_profile=make_profile(
+                    str(self.combo_phase.currentData() or self.profile.phase),
+                    str(self.combo_bridge.currentData() or self.profile.bridge),
+                ),
             )
             self._apply_loaded_waveform(outcome)
         except Exception as e:
@@ -7627,8 +7787,19 @@ class MainWindow(QMainWindow):
             "应力Vpeak_本管",
             "应力Vpeak_对管",
         }:
-            # short_circuit_vpeak_cursors(): both boundaries are Vge base crossings.
-            return "vge", "vge"
+            voltage_channel = (
+                self.profile.v_diode
+                if name == "应力Vpeak_对管"
+                else self.profile.vce
+            )
+            context = self._short_circuit_vpeak_default_context(
+                voltage_channel,
+                gate_channel=self.profile.vge,
+            )
+            boundary_role = (
+                context.boundary_source if context is not None else "vge"
+            )
+            return boundary_role, boundary_role
         if section == "短路过程" and name == "Desat动作时间":
             desat_channel = self._short_circuit_desat_channel()
             return "vge", desat_channel
@@ -7920,8 +8091,8 @@ class MainWindow(QMainWindow):
         )
         short_energy_names = {"短路能量Esc_本管", "短路能量Esc_对管"}
         short_vpeak_roles = {
-            "应力Vpeak_本管": (self.profile.vce, "vge", self.profile.vge),
-            "应力Vpeak_对管": (self.profile.v_diode, "vge", self.profile.vge),
+            "应力Vpeak_本管": (self.profile.vce, self.profile.vge),
+            "应力Vpeak_对管": (self.profile.v_diode, self.profile.vge),
         }
         is_short_energy_param = is_short_circuit_param and name in short_energy_names
         short_vpeak_role = short_vpeak_roles.get(name) if is_short_circuit_param else None
@@ -7981,7 +8152,7 @@ class MainWindow(QMainWindow):
                     _ta, _tb, hb, _ha = cursors
                     self.wave_plot.set_interval_base_horizontal(hb, channel="ic")
             elif short_vpeak_role is not None:
-                voltage_channel, gate_role, gate_channel = short_vpeak_role
+                voltage_channel, gate_channel = short_vpeak_role
                 peak_y = self._peak_y_for_param(section, name, i0, i1)
                 if peak_y is not None:
                     self.wave_plot.set_interval_peak_horizontal(
@@ -7990,13 +8161,15 @@ class MainWindow(QMainWindow):
                         t0_us=ta,
                         t1_us=tb,
                     )
-                cursors = self._short_circuit_vpeak_default_cursors(
+                cursors = self._short_circuit_vpeak_default_context(
                     voltage_channel,
                     gate_channel=gate_channel,
                 )
                 if cursors is not None:
-                    _ta, _tb, hb, _ha = cursors
-                    self.wave_plot.set_interval_base_horizontal(hb, channel=gate_role)
+                    self.wave_plot.set_interval_base_horizontal(
+                        cursors.hb_a,
+                        channel=cursors.boundary_source,
+                    )
             elif is_short_desat_param:
                 cursors = self._short_circuit_desat_default_cursors()
                 desat_channel = self._short_circuit_desat_channel()
@@ -8177,7 +8350,7 @@ class MainWindow(QMainWindow):
                 _ta, _tb, hb, _ha = cursors
                 self.wave_plot.set_interval_base_horizontal(hb, channel="ic")
         elif short_vpeak_role is not None:
-            voltage_channel, gate_role, gate_channel = short_vpeak_role
+            voltage_channel, gate_channel = short_vpeak_role
             peak_y = (
                 float(manual_extreme[0])
                 if manual_extreme is not None
@@ -8190,13 +8363,15 @@ class MainWindow(QMainWindow):
                     t0_us=ta if manual_extreme is None else None,
                     t1_us=tb if manual_extreme is None else None,
                 )
-            cursors = self._short_circuit_vpeak_default_cursors(
+            cursors = self._short_circuit_vpeak_default_context(
                 voltage_channel,
                 gate_channel=gate_channel,
             )
             if cursors is not None:
-                _ta, _tb, hb, _ha = cursors
-                self.wave_plot.set_interval_base_horizontal(hb, channel=gate_role)
+                self.wave_plot.set_interval_base_horizontal(
+                    cursors.hb_a,
+                    channel=cursors.boundary_source,
+                )
         elif is_short_desat_param:
             cursors = self._short_circuit_desat_default_cursors()
             desat_channel = self._short_circuit_desat_channel()
@@ -9211,6 +9386,28 @@ class MainWindow(QMainWindow):
         self,
     ) -> tuple[float, float, float, float] | None:
         """Default short-circuit current cursors at the Ic-Hb crossings."""
+        cursors = self._short_circuit_ic_default_context()
+        if cursors is not None:
+            return (
+                cursors.t_a_s * 1e6,
+                cursors.t_b_s * 1e6,
+                cursors.hb_a,
+                cursors.ha_a,
+            )
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        t = self.bundle.t
+        if len(t) == 0:
+            return None
+        gate0, gate1 = self.result.segments.turn_off
+        i0 = max(0, min(int(gate0), len(t) - 1))
+        i1 = max(i0, min(int(gate1), len(t) - 1))
+        return t[i0] * 1e6, t[i1] * 1e6, 0.0, 0.0
+
+    def _short_circuit_ic_default_context(
+        self,
+    ) -> ShortCircuitCurrentCursors | None:
+        """Return only a valid short-current Base-crossing context."""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
         from dpt_extractor.models.waveform import bundle_total_current
@@ -9237,16 +9434,7 @@ class MainWindow(QMainWindow):
                 self.bundle.dt,
                 smooth_ns=self.cfg.smoothing.detect_window_ns,
             )
-        if cursors is None:
-            i0 = max(0, min(int(gate0), len(t) - 1))
-            i1 = max(i0, min(int(gate1), len(t) - 1))
-            return t[i0] * 1e6, t[i1] * 1e6, 0.0, 0.0
-        return (
-            cursors.t_a_s * 1e6,
-            cursors.t_b_s * 1e6,
-            cursors.hb_a,
-            cursors.ha_a,
-        )
+        return cursors
 
     def _short_circuit_tsc_cursors(
         self,
@@ -9301,13 +9489,36 @@ class MainWindow(QMainWindow):
         voltage_channel: str,
         gate_channel: str | None = None,
     ) -> tuple[float, float, float, float] | None:
-        """Default Vpeak cursors: A/B and Hb from mapped Vge, Ha from voltage max."""
+        """Default Vpeak cursors using Vge, or valid current A/B as fallback."""
+        cursors = self._short_circuit_vpeak_default_context(
+            voltage_channel,
+            gate_channel=gate_channel,
+        )
+        if cursors is None:
+            return None
+        return (
+            cursors.t_a_s * 1e6,
+            cursors.t_b_s * 1e6,
+            cursors.hb_a,
+            cursors.ha_a,
+        )
+
+    def _short_circuit_vpeak_default_context(
+        self,
+        voltage_channel: str,
+        gate_channel: str | None = None,
+    ) -> ShortCircuitCurrentCursors | None:
+        """Return Vpeak values together with the active A/B boundary source."""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
         t = self.bundle.t
         if len(t) == 0:
             return None
         gate_ref = gate_channel or self.profile.vge
+        if not gate_ref or not self.bundle.has_channel_reference(gate_ref):
+            return None
+        if not voltage_channel or not self.bundle.has_channel_reference(voltage_channel):
+            return None
         vge = np.asarray(self.bundle.get(gate_ref), dtype=np.float64)
         voltage = np.asarray(self.bundle.get(voltage_channel), dtype=np.float64)
         gate0, gate1 = self.result.segments.turn_off
@@ -9319,19 +9530,9 @@ class MainWindow(QMainWindow):
             gate1,
             self.bundle.dt,
             smooth_ns=self.cfg.smoothing.detect_window_ns,
+            current_cursors=self._short_circuit_ic_default_context(),
         )
-        if cursors is None:
-            i0 = max(0, min(int(gate0), len(t) - 1))
-            i1 = max(i0, min(int(gate1), len(t) - 1))
-            seg = np.asarray(voltage[i0 : i1 + 1], dtype=np.float64)
-            ha = float(np.nanmax(seg)) if len(seg) else 0.0
-            return t[i0] * 1e6, t[i1] * 1e6, 0.0, ha
-        return (
-            cursors.t_a_s * 1e6,
-            cursors.t_b_s * 1e6,
-            cursors.hb_a,
-            cursors.ha_a,
-        )
+        return cursors
 
     def _short_circuit_desat_channel(self) -> str | None:
         if self.bundle is None:

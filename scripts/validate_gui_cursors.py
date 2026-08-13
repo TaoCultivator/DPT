@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -1440,7 +1441,7 @@ def audit_short_circuit_file(MainWindow, QApplication, app, path: Path) -> list[
     cap = Capture()
     cap.install(mw.wave_plot)
     rows: list[tuple] = []
-    short_vpeak_reference: tuple[float, float, float] | None = None
+    short_vpeak_reference: tuple[float, float, float, str] | None = None
 
     def record(name: str, status: str, detail: str) -> None:
         rows.append((sample_id, "短路过程", name, status, detail))
@@ -1705,38 +1706,52 @@ def audit_short_circuit_file(MainWindow, QApplication, app, path: Path) -> list[
                 f"source={source or 'V×I'} Esc={stored_value:.9g}J"
             )
         elif name in {"应力Vpeak_本管", "应力Vpeak_对管"}:
-            expected_endpoint_channels = ("vge", "vge")
             other = name.endswith("对管")
             voltage = v_diode if other else vce
             expected_channel = "v_diode" if other else "vce"
             voltage_reference = profile.v_diode if other else profile.vce
-            vpeak_cursors = mw._short_circuit_vpeak_default_cursors(
+            vpeak_context = mw._short_circuit_vpeak_default_context(
                 voltage_reference,
                 gate_channel=profile.vge,
             )
-            if vpeak_cursors is None:
-                problems.append("Vpeak 标为可用但权威 Vge Base 卡尺不可用")
+            if vpeak_context is None:
+                problems.append("Vpeak 标为可用但 Vge/电流 A/B 卡尺均不可用")
+                boundary_source = "vge"
+                vpeak_cursors = None
             else:
+                boundary_source = str(vpeak_context.boundary_source)
+                expected_endpoint_channels = (boundary_source, boundary_source)
+                vpeak_cursors = (
+                    vpeak_context.t_a_s * 1e6,
+                    vpeak_context.t_b_s * 1e6,
+                    vpeak_context.hb_a,
+                    vpeak_context.ha_a,
+                )
                 ref_a, ref_b, ref_hb, _ref_ha = map(float, vpeak_cursors)
                 problems.extend(
                     _ab_role_binding_problems(
                         t_a_us,
                         t_b_us,
                         (ref_a, ref_b),
-                        role_text="Vpeak A/B=本管Vge Base交点",
+                        role_text=f"Vpeak A/B={boundary_source} Base交点",
                         tolerance_us=1e-7,
                     )
                 )
-                current_reference = (ref_a, ref_b, ref_hb)
+                current_reference = (ref_a, ref_b, ref_hb, boundary_source)
                 if short_vpeak_reference is None:
                     short_vpeak_reference = current_reference
-                elif not all(
-                    _short_values_close(actual, expected, floor=1e-7)
-                    for actual, expected in zip(
-                        current_reference, short_vpeak_reference, strict=True
+                elif (
+                    boundary_source != short_vpeak_reference[3]
+                    or not all(
+                        _short_values_close(actual, expected, floor=1e-7)
+                        for actual, expected in zip(
+                            current_reference[:3],
+                            short_vpeak_reference[:3],
+                            strict=True,
+                        )
                     )
                 ):
-                    problems.append("本管/对管 Vpeak 未共用同一 Vge A/B/Hb")
+                    problems.append("本管/对管 Vpeak 未共用同一来源的 A/B/Hb")
             if channel != expected_channel:
                 problems.append(f"Vpeak交互通道={channel}≠{expected_channel}")
             stored_value = float(sc.vpeak_other if other else sc.vpeak_dut)
@@ -1761,28 +1776,47 @@ def audit_short_circuit_file(MainWindow, QApplication, app, path: Path) -> list[
                 ):
                     problems.append("Vpeak Ha未贴原始峰值")
             base_call = cap.calls.get("set_interval_base_horizontal")
-            if base_call is None or base_call["bound"].get("channel") != "vge":
-                problems.append("Vpeak Hb未绑定DUT Vge")
+            if (
+                base_call is None
+                or base_call["bound"].get("channel") != boundary_source
+            ):
+                problems.append(f"Vpeak Hb未绑定{boundary_source}")
             else:
-                gate_hb = float(base_call["bound"]["y"])
+                boundary_hb = float(base_call["bound"]["y"])
                 if vpeak_cursors is not None and not _short_values_close(
-                    gate_hb, float(vpeak_cursors[2]), floor=1e-6
+                    boundary_hb, float(vpeak_cursors[2]), floor=1e-6
                 ):
-                    problems.append("Vpeak Hb未绑定权威 Vge Base")
-                gate_span = float(np.nanmax(vge[gate_i0 : gate_i1 + 1]) - np.nanmin(vge[gate_i0 : gate_i1 + 1]))
-                gate_tol = _short_raw_level_tolerance(
-                    vge, gate_i0, bundle.dt, gate_span, floor=0.15
+                    problems.append(f"Vpeak Hb未绑定权威 {boundary_source} Base")
+                boundary_waveform = ic if boundary_source == "ic" else vge
+                boundary_span = float(
+                    np.nanmax(boundary_waveform[gate_i0 : gate_i1 + 1])
+                    - np.nanmin(boundary_waveform[gate_i0 : gate_i1 + 1])
                 )
-                gate_a = float(np.interp(t_a_us * 1e-6, t, vge))
-                gate_b = float(np.interp(t_b_us * 1e-6, t, vge))
-                if abs(gate_a - gate_hb) > gate_tol or abs(gate_b - gate_hb) > gate_tol:
+                boundary_tol = _short_raw_level_tolerance(
+                    boundary_waveform,
+                    gate_i0,
+                    bundle.dt,
+                    boundary_span,
+                    floor=0.15,
+                )
+                boundary_a = float(
+                    np.interp(t_a_us * 1e-6, t, boundary_waveform)
+                )
+                boundary_b = float(
+                    np.interp(t_b_us * 1e-6, t, boundary_waveform)
+                )
+                if (
+                    abs(boundary_a - boundary_hb) > boundary_tol
+                    or abs(boundary_b - boundary_hb) > boundary_tol
+                ):
                     problems.append(
-                        f"Vpeak A/B未贴近Vge稳定基线: raw={gate_a:.3f}/{gate_b:.3f},"
-                        f"Hb={gate_hb:.3f},tol={gate_tol:.3f}V"
+                        f"Vpeak A/B未贴近{boundary_source}稳定基线: "
+                        f"raw={boundary_a:.3f}/{boundary_b:.3f},"
+                        f"Hb={boundary_hb:.3f},tol={boundary_tol:.3f}"
                     )
             detail = (
                 f"ch={channel} A={t_a_us:.6f} B={t_b_us:.6f}us "
-                f"Vpeak={stored_value:.6g}V Hb_ch=vge"
+                f"Vpeak={stored_value:.6g}V Hb_ch={boundary_source}"
             )
         else:  # Desat动作时间（仅有真实 Vdesat 通道/阈值时可达）
             desat_channel = mw._short_circuit_desat_channel()
@@ -4223,6 +4257,7 @@ def _selected_sample_waveforms(root: Path) -> list[Path]:
 def run_all() -> list[tuple]:
     """对选定示例文件跑光标审计，返回 (file, section, name, status, detail) 行。"""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtCore import QSettings
     from PyQt6.QtWidgets import QApplication
 
     from dpt_extractor.gui import main_window as main_window_module
@@ -4231,18 +4266,30 @@ def run_all() -> list[tuple]:
     # not replace the user's persisted "last opened TSS" with the final audit
     # sample.  Patch only this validator process; production behavior remains
     # unchanged.
-    main_window_module.set_last_open_path = lambda _path: None
+    original_set_last_open_path = main_window_module.set_last_open_path
+    original_app_settings = main_window_module._app_settings
     MainWindow = main_window_module.MainWindow
 
     app = QApplication.instance() or QApplication([])
     all_rows: list[tuple] = []
-    for path in _selected_sample_waveforms(ROOT):
-        if _is_short_circuit_sample(path):
-            all_rows.extend(
-                audit_short_circuit_file(MainWindow, QApplication, app, path)
-            )
-        else:
-            all_rows.extend(audit_file(MainWindow, QApplication, app, path))
+    with tempfile.TemporaryDirectory() as tmp:
+        settings_path = Path(tmp) / "DPTExtractor.ini"
+        main_window_module.set_last_open_path = lambda _path: None
+        main_window_module._app_settings = lambda: QSettings(
+            str(settings_path),
+            QSettings.Format.IniFormat,
+        )
+        try:
+            for path in _selected_sample_waveforms(ROOT):
+                if _is_short_circuit_sample(path):
+                    all_rows.extend(
+                        audit_short_circuit_file(MainWindow, QApplication, app, path)
+                    )
+                else:
+                    all_rows.extend(audit_file(MainWindow, QApplication, app, path))
+        finally:
+            main_window_module.set_last_open_path = original_set_last_open_path
+            main_window_module._app_settings = original_app_settings
     return all_rows
 
 

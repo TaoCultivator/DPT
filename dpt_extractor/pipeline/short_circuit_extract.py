@@ -37,6 +37,7 @@ class ShortCircuitCurrentCursors:
     ha_a: float
     i0: int
     i1: int
+    boundary_source: str = "ic"
 
 
 def short_circuit_tsc_range_percentages(label: str | None) -> tuple[float, float, str]:
@@ -495,8 +496,9 @@ def short_circuit_vpeak_cursors(
     dt: float,
     *,
     smooth_ns: float = 40.0,
+    current_cursors: ShortCircuitCurrentCursors | None = None,
 ) -> ShortCircuitCurrentCursors | None:
-    """Vpeak cursors: A/B/Hb from the mapped Vge, Ha from voltage max in A-B."""
+    """Vpeak cursors from Vge, falling back to the valid short-current A/B."""
     gate = short_circuit_current_cursors(
         t,
         vge,
@@ -506,6 +508,10 @@ def short_circuit_vpeak_cursors(
         smooth_ns=smooth_ns,
         peak_mode="max",
     )
+    boundary_source = "vge"
+    if gate is None:
+        gate = current_cursors
+        boundary_source = "ic"
     if gate is None:
         return None
     if len(voltage) != len(t):
@@ -521,6 +527,7 @@ def short_circuit_vpeak_cursors(
         ha,
         gate.i0,
         gate.i1,
+        boundary_source=boundary_source,
     )
 
 
@@ -914,6 +921,7 @@ def extract_short_circuit(
         gate1,
         bundle.dt,
         smooth_ns=cfg.smoothing.detect_window_ns,
+        current_cursors=current_cursors,
     )
     other_vpeak_cursors = (
         short_circuit_vpeak_cursors(
@@ -924,6 +932,7 @@ def extract_short_circuit(
             gate1,
             bundle.dt,
             smooth_ns=cfg.smoothing.detect_window_ns,
+            current_cursors=current_cursors,
         )
         if v_diode_arr is not None
         else None

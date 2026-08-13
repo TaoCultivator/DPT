@@ -224,19 +224,30 @@ def _guess_bridge_from_tokens(tokens: tuple[str, ...]) -> str | None:
     return None
 
 
-def guess_profile_from_path(path: str | Path) -> BridgeProfile:
+def infer_profile_hint_from_path(
+    path: str | Path,
+) -> tuple[str | None, str | None]:
+    """Return only phase/bridge fields that are explicitly present in *path*."""
+
     p = Path(path)
     stem = p.stem.upper()
     for code in _CODE_ORDER:
         if code in stem:
-            return PROFILES[code]
+            profile = PROFILES[code]
+            return profile.phase, profile.bridge
     # fallback: H/L at end of name e.g. xxx_UH_xxx
     for code in _CODE_ORDER:
         if stem.endswith(code) or f"_{code}_" in stem:
-            return PROFILES[code]
+            profile = PROFILES[code]
+            return profile.phase, profile.bridge
     tokens = _tokenize_path_for_guess(p)
     phase = _guess_phase_from_tokens(tokens)
     bridge = _guess_bridge_from_tokens(tokens)
+    return phase, bridge
+
+
+def guess_profile_from_path(path: str | Path) -> BridgeProfile:
+    phase, bridge = infer_profile_hint_from_path(path)
     if phase and bridge:
         return make_profile(phase, bridge)
     if bridge:
@@ -246,13 +257,8 @@ def guess_profile_from_path(path: str | Path) -> BridgeProfile:
 
 def has_bridge_hint_from_path(path: str | Path) -> bool:
     """Return True when the path itself contains an upper/lower bridge hint."""
-    p = Path(path)
-    stem = p.stem.upper()
-    for code in _CODE_ORDER:
-        if code in stem or stem.endswith(code) or f"_{code}_" in stem:
-            return True
-    tokens = _tokenize_path_for_guess(p)
-    return _guess_bridge_from_tokens(tokens) is not None
+    _phase, bridge = infer_profile_hint_from_path(path)
+    return bridge is not None
 
 
 def profile_from_combo_data(data) -> BridgeProfile:

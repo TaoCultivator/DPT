@@ -391,14 +391,14 @@ class TestShortCircuitSyntheticRegressions(unittest.TestCase):
         )
         self.assertTrue(np.isnan(invalid_energy))
 
-    def test_invalid_energy_and_missing_gate_crossings_do_not_leak_fake_values(self):
+    def test_invalid_energy_and_missing_gate_crossings_use_current_vpeak_window(self):
         import numpy as np
 
         from dpt_extractor.config.loader import load_config
-        from dpt_extractor.pipeline.short_circuit_extract import extract_short_circuit
-        from scripts.validate_tss_samples import (
-            _short_metric_state_problem,
-            _short_metric_text,
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            extract_short_circuit,
+            short_circuit_current_cursors,
+            short_circuit_vpeak_cursors,
         )
 
         invalid_bundle, profile = self._short_bundle(nan_vce=True)
@@ -409,43 +409,123 @@ class TestShortCircuitSyntheticRegressions(unittest.TestCase):
         self.assertTrue(np.isnan(invalid_result.short_circuit.esc_dut))
 
         flat_gate_bundle, profile = self._short_bundle(flat_gate=True)
+        flat_gate_bundle.get(profile.vce)[20] = 1200.0
+        flat_gate_bundle.get(profile.vce)[80] = 850.0
+        flat_gate_bundle.get(profile.v_diode)[20] = 900.0
+        flat_gate_bundle.get(profile.v_diode)[90] = 450.0
         flat_gate_result = extract_short_circuit(
             flat_gate_bundle,
             profile,
             load_config(),
         )
-        for name, value in (
-            ("应力Vpeak_本管", flat_gate_result.short_circuit.vpeak_dut),
-            ("应力Vpeak_对管", flat_gate_result.short_circuit.vpeak_other),
-        ):
-            self.assertTrue(
-                flat_gate_result.is_metric_unavailable("短路过程", name)
-            )
-            self.assertTrue(np.isnan(value))
-            self.assertEqual(
-                _short_metric_text(
-                    flat_gate_result,
-                    name,
-                    value,
-                    unit="V",
-                    precision=1,
-                ),
-                "-",
-            )
+        current_cursors = short_circuit_current_cursors(
+            flat_gate_bundle.t,
+            flat_gate_bundle.get(profile.ic),
+            0,
+            flat_gate_bundle.n - 1,
+            flat_gate_bundle.dt,
+        )
+        self.assertIsNotNone(current_cursors)
+        assert current_cursors is not None
+        dut_cursors = short_circuit_vpeak_cursors(
+            flat_gate_bundle.t,
+            flat_gate_bundle.get(profile.vge),
+            flat_gate_bundle.get(profile.vce),
+            0,
+            flat_gate_bundle.n - 1,
+            flat_gate_bundle.dt,
+            current_cursors=current_cursors,
+        )
+        self.assertIsNotNone(dut_cursors)
+        assert dut_cursors is not None
+        self.assertEqual(dut_cursors.boundary_source, "ic")
+        self.assertAlmostEqual(dut_cursors.t_a_s, current_cursors.t_a_s, places=15)
+        self.assertAlmostEqual(dut_cursors.t_b_s, current_cursors.t_b_s, places=15)
+        self.assertEqual(dut_cursors.ha_a, 850.0)
+        self.assertEqual(flat_gate_result.short_circuit.vpeak_dut, 850.0)
+        self.assertEqual(flat_gate_result.short_circuit.vpeak_other, 450.0)
+        self.assertFalse(
+            flat_gate_result.is_metric_unavailable("短路过程", "应力Vpeak_本管")
+        )
+        self.assertFalse(
+            flat_gate_result.is_metric_unavailable("短路过程", "应力Vpeak_对管")
+        )
 
-        flat_gate_result.unavailable_metrics.discard(
-            ("短路过程", "应力Vpeak_本管")
-        )
-        self.assertEqual(
-            _short_metric_state_problem(
-                flat_gate_result,
-                "应力Vpeak_本管",
-                flat_gate_result.short_circuit.vpeak_dut,
-                label="VpeakDUT",
-                required=False,
-            ),
-            "VpeakDUT=nan",
-        )
+    def test_flat_gate_vpeak_gui_binds_to_current_ab_window(self):
+        from unittest.mock import patch
+
+        from PyQt6.QtCore import QSettings
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.test_mode import TestMode
+        from dpt_extractor.pipeline.short_circuit_extract import extract_short_circuit
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        bundle, profile = self._short_bundle(flat_gate=True)
+        cfg = load_config()
+        cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
+        result = extract_short_circuit(bundle, profile, cfg)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "DPTExtractor.ini"
+
+            def settings_factory() -> QSettings:
+                return QSettings(str(settings_path), QSettings.Format.IniFormat)
+
+            with patch(
+                "dpt_extractor.gui.main_window._app_settings",
+                settings_factory,
+            ):
+                win = MainWindow()
+                try:
+                    win.cfg = cfg
+                    win._apply_test_mode_ui()
+                    win.bundle = bundle
+                    win.profile = profile
+                    win.result = result
+                    win.result_table.set_result(result)
+                    win.wave_plot.plot_waveforms(bundle, profile, result)
+                    app.processEvents()
+
+                    current = win._short_circuit_ic_default_context()
+                    self.assertIsNotNone(current)
+                    assert current is not None
+                    for name, voltage_channel in (
+                        ("应力Vpeak_本管", win.profile.vce),
+                        ("应力Vpeak_对管", win.profile.v_diode),
+                    ):
+                        with self.subTest(name=name):
+                            context = win._short_circuit_vpeak_default_context(
+                                voltage_channel,
+                                gate_channel=win.profile.vge,
+                            )
+                            self.assertIsNotNone(context)
+                            assert context is not None
+                            self.assertEqual(context.boundary_source, "ic")
+                            self.assertAlmostEqual(
+                                context.t_a_s, current.t_a_s, places=15
+                            )
+                            self.assertAlmostEqual(
+                                context.t_b_s, current.t_b_s, places=15
+                            )
+                            self.assertEqual(
+                                win._cursor_endpoint_channels_for_param(
+                                    "短路过程", name
+                                ),
+                                ("ic", "ic"),
+                            )
+
+                            win._enable_generic_parameter_interaction(
+                                "短路过程", name
+                            )
+                            app.processEvents()
+                            self.assertEqual(win.wave_plot._interval_a_channel, "ic")
+                            self.assertEqual(win.wave_plot._interval_b_channel, "ic")
+                            self.assertEqual(win.wave_plot._interval_hb_channel, "ic")
+                finally:
+                    win.close()
 
     def test_empty_short_waveform_marks_every_metric_unavailable(self):
         import numpy as np
@@ -490,14 +570,13 @@ class TestShortCircuitCustomTscRange(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
     def setUp(self):
-        from PyQt6.QtCore import QSettings
-
         from dpt_extractor.gui.main_window import (
             SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+            _app_settings,
         )
         from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_DEFAULT
 
-        self._tsc_settings = QSettings("DPT", "DPTExtractor")
+        self._tsc_settings = _app_settings()
         self._old_tsc_range = self._tsc_settings.value(
             SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
             None,
@@ -766,6 +845,8 @@ class TestShortCircuitExtract(unittest.TestCase):
         self.assertIsNotNone(other_vce_cursors)
         assert dut_vce_cursors is not None
         assert other_vce_cursors is not None
+        self.assertEqual(dut_vce_cursors.boundary_source, "vge")
+        self.assertEqual(other_vce_cursors.boundary_source, "vge")
         esc_dut_expected, _ = short_circuit_energy_value(
             bundle,
             profile,
@@ -1348,7 +1429,7 @@ class TestSlowGateVpeakRawCrossings(unittest.TestCase):
         SONG_LCG_DDD_RT_UL.exists(),
         "flat-gate short-circuit sample missing",
     )
-    def test_vpeak_without_vge_base_crossings_is_unavailable(self):
+    def test_vpeak_without_vge_base_crossings_uses_current_ab_window(self):
         import numpy as np
 
         from dpt_extractor.config.loader import load_config
@@ -1363,6 +1444,10 @@ class TestSlowGateVpeakRawCrossings(unittest.TestCase):
         )
         from dpt_extractor.models.test_mode import TestMode
         from dpt_extractor.pipeline.run_extract import run_extraction
+        from dpt_extractor.models.waveform import bundle_total_current
+        from dpt_extractor.pipeline.short_circuit_extract import (
+            short_circuit_current_cursors,
+        )
 
         cfg = load_config()
         cfg.test_mode.mode = TestMode.SHORT_CIRCUIT.value
@@ -1373,15 +1458,43 @@ class TestSlowGateVpeakRawCrossings(unittest.TestCase):
         if mapping is not None:
             profile = apply_mapping(profile, mapping)
         result = run_extraction(bundle, profile, cfg)
-
-        self.assertTrue(
+        assert result.segments is not None
+        gate0, gate1 = result.segments.turn_off
+        current_cursors = short_circuit_current_cursors(
+            bundle.t,
+            bundle_total_current(bundle, profile),
+            gate0,
+            gate1,
+            bundle.dt,
+            smooth_ns=cfg.smoothing.detect_window_ns,
+        )
+        if current_cursors is None:
+            current_cursors = short_circuit_current_cursors(
+                bundle.t,
+                bundle_total_current(bundle, profile),
+                0,
+                bundle.n - 1,
+                bundle.dt,
+                smooth_ns=cfg.smoothing.detect_window_ns,
+            )
+        self.assertIsNotNone(current_cursors)
+        assert current_cursors is not None
+        expected_dut = float(
+            np.nanmax(bundle.get(profile.vce)[current_cursors.i0 : current_cursors.i1 + 1])
+        )
+        expected_other = float(
+            np.nanmax(
+                bundle.get(profile.v_diode)[current_cursors.i0 : current_cursors.i1 + 1]
+            )
+        )
+        self.assertFalse(
             result.is_metric_unavailable("短路过程", "应力Vpeak_本管")
         )
-        self.assertTrue(
+        self.assertFalse(
             result.is_metric_unavailable("短路过程", "应力Vpeak_对管")
         )
-        self.assertTrue(np.isnan(result.short_circuit.vpeak_dut))
-        self.assertTrue(np.isnan(result.short_circuit.vpeak_other))
+        self.assertAlmostEqual(result.short_circuit.vpeak_dut, expected_dut, places=9)
+        self.assertAlmostEqual(result.short_circuit.vpeak_other, expected_other, places=9)
 
 
 @unittest.skipUnless(DDD_UH.exists(), "short-circuit DDD sample missing")
@@ -1623,12 +1736,13 @@ class TestShortCircuitGuiInteraction(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
     def setUp(self):
-        from PyQt6.QtCore import QSettings
-
-        from dpt_extractor.gui.main_window import SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY
+        from dpt_extractor.gui.main_window import (
+            SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
+            _app_settings,
+        )
         from dpt_extractor.models.results import SHORT_CIRCUIT_TSC_RANGE_DEFAULT
 
-        self._tsc_settings = QSettings("DPT", "DPTExtractor")
+        self._tsc_settings = _app_settings()
         self._old_tsc_range = self._tsc_settings.value(
             SHORT_CIRCUIT_TSC_RANGE_SETTINGS_KEY,
             None,

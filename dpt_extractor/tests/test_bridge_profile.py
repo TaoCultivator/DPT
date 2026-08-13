@@ -3,6 +3,7 @@ import unittest
 from dpt_extractor.models.bridge_profile import (
     guess_profile_from_path,
     has_bridge_hint_from_path,
+    infer_profile_hint_from_path,
     make_short_circuit_profile,
     make_profile,
     all_profiles,
@@ -54,6 +55,21 @@ class TestBridgeProfile(unittest.TestCase):
         self.assertTrue(has_bridge_hint_from_path("projectA_phaseA_upper_run001.tss"))
         self.assertTrue(has_bridge_hint_from_path("projectB_phaseC_lowside_final.tss"))
         self.assertFalse(has_bridge_hint_from_path("360A.tss"))
+
+    def test_profile_hint_detection_does_not_invent_missing_fields(self):
+        self.assertEqual(
+            infer_profile_hint_from_path("VH_480V_800A.tss"),
+            ("V", "upper"),
+        )
+        self.assertEqual(
+            infer_profile_hint_from_path("project_phaseU_run001.tss"),
+            ("U", None),
+        )
+        self.assertEqual(
+            infer_profile_hint_from_path("project_lowside_run001.tss"),
+            (None, "lower"),
+        )
+        self.assertEqual(infer_profile_hint_from_path("360A.tss"), (None, None))
 
     def test_same_channels_across_phases(self):
         wh = make_profile("W", "upper")

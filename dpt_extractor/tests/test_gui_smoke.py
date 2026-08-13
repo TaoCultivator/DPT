@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -211,10 +213,34 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        from PyQt6.QtCore import QSettings
         from PyQt6.QtWidgets import QApplication
 
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         cls.app = QApplication.instance() or QApplication(sys.argv)
+        cls._settings_tempdir = tempfile.TemporaryDirectory()
+        settings_path = Path(cls._settings_tempdir.name) / "DPTExtractor.ini"
+
+        def settings_factory() -> QSettings:
+            return QSettings(str(settings_path), QSettings.Format.IniFormat)
+
+        cls._settings_factory = staticmethod(settings_factory)
+        cls._settings_patcher = patch(
+            "dpt_extractor.gui.main_window._app_settings",
+            settings_factory,
+        )
+        cls._settings_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._settings_patcher.stop()
+        cls._settings_tempdir.cleanup()
+
+    def setUp(self):
+        settings = self._settings_factory()
+        settings.clear()
+        settings.setValue("license/noncommercial_notice_v1", True)
+        settings.sync()
 
     def test_tss_scope_ypos_sets_initial_zero_offsets(self):
         """TSS 中的示波器 yPosition 是该通道 0 刻度的初始位置。"""
@@ -3005,8 +3031,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         )
         expected_outcome = object()
 
-        def fake_compute(path, cfg, progress_callback):
+        def fake_compute(path, cfg, progress_callback, *, fallback_profile=None):
             self.assertEqual(path, "sample.tss")
+            self.assertIsNone(fallback_profile)
             progress_callback(
                 8750,
                 100000,
@@ -3329,6 +3356,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             MainWindow,
             TEMP_CONDITION_SETTINGS_PREFIX,
         )
+        from dpt_extractor.models.bridge_profile import make_profile
 
         with tempfile.TemporaryDirectory() as tmp:
             settings_path = Path(tmp) / "DPTExtractor.ini"
@@ -3348,19 +3376,34 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 win.spin_temp_value.setValue(32.0)
                 settings.sync()
                 self.assertAlmostEqual(
-                    float(settings.value(f"{TEMP_CONDITION_SETTINGS_PREFIX}RT")),
+                    float(
+                        settings.value(
+                            f"{TEMP_CONDITION_SETTINGS_PREFIX}upper/RT"
+                        )
+                    ),
                     32.0,
                 )
                 win._set_temperature_code("HT")
                 self.assertAlmostEqual(win.spin_temp_value.value(), 150.0)
                 win.spin_temp_value.setValue(155.0)
+                win._set_profile_combos(make_profile("V", "upper"))
+                self.assertEqual(win.combo_temp.currentData(), "HT")
+                self.assertAlmostEqual(win.spin_temp_value.value(), 155.0)
+                win._set_profile_combos(make_profile("U", "lower"))
+                self.assertEqual(win.combo_temp.currentData(), "RT")
+                self.assertAlmostEqual(win.spin_temp_value.value(), 25.0)
+                win.spin_temp_value.setValue(22.0)
                 win.close()
 
                 win2 = MainWindow()
+                win2._set_profile_combos(make_profile("W", "upper"))
                 win2._set_temperature_code("RT")
                 self.assertAlmostEqual(win2.spin_temp_value.value(), 32.0)
                 win2._set_temperature_code("HT")
                 self.assertAlmostEqual(win2.spin_temp_value.value(), 155.0)
+                win2._set_profile_combos(make_profile("W", "lower"))
+                self.assertEqual(win2.combo_temp.currentData(), "RT")
+                self.assertAlmostEqual(win2.spin_temp_value.value(), 22.0)
                 win2.close()
 
     def test_main_window_shows_noncommercial_notice(self):
