@@ -8685,6 +8685,31 @@ class TestMainWindowSmoke(unittest.TestCase):
         finally:
             win.close()
 
+    def test_phase_bridge_change_does_not_restore_previous_local_metric_view(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            # The handler only needs a loaded-bundle sentinel to choose the
+            # recalculation path; all unrelated context switching is isolated.
+            win.bundle = object()
+            with (
+                patch.object(win, "_switch_temperature_context"),
+                patch.object(win, "_switch_report_condition_context"),
+                patch.object(win, "_save_current_setup_selection"),
+                patch.object(win, "_current_profile", return_value=win.profile),
+                patch.object(win, "_recalculate") as recalculate,
+            ):
+                win._on_phase_bridge_changed()
+
+            recalculate.assert_called_once_with(
+                reset_manual=True,
+                restore_active_metric_context=False,
+            )
+        finally:
+            win.bundle = None
+            win.close()
+
     @unittest.skipUnless(OTHER_360A.exists(), "360A unavailable-card sample missing")
     def test_recalculate_restores_unavailable_active_card_empty_cursor_context(self):
         """An unavailable selected row must not regain global MATH cursors."""

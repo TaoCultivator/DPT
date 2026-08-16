@@ -418,6 +418,17 @@ class TestReportTaskProgress(unittest.TestCase):
 
             restarted = MainWindow()
             try:
+                # Startup itself must restore the last phase/bridge and the
+                # matching DPT setup; callers should not need to reselect it.
+                self.assertEqual(restarted.combo_phase.currentData(), "U")
+                self.assertEqual(restarted.combo_bridge.currentData(), "upper")
+                self.assertEqual(restarted._current_temperature_code(), "HT")
+                self.assertEqual(restarted.spin_temp_value.value(), 155.0)
+                startup_dpt = restarted._current_report_conditions()
+                self.assertEqual(startup_dpt.voltage_v, 900.0)
+                self.assertEqual(startup_dpt.current_a, 1048.0)
+                self.assertEqual(startup_dpt.rg_on_ohm, 3.2)
+
                 restarted._set_profile_combos(make_profile("U", "upper"))
                 self.assertEqual(restarted._current_temperature_code(), "HT")
                 self.assertEqual(restarted.spin_temp_value.value(), 155.0)

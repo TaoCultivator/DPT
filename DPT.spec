@@ -22,6 +22,10 @@ datas = [
         str(ROOT / "dpt_extractor" / "io" / "tek_scope_bridge.ps1"),
         "dpt_extractor/io",
     ),
+    (
+        str(ROOT / "dpt_extractor" / "io" / "tekvisa_native.cs"),
+        "dpt_extractor/io",
+    ),
     (str(ROOT / "默认报告模板.xlsx"), "dpt_extractor/templates"),
     (
         str(ROOT / "assets" / "noncommercial_authorization_poster.png"),

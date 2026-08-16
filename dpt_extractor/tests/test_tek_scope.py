@@ -29,6 +29,46 @@ def _ieee_block(payload: bytes) -> bytes:
 
 
 class TekScopeIOTests(unittest.TestCase):
+    def test_bridge_prefers_tekvisa_and_limits_ni_fallback_to_provider_selection(self) -> None:
+        root = Path(__file__).parents[2]
+        bridge = (root / "dpt_extractor" / "io" / "tek_scope_bridge.ps1").read_text(
+            encoding="utf-8"
+        )
+        selection_start = bridge.index("function Open-PreferredVisaContext")
+        selection_end = bridge.index("function Optional-Query", selection_start)
+        selection = bridge[selection_start:selection_end]
+        self.assertIn("foreach ($provider in @('TekVISA', 'NI-VISA'))", selection)
+        self.assertLess(
+            selection.index("Open-TekVisaManager"),
+            selection.index("Open-NiVisaManager"),
+        )
+        self.assertIn("$resolved = Resolve-ScopeIdentity", selection)
+        self.assertIn("if ($scopeNotFound) { throw 'SCOPE_NOT_FOUND' }", selection)
+
+        acquire_start = bridge.index("function Read-ScopeWaveforms")
+        acquire_end = bridge.index("function Test-JsonValue", acquire_start)
+        acquire = bridge[acquire_start:acquire_end]
+        self.assertNotIn("Open-TekVisaManager", acquire)
+        self.assertNotIn("Open-NiVisaManager", acquire)
+        self.assertIn("visa_backend = $Identity.visa_backend", acquire)
+
+        native = (root / "dpt_extractor" / "io" / "tekvisa_native.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("tkVisa64.dll", native)
+        for entrypoint in (
+            "viOpenDefaultRM",
+            "viFindRsrc",
+            "viOpen",
+            "viRead",
+            "viWrite",
+            "viClear",
+        ):
+            self.assertIn(entrypoint, native)
+
+        spec = (root / "DPT.spec").read_text(encoding="utf-8")
+        self.assertIn('"tekvisa_native.cs"', spec)
+
     def test_bridge_requests_full_record_before_reading_preamble(self) -> None:
         bridge = (
             Path(__file__).parents[1] / "io" / "tek_scope_bridge.ps1"
@@ -72,7 +112,7 @@ class TekScopeIOTests(unittest.TestCase):
             Path(__file__).parents[1] / "io" / "tek_scope_bridge.ps1"
         ).read_text(encoding="utf-8")
         sync_start = bridge.index("function Sync-Scope")
-        sync_end = bridge.index("$manager = $null", sync_start)
+        sync_end = bridge.index("$context = $null", sync_start)
         sync = bridge[sync_start:sync_end]
         win_scale = sync.index("$zoom`:HORIZONTAL:WINSCALE")
         position = sync.index("$zoom`:HORIZONTAL:POSITION", win_scale)

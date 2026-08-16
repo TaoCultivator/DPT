@@ -3558,7 +3558,14 @@ class MainWindow(QMainWindow):
         self._save_current_setup_selection()
         self.profile = self._current_profile()
         if self.bundle:
-            self._recalculate(reset_manual=True)
+            # Changing phase/bridge selects a new test context.  It must not
+            # behave like another click on the previously active parameter
+            # row, otherwise the replot immediately enters that row's local
+            # zoom again.
+            self._recalculate(
+                reset_manual=True,
+                restore_active_metric_context=False,
+            )
 
     def _on_apply_label_mapping_requested(self) -> None:
         if self.bundle is None:
@@ -10032,7 +10039,12 @@ class MainWindow(QMainWindow):
             else:
                 current.unavailable_metrics.discard(("开通", "Ls_on"))
 
-    def _recalculate(self, *, reset_manual: bool = False) -> None:
+    def _recalculate(
+        self,
+        *,
+        reset_manual: bool = False,
+        restore_active_metric_context: bool = True,
+    ) -> None:
         if self.bundle is None:
             QMessageBox.warning(self, "提示", "请先打开波形文件")
             return
@@ -10044,8 +10056,16 @@ class MainWindow(QMainWindow):
                     self._clear_manual_adjustments()
                 self._enter_offset_measurement_mode()
                 return
-            active_param = self._active_slope_param
-            active_metric = self.result_table._active_metric
+            active_param = (
+                self._active_slope_param
+                if restore_active_metric_context
+                else None
+            )
+            active_metric = (
+                self.result_table._active_metric
+                if restore_active_metric_context
+                else None
+            )
             if reset_manual:
                 self._clear_manual_adjustments()
                 active_param = None

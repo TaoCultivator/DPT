@@ -13,6 +13,8 @@ $ErrorActionPreference = 'Stop'
 
 $IviPath = 'C:\Program Files\IVI Foundation\VISA\Microsoft.NET\Framework64\v4.0.30319\VISA.NET Shared Components 8.0.2\Ivi.Visa.dll'
 $NiVisaPath = 'C:\Program Files\IVI Foundation\VISA\Microsoft.NET\Framework64\v4.0.30319\NI VISA.NET 26.0\NationalInstruments.Visa.dll'
+$TekVisaPath = 'C:\Program Files\IVI Foundation\VISA\Win64\TekVISA\Bin\tkVisa64.dll'
+$TekVisaAdapterPath = Join-Path $PSScriptRoot 'tekvisa_native.cs'
 
 function Write-Result([object]$Value) {
     $json = $Value | ConvertTo-Json -Depth 8 -Compress
@@ -23,7 +25,20 @@ function Write-ProgressLine([int]$Done, [int]$Total, [string]$Label) {
     [Console]::Out.WriteLine("PROGRESS`t$Done`t$Total`t$Label")
 }
 
-function Open-VisaManager {
+function Open-TekVisaManager {
+    if (-not (Test-Path -LiteralPath $TekVisaPath)) {
+        throw 'TekVISA runtime was not found'
+    }
+    if (-not (Test-Path -LiteralPath $TekVisaAdapterPath)) {
+        throw 'TekVISA adapter source was not found'
+    }
+    if ($null -eq ('Dpt.ScopeIo.TekVisaResourceManager' -as [type])) {
+        Add-Type -Path $TekVisaAdapterPath
+    }
+    return New-Object Dpt.ScopeIo.TekVisaResourceManager
+}
+
+function Open-NiVisaManager {
     if (-not (Test-Path -LiteralPath $IviPath) -or -not (Test-Path -LiteralPath $NiVisaPath)) {
         throw 'NI-VISA .NET runtime was not found'
     }
@@ -33,7 +48,7 @@ function Open-VisaManager {
 }
 
 function Open-Scope([object]$Manager, [string]$ResourceName) {
-    $session = [Ivi.Visa.IMessageBasedSession]$Manager.Open($ResourceName)
+    $session = $Manager.Open($ResourceName)
     $session.TimeoutMilliseconds = 15000
     # Clear unread bytes left by an interrupted binary transfer before the
     # first text query on a newly opened USBTMC session.
@@ -173,6 +188,40 @@ function Resolve-ScopeIdentity([object]$Manager, [string]$RequestedResource) {
     finally {
         if ($null -ne $session) { $session.Dispose() }
     }
+}
+
+function Open-PreferredVisaContext([string]$RequestedResource) {
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $scopeNotFound = $false
+    foreach ($provider in @('TekVISA', 'NI-VISA')) {
+        $manager = $null
+        try {
+            $manager = if ($provider -eq 'TekVISA') {
+                Open-TekVisaManager
+            }
+            else {
+                Open-NiVisaManager
+            }
+            $resolved = Resolve-ScopeIdentity $manager $RequestedResource
+            $identity = [pscustomobject]@{
+                resource = [string]$resolved.resource
+                idn = [string]$resolved.idn
+                visa_backend = $provider
+            }
+            return [pscustomobject]@{
+                manager = $manager
+                identity = $identity
+            }
+        }
+        catch {
+            $message = $_.Exception.Message
+            if ($message -eq 'SCOPE_NOT_FOUND') { $scopeNotFound = $true }
+            $failures.Add("$provider`: $message")
+            if ($null -ne $manager) { $manager.Dispose() }
+        }
+    }
+    if ($scopeNotFound) { throw 'SCOPE_NOT_FOUND' }
+    throw "No supported VISA backend could access the Tektronix oscilloscope. $($failures -join '; ')"
 }
 
 function Optional-Query(
@@ -365,6 +414,7 @@ function Read-ScopeWaveforms([object]$Manager, [object]$Identity, [string]$Desti
         return [ordered]@{
             resource = $Identity.resource
             idn = $Identity.idn
+            visa_backend = $Identity.visa_backend
             record_length = $recordLength
             available_sources = $availableSources
             horizontal_scale = Optional-Query $session 'HORIZONTAL:MODE:SCALE?'
@@ -421,6 +471,7 @@ function Sync-Scope([object]$Manager, [object]$Identity, [string]$JsonPath) {
             return [ordered]@{
                 resource = $Identity.resource
                 idn = $Identity.idn
+                visa_backend = $Identity.visa_backend
                 synced = $true
                 zoom_enabled = $false
             }
@@ -456,6 +507,7 @@ function Sync-Scope([object]$Manager, [object]$Identity, [string]$JsonPath) {
         return [ordered]@{
             resource = $Identity.resource
             idn = $Identity.idn
+            visa_backend = $Identity.visa_backend
             synced = $true
             zoom_enabled = $true
             zoom_winscale = [double](Invoke-Query $session "$zoom`:HORIZONTAL:WINSCALE?")
@@ -467,10 +519,11 @@ function Sync-Scope([object]$Manager, [object]$Identity, [string]$JsonPath) {
     }
 }
 
-$manager = $null
+$context = $null
 try {
-    $manager = Open-VisaManager
-    $identity = Resolve-ScopeIdentity $manager $Resource
+    $context = Open-PreferredVisaContext $Resource
+    $manager = $context.manager
+    $identity = $context.identity
     switch ($Operation) {
         'discover' { Write-Result $identity }
         'acquire' { Write-Result (Read-ScopeWaveforms $manager $identity $OutputPath) }
@@ -482,5 +535,5 @@ catch {
     exit 1
 }
 finally {
-    if ($null -ne $manager) { $manager.Dispose() }
+    if ($null -ne $context -and $null -ne $context.manager) { $context.manager.Dispose() }
 }
