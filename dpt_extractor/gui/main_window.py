@@ -5036,7 +5036,15 @@ class MainWindow(QMainWindow):
         if self._metric_unavailable(section, name):
             return
         if restore_window is not None:
-            self.wave_plot.restore_local_x_window_us(restore_window)
+            cursor_times = self.wave_plot.visible_parameter_cursor_times_us()
+            if (
+                cursor_times is not None
+                and self.wave_plot.local_x_window_contains_times_us(
+                    restore_window,
+                    *cursor_times,
+                )
+            ):
+                self.wave_plot.restore_local_x_window_us(restore_window)
         QTimer.singleShot(0, self._start_scope_sync_from_plot)
 
     def _on_plot_zoom_sync_requested(self, zoom_enabled: bool) -> None:
@@ -5726,11 +5734,28 @@ class MainWindow(QMainWindow):
             ta_us = res0.t_pct_a_s * 1e6
             tb_us = res0.t_pct_b_s * 1e6
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
-        if restored is None:
-            if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
+        if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
+            # A hand-adjusted dv/dt should keep the user's current local view
+            # only while that view still contains this parameter's A/B.  If a
+            # different card moved the X window, restoring just the cursor
+            # state leaves all four cursor lines off-screen and makes the
+            # parameter appear to have no cursor information.
+            if (
+                restored is None
+                or not self.wave_plot.current_local_x_window_contains_us(
+                    ta_us,
+                    tb_us,
+                )
+            ):
                 self._focus_switching_local_view(section, ta_us, tb_us)
-            else:
-                self._focus_switching_local_view(section, search_t0, search_t1)
+        elif (
+            restored is None
+            or not self.wave_plot.current_local_x_window_contains_us(
+                search_t0,
+                search_t1,
+            )
+        ):
+            self._focus_switching_local_view(section, search_t0, search_t1)
         if restored is not None:
             self._apply_dvdt_result(section, res0, top_v, base_v, search_t0, search_t1)
         else:
@@ -7202,7 +7227,10 @@ class MainWindow(QMainWindow):
         interval_channel = matched[0] if matched is not None else boundary_a
         endpoint_a = matched[0] if matched is not None else boundary_a
         endpoint_b = matched[0] if matched is not None else boundary_b
-        if restored is None:
+        if restored is None or not self.wave_plot.current_local_x_window_contains_us(
+            t0_us,
+            t1_us,
+        ):
             self._focus_switching_local_view(section, t0_us, t1_us)
         self.wave_plot.enable_interval_interaction(
             start_t_us=t0_us,
@@ -7345,7 +7373,13 @@ class MainWindow(QMainWindow):
         # 首次进入 Err 时将恢复区放到推荐位置；已经存在手动 energy
         # 光标时，用户可能刚刚平移/缩放到要复核的局部区域。二次点击只恢复
         # 光标和交互状态，不应覆盖当前 X 轴视图。
-        if restored is None and legacy is None:
+        if (
+            (restored is None and legacy is None)
+            or not self.wave_plot.current_local_x_window_contains_us(
+                ta_us,
+                tb_us,
+            )
+        ):
             self._focus_switching_local_view(
                 "反向恢复",
                 min(ta_us, tb_us) - 0.15,
@@ -7496,6 +7530,11 @@ class MainWindow(QMainWindow):
             ta_us, tb_us, ha_v, hb_v = restored
             search_t0 = min(search_t0, float(ta_us), float(tb_us))
             search_t1 = max(search_t1, float(ta_us), float(tb_us))
+            if not self.wave_plot.current_local_x_window_contains_us(
+                ta_us,
+                tb_us,
+            ):
+                self._focus_switching_local_view(section, ta_us, tb_us)
             self.wave_plot.enable_energy_loss_interaction(
                 search_t0,
                 search_t1,

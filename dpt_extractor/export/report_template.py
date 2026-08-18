@@ -41,6 +41,7 @@ from dpt_extractor.utils.filename import parse_setpoints_from_filename
 
 
 PHASE_CODES = ("UH", "UL", "VH", "VL", "WH", "WL")
+_DPT_PHASE_IDENTITY_RE = re.compile(r"^([UVW][HL])(\d+)?$", re.IGNORECASE)
 TEMP_LABELS = {
     "RT": ("25℃", 25),
     "HT": ("150℃", 150),
@@ -557,12 +558,31 @@ def _temperature_report_order_key(value: float) -> tuple[int, float]:
     return (0, number) if number >= 0 else (1, abs(number))
 
 
-def _phase_report_order(phase_code: str) -> int:
-    code = str(phase_code or "").strip().upper()
+def _phase_base_code(phase_code: str) -> str:
+    match = _DPT_PHASE_IDENTITY_RE.fullmatch(
+        str(phase_code or "").strip().upper()
+    )
+    return match.group(1).upper() if match is not None else ""
+
+
+def _phase_module_number(phase_code: str) -> int:
+    match = _DPT_PHASE_IDENTITY_RE.fullmatch(
+        str(phase_code or "").strip().upper()
+    )
+    if match is None or not match.group(2):
+        return 0
+    return int(match.group(2))
+
+
+def _phase_report_order(phase_code: str) -> tuple[int, int]:
+    code = _phase_base_code(phase_code)
     try:
-        return PHASE_CODES.index(code)
+        base_order = PHASE_CODES.index(code)
     except ValueError:
-        return len(PHASE_CODES)
+        base_order = len(PHASE_CODES)
+    # Module identity is the primary order.  Within each module the bridge
+    # order remains H before L: UH1, UL1, UH2, UL2.
+    return _phase_module_number(phase_code), base_order
 
 
 def _phase_family_report_order(phase_family: str) -> int:
@@ -632,8 +652,12 @@ def _infer_phase_code(path: str, result: ExtractResult) -> str:
     for part in reversed(_path_parts(path)):
         stem = Path(part).stem.upper()
         for code in PHASE_CODES:
-            if re.search(rf"(?<![A-Z0-9]){code}(?![A-Z0-9])", stem):
-                return code
+            match = re.search(
+                rf"(?<![A-Z0-9]){code}(\d+)?(?![A-Z0-9])",
+                stem,
+            )
+            if match is not None:
+                return f"{code}{match.group(1) or ''}"
     for value in (result.profile_code, result.phase):
         text = str(value or "").upper()
         for code in PHASE_CODES:
@@ -650,10 +674,24 @@ def _resolve_phase_code(
     """Use the frozen report-page phase/bridge before path inference."""
 
     if phase_code is None:
-        return _infer_phase_code(path, result)
+        code = _infer_phase_code(path, result)
+        if result.short_circuit_mode:
+            return _phase_base_code(code)
+        return code
     code = str(phase_code).strip().upper()
-    if code not in PHASE_CODES:
+    base_code = _phase_base_code(code)
+    if base_code not in PHASE_CODES:
         raise ValueError(f"不支持的相位/桥臂代码：{phase_code}")
+    if result.short_circuit_mode:
+        return base_code
+    if _phase_module_number(code) > 0:
+        return code
+    inferred = _infer_phase_code(path, result)
+    if (
+        _phase_base_code(inferred) == base_code
+        and _phase_module_number(inferred) > 0
+    ):
+        return inferred
     return code
 
 
@@ -1436,7 +1474,7 @@ def _normalize_dpt_waveform_temperature_order(
         (rng, parts)
         for rng, value in _left_merged_ranges_with_value(ws)
         if (parts := _phase_temp_token_parts(value)) is not None
-        and parts[0] in PHASE_CODES
+        and _phase_base_code(parts[0]) in PHASE_CODES
     ]
     blocks: list[_WorksheetRowBlock] = []
     for index, (rng, parts) in enumerate(labels):
@@ -1698,7 +1736,7 @@ def _ensure_dpt_temperature_group(
     seed_groups = [
         (index, group)
         for index, group in enumerate(groups)
-        if group.phase.upper() == phase_code.upper()
+        if _phase_base_code(group.phase) == _phase_base_code(phase_code)
         and _temperature_cell_matches(group.temp, temp_code, temperature_labels)
     ]
     if not seed_groups:
@@ -1707,7 +1745,48 @@ def _ensure_dpt_temperature_group(
             f"报告模板工作表“{data_ws.title}”缺少工况组："
             f"{phase_code.upper()} / {display_temp}；为避免写入错误行，已停止写入"
         )
+    if _phase_module_number(phase_code) == 1:
+        legacy_group = next(
+            (
+                group
+                for _index, group in seed_groups
+                if _phase_module_number(group.phase) == 0
+            ),
+            None,
+        )
+        if legacy_group is not None:
+            # An unnumbered block written by an older release represents the
+            # first physical module.  Give it the explicit module-1 identity
+            # in place so adding module 2 never overwrites or strands those
+            # existing values as an unsorted legacy group.
+            _set_merged_cell_value(
+                data_ws,
+                legacy_group.start_row,
+                1,
+                phase_code.upper(),
+            )
+            return
     _source_index, source_group = seed_groups[-1]
+    source_has_payload = any(
+        _data_row_has_payload(data_ws, row)
+        for row in range(source_group.start_row, source_group.end_row)
+    )
+    if not source_has_payload:
+        # Claim an empty legacy UH/UL template block for the first numbered
+        # module instead of leaving an unused block above the real data.
+        _set_merged_cell_value(
+            data_ws,
+            source_group.start_row,
+            1,
+            phase_code.upper(),
+        )
+        _set_merged_cell_value(
+            data_ws,
+            source_group.start_row,
+            2,
+            _temperature_display(temp_code, temperature_labels),
+        )
+        return
     insert_row = _dpt_temperature_group_insert_row(
         groups,
         phase_code,
@@ -1973,7 +2052,11 @@ def _phase_temp_parts(
     label: str,
     temperature_labels: TemperatureLabels | None = None,
 ) -> tuple[str, str] | None:
-    match = re.fullmatch(r"\s*([UVW][HL])\s*_?\s*(.+?)\s*", str(label or ""), re.I)
+    match = re.fullmatch(
+        r"\s*([UVW][HL]\d*)\s*_?\s*(.+?)\s*",
+        str(label or ""),
+        re.I,
+    )
     if match is None:
         return None
     temp_code = _temperature_code_from_token(match.group(2), temperature_labels)
@@ -1983,7 +2066,11 @@ def _phase_temp_parts(
 
 
 def _phase_temp_token_parts(label: str) -> tuple[str, str] | None:
-    match = re.fullmatch(r"\s*([UVW][HL])\s*_?\s*(.+?)\s*", str(label or ""), re.I)
+    match = re.fullmatch(
+        r"\s*([UVW][HL]\d*)\s*_?\s*(.+?)\s*",
+        str(label or ""),
+        re.I,
+    )
     if match is None:
         return None
     return match.group(1).upper(), match.group(2).strip()

@@ -2200,6 +2200,50 @@ class WaveformPlot(QWidget):
             return None
         return min(float(x0), float(x1)), max(float(x0), float(x1))
 
+    def current_local_x_window_contains_us(self, *times_us: float) -> bool:
+        """Whether the visible local window contains every required time.
+
+        A manual parameter re-entry may preserve the current view only when
+        that view still belongs to the parameter being restored.  Merely
+        having valid cursor objects is insufficient: after selecting another
+        card, the restored A/B lines can be valid but completely outside the
+        visible X range.
+        """
+
+        current = self.current_x_range_us()
+        return self.local_x_window_contains_times_us(current, *times_us)
+
+    def local_x_window_contains_times_us(
+        self,
+        window: tuple[float, float] | None,
+        *times_us: float,
+    ) -> bool:
+        """Whether a proposed local window contains every required time."""
+
+        if window is None or not times_us:
+            return False
+        x0, x1 = min(window), max(window)
+        if not self._is_local_x_window(x0, x1):
+            return False
+        tolerance = max(1e-6, (x1 - x0) * 1e-6)
+        return all(
+            np.isfinite(float(value))
+            and x0 - tolerance <= float(value) <= x1 + tolerance
+            for value in times_us
+        )
+
+    def visible_parameter_cursor_times_us(self) -> tuple[float, float] | None:
+        """Return visible A/B times for validating a restored local window."""
+
+        if (
+            self._cursor_a is None
+            or self._cursor_b is None
+            or not self._cursor_a.isVisible()
+            or not self._cursor_b.isVisible()
+        ):
+            return None
+        return float(self._cursor_a.value()), float(self._cursor_b.value())
+
     def recent_local_x_window_us(self) -> tuple[float, float] | None:
         """Return the latest exact local X window without changing the view."""
 

@@ -71,7 +71,7 @@ class TestEnergyManualPersist(unittest.TestCase):
         self.assertAlmostEqual(float(ha), manual[2], places=6)
         self.assertAlmostEqual(float(hb), manual[3], places=6)
 
-    def _assert_energy_reclick_keeps_current_view(
+    def _assert_energy_reclick_refocuses_offscreen_view(
         self,
         section: str,
         name: str,
@@ -95,8 +95,12 @@ class TestEnergyManualPersist(unittest.TestCase):
         after = plot.current_x_range_us()
         self.assertIsNotNone(after)
         assert after is not None
-        self.assertAlmostEqual(after[0], before[0], places=6)
-        self.assertAlmostEqual(after[1], before[1], places=6)
+        self.assertNotAlmostEqual(after[0], before[0], places=6)
+        self.assertTrue(
+            plot.current_local_x_window_contains_us(manual[0], manual[1])
+        )
+        self.assertTrue(plot._cursor_a.isVisible())
+        self.assertTrue(plot._cursor_b.isVisible())
         win.close()
 
     def test_reclick_eoff_keeps_manual_energy_cursors(self) -> None:
@@ -120,16 +124,20 @@ class TestEnergyManualPersist(unittest.TestCase):
             (19.060, 18.560, 24.0, 8.0),
         )
 
-    def test_reclick_energy_keeps_current_view(self) -> None:
+    def test_reclick_energy_refocuses_when_current_view_hides_cursors(self) -> None:
         for section, name, manual in (
             ("关断过程", "Eoff", (14.420, 15.260, 12.0, 45.0)),
             ("开通", "Eon", (18.360, 18.920, 35.0, 8.0)),
             ("反向恢复", "Err", (19.060, 18.560, 24.0, 8.0)),
         ):
             with self.subTest(section=section, name=name):
-                self._assert_energy_reclick_keeps_current_view(section, name, manual)
+                self._assert_energy_reclick_refocuses_offscreen_view(
+                    section,
+                    name,
+                    manual,
+                )
 
-    def test_x_exit_then_reclick_restores_manual_local_page(self) -> None:
+    def test_x_exit_then_reclick_rejects_saved_page_that_hides_cursors(self) -> None:
         from PyQt6.QtWidgets import QApplication
 
         section, name = "开通", "Eon"
@@ -162,8 +170,10 @@ class TestEnergyManualPersist(unittest.TestCase):
             restored_view = plot.current_x_range_us()
             self.assertIsNotNone(restored_view)
             assert restored_view is not None
-            self.assertAlmostEqual(restored_view[0], expected_view[0], places=6)
-            self.assertAlmostEqual(restored_view[1], expected_view[1], places=6)
+            self.assertNotAlmostEqual(restored_view[0], expected_view[0], places=6)
+            self.assertTrue(
+                plot.current_local_x_window_contains_us(manual[0], manual[1])
+            )
 
             assert plot._cursor_a is not None and plot._cursor_b is not None
             self.assertAlmostEqual(float(plot._cursor_a.value()), manual[0], places=6)

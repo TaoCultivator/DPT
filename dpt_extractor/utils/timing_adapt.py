@@ -138,7 +138,14 @@ def scope_turn_off_bases(
         off_idx, pulse1_on, dt, pre_ns, max_us=4.0, frac_of_interval=0.12
     )
     # 导通段搜索必须能早于分段器 turn_off 窄窗，否则长脉冲工况会落在切换中途
-    w0 = max(0, off_idx - lookback)
+    # ``off_idx`` follows the gate event and can lag the actual Vce departure
+    # by more than the adaptive look-back on slow/noisy captures.  In that
+    # case starting at ``off_idx - lookback`` cuts away the real conducting
+    # plateau and makes the 20th percentile land inside the rising edge.  The
+    # detector's turn-off segment start is already the bounded local event
+    # window, so include it whenever it is earlier.  Eoff Top/Base must come
+    # from that stable local platform, never from an in-edge pseudo level.
+    w0 = max(0, min(int(i0), off_idx - lookback))
     w1 = min(n - 1, i1, off_idx + int(900e-9 / dt))
 
     pre_end = max(w0 + 5, off_idx)

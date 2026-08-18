@@ -240,8 +240,162 @@ class TestReportTemplateWriter(unittest.TestCase):
         result = ExtractResult(profile_code="UL")
         self.assertEqual(_resolve_phase_code(ambiguous, result), "UH")
         self.assertEqual(_resolve_phase_code(ambiguous, result, "vl"), "VL")
+        module_path = str(
+            Path("samples") / "RT" / "UH2_915V_400A_000.tss"
+        )
+        self.assertEqual(
+            _resolve_phase_code(module_path, ExtractResult(profile_code="UH"), "UH"),
+            "UH2",
+        )
+        self.assertEqual(
+            _resolve_phase_code(
+                module_path,
+                ExtractResult(profile_code="UH", short_circuit_mode=True),
+                "UH2",
+            ),
+            "UH",
+        )
         with self.assertRaisesRegex(ValueError, "不支持的相位/桥臂代码"):
             _resolve_phase_code(ambiguous, result, "U")
+
+    def test_dpt_module_rows_do_not_overwrite_and_sort_by_module_then_bridge(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CONDITION,
+            COL_CURRENT,
+            COL_OFF,
+            COL_VOLTAGE,
+        )
+        from dpt_extractor.export.report_template import (
+            DPT_WAVEFORM_BLOCK_STRIDE,
+            DptReportConditions,
+            _dpt_data_groups,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "module_order.xlsx"
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            for start_row, phase in ((5, "UH"), (9, "UL")):
+                for col in (1, 2, COL_CONDITION):
+                    data.merge_cells(
+                        start_row=start_row,
+                        start_column=col,
+                        end_row=start_row + 3,
+                        end_column=col,
+                    )
+                data.cell(start_row, 1, phase)
+                data.cell(start_row, 2, "25℃")
+            # Simulate one value already written by an older unnumbered
+            # release.  It is the legacy module-1 block and must survive a
+            # module-2-first write without becoming an orphan or being reused.
+            data.cell(5, COL_VOLTAGE, 915.0)
+            data.cell(5, COL_CURRENT, 400.0)
+            data.cell(5, COL_OFF["eoff"], 11.0)
+
+            wave = wb.create_sheet("U相_双脉冲波形")
+            for index, phase in enumerate(("UH", "UL")):
+                anchor_row = 1 + index * DPT_WAVEFORM_BLOCK_STRIDE
+                wave.merge_cells(
+                    start_row=anchor_row,
+                    start_column=1,
+                    end_row=anchor_row + 16,
+                    end_column=8,
+                )
+                wave.cell(anchor_row, 1, f"{phase}_25℃")
+                wave.merge_cells(
+                    start_row=anchor_row + 17,
+                    start_column=1,
+                    end_row=anchor_row + 33,
+                    end_column=8,
+                )
+                wave.cell(anchor_row + 17, 1, "915V_400A")
+                wave.merge_cells(
+                    start_row=anchor_row + 34,
+                    start_column=1,
+                    end_row=anchor_row + 50,
+                    end_column=8,
+                )
+                wave.cell(anchor_row + 34, 1, "总概览图")
+            wb.save(report)
+
+            report_conditions = DptReportConditions(
+                voltage_v=915.0,
+                current_a=400.0,
+                cg_nf=10.0,
+            )
+
+            def write_module(phase: str, marker: float) -> None:
+                write_report_template(
+                    ExtractResult(
+                        source_path=str(
+                            Path("samples")
+                            / "RT"
+                            / f"{phase}_915V_400A_000.tss"
+                        ),
+                        profile_code=phase[:2],
+                        turn_off=TurnOffResult(eoff=marker),
+                    ),
+                    report,
+                    phase_code=phase[:2],
+                    temperature_code="RT",
+                    report_conditions=report_conditions,
+                )
+
+            # Deliberately write module 2 first and reverse the bridge order.
+            for phase, marker in (
+                ("UH2", 22.0),
+                ("UL2", 42.0),
+                ("UL1", 41.0),
+                ("UH1", 21.0),
+            ):
+                write_module(phase, marker)
+
+            saved = load_workbook(report)
+            saved_data = saved["U相_双脉冲数据"]
+            groups = _dpt_data_groups(saved_data)
+            self.assertEqual(
+                [group.phase for group in groups],
+                ["UH1", "UL1", "UH2", "UL2"],
+            )
+            self.assertEqual(
+                [
+                    saved_data.cell(group.start_row, COL_OFF["eoff"]).value
+                    for group in groups
+                ],
+                [21.0, 41.0, 22.0, 42.0],
+            )
+            saved_wave = saved["U相_双脉冲波形"]
+            self.assertEqual(
+                [
+                    saved_wave.cell(
+                        1 + index * DPT_WAVEFORM_BLOCK_STRIDE,
+                        1,
+                    ).value
+                    for index in range(4)
+                ],
+                ["UH1_25℃", "UL1_25℃", "UH2_25℃", "UL2_25℃"],
+            )
+
+            # A repeated write updates UH2 only; it must not add or overwrite
+            # any other module/bridge group.
+            write_module("UH2", 222.0)
+            rewritten = load_workbook(report)
+            rewritten_data = rewritten["U相_双脉冲数据"]
+            rewritten_groups = _dpt_data_groups(rewritten_data)
+            self.assertEqual(
+                [group.phase for group in rewritten_groups],
+                ["UH1", "UL1", "UH2", "UL2"],
+            )
+            self.assertEqual(
+                [
+                    rewritten_data.cell(group.start_row, COL_OFF["eoff"]).value
+                    for group in rewritten_groups
+                ],
+                [21.0, 41.0, 222.0, 42.0],
+            )
 
     def test_temperature_identity_guard_rejects_incomplete_foreign_name_set(self):
         from openpyxl.workbook.defined_name import DefinedName
