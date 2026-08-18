@@ -6910,8 +6910,29 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 after_reclick = plot.current_x_range_us()
                 self.assertIsNotNone(after_reclick)
                 assert after_reclick is not None
-                self.assertAlmostEqual(after_reclick[0], before[0], places=6)
-                self.assertAlmostEqual(after_reclick[1], before[1], places=6)
+                if name == "dv/dt":
+                    self.assertNotAlmostEqual(
+                        after_reclick[0], before[0], places=6
+                    )
+                    self.assertIsNotNone(plot._cursor_a)
+                    self.assertIsNotNone(plot._cursor_b)
+                    assert plot._cursor_a is not None
+                    assert plot._cursor_b is not None
+                    self.assertTrue(plot._cursor_a.isVisible())
+                    self.assertTrue(plot._cursor_b.isVisible())
+                    self.assertTrue(
+                        plot.current_local_x_window_contains_us(
+                            float(plot._cursor_a.value()),
+                            float(plot._cursor_b.value()),
+                        )
+                    )
+                else:
+                    self.assertAlmostEqual(
+                        after_reclick[0], before[0], places=6
+                    )
+                    self.assertAlmostEqual(
+                        after_reclick[1], before[1], places=6
+                    )
                 win.close()
 
     @unittest.skipUnless(
@@ -7136,7 +7157,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             finally:
                 win.close()
 
-    def test_restored_trr_and_err_keep_current_view(self):
+    def test_restored_trr_keeps_view_but_err_refocuses_offscreen_cursors(self):
         from PyQt6.QtWidgets import QApplication
 
         from dpt_extractor.config.loader import load_config
@@ -7199,13 +7220,25 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             calls.clear()
             win._on_value_clicked("反向恢复", "Err")
             QApplication.processEvents()
-            self.assertFalse(calls)
+            self.assertTrue(calls)
             after_err_view = plot.current_x_range_us()
             self.assertIsNotNone(before_err_view)
             self.assertIsNotNone(after_err_view)
             assert before_err_view is not None and after_err_view is not None
-            self.assertAlmostEqual(after_err_view[0], before_err_view[0], places=6)
-            self.assertAlmostEqual(after_err_view[1], before_err_view[1], places=6)
+            self.assertNotAlmostEqual(
+                after_err_view[0], before_err_view[0], places=6
+            )
+            self.assertTrue(
+                plot.current_local_x_window_contains_us(
+                    float(saved_err[0]), float(saved_err[1])
+                )
+            )
+            self.assertIsNotNone(plot._cursor_a)
+            self.assertIsNotNone(plot._cursor_b)
+            assert plot._cursor_a is not None
+            assert plot._cursor_b is not None
+            self.assertTrue(plot._cursor_a.isVisible())
+            self.assertTrue(plot._cursor_b.isVisible())
         finally:
             win.close()
 
