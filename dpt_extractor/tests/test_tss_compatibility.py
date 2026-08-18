@@ -253,8 +253,9 @@ class TestFourTssCompatibility(unittest.TestCase):
 class TestGuiCursorBinding(unittest.TestCase):
   """无界面驱动 GUI，逐参数校验数据光标绑定到正确波形/特征（上下桥兼容）。
 
-  Qt 在 unittest 同进程内不易干净退出，故用独立子进程 + 超时运行审计脚本，
-  既隔离 Qt 事件循环，又能在脚本非零退出时给出失败矩阵。
+  Qt 在 unittest 同进程内不易干净退出，故用最多 4 个 TSS 的独立子进程
+  分批运行审计脚本。既隔离 Qt 事件循环和累计资源，又能在脚本非零退出时
+  给出对应批次的失败矩阵。
   """
 
   def test_all_parameter_cursors_bind_correct_waveform(self) -> None:
@@ -269,23 +270,37 @@ class TestGuiCursorBinding(unittest.TestCase):
       import subprocess
       import sys
 
+      from scripts.validate_gui_cursors import DEFAULT_SAMPLE_FRAGMENTS
+
       script = ROOT / "scripts" / "validate_gui_cursors.py"
-      env = dict(os.environ)
-      env.setdefault("QT_QPA_PLATFORM", "offscreen")
-      try:
-          proc = subprocess.run(
-              [sys.executable, str(script)],
-              cwd=str(ROOT),
-              env=env,
-              capture_output=True,
-              text=True,
-              encoding="utf-8",
-              errors="replace",
-              timeout=180,
+      batch_size = 4
+      batch_outputs: list[str] = []
+      for offset in range(0, len(DEFAULT_SAMPLE_FRAGMENTS), batch_size):
+          env = dict(os.environ)
+          env.setdefault("QT_QPA_PLATFORM", "offscreen")
+          env["DPT_VALIDATE_CURSOR_OFFSET"] = str(offset)
+          env["DPT_VALIDATE_CURSOR_LIMIT"] = str(batch_size)
+          env["DPT_VALIDATE_CURSOR_SUMMARY_ONLY"] = "1"
+          try:
+              proc = subprocess.run(
+                  [sys.executable, str(script)],
+                  cwd=str(ROOT),
+                  env=env,
+                  capture_output=True,
+                  text=True,
+                  encoding="utf-8",
+                  errors="replace",
+                  timeout=180,
+              )
+          except subprocess.TimeoutExpired:
+              self.fail(
+                  "validate_gui_cursors.py 分批运行超时 "
+                  f"(offset={offset}, limit={batch_size}, >180s)"
+              )
+          out = (proc.stdout or "") + (proc.stderr or "")
+          batch_outputs.append(f"batch offset={offset}:\n{out}")
+          self.assertEqual(
+              proc.returncode,
+              0,
+              "光标审计存在 FAIL:\n" + "\n".join(batch_outputs),
           )
-      except subprocess.TimeoutExpired:
-          self.fail("validate_gui_cursors.py 运行超时 (>180s)")
-      out = (proc.stdout or "") + (proc.stderr or "")
-      self.assertEqual(
-          proc.returncode, 0, f"光标审计存在 FAIL:\n{out}"
-      )

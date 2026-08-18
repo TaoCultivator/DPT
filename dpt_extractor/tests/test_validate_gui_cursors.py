@@ -672,6 +672,34 @@ class TestCursorAuditCapture(unittest.TestCase):
 
         self.assertEqual(selected, [dpt])
 
+    def test_default_cursor_selection_supports_bounded_pagination(self) -> None:
+        root = Path.cwd()
+        first = root / "示例文件" / "samples" / "UH_750V_1000A_000.tss"
+        second = root / "示例文件" / "samples" / "UL_750V_1000A_000.tss"
+        third = root / "示例文件" / "samples" / "WH_750V_1000A_000.tss"
+        with patch(
+            "scripts.validate_gui_cursors.discover_sample_waveforms",
+            return_value=[first, second, third],
+        ), patch(
+            "scripts.validate_gui_cursors.DEFAULT_SAMPLE_FRAGMENTS",
+            (),
+        ), patch.dict(
+            os.environ,
+            {
+                "DPT_VALIDATE_CURSOR_OFFSET": "1",
+                "DPT_VALIDATE_CURSOR_LIMIT": "1",
+            },
+            clear=False,
+        ):
+            old = os.environ.pop("DPT_VALIDATE_ALL_CURSORS", None)
+            try:
+                selected = _selected_sample_waveforms(root)
+            finally:
+                if old is not None:
+                    os.environ["DPT_VALIDATE_ALL_CURSORS"] = old
+
+        self.assertEqual(selected, [second])
+
     def test_short_only_cursor_selection_filters_before_pagination(self) -> None:
         root = Path.cwd()
         dpt = root / "示例文件" / "samples" / "UH_750V_1000A_000.tss"
@@ -1049,6 +1077,74 @@ class TestShortCircuitGuiAudit(unittest.TestCase):
         for name in ("应力Vpeak_本管", "应力Vpeak_对管"):
             self.assertNotEqual(by_name[name][3], "INFO", by_name[name][4])
         self.assertIn(by_name["Desat动作时间"][3], {"OK", "INFO"})
+
+
+class TestRrDvdtLateSettledPlatformGuiAudit(unittest.TestCase):
+    sample = (
+        Path(__file__).resolve().parents[2]
+        / "示例文件"
+        / "songzhenxi"
+        / "KSU2506"
+        / "DCU"
+        / "SMC"
+        / "LT"
+        / "tss"
+        / "WL_450V_800A_000.tss"
+    )
+
+    @unittest.skipUnless(sample.exists(), "late-settling RR sample missing")
+    def test_rr_platform_after_compact_window_is_not_rejected(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        with patch.dict(
+            os.environ,
+            {"DPT_VALIDATE_CURSOR_METRIC": "反向恢复/dv/dt"},
+        ):
+            rows = audit_file(MainWindow, QApplication, app, self.sample)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1:3], ("反向恢复", "dv/dt"))
+        self.assertEqual(rows[0][3], "OK", rows[0][4])
+        self.assertIn("Ha=438.03", rows[0][4])
+
+
+class TestStablePlatformsOutsideCompactCrossingWindow(unittest.TestCase):
+    sample = (
+        Path(__file__).resolve().parents[2]
+        / "示例文件"
+        / "wanglihui"
+        / "20260729"
+        / "UH_HT_Rgon3.33R_Rgoff8.92R"
+        / "UH_400V_1070A_Rgon3.33R_Rgoff8.92R_000.tss"
+    )
+
+    @unittest.skipUnless(sample.exists(), "slow stable-platform sample missing")
+    def test_dvdt_platforms_need_not_be_inside_compact_ab_window(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        with patch.dict(
+            os.environ,
+            {
+                "DPT_VALIDATE_CURSOR_METRIC": (
+                    "开通/dv/dt|反向恢复/dv/dt"
+                )
+            },
+        ):
+            rows = audit_file(MainWindow, QApplication, app, self.sample)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row[1:3] for row in rows}, {
+            ("开通", "dv/dt"),
+            ("反向恢复", "dv/dt"),
+        })
+        for row in rows:
+            self.assertEqual(row[3], "OK", row[4])
 
 
 class TestTrrExtendedWindowGuiAudit(unittest.TestCase):

@@ -58,19 +58,19 @@ LT_REPORT_RR_DVDT_V_PER_NS = {
     "WL": 5.3973,
 }
 
-UNCHANGED_RR_DVDT_V_PER_NS = {
-    ("HT", "UH"): 24.8523,
-    ("HT", "UL"): 21.1471,
-    ("HT", "VH"): 24.9087,
-    ("HT", "VL"): 20.8697,
-    ("HT", "WH"): 26.0591,
-    ("HT", "WL"): 21.4602,
-    ("RT", "UH"): 6.1526,
-    ("RT", "UL"): 6.1537,
-    ("RT", "VH"): 6.1840,
-    ("RT", "VL"): 6.2618,
-    ("RT", "WH"): 6.2069,
-    ("RT", "WL"): 6.2879,
+STABLE_PLATFORM_RR_DVDT_V_PER_NS = {
+    ("HT", "UH"): 18.05629729392376,
+    ("HT", "UL"): 16.43715401342251,
+    ("HT", "VH"): 17.943293659263166,
+    ("HT", "VL"): 16.721052212254328,
+    ("HT", "WH"): 18.376296838315675,
+    ("HT", "WL"): 16.85790246194822,
+    ("RT", "UH"): 8.722280364658834,
+    ("RT", "UL"): 9.20825974222445,
+    ("RT", "VH"): 8.85922515237225,
+    ("RT", "VL"): 9.361448143800159,
+    ("RT", "WH"): 8.835369622310722,
+    ("RT", "WL"): 9.355705848950942,
 }
 
 UNCHANGED_ERR_MJ = {
@@ -186,9 +186,9 @@ class Test0729ReportReference(unittest.TestCase):
                     delta=0.02 * report_dvdt,
                 )
 
-    def test_ht_and_rt_rr_dvdt_values_do_not_drift(self) -> None:
-        """The low-Irr ringing guard must not change aligned HT/RT slopes."""
-        for (temperature, code), expected in UNCHANGED_RR_DVDT_V_PER_NS.items():
+    def test_ht_and_rt_rr_dvdt_use_stable_blocking_platform(self) -> None:
+        """HT/RT slopes use stable high/low platforms, not Vd overshoot/zero."""
+        for (temperature, code), expected in STABLE_PLATFORM_RR_DVDT_V_PER_NS.items():
             with self.subTest(temperature=temperature, code=code):
                 _bundle, _profile, result = self._load_case(temperature, code)
                 self.assertAlmostEqual(

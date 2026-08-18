@@ -46,7 +46,7 @@ class TestRrSlopeWindowCompletion(unittest.TestCase):
         )
         self.assertAlmostEqual(
             result.reverse_recovery.dvdt_max,
-            5.510489760718153,
+            5.510706815483219,
             places=9,
         )
         self.assertAlmostEqual(
@@ -75,14 +75,13 @@ class TestRrSlopeWindowCompletion(unittest.TestCase):
 
 
 class TestRrMeasurementWindowCompletionGate(unittest.TestCase):
-    def test_settled_rr_dvdt_base_uses_stable_band_visual_center(self) -> None:
+    def test_default_rr_dvdt_uses_stable_high_and_low_voltage_platforms(self) -> None:
         dt = 2e-9
         t = np.arange(2500, dtype=np.float64) * dt
         vd = np.full_like(t, 30.0)
 
-        # The edge-adjacent low plateau has a real 20..40 V visible ripple.
-        # Its reference is the middle of that band, not the most frequent
-        # histogram bucket at either side of it.
+        # A noisy pre-edge trace and a 1000 V recovery overshoot must keep Hb
+        # on the stable 30 V low platform and Ha on the stable 800 V platform.
         ripple = np.array(
             [20.0, 25.0, 30.0, 35.0, 40.0, 35.0, 30.0, 25.0]
         )
@@ -103,12 +102,13 @@ class TestRrMeasurementWindowCompletionGate(unittest.TestCase):
             load_config(),
             0.1,
             0.9,
-            use_settled_platform=True,
             event_end_idx=900,
+            pulse_end_idx=2000,
         )
 
-        self.assertAlmostEqual(context.base_v, 30.0, places=6)
+        self.assertAlmostEqual(context.base_v, 30.0, delta=0.05)
         self.assertAlmostEqual(context.top_v, 800.0, delta=0.05)
+        self.assertLess(context.top_v, float(np.max(vd[800:920])))
         self.assertFalse(context.used_fallback)
 
     def test_extends_when_legacy_window_cannot_reach_90_percent_vd(self) -> None:

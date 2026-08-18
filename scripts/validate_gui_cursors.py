@@ -6,6 +6,8 @@
 默认使用代表性样本以保证 GUI 子进程审计在单测超时内完成；设置
 DPT_VALIDATE_ALL_CURSORS=1 可扫描所有示例 .tss。
 DPT_VALIDATE_DPT_ONLY=1 可在全量模式下仅扫描非短路样例，并在分页前过滤。
+DPT_VALIDATE_CURSOR_MATCH 可按路径片段过滤，再由 OFFSET/LIMIT 分批；
+OFFSET/LIMIT 同时适用于默认代表样本和全量样本，避免 GUI 长进程累积资源。
 """
 from __future__ import annotations
 
@@ -41,12 +43,13 @@ from dpt_extractor.metrics.iec_timings import (  # noqa: E402
 )
 from dpt_extractor.metrics.plateau_level import (  # noqa: E402
     _plateau_mid_without_isolated_spikes,
+    turn_on_dvdt_base_top_levels,
     turn_on_current_hb_ha_window_indices,
     turn_on_current_cursor_hb_a_us,
     turn_on_ic_b_cross_ha_us,
 )
 from dpt_extractor.metrics.slopes import (  # noqa: E402
-    rr_dvdt_prefers_settled_platform,
+    _rr_dvdt_stable_base_top,
 )
 from dpt_extractor.models.waveform import (  # noqa: E402
     bundle_reverse_recovery_current,
@@ -114,7 +117,7 @@ DPT_PARAMETER_CURSOR_ROLES = {
     ("关断过程", "Ic_off_max"): "A/B=Vge下降沿窗口；Ha=Ic最大值；Hb=Ic最小值",
     ("关断过程", "Vce_off_max"): "A/B=Vce取值窗；Ha=Vce最大值；Hb=Vce最小值",
     ("关断过程", "串扰电压"): "A/B=对管Vge取值窗；Ha=Vge最大值；Hb=Vge最小值",
-    ("开通", "dv/dt"): "A/B=Vce阈值交点；Ha=Vce Top；Hb=0幅值基准",
+    ("开通", "dv/dt"): "A/B=Vce阈值交点；Ha/Hb=跌落前后稳定高/低电压平台",
     ("开通", "di/dt"): "A/B=Ic阈值交点；Ha/Hb=Ic Top/Base",
     ("开通", "Eon"): "A=Ic与Ha交点；B=Vce与Hb交点；Ha=Ic；Hb=Vce",
     ("开通", "ΔVce"): "A/Ha=Vce高平台；B/Hb=Vce下降拐点",
@@ -133,7 +136,7 @@ DPT_PARAMETER_CURSOR_ROLES = {
         "Ha=峰后恢复稳定平台max/min平均中线；Hb=有符号I_RM尖峰"
     ),
     ("反向恢复", "Vrr"): "A/B=Vd取值窗；Ha=Vd最大值；Hb=Vd最小值",
-    ("反向恢复", "dv/dt"): "A/B=|Vd|阈值交点；默认Ha=|VDM|/Hb=0；低Irr强振铃时Ha/Hb=稳定Vd Top/Base",
+    ("反向恢复", "dv/dt"): "A/B=|Vd|阈值交点；Ha/Hb=主上升后/前稳定高/低电压平台",
     ("反向恢复", "di/dt"): "A/B=Irr阈值交点；Ha/Hb=Irr恢复平台/正向平台",
     ("反向恢复", "Pdmax"): "A/B=Err功率窗口；有可信功率轨迹时Ha=|Vd|×|Irr|峰，否则Ha/Hb=不适用",
     ("反向恢复", "Err"): "A=Irr与Ha交点；B=Vd与Hb交点；Ha=Irr局部offset Top；Hb=Vd基线",
@@ -2069,7 +2072,17 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
     def record(section, name, status, detail):
         rows.append((sample_id, section, name, status, detail))
 
+    metric_filter_text = os.environ.get(
+        "DPT_VALIDATE_CURSOR_METRIC", ""
+    ).strip()
+    metric_filters = {
+        item.strip()
+        for item in metric_filter_text.split("|")
+        if item.strip()
+    }
     for section, name in INTERACTIVE_PARAMS:
+        if metric_filters and f"{section}/{name}" not in metric_filters:
+            continue
         if result.single_pulse_mode and section in {"开通", "反向恢复"}:
             cap.reset()
             try:
@@ -2271,11 +2284,16 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 else ("irr" if section == "反向恢复" else "ic")
             )
             check_channel(channel, expected_ch, "dvdt/didt")
-            check_level(top_v, channel, "Ha", win)
-            # 开通/RR dv/dt 的 Hb=0 是已接受公式的幅值参考，不是
-            # 必须落在稳定带上的物理 Base；专门分支会精确检查其为 0。
-            if not (name == "dv/dt" and section in {"开通", "反向恢复"}):
-                check_level(base_v, channel, "Hb", win)
+            # ``win`` is the compact A/B crossing-search interval.  Stable
+            # Top/Base bands are deliberately sampled before/after that edge
+            # and may lie outside its raw value range on slow records.  The
+            # metric-specific audits below compare Ha/Hb exactly with their
+            # independently recomputed stable bands, while this common block
+            # only rejects invalid numeric cursor levels.
+            if not np.isfinite(float(top_v)):
+                problems.append(f"Ha不是有限值: {top_v!r}")
+            if not np.isfinite(float(base_v)):
+                problems.append(f"Hb不是有限值: {base_v!r}")
             ab = calls.get("apply_dvdt_ab_times")
             ab_txt = ""
             gui_ab_us: tuple[float, float] | None = None
@@ -2841,31 +2859,32 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     problems.append("开通 dv/dt MainWindow共用context不可用")
                     detail += " | context=none used_fallback=unknown cross=unknown"
                 else:
-                    from dpt_extractor.metrics.iec_timings import (
-                        turn_on_vce_top_from_ic_rise,
-                    )
-
                     segs = result.segments
                     assert segs is not None
-                    independent_top = float(
-                        turn_on_vce_top_from_ic_rise(
-                            chan["ic"],
-                            chan["vce"],
-                            segs.pulse2_on,
+                    on0, on1 = segs.turn_on
+                    independent_base, independent_top = (
+                        turn_on_dvdt_base_top_levels(
+                            np.asarray(chan["vce"]),
+                            on0,
+                            on1,
                             segs.pulse2_off,
                             bundle.dt,
                         )
                     )
-                    if float(base_v) != 0.0 or float(context.base_v) != 0.0:
+                    independent_base = float(independent_base)
+                    independent_top = float(independent_top)
+                    if not _short_values_close(
+                        float(base_v), independent_base, floor=1e-9
+                    ):
                         problems.append(
-                            "开通 dv/dt Hb未使用0幅值基准: "
-                            f"gui/context={float(base_v):.12g}/{float(context.base_v):.12g}V"
+                            "开通 dv/dt Hb未绑定跌落后稳定低电压平台: "
+                            f"{float(base_v):.12g}≠{independent_base:.12g}V"
                         )
                     if not _short_values_close(
                         float(top_v), independent_top, floor=1e-9
                     ):
                         problems.append(
-                            "开通 dv/dt Ha未绑定权威Vce Top: "
+                            "开通 dv/dt Ha未绑定跌落前稳定电压平台: "
                             f"{float(top_v):.12g}≠{independent_top:.12g}V"
                         )
                     context_problems, context_detail = (
@@ -2899,47 +2918,59 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     completed = mw._rr_measurement_window_indices()
                     assert completed is not None
                     rr_i0, rr_i1, _rr_context_i1, _extended = completed
-                    independent_top = float(
-                        np.max(np.abs(chan["v_diode"][rr_i0:rr_i1]))
+                    # The stable blocking platform is intentionally allowed to
+                    # settle after the compact RR crossing window.  Its
+                    # physical upper bound must therefore use the same
+                    # event-local look-ahead as the production context, never
+                    # the compact ``rr_i0:rr_i1`` slice alone.  Some slow
+                    # records finish a few volts above that compact slice while
+                    # remaining well below the actual event peak.
+                    rr_peak_end = max(
+                        rr_i1,
+                        min(int(segs.pulse2_off) + 1, len(t)),
                     )
-                    use_settled_platform = rr_dvdt_prefers_settled_platform(
-                        chan["irr"],
-                        result.reverse_recovery.irr,
+                    independent_peak = float(
+                        np.max(np.abs(chan["v_diode"][rr_i0:rr_peak_end]))
+                    )
+                    independent_levels = _rr_dvdt_stable_base_top(
+                        t,
+                        np.abs(chan["v_diode"]),
+                        rr_i0,
+                        rr_i1,
                         segs.turn_on[1],
                         segs.pulse2_off,
                         bundle.dt,
                     )
-                    if use_settled_platform:
-                        settled_ratio = (
-                            float(context.top_v) / independent_top
-                            if independent_top > 1e-9
-                            else 0.0
+                    if independent_levels is None:
+                        problems.append(
+                            "反向恢复 dv/dt 稳定高低平台独立计算不可用"
                         )
-                        if not 0.70 <= settled_ratio <= 0.98:
-                            problems.append(
-                                "反向恢复 dv/dt 低Irr强振铃时Ha未避开过冲峰值: "
-                                f"Top/|VDM|max={settled_ratio:.6f}"
-                            )
-                        if abs(float(context.base_v)) > 0.05 * abs(
-                            float(context.top_v)
+                    else:
+                        independent_base, independent_top = independent_levels
+                        if not _short_values_close(
+                            float(base_v), float(independent_base), floor=1e-9
                         ):
                             problems.append(
-                                "反向恢复 dv/dt 稳定Base偏离低平台: "
-                                f"{float(context.base_v):.12g}V"
-                            )
-                    else:
-                        if float(base_v) != 0.0 or float(context.base_v) != 0.0:
-                            problems.append(
-                                "反向恢复 dv/dt Hb未使用0幅值基准: "
-                                f"gui/context={float(base_v):.12g}/{float(context.base_v):.12g}V"
+                                "反向恢复 dv/dt Hb未绑定主上升前稳定低电压平台: "
+                                f"{float(base_v):.12g}≠{float(independent_base):.12g}V"
                             )
                         if not _short_values_close(
-                            float(top_v), independent_top, floor=1e-9
+                            float(top_v), float(independent_top), floor=1e-9
                         ):
                             problems.append(
-                                "反向恢复 dv/dt Ha未绑定|VDM|: "
-                                f"{float(top_v):.12g}≠{independent_top:.12g}V"
+                                "反向恢复 dv/dt Ha未绑定恢复后稳定阻断平台: "
+                                f"{float(top_v):.12g}≠{float(independent_top):.12g}V"
                             )
+                    if (
+                        not np.isfinite(float(context.top_v))
+                        or float(context.top_v) <= 0.0
+                        or float(context.top_v) > independent_peak * 1.001
+                    ):
+                        problems.append(
+                            "反向恢复 dv/dt Ha不是有效稳定阻断平台: "
+                            f"Ha={float(context.top_v):.12g}V, "
+                            f"|VDM|max={independent_peak:.12g}V"
+                        )
                     context_problems, context_detail = (
                         _audit_turn_off_slope_context_consistency(
                             metric_name="反向恢复 dv/dt",
@@ -4214,6 +4245,11 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
 
 def _selected_sample_waveforms(root: Path) -> list[Path]:
     discovered = discover_sample_waveforms(root)
+    path_match = os.environ.get("DPT_VALIDATE_CURSOR_MATCH", "").strip().lower()
+    if path_match:
+        discovered = [
+            path for path in discovered if path_match in str(path).lower()
+        ]
     if os.environ.get("DPT_VALIDATE_SHORT_ONLY", "").lower() in {
         "1",
         "true",
@@ -4230,28 +4266,28 @@ def _selected_sample_waveforms(root: Path) -> list[Path]:
         # Full mode is a corpus audit: include both DPT and every short-circuit
         # sample.  Offset/limit continue to provide deterministic pagination.
         paths = discovered
-        try:
-            offset = max(0, int(os.environ.get("DPT_VALIDATE_CURSOR_OFFSET", "0")))
-        except ValueError:
-            offset = 0
-        try:
-            limit = int(os.environ.get("DPT_VALIDATE_CURSOR_LIMIT", "0"))
-        except ValueError:
-            limit = 0
-        if limit > 0:
-            return paths[offset : offset + limit]
-        return paths[offset:]
-    paths = [path for path in discovered if not _is_short_circuit_sample(path)]
-    selected: list[Path] = []
-    for fragments in DEFAULT_SAMPLE_FRAGMENTS:
-        for path in paths:
-            text = str(path)
-            if all(fragment in text for fragment in fragments):
-                selected.append(path)
-                break
-    if selected:
-        return selected
-    return paths[: min(8, len(paths))]
+    else:
+        paths = [path for path in discovered if not _is_short_circuit_sample(path)]
+        selected: list[Path] = []
+        for fragments in DEFAULT_SAMPLE_FRAGMENTS:
+            for path in paths:
+                text = str(path)
+                if all(fragment in text for fragment in fragments):
+                    selected.append(path)
+                    break
+        paths = selected or paths[: min(8, len(paths))]
+
+    try:
+        offset = max(0, int(os.environ.get("DPT_VALIDATE_CURSOR_OFFSET", "0")))
+    except ValueError:
+        offset = 0
+    try:
+        limit = int(os.environ.get("DPT_VALIDATE_CURSOR_LIMIT", "0"))
+    except ValueError:
+        limit = 0
+    if limit > 0:
+        return paths[offset : offset + limit]
+    return paths[offset:]
 
 
 def run_all() -> list[tuple]:
@@ -4282,6 +4318,8 @@ def run_all() -> list[tuple]:
         try:
             for path in _selected_sample_waveforms(ROOT):
                 if _is_short_circuit_sample(path):
+                    if os.environ.get("DPT_VALIDATE_CURSOR_METRIC", "").strip():
+                        continue
                     all_rows.extend(
                         audit_short_circuit_file(MainWindow, QApplication, app, path)
                     )
@@ -4298,13 +4336,19 @@ def main() -> None:
     fails = [r for r in all_rows if r[3] == "FAIL"]
     by_file = _group_rows_by_sample(all_rows)
 
-    for fn, rows in by_file.items():
-        n_ok = sum(1 for r in rows if r[3] == "OK")
-        n_fail = sum(1 for r in rows if r[3] == "FAIL")
-        print(f"\n=== {fn}  OK={n_ok} FAIL={n_fail} ===")
-        for _f, section, name, status, detail in rows:
-            mark = {"OK": "OK ", "FAIL": "FAIL", "INFO": "INFO"}.get(status, status)
-            print(f"  [{mark}] {section}/{name}: {detail}")
+    summary_only = os.environ.get(
+        "DPT_VALIDATE_CURSOR_SUMMARY_ONLY", ""
+    ).lower() in {"1", "true", "yes"}
+    if not summary_only or fails:
+        for fn, rows in by_file.items():
+            n_ok = sum(1 for r in rows if r[3] == "OK")
+            n_fail = sum(1 for r in rows if r[3] == "FAIL")
+            print(f"\n=== {fn}  OK={n_ok} FAIL={n_fail} ===")
+            for _f, section, name, status, detail in rows:
+                mark = {"OK": "OK ", "FAIL": "FAIL", "INFO": "INFO"}.get(
+                    status, status
+                )
+                print(f"  [{mark}] {section}/{name}: {detail}")
 
     ok_count = sum(1 for row in all_rows if row[3] == "OK")
     info_count = sum(1 for row in all_rows if row[3] == "INFO")

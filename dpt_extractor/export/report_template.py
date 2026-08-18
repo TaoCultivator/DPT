@@ -2145,7 +2145,12 @@ def _set_value(ws: Worksheet, row: int, col: int, value) -> None:
         return
     if isinstance(value, str) and not value.strip():
         return
-    ws.cell(row, col, value)
+    # Excel templates edited by users may merge a value slot vertically or
+    # horizontally.  openpyxl exposes every cell except the top-left anchor as
+    # a read-only MergedCell, so assigning through Worksheet.cell(..., value)
+    # raises ``'MergedCell' object attribute 'value' is read-only``.  Route all
+    # report values through the merge anchor while preserving ordinary cells.
+    _set_merged_cell_value(ws, row, col, value)
 
 
 def _normalize_dpt_written_data_row_style(ws: Worksheet, row: int) -> None:
@@ -2172,7 +2177,7 @@ def _set_metric_value(
     value,
 ) -> None:
     if result.is_metric_unavailable(section, name):
-        ws.cell(row, col).value = None
+        _set_merged_cell_value(ws, row, col, None)
         return
     _set_value(ws, row, col, value)
 
@@ -2320,7 +2325,7 @@ def _ensure_dpt_data_power_columns(ws: Worksheet) -> bool:
         ws.cell(HEADER_NAME_ROW, loss_col).value = power_metric_name(section)
         ws.cell(HEADER_UNIT_ROW, loss_col).value = "KW"
         for row in range(DATA_ROW, ws.max_row + 1):
-            ws.cell(row, loss_col).value = None
+            _set_merged_cell_value(ws, row, loss_col, None)
 
     _merge_dpt_data_headers_like_template(ws)
     _rewrite_dpt_header_row(ws)
@@ -2352,8 +2357,8 @@ def _write_dpt_data(
             require_header=require_header,
         )
 
-    ws.cell(row, 4).value = _num(vdc, 1)
-    ws.cell(row, 5).value = _num(idc, 1)
+    _set_merged_cell_value(ws, row, 4, _num(vdc, 1))
+    _set_merged_cell_value(ws, row, 5, _num(idc, 1))
     _set_dpt_metric_value(
         ws,
         row,
@@ -2444,7 +2449,7 @@ def _write_dpt_data(
     ):
         tail_col = col("汇总", COL_TAIL["etotal"], "Etotal（all）", "Etotal")
         if tail_col is not None:
-            ws.cell(row, tail_col).value = None
+            _set_merged_cell_value(ws, row, tail_col, None)
     else:
         tail_col = col("汇总", COL_TAIL["etotal"], "Etotal（all）", "Etotal")
         if tail_col is not None:
@@ -3479,7 +3484,7 @@ def _write_short_data(
         vdc, _idc = _match_setpoints(result)
     if report_conditions is not None:
         vdc = report_conditions.vce_v
-    ws.cell(row, 4).value = _num(vdc, 1)
+    _set_merged_cell_value(ws, row, 4, _num(vdc, 1))
     _set_metric_value(ws, row, 5, result, "短路过程", "短路电流Imax", _num(sc.ic_max, 3))
     _set_metric_value(ws, row, 6, result, "短路过程", "短路时间Tsc", _num(sc.tsc, 4))
     _set_metric_value(ws, row, 7, result, "短路过程", "短路能量Esc_本管", _num(sc.esc_dut, 4))
@@ -3644,7 +3649,7 @@ def _write_short_picture_conditions(
                 key = "VDESAT"
             if key is None:
                 continue
-            ws.cell(row + 1, col).value = values[key]
+            _set_merged_cell_value(ws, row + 1, col, values[key])
 
 
 def _short_image_anchor_row(
@@ -3811,7 +3816,7 @@ def _ensure_short_picture_temperature_block(
                 label.startswith(("VCE", "IMAX", "CDESAT", "RDESAT", "VDESAT"))
                 and row < ws.max_row
             ):
-                ws.cell(row + 1, col).value = None
+                _set_merged_cell_value(ws, row + 1, col, None)
 
 
 def _write_short_images(

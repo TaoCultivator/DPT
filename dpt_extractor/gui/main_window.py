@@ -172,7 +172,6 @@ from dpt_extractor.metrics.slopes import (
     dvdt_max,
     prepare_rr_didt_series,
     rr_dvdt_measurement_context,
-    rr_dvdt_prefers_settled_platform,
     rr_didt_between_levels,
     rr_didt_between_prepared_levels,
     rr_didt_measurement_context,
@@ -884,6 +883,9 @@ class ReportProgressPanel(QFrame):
 
     def is_busy(self) -> bool:
         return self._busy
+
+    def is_running(self) -> bool:
+        return self._running
 
     def _percent(self) -> float:
         if self._task_started:
@@ -1726,6 +1728,7 @@ class MainWindow(QMainWindow):
         self._report_tasks: dict[int, _ReportWriteTask] = {}
         self._report_capture_state: _ReportCaptureState | None = None
         self._report_progress_active = False
+        self._task_progress_owner: str | None = None
         self._report_timing_history = ReportTimingHistory.from_json(
             _app_settings().value(
                 REPORT_TIMING_SETTINGS_KEY,
@@ -3884,10 +3887,18 @@ class MainWindow(QMainWindow):
         self._report_operation_active = False
         self._set_report_busy(False)
 
-    def _begin_task_progress(self, stage: str, total: int, label: str) -> None:
+    def _begin_task_progress(self, stage: str, total: int, label: str) -> bool:
         total = max(1, int(total))
+        if self._task_progress_owner == stage and self.report_progress.is_running():
+            # A report can pass through template, preparation and capture entry
+            # points.  Re-entering the same task must never reset visible
+            # progress or its ETA history.
+            self._report_progress_active = True
+            return False
+        self._task_progress_owner = stage
         self._report_progress_active = True
         self.report_progress.begin(total, label, stage=stage)
+        return True
 
     def _set_task_progress(
         self,
@@ -3900,6 +3911,8 @@ class MainWindow(QMainWindow):
         eta_completed: int = 0,
         eta_total: int = 0,
     ) -> None:
+        if stage is not None and stage != self._task_progress_owner:
+            return
         total = max(1, int(total))
         self.report_progress.update_progress(
             value,
@@ -3919,6 +3932,8 @@ class MainWindow(QMainWindow):
         value: int | None = None,
         total: int | None = None,
     ) -> None:
+        if stage is not None and stage != self._task_progress_owner:
+            return
         if value is None:
             self.report_progress.set_busy(label, stage=stage)
             return
@@ -3936,8 +3951,11 @@ class MainWindow(QMainWindow):
         ok: bool,
         stage: str | None = None,
     ) -> None:
+        if stage is not None and stage != self._task_progress_owner:
+            return
         self.report_progress.finish(label, ok=ok, stage=stage)
         self._report_progress_active = False
+        self._task_progress_owner = None
 
     def _begin_report_progress(
         self,
@@ -3946,7 +3964,9 @@ class MainWindow(QMainWindow):
         *,
         timing_stage: str | None = None,
     ) -> None:
-        self._begin_task_progress("报告写入", total, label)
+        started = self._begin_task_progress("报告写入", total, label)
+        if not started:
+            return
         if self._active_report_timing_context is not None and timing_stage is not None:
             budgets = self._report_timing_history.estimate(
                 self._active_report_timing_context
@@ -5332,7 +5352,7 @@ class MainWindow(QMainWindow):
     def _default_dvdt_on_vce_base_top(
         self, t0_us: float, t1_us: float
     ) -> tuple[float, float] | None:
-        """开通 Vce dv/dt：Hb=0 幅值基准，Ha=权威 Vce Top。"""
+        """开通 Vce dv/dt：Hb/Ha=跌落后的稳定低平台/跌落前稳定高平台。"""
         context = self._turn_on_dvdt_context(t0_us, t1_us)
         if context is None:
             return None
@@ -5394,16 +5414,6 @@ class MainWindow(QMainWindow):
         if completed is None:
             return None
         i0, i1, rr_context_i1, _extended = completed
-        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
-
-        irr = bundle_reverse_recovery_current(self.bundle, self.profile)
-        use_settled_platform = rr_dvdt_prefers_settled_platform(
-            irr,
-            self.result.reverse_recovery.irr,
-            self.result.segments.turn_on[1],
-            self.result.segments.pulse2_off,
-            self.bundle.dt,
-        )
         row_key = SLOPE_ROW_KEYS.get(("反向恢复", "dv/dt"))
         sr = self._slope_ranges.get(row_key) if row_key else None
         pct_a, pct_b = sr.as_fractions() if sr else (0.1, 0.9)
@@ -5418,8 +5428,8 @@ class MainWindow(QMainWindow):
             max(pct_a, pct_b),
             fallback_i0=rr0,
             fallback_i1=rr_context_i1,
-            use_settled_platform=use_settled_platform,
             event_end_idx=self.result.segments.turn_on[1],
+            pulse_end_idx=self.result.segments.pulse2_off,
             auto_max=bool(sr and sr.is_auto_max),
         )
 

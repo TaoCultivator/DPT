@@ -277,7 +277,7 @@ def dvdt_on_vce_fall_base_top(
     seg: np.ndarray, dt: float = 0.0
 ) -> tuple[float, float]:
     """
-    开通 Vce：Ha=跌落前高平台；Hb=回落后平稳段平均值（非全段 min）。
+    开通 Vce：Ha=跌落前稳定高平台；Hb=回落后稳定低平台。
     返回 (Hb, Ha) 即 (base, top)。
     """
     seg = np.asarray(seg, dtype=np.float64)
@@ -301,10 +301,122 @@ def dvdt_on_vce_fall_base_top(
     n_avg = min(len(post), max(12, int(120e-9 / dt_s)))
     post_w = post[-n_avg:] if len(post) >= n_avg else post
     if len(post_w) < 3:
-        hb = float(np.mean(tail)) if len(tail) else float(np.min(seg))
+        hb = (
+            _plateau_mid_without_isolated_spikes(tail)
+            if len(tail)
+            else float(np.min(seg))
+        )
     else:
-        hb = float(np.mean(post_w))
+        hb = _plateau_mid_without_isolated_spikes(post_w)
     return hb, top
+
+
+def _turn_on_dvdt_stable_low_platform(
+    seg: np.ndarray,
+    dt: float,
+    top: float,
+) -> float | None:
+    """Find the quiet low-voltage platform after the physical Vce fall."""
+
+    arr = np.asarray(seg, dtype=np.float64)
+    if len(arr) < 12 or not np.isfinite(top):
+        return None
+    dt_s = max(float(dt), 1e-15)
+    finite_values = arr[np.isfinite(arr)]
+    if len(finite_values) < 8:
+        return None
+    low_seed = float(np.percentile(finite_values, 5.0))
+    if low_seed >= float(top):
+        return None
+    high_threshold = low_seed + 0.90 * (float(top) - low_seed)
+    low_threshold = low_seed + 0.10 * (float(top) - low_seed)
+    below_high = np.flatnonzero(arr <= high_threshold)
+    if len(below_high) == 0:
+        return None
+    main_fall_start = int(below_high[0])
+    below_low = np.flatnonzero(arr[main_fall_start:] <= low_threshold)
+    if len(below_low) == 0:
+        return None
+    low_cross = main_fall_start + int(below_low[0])
+    settle_start = min(
+        len(arr),
+        low_cross + max(8, int(round(100e-9 / dt_s))),
+    )
+    settle_end = min(
+        len(arr),
+        low_cross + max(16, int(round(1.35e-6 / dt_s))),
+    )
+    if settle_end - settle_start < 8:
+        return None
+    candidate = arr[settle_start:settle_end]
+    candidate = candidate[np.isfinite(candidate)]
+    if len(candidate) < 8:
+        return None
+
+    window_n = max(16, int(round(200e-9 / dt_s)))
+    if len(candidate) <= window_n:
+        return float(_plateau_mid_without_isolated_spikes(candidate))
+    step = max(1, window_n // 8)
+    starts = list(range(0, len(candidate) - window_n + 1, step))
+    if starts[-1] != len(candidate) - window_n:
+        starts.append(len(candidate) - window_n)
+    low_ref = float(np.percentile(candidate, 5.0))
+    best_block = candidate[:window_n]
+    best_score = float("inf")
+    for start in starts:
+        block = candidate[start : start + window_n]
+        p05, p95 = (
+            float(np.percentile(block, percentile))
+            for percentile in (5.0, 95.0)
+        )
+        center = 0.5 * (p05 + p95)
+        score = (
+            (p95 - p05)
+            + 0.10 * abs(float(block[-1]) - float(block[0]))
+            + 0.10 * abs(center - low_ref)
+        )
+        if score < best_score:
+            best_score = score
+            best_block = block
+    return float(_plateau_mid_without_isolated_spikes(best_block))
+
+
+def turn_on_dvdt_base_top_levels(
+    vce: np.ndarray,
+    i0: int,
+    i1: int,
+    event_end_idx: int | None,
+    dt: float,
+) -> tuple[float, float]:
+    """Return turn-on dv/dt stable low/high voltage platform centres.
+
+    The compact turn-on segment is authoritative for the pre-fall high
+    platform.  Slow records may not reach the low platform before that segment
+    ends, so Base may search farther within the same event, never across the
+    following pulse2-off boundary.
+    """
+
+    arr = np.asarray(vce, dtype=np.float64)
+    n = len(arr)
+    if n < 2:
+        return 0.0, 0.0
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 1, min(int(i1), n - 1))
+    compact_base, top = dvdt_on_vce_fall_base_top(arr[i0 : i1 + 1], dt)
+    platform_end = i1
+    if event_end_idx is not None:
+        platform_end = max(
+            i1,
+            min(max(i0 + 1, int(event_end_idx) - 1), n - 1),
+        )
+    base = _turn_on_dvdt_stable_low_platform(
+        arr[i0 : platform_end + 1],
+        dt,
+        top,
+    )
+    if base is None or not np.isfinite(base) or float(base) >= float(top):
+        base = compact_base
+    return float(base), float(top)
 
 
 def turn_on_vce_on_max_window_indices(
@@ -476,8 +588,29 @@ def dvdt_rr_vd_base_top(
     dt: float,
     search_end: int,
 ) -> tuple[float, float]:
-    """Hb=0（|VDM| 幅值基准），Ha=震荡结束后的 Vd 平台。"""
-    return 0.0, dvdt_rr_vd_plateau_top(t, v_d, vrr_peak_idx, dt, search_end)
+    """Return stable low/high ``abs(Vd)`` platforms around recovery."""
+
+    t_arr = np.asarray(t, dtype=np.float64)
+    vd_abs = np.abs(np.asarray(v_d, dtype=np.float64))
+    n = min(len(t_arr), len(vd_abs))
+    if n < 4:
+        return 0.0, 0.0
+    peak = max(1, min(int(vrr_peak_idx), n - 1))
+    top = dvdt_rr_vd_plateau_top(t_arr, vd_abs, peak, dt, search_end)
+    pre = vd_abs[: peak + 1]
+    seed = float(np.percentile(pre, 10.0))
+    threshold = seed + 0.10 * (float(top) - seed)
+    crossings = np.flatnonzero(
+        (vd_abs[:peak] < threshold) & (vd_abs[1 : peak + 1] >= threshold)
+    )
+    edge = int(crossings[-1]) if len(crossings) else peak
+    edge_t = float(t_arr[edge])
+    b0 = int(np.searchsorted(t_arr, edge_t - 400e-9, side="left"))
+    b1 = int(np.searchsorted(t_arr, edge_t - 100e-9, side="right"))
+    b0 = max(0, min(b0, n - 2))
+    b1 = max(b0 + 2, min(b1, n))
+    base = _plateau_mid_without_isolated_spikes(vd_abs[b0:b1])
+    return float(base), float(top)
 
 
 def dvdt_fall_base_top_mid(seg: np.ndarray) -> tuple[float, float]:
@@ -1492,10 +1625,10 @@ def turn_off_didt_base_top_levels(
     next_pulse_on: int | None = None,
     base_window: tuple[int, int] | None = None,
 ) -> tuple[float, float]:
-    """关断 di/dt 的本地 Base 与最大电流 Top。
+    """关断 di/dt 的本地稳定电流 Base/Top。
 
-    Top 与 ``Ic_off_max`` 共用真实关断电流下降窗内的 ``max(abs(Ic))``；
-    Base 使用主下降沿后的本地安静回落平台。
+    Top 使用主下降沿前的本地稳定高电流平台；Base 使用主下降沿后的
+    本地稳定低电流平台。独立的 ``Ic_off_max`` 峰值参数不得冒充 Top。
     返回顺序为 ``(Base, Top)``，便于直接生成百分比参考电平。
     """
     ic = np.asarray(ic, dtype=np.float64)
@@ -1510,7 +1643,11 @@ def turn_off_didt_base_top_levels(
     fall_end = max(fall_start + 1, min(int(fall_end), n - 1))
 
     top_seg = ic[fall_start : fall_end + 1]
-    top = float(np.max(np.abs(top_seg))) if len(top_seg) else 0.0
+    top = (
+        float(_quiet_plateau_mid(np.abs(top_seg), prefer="high"))
+        if len(top_seg)
+        else 0.0
+    )
 
     if base_window is None:
         base_window = turn_off_didt_stable_base_window_indices(

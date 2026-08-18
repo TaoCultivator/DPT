@@ -44,6 +44,20 @@ def _drawing_anchor_counts(path: Path) -> dict[str, int]:
 
 
 class TestReportTemplateWriter(unittest.TestCase):
+    def test_report_value_writer_uses_merged_range_anchor(self):
+        from dpt_extractor.export.report_template import _set_value
+
+        wb = Workbook()
+        ws = wb.active
+        ws.merge_cells("D5:D8")
+
+        # A user-edited report can turn the target row into a MergedCell.
+        # The writer must update the writable top-left anchor instead of
+        # raising "MergedCell object attribute value is read-only".
+        _set_value(ws, 6, 4, 750)
+
+        self.assertEqual(ws["D5"].value, 750)
+
     def test_report_condition_inference_covers_dpt_and_short_tokens(self):
         from dpt_extractor.export.report_template import (
             infer_dpt_report_conditions,

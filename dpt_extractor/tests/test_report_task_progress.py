@@ -30,6 +30,49 @@ class TestReportTaskProgress(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_repeated_report_begin_does_not_reset_visible_progress(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._begin_report_progress(100_000, "准备报告")
+            win._set_report_progress(70_000, 100_000, "写入报告数据")
+            before = win.report_progress.percent_text()
+
+            # Reproduce the old lifecycle desynchronization: a later report
+            # entry point sees the compatibility flag as inactive and begins
+            # the same logical task a second time.
+            win._report_progress_active = False
+            win._begin_report_progress(100_000, "准备报告截图")
+
+            self.assertEqual(before, "70.0%")
+            self.assertEqual(win.report_progress.percent_text(), before)
+            self.assertEqual(win.report_progress.detail_text(), "写入报告数据")
+            self.assertTrue(win.report_progress.is_running())
+        finally:
+            win._finish_report_progress("写入失败", ok=False)
+            win.close()
+
+    def test_stale_task_callbacks_cannot_rewrite_active_report_progress(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._begin_task_progress("数据导入", 100, "读取数据")
+            win._begin_report_progress(100, "准备报告")
+            win._set_report_progress(40, 100, "写入报告数据")
+
+            win._set_task_progress(90, 100, "旧导入进度", stage="数据导入")
+            win._finish_task_progress("旧导入完成", ok=True, stage="数据导入")
+
+            self.assertEqual(win.report_progress.stage_text(), "报告写入")
+            self.assertEqual(win.report_progress.percent_text(), "40.0%")
+            self.assertEqual(win.report_progress.detail_text(), "写入报告数据")
+            self.assertTrue(win.report_progress.is_running())
+        finally:
+            win._finish_report_progress("写入失败", ok=False)
+            win.close()
+
     def test_report_write_task_emits_finished_only_after_save_returns(self):
         from PyQt6.QtCore import Qt
 

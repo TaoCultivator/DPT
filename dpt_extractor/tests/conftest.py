@@ -31,5 +31,10 @@ def reset_production_qsettings(isolate_qsettings_root, monkeypatch):
     settings.setValue("license/noncommercial_notice_shown", True)
     settings.sync()
     yield
-    settings.clear()
-    settings.sync()
+    # Some GUI tests explicitly destroy the QApplication.  Qt may then delete
+    # the native QSettings object even though its Python wrapper is still in
+    # scope, so reusing ``settings`` here can raise "wrapped C/C++ object ...
+    # has been deleted".  Reopen the same isolated file for teardown instead.
+    cleanup_settings = settings_factory()
+    cleanup_settings.clear()
+    cleanup_settings.sync()

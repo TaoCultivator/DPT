@@ -31,9 +31,9 @@ WANGLIHUI_HT_TARGETS = (
         / "20260729"
         / "UH_HT_Rgon3.33R_Rgoff8.92R"
         / "UH_486V_950A_Rgon3.33R_Rgoff8.92R_000.tss",
-        0.7317665573531311,
-        27.274399507423403,
-        27.793075847830197,
+        0.7293554360160139,
+        27.275863829518315,
+        27.7900164380851,
     ),
     (
         ROOT
@@ -42,11 +42,76 @@ WANGLIHUI_HT_TARGETS = (
         / "20260729"
         / "UL_HT_Rgon2.267R_Rgoff7.5R"
         / "UL_486V_950A_Rgon2.267R_Rgoff7.5R_000.tss",
-        0.8956070108671828,
-        26.283775999728606,
-        26.712367999726833,
+        0.894175273833987,
+        26.286128080946867,
+        26.709087662884734,
     ),
 )
+
+
+class TestDvdtStablePlatformFailClosed(unittest.TestCase):
+    def test_missing_platform_edge_never_falls_back_to_zero_origin_or_max_slope(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.metrics.slopes import (
+            rr_dvdt_measurement_context,
+            turn_off_dvdt_measurement_context,
+            turn_on_dvdt_measurement_context,
+        )
+
+        t = np.arange(1_200, dtype=np.float64) * 1e-9
+        flat = np.full(len(t), 12.0, dtype=np.float64)
+        cfg = load_config()
+        with patch(
+            "dpt_extractor.metrics.slopes.dvdt_max",
+            return_value=123.456,
+        ):
+            turn_on = turn_on_dvdt_measurement_context(
+                t,
+                flat,
+                750.0,
+                100,
+                800,
+                1e-9,
+                cfg,
+                0.90,
+                0.10,
+                event_end_idx=1_000,
+            )
+            turn_off = turn_off_dvdt_measurement_context(
+                t,
+                flat,
+                100,
+                800,
+                1e-9,
+                cfg,
+                0.10,
+                0.90,
+            )
+            recovery = rr_dvdt_measurement_context(
+                t,
+                -flat,
+                100,
+                800,
+                1e-9,
+                cfg,
+                0.10,
+                0.90,
+                event_end_idx=1_000,
+                pulse_end_idx=1_100,
+            )
+
+        for context in (turn_on, turn_off, recovery):
+            with self.subTest(context=context):
+                self.assertTrue(context.used_fallback)
+                self.assertAlmostEqual(context.base_v, 12.0, places=9)
+                self.assertAlmostEqual(context.top_v, 12.0, places=9)
+                self.assertEqual(context.crossing.dvdt, 0.0)
+                self.assertIsNone(context.crossing.t_pct_a_s)
+                self.assertIsNone(context.crossing.t_pct_b_s)
 
 
 @unittest.skipUnless(TARGET.exists(), "songzhenxi 20260717 HT target sample missing")
@@ -76,7 +141,6 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
         hb = plot._from_disp(channel, float(plot._h_cursor_b.value()))
         self.assertAlmostEqual(ha, float(context.top_v), places=9)
         self.assertAlmostEqual(hb, float(context.base_v), places=9)
-        self.assertEqual(hb, 0.0)
 
         self.assertIsNotNone(context.crossing.t_pct_a_s)
         self.assertIsNotNone(context.crossing.t_pct_b_s)
@@ -127,11 +191,11 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
             on_context = win._turn_on_dvdt_context(*on_interval)
             self.assertIsNotNone(on_context)
             assert on_context is not None
-            self.assertAlmostEqual(on_context.base_v, 0.0, places=12)
-            self.assertAlmostEqual(on_context.top_v, 748.909375, places=9)
+            self.assertAlmostEqual(on_context.base_v, 11.609375, places=9)
+            self.assertAlmostEqual(on_context.top_v, 748.0, places=9)
             self.assertAlmostEqual(
                 on_context.crossing.dvdt,
-                2.1021456116889996,
+                2.1041710329819425,
                 places=12,
             )
             self.assertAlmostEqual(
@@ -141,12 +205,12 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
             )
             self.assertAlmostEqual(
                 float(on_context.crossing.t_pct_a_s) * 1e6,
-                20.576111708438016,
+                20.576103514045492,
                 places=8,
             )
             self.assertAlmostEqual(
                 float(on_context.crossing.t_pct_b_s) * 1e6,
-                20.86111932002712,
+                20.85607719050331,
                 places=8,
             )
             win._on_value_clicked("开通", "dv/dt")
@@ -156,11 +220,20 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
             rr_context = win._rr_dvdt_context()
             self.assertIsNotNone(rr_context)
             assert rr_context is not None
-            self.assertAlmostEqual(rr_context.base_v, 0.0, places=12)
-            self.assertAlmostEqual(rr_context.top_v, 1025.0, places=9)
+            self.assertAlmostEqual(rr_context.base_v, 8.859375, places=9)
+            self.assertAlmostEqual(rr_context.top_v, 720.015625, places=9)
+            self.assertAlmostEqual(
+                win.result.reverse_recovery.vrr,
+                1025.0,
+                places=9,
+            )
+            self.assertGreater(
+                win.result.reverse_recovery.vrr,
+                rr_context.top_v,
+            )
             self.assertAlmostEqual(
                 rr_context.crossing.dvdt,
-                24.852287891176825,
+                18.05629729392376,
                 places=12,
             )
             self.assertAlmostEqual(
@@ -170,12 +243,12 @@ class TestDvdtDefaultContextAlignment(unittest.TestCase):
             )
             self.assertAlmostEqual(
                 float(rr_context.crossing.t_pct_a_s) * 1e6,
-                20.762784727299738,
+                20.75995017145558,
                 places=8,
             )
             self.assertAlmostEqual(
                 float(rr_context.crossing.t_pct_b_s) * 1e6,
-                20.795779677446405,
+                20.79145856937011,
                 places=8,
             )
             win._on_value_clicked("反向恢复", "dv/dt")

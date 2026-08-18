@@ -41,7 +41,6 @@ from dpt_extractor.metrics.commutation_inductance import (
 from dpt_extractor.metrics.plateau_level import turn_off_delta_vce_blocking_top
 from dpt_extractor.metrics.slopes import (
     rr_dvdt_measurement_context,
-    rr_dvdt_prefers_settled_platform,
     rr_didt_measurement_context,
     turn_on_dvdt_measurement_context,
     turn_on_didt_measurement_context,
@@ -600,10 +599,10 @@ def extract_all(
         next_pulse_on=edges.next_pulse_on,
         auto_max=off_di.is_auto_max,
     )
-    # One canonical source keeps Ic_off_max, the displayed Ha/Top, percentage
-    # thresholds, GUI cursors and report values identical even on the fallback
-    # interval path where no dedicated Vge fall window is available.
-    ic_off_max = float(off_didt_context.top_a)
+    # Top/Base belong to stable platforms.  Ic_off_max is an independent peak
+    # metric and must remain in the declared Vge fall window rather than reuse
+    # the di/dt stable Top.
+    ic_off_max = float(np.max(np.abs(ic[ic_f0 : ic_f1 + 1])))
     didt_o = float(off_didt_context.crossing.didt)
 
     # 换流回路杂散电感：Vce 正过冲与 Ic 变化必须使用同一时间子窗。
@@ -901,13 +900,6 @@ def extract_all(
     di_a, di_b = rr_di.as_fractions()
     pct_lo = min(dv_a, dv_b)
     pct_hi = max(dv_a, dv_b)
-    rr_dvdt_settled_platform = rr_dvdt_prefers_settled_platform(
-        irr,
-        irr_peak,
-        on1,
-        edges.pulse2_off,
-        dt,
-    )
     rr_dvdt_context = (
         rr_dvdt_measurement_context(
             t,
@@ -920,8 +912,8 @@ def extract_all(
             pct_hi,
             fallback_i0=rr0,
             fallback_i1=rr_context_i1,
-            use_settled_platform=rr_dvdt_settled_platform,
             event_end_idx=on1,
+            pulse_end_idx=edges.pulse2_off,
             auto_max=rr_dv.is_auto_max,
         )
         if v_diode is not None

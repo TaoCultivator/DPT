@@ -8,7 +8,7 @@ from scipy.ndimage import median_filter
 from dpt_extractor.config.loader import AppConfig
 from dpt_extractor.metrics.plateau_level import (
     _plateau_mid_without_isolated_spikes,
-    dvdt_rr_vd_plateau_top,
+    dvdt_rr_vd_base_top,
 )
 from dpt_extractor.models.slope_range import AUTO_MAX_SLOPE_SPAN_PERCENT
 from dpt_extractor.utils.signal import (
@@ -19,49 +19,23 @@ from dpt_extractor.utils.signal import (
 )
 
 
-def rr_dvdt_prefers_settled_platform(
-    irr: np.ndarray,
-    irr_peak_a: float,
-    compact_event_end_idx: int,
-    pulse_end_idx: int,
-    dt: float,
-) -> bool:
-    """Whether low-IRM ringing makes the Vd overshoot an invalid dv/dt Top.
-
-    The 0729 LT reference captures have a real low-current recovery edge
-    followed by a large ringing packet.  In that morphology the absolute Vd
-    maximum is a later overshoot, not the stable blocking-voltage endpoint.
-    Keep the historical peak-amplitude definition for all other records.
-    """
-    y = np.asarray(irr, dtype=np.float64)
-    n = len(y)
-    if n < 12:
-        return False
-    event_end = max(0, min(int(compact_event_end_idx), n - 1))
-    pulse_end = max(event_end, min(int(pulse_end_idx), n - 1))
-    if pulse_end <= event_end:
-        return False
-    peak_abs = abs(float(irr_peak_a))
-    if not 80.0 <= peak_abs <= 130.0:
-        return False
-    lookahead = max(8, int(round(120e-9 / max(float(dt), 1e-15))))
-    tail_end = min(pulse_end, event_end + lookahead)
-    if tail_end < event_end + 8:
-        return False
-    post_tail = y[event_end : tail_end + 1]
-    post_tail_pp = float(np.max(post_tail) - np.min(post_tail))
-    return post_tail_pp >= max(35.0, 0.35 * peak_abs)
-
-
-def _rr_dvdt_settled_base_top(
+def _rr_dvdt_stable_base_top(
     t: np.ndarray,
     vd_abs: np.ndarray,
     i0: int,
     i1: int,
     event_end_idx: int | None,
+    pulse_end_idx: int | None,
     dt: float,
-) -> tuple[float, float, float, float] | None:
-    """Return event-local stable Vd Base/Top for a ringing-polluted RR edge."""
+) -> tuple[float, float] | None:
+    """Return the reverse-recovery stable low/high voltage platforms.
+
+    The recovery overshoot is a peak metric, not the endpoint of the dv/dt
+    transition.  Search only the post-overshoot blocking interval and use the
+    quietest 200 ns raw band as the horizontal Ha cursor.  The search is
+    bounded before the next pulse edge so a later low-voltage state cannot be
+    mistaken for the blocking platform.
+    """
     t_arr = np.asarray(t, dtype=np.float64)
     y = np.asarray(vd_abs, dtype=np.float64)
     n = min(len(t_arr), len(y))
@@ -75,47 +49,61 @@ def _rr_dvdt_settled_base_top(
         else max(i0 + 1, min(int(event_end_idx), n - 1))
     )
     peak_idx = i0 + int(np.argmax(y[i0 : event_end + 1]))
-    search_end = min(
-        n - 1,
-        max(
-            peak_idx + 2,
-            int(np.searchsorted(t_arr, float(t_arr[peak_idx]) + 1.35e-6)),
-        ),
+    settle_start = int(
+        np.searchsorted(t_arr, float(t_arr[peak_idx]) + 100e-9, side="left")
     )
-    top = float(
-        dvdt_rr_vd_plateau_top(
-            t_arr,
-            y,
-            peak_idx,
-            dt,
-            search_end,
-        )
+    search_end = int(
+        np.searchsorted(t_arr, float(t_arr[peak_idx]) + 1.35e-6, side="right")
     )
+    if pulse_end_idx is not None:
+        search_end = min(search_end, max(0, int(pulse_end_idx)))
+    search_end = max(0, min(search_end, n))
+    settle_start = max(peak_idx + 1, min(settle_start, search_end))
+
+    min_samples = max(8, int(round(200e-9 / max(float(dt), 1e-15))))
+    if search_end - settle_start < min_samples:
+        settle_start = max(peak_idx + 1, search_end - min_samples)
+    platform_band = y[settle_start:search_end]
+    platform_band = platform_band[np.isfinite(platform_band)]
+    if len(platform_band) < 8:
+        return None
+    top = float(_rr_quiet_local_platform_band_center(platform_band, dt))
     if not np.isfinite(top) or top <= 1e-9:
         return None
 
-    seg_t = t_arr[i0:i1]
-    seg_y = y[i0:i1]
-    first_rise = crossing_time(seg_t, seg_y, 0.10 * top, "rising", start=0)
-    base = 0.0
-    if first_rise is not None:
-        base_i0 = int(np.searchsorted(t_arr, float(first_rise) - 400e-9))
-        base_i1 = int(np.searchsorted(t_arr, float(first_rise) - 100e-9))
-        base_i0 = max(0, min(base_i0, n - 2))
-        base_i1 = max(base_i0 + 2, min(base_i1, n))
-        base_band = y[base_i0:base_i1]
-        base_band = base_band[np.isfinite(base_band)]
-        if len(base_band) >= 2:
-            # This range is already a declared, edge-adjacent stable band.
-            # Tek-style modal Top/Base would split its ripple and bias Base
-            # toward one side of the visible trace.  The slope reference must
-            # instead sit at the spike-guarded raw (max + min) / 2 centre.
-            base = float(_plateau_mid_without_isolated_spikes(base_band))
-    if abs(base) <= 0.01 * abs(top):
-        base = 0.0
-    if base >= top:
+    # Locate the physical main rise with a robust seed only; the published
+    # Base comes from a separate edge-adjacent stable band.  Using a seed
+    # percentile here cannot move the final horizontal cursor.
+    pre_event = y[i0 : peak_idx + 1]
+    finite_pre = pre_event[np.isfinite(pre_event)]
+    if len(finite_pre) < 4:
         return None
-    return float(base), float(top)
+    base_seed = float(np.percentile(finite_pre, 10.0))
+    if not np.isfinite(base_seed) or base_seed >= top:
+        return None
+    seg_t = t_arr[i0 : peak_idx + 1]
+    seg_y = y[i0 : peak_idx + 1]
+    first_rise = crossing_time(
+        seg_t,
+        seg_y,
+        base_seed + 0.10 * (top - base_seed),
+        "rising",
+        start=0,
+    )
+    if first_rise is None:
+        return None
+    base_i0 = int(np.searchsorted(t_arr, float(first_rise) - 400e-9))
+    base_i1 = int(np.searchsorted(t_arr, float(first_rise) - 100e-9))
+    base_i0 = max(0, min(base_i0, n - 2))
+    base_i1 = max(base_i0 + 2, min(base_i1, n))
+    base_band = y[base_i0:base_i1]
+    base_band = base_band[np.isfinite(base_band)]
+    if len(base_band) < 4:
+        return None
+    base = float(_plateau_mid_without_isolated_spikes(base_band))
+    if not np.isfinite(base) or base >= top:
+        return None
+    return base, top
 
 
 def dvdt_off(
@@ -1016,29 +1004,54 @@ def turn_on_dvdt_measurement_context(
 ) -> DvdtMeasurementContext:
     """Build the canonical turn-on Vce dv/dt context.
 
-    The accepted DPT definition is ``pct * VceTop`` rather than a percentage
-    of the post-fall local platform span.  ``i1`` is inclusive, matching the
-    turn-on segment stored in :class:`SegmentIndices`.  Keeping the zero
-    reference, A/B crossings and fallback together prevents the result card
-    and its default GUI cursors from silently measuring different slopes.
+    Ha is the quiet high-voltage platform immediately before the Vce fall;
+    an overshoot or a percentile near the upper edge of that band must not
+    redefine the dv/dt endpoint.  Hb is the stable low-voltage platform after
+    the fall, so thresholds use ``Base + pct * (Top - Base)``.  ``top_v`` is
+    retained in the public signature for compatibility but must never replace
+    a missing stable platform with a peak/nominal value.  ``i1`` is inclusive,
+    matching the turn-on segment stored in :class:`SegmentIndices`.
     """
 
     t_arr = np.asarray(t, dtype=np.float64)
     vce_arr = np.asarray(vce, dtype=np.float64)
     n = min(len(t_arr), len(vce_arr))
     if n < 2:
-        crossing = DvdtCrossingResult(0.0, None, None, 0.0, 0.0)
-        return DvdtMeasurementContext(0.0, float(top_v), crossing, True)
+        level = float(vce_arr[0]) if n else 0.0
+        crossing = DvdtCrossingResult(0.0, None, None, level, level)
+        return DvdtMeasurementContext(level, level, crossing, True)
     i0 = max(0, min(int(i0), n - 2))
     i1 = max(i0 + 1, min(int(i1), n - 1))
-    top = float(top_v)
+    from dpt_extractor.metrics.plateau_level import (
+        turn_on_dvdt_base_top_levels,
+    )
+
+    stable_base, stable_top = turn_on_dvdt_base_top_levels(
+        vce_arr,
+        i0,
+        i1,
+        event_end_idx,
+        dt,
+    )
+    base = float(stable_base)
+    top = float(stable_top)
+    if (
+        not np.isfinite(base)
+        or not np.isfinite(top)
+        or top <= base + 1e-9
+    ):
+        level = float(
+            _plateau_mid_without_isolated_spikes(vce_arr[i0 : i1 + 1])
+        )
+        crossing = DvdtCrossingResult(0.0, None, None, level, level)
+        return DvdtMeasurementContext(level, level, crossing, True)
     if auto_max:
         crossing = auto_dvdt_between_base_top(
             t_arr,
             vce_arr,
             i0,
             i1,
-            0.0,
+            base,
             top,
             "fall",
         )
@@ -1053,7 +1066,7 @@ def turn_on_dvdt_measurement_context(
                     vce_arr,
                     i0,
                     extended_i1,
-                    0.0,
+                    base,
                     top,
                     "fall",
                 )
@@ -1063,15 +1076,16 @@ def turn_on_dvdt_measurement_context(
                 ):
                     crossing = extended
         return DvdtMeasurementContext(
-            0.0,
+            base,
             top,
             crossing,
             crossing.t_pct_a_s is None or crossing.t_pct_b_s is None,
         )
     high_pct = max(float(pct_hi), float(pct_lo))
     low_pct = min(float(pct_hi), float(pct_lo))
-    th_hi = high_pct * top
-    th_lo = low_pct * top
+    span = top - base
+    th_hi = base + high_pct * span
+    th_lo = base + low_pct * span
     seg_t = t_arr[i0 : i1 + 1]
     seg_y = vce_arr[i0 : i1 + 1]
     t_a = crossing_time(seg_t, seg_y, th_hi, "falling", start=0)
@@ -1120,8 +1134,6 @@ def turn_on_dvdt_measurement_context(
         else 0.0
     )
     used_fallback = value < 1e-6
-    if used_fallback:
-        value = dvdt_max(t_arr, vce_arr, i0, i1 + 1, dt, cfg)
     crossing = DvdtCrossingResult(
         float(value),
         float(t_a) if t_a is not None else None,
@@ -1129,7 +1141,7 @@ def turn_on_dvdt_measurement_context(
         th_hi,
         th_lo,
     )
-    return DvdtMeasurementContext(0.0, top, crossing, used_fallback)
+    return DvdtMeasurementContext(base, top, crossing, used_fallback)
 
 
 def rr_dvdt_measurement_context(
@@ -1144,43 +1156,44 @@ def rr_dvdt_measurement_context(
     *,
     fallback_i0: int | None = None,
     fallback_i1: int | None = None,
-    use_settled_platform: bool = False,
     event_end_idx: int | None = None,
+    pulse_end_idx: int | None = None,
     auto_max: bool = False,
 ) -> DvdtMeasurementContext:
     """Build the canonical reverse-recovery ``|Vd|`` dv/dt context.
 
     ``i1`` is exclusive to preserve the long-standing
-    :func:`dvdt_diode_recovery` search window.  The default Ha is the same
-    ``|VDM|`` peak used by the numeric result and Hb is its zero-amplitude
-    reference.  A narrowly detected low-IRM ringing morphology may instead
-    use the event-local stable blocking-voltage Base/Top so a later overshoot
-    cannot steal the 90% crossing.
+    :func:`dvdt_diode_recovery` search window.  Ha is the event-local stable
+    blocking-voltage platform and Hb is the stable low-voltage platform before
+    the main rise; the recovery overshoot remains separate from the dv/dt
+    endpoint.
     """
 
     t_arr = np.asarray(t, dtype=np.float64)
     vd_arr = np.asarray(v_d, dtype=np.float64)
     n = min(len(t_arr), len(vd_arr))
     if n < 2:
-        crossing = DvdtCrossingResult(0.0, None, None, 0.0, 0.0)
-        return DvdtMeasurementContext(0.0, 0.0, crossing, True)
+        level = float(abs(vd_arr[0])) if n else 0.0
+        crossing = DvdtCrossingResult(0.0, None, None, level, level)
+        return DvdtMeasurementContext(level, level, crossing, True)
     i0 = max(0, min(int(i0), n - 2))
     i1 = max(i0 + 2, min(int(i1), n))
     seg_t = t_arr[i0:i1]
     seg_y = np.abs(vd_arr[i0:i1])
-    base = 0.0
-    top = float(np.max(seg_y)) if len(seg_y) else 0.0
-    if use_settled_platform:
-        settled_levels = _rr_dvdt_settled_base_top(
-            t_arr,
-            np.abs(vd_arr),
-            i0,
-            i1,
-            event_end_idx,
-            dt,
-        )
-        if settled_levels is not None:
-            base, top = settled_levels
+    stable_levels = _rr_dvdt_stable_base_top(
+        t_arr,
+        np.abs(vd_arr),
+        i0,
+        i1,
+        event_end_idx,
+        pulse_end_idx,
+        dt,
+    )
+    if stable_levels is None:
+        level = float(_plateau_mid_without_isolated_spikes(seg_y))
+        base, top = level, level
+    else:
+        base, top = (float(value) for value in stable_levels)
     if auto_max:
         crossing = auto_dvdt_between_base_top(
             t_arr,
@@ -1214,10 +1227,6 @@ def rr_dvdt_measurement_context(
         else 0.0
     )
     used_fallback = value < 1e-6
-    if used_fallback and not auto_max:
-        fb0 = i0 if fallback_i0 is None else int(fallback_i0)
-        fb1 = i1 if fallback_i1 is None else int(fallback_i1)
-        value = dvdt_max(t_arr, vd_arr, fb0, fb1, dt, cfg)
     crossing = DvdtCrossingResult(
         float(value),
         float(t_a) if t_a is not None else None,
@@ -1434,15 +1443,6 @@ def turn_off_dvdt_measurement_context(
         ):
             crossing = extended
     used_fallback = crossing.dvdt < 1e-6
-    if used_fallback:
-        fallback = dvdt_max(t, vce, search0, search1 + 1, dt, cfg)
-        crossing = DvdtCrossingResult(
-            float(fallback),
-            crossing.t_pct_a_s,
-            crossing.t_pct_b_s,
-            crossing.th_a,
-            crossing.th_b,
-        )
     return DvdtMeasurementContext(
         float(base_v), float(top_v), crossing, used_fallback
     )
@@ -3333,20 +3333,43 @@ def dvdt_diode_recovery(
     pct_hi: float = 0.9,
     vdm_top: float | None = None,
 ) -> float:
+    """兼容入口：按稳定低/高 ``abs(Vd)`` 平台求恢复 dv/dt。
+
+    ``vdm_top`` 仅作为调用方已确认的稳定阻断平台覆盖值；显式 Vrr
+    过冲峰值不得传入或由本函数从窗内最大值推断。缺少稳定平台或完整
+    原始交点时返回 0，不再回退到最大导数。
     """
-    二极管反向恢复 dv/dt：按指导书 dv/dt(1) 用 0.1*(-VDM) -> 0.9*(-VDM)。
-    对 |v_d| 做上升穿越，等价于指导书中的 -VDM 幅值定义，兼容通道极性差异。
-    """
-    seg_t = t[i0:i1]
-    seg_v = np.abs(v_d[i0:i1]).astype(np.float64)
+    t_arr = np.asarray(t, dtype=np.float64)
+    vd_arr = np.asarray(v_d, dtype=np.float64)
+    n = min(len(t_arr), len(vd_arr))
+    if n < 4:
+        return 0.0
+    i0 = max(0, min(int(i0), n - 2))
+    i1 = max(i0 + 2, min(int(i1), n))
+    seg_t = t_arr[i0:i1]
+    seg_v = np.abs(vd_arr[i0:i1]).astype(np.float64)
     if len(seg_t) < 4:
         return 0.0
-    vdm = float(abs(vdm_top)) if vdm_top is not None and abs(vdm_top) > 1e-9 else float(np.max(seg_v))
-    if vdm <= 1e-9:
+    dt = float(np.median(np.diff(seg_t)))
+    peak_idx = i0 + int(np.argmax(seg_v))
+    base, detected_top = dvdt_rr_vd_base_top(
+        t_arr,
+        vd_arr,
+        peak_idx,
+        dt,
+        i1 - 1,
+    )
+    top = (
+        float(abs(vdm_top))
+        if vdm_top is not None and np.isfinite(vdm_top)
+        else float(detected_top)
+    )
+    span = top - float(base)
+    if not np.isfinite(span) or span <= 1e-9:
         return 0.0
 
-    th_lo = pct_lo * vdm
-    th_hi = pct_hi * vdm
+    th_lo = float(base) + pct_lo * span
+    th_hi = float(base) + pct_hi * span
     t_a = crossing_time(seg_t, seg_v, th_lo, "rising", start=0)
     if t_a is None:
         return 0.0
