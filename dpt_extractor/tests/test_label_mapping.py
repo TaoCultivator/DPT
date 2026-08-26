@@ -206,6 +206,47 @@ class TestLabelMapping(unittest.TestCase):
         self.assertEqual(mapping.vge, "CH1")
         self.assertEqual(mapping.vce, "CH2")
 
+    def test_remote_scope_screen_with_one_current_maps_direct_total_ic(self):
+        import numpy as np
+
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        t = np.linspace(-1e-3, 1e-3, 200_001)
+        gate_on = (
+            ((t >= 0.0) & (t <= 8.8e-6))
+            | ((t >= 11.7e-6) & (t <= 15.3e-6))
+        )
+        gate = gate_on.astype(np.float64)
+        vge = -7.0 + 22.0 * gate
+        vce = 880.0 - 865.0 * gate
+        vce_other = 8.0 + 862.0 * gate
+        ic = 50.0 * gate
+        bundle = WaveformBundle(
+            t=t,
+            channels={"CH1": vge, "CH2": vce, "CH3": vce_other, "CH4": ic},
+            meta=TekMetadata(
+                channel_units={"CH1": "V", "CH2": "V", "CH3": "V", "CH4": "A"},
+                horizontal_scale_per_div=2e-6,
+                horizontal_position_percent=50.0,
+                horizontal_delay=7.244e-6,
+            ),
+        )
+
+        mapping, source = infer_best_mapping_from_bundle(bundle, "upper")
+
+        self.assertEqual(source, "trend")
+        self.assertIsNotNone(mapping)
+        assert mapping is not None
+        self.assertEqual(mapping.vge, "CH1")
+        self.assertEqual(mapping.vce, "CH2")
+        self.assertEqual(mapping.ic, "CH4")
+        self.assertEqual(mapping.v_diode, "CH3")
+        self.assertEqual(mapping.il, "")
+        self.assertEqual(mapping.irr, "")
+        self.assertEqual(mapping.vge_other, "")
+        self.assertFalse(mapping.ic_from_sum_irr_il)
+        self.assertFalse(mapping.irr_from_ic_minus_il)
+
     def test_upper_label_ic_ul_is_upper_irr(self):
         import numpy as np
 

@@ -5,6 +5,7 @@ import re
 
 import numpy as np
 
+from dpt_extractor.io.wfm_scope_display import saved_scope_horizontal_window_s
 from dpt_extractor.models.channel_mapping import (
     ChannelMapping,
     sort_channel_names,
@@ -113,6 +114,26 @@ def _mapping_candidate_channels(
             if ch.upper().startswith("MATH") and ch.upper()[4:].isdigit()
         )
     return sort_channel_names(channels)
+
+
+def _trend_analysis_bundle(bundle: WaveformBundle) -> WaveformBundle:
+    """Analyze the saved scope screen when a TSS contains a much longer raw record."""
+
+    if bundle.n < 2:
+        return bundle
+    x0, x1 = saved_scope_horizontal_window_s(
+        bundle.meta,
+        (float(bundle.t[0]), float(bundle.t[-1])),
+    )
+    i0 = max(0, min(int(np.searchsorted(bundle.t, x0, side="left")), bundle.n - 1))
+    i1 = max(i0 + 1, min(int(np.searchsorted(bundle.t, x1, side="right")), bundle.n))
+    if i0 == 0 and i1 == bundle.n:
+        return bundle
+    return WaveformBundle(
+        t=bundle.t[i0:i1],
+        channels={name: values[i0:i1] for name, values in bundle.channels.items()},
+        meta=bundle.meta,
+    )
 
 
 def _channel_values(bundle: WaveformBundle, channel: str) -> np.ndarray:
@@ -453,6 +474,28 @@ def _pick_current_pair(
     return (current, il) if bridge.lower() == "upper" else (current, il)
 
 
+def _pick_direct_total_current(
+    bundle: WaveformBundle,
+    gate: str,
+    features: dict[str, _TrendFeatures],
+    used: set[str],
+) -> str | None:
+    """Accept one strong current trace as an already measured total Ic."""
+
+    remaining = [
+        ch
+        for ch in sort_channel_names(features)
+        if ch not in used and _unit_allows(bundle, ch, "current")
+    ]
+    if len(remaining) != 1:
+        return None
+    current = remaining[0]
+    gate_bin = _binary_gate(_channel_values(bundle, gate))
+    if _switched_current_score(bundle, gate_bin, features, current) < 0.18:
+        return None
+    return current
+
+
 def infer_channel_mapping_from_waveform_trends(
     bundle: WaveformBundle | None,
     bridge: str,
@@ -470,6 +513,8 @@ def infer_channel_mapping_from_waveform_trends(
     """
     if bundle is None:
         return None
+    source_bundle = bundle
+    bundle = _trend_analysis_bundle(source_bundle)
     raw_channels = _raw_scope_channels(bundle)
     if len(raw_channels) < 4:
         return None
@@ -501,7 +546,21 @@ def infer_channel_mapping_from_waveform_trends(
 
     current_pair = _pick_current_pair(bundle, vge, bridge, features, used)
     if current_pair is None:
-        return None
+        direct_current = _pick_direct_total_current(bundle, vge, features, used)
+        if direct_current is None:
+            return None
+        mapping = ChannelMapping(
+            vge=vge,
+            vce=vce,
+            ic=direct_current,
+            il="",
+            irr="",
+            v_diode=v_diode,
+            vge_other=vge_other or "",
+            ic_from_sum_irr_il=False,
+            irr_from_ic_minus_il=False,
+        )
+        return None if validate_mapping(mapping, source_bundle) else mapping
     current, il = current_pair
 
     if bridge.lower() == "upper":
@@ -529,4 +588,4 @@ def infer_channel_mapping_from_waveform_trends(
             irr_from_ic_minus_il=True,
         )
 
-    return None if validate_mapping(mapping, bundle) else mapping
+    return None if validate_mapping(mapping, source_bundle) else mapping

@@ -629,7 +629,7 @@ def _validate_dpt_sample(
     base_prof = guess_profile_from_path(path)
     b = load_waveform(path)
     prof = profile_override or base_prof
-    if profile_override is None and has_bridge_hint_from_path(path):
+    if profile_override is None:
         inferred_mapping, inferred_source = infer_best_mapping_from_bundle(
             b,
             base_prof.bridge,
@@ -812,7 +812,8 @@ def _validate_dpt_sample(
     ha_settle = float(err_base.level)
     settle_pp = 2.0 * float(err_base.amp)
     problems: list[str] = []
-    if (
+    rr_current_available = not r.is_metric_unavailable("反向恢复", "Irr")
+    if rr_current_available and (
         r.is_metric_unavailable("反向恢复", "Trr")
         or not np.isfinite(float(r.reverse_recovery.trr))
         or float(r.reverse_recovery.trr) <= 0.0
@@ -831,13 +832,21 @@ def _validate_dpt_sample(
         cfg,
         pulse2_off=segs.pulse2_off,
     )
-    timing_problems, timing_detail = _audit_turn_on_timing_core(
-        b.t,
-        r,
-        on_timing,
-        event_start_idx=on0,
-        event_end_idx=segs.pulse2_off,
+    timing_metrics_available = any(
+        not r.is_metric_unavailable("开通", name)
+        for name in ("Ton", "Td_on", "Tr")
     )
+    if timing_metrics_available:
+        timing_problems, timing_detail = _audit_turn_on_timing_core(
+            b.t,
+            r,
+            on_timing,
+            event_start_idx=on0,
+            event_end_idx=segs.pulse2_off,
+        )
+    else:
+        timing_problems = []
+        timing_detail = "on_instants=unavailable"
     problems.extend(timing_problems)
     slope_active = default_slope_ranges()
     slope_active.update(cfg.slope_ranges)
@@ -869,15 +878,19 @@ def _validate_dpt_sample(
             di_a = float(rr_context.crossing.resolved_pct_a)
         if rr_context.crossing.resolved_pct_b is not None:
             di_b = float(rr_context.crossing.resolved_pct_b)
-    rr_problems, rr_detail = _audit_rr_didt_context(
-        b.t,
-        irr,
-        rr_context,
-        r.reverse_recovery.didt_irr,
-        pct_a=di_a,
-        pct_b=di_b,
-        measure=rr_measure,
-    )
+    if rr_current_available:
+        rr_problems, rr_detail = _audit_rr_didt_context(
+            b.t,
+            irr,
+            rr_context,
+            r.reverse_recovery.didt_irr,
+            pct_a=di_a,
+            pct_b=di_b,
+            measure=rr_measure,
+        )
+    else:
+        rr_problems = []
+        rr_detail = "rr_current=unavailable"
     problems.extend(rr_problems)
     if _VALIDATE_AUTO_SLOPES:
         for name, value, label in (
@@ -916,15 +929,16 @@ def _validate_dpt_sample(
     if abs(ha - ha_d) >= 1.0:
         problems.append(f"on_ha偏差={abs(ha - ha_d):.2f}A")
     err_tol = max(0.01, 0.02 * max(abs(e_chk), 1e-9))
-    if not (
-        r.reverse_recovery.err > 0.01
-        and abs(r.reverse_recovery.err - e_chk) <= err_tol
-    ):
-        problems.append(f"Err校验={r.reverse_recovery.err:.3f}/{e_chk:.3f}mJ")
-    if abs(mk.hb_a) >= 50.0:
-        problems.append(f"Err Hb={mk.hb_a:.2f}V")
-    if not _err_b_on_vd_main_rise(b.t, vd, mk.t_end, mk.hb_a):
-        problems.append(f"Err B未贴Vd主上升沿={mk.t_end * 1e6:.6f}us")
+    if rr_current_available:
+        if not (
+            r.reverse_recovery.err > 0.01
+            and abs(r.reverse_recovery.err - e_chk) <= err_tol
+        ):
+            problems.append(f"Err校验={r.reverse_recovery.err:.3f}/{e_chk:.3f}mJ")
+        if abs(mk.hb_a) >= 50.0:
+            problems.append(f"Err Hb={mk.hb_a:.2f}V")
+        if not _err_b_on_vd_main_rise(b.t, vd, mk.t_end, mk.hb_a):
+            problems.append(f"Err B未贴Vd主上升沿={mk.t_end * 1e6:.6f}us")
     _append_condition_checks(
         problems,
         expected_voltage=expected_voltage,

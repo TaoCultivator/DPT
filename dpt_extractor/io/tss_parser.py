@@ -20,6 +20,7 @@ from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
 
 _CHANNEL_RE = re.compile(r"^(CH[1-8]|MATH\d+|M\d+)$", re.I)
 _WFM_NAME_RE = re.compile(r"(CH[1-8]|MATH\d+|M\d+)", re.I)
+_REMOTE_WFM_NAME_RE = re.compile(r"(S\d+)_(CH[1-8])", re.I)
 _MATH_KEY_RE = re.compile(r"MATH(\d+)", re.I)
 
 
@@ -39,6 +40,14 @@ def _channel_from_member(member: str) -> str | None:
     if not match:
         return None
     return _normalize_channel(match.group(1))
+
+
+def _remote_source_from_member(member: str) -> str | None:
+    stem = PurePosixPath(member).stem
+    match = _REMOTE_WFM_NAME_RE.fullmatch(stem)
+    if not match:
+        return None
+    return f"{match.group(1).upper()}_{match.group(2).upper()}"
 
 
 def read_file(path: str | Path):
@@ -124,6 +133,11 @@ class _MathSetup:
     y_position: dict[str, float] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
+    remote_order: list[str] = field(default_factory=list)
+    remote_vdiv: dict[str, float] = field(default_factory=dict)
+    remote_y_position: dict[str, float] = field(default_factory=dict)
+    remote_labels: dict[str, str] = field(default_factory=dict)
+    remote_channel_inversions: set[str] = field(default_factory=set)
     horizontal_scale_per_div: float | None = None
     horizontal_position_percent: float | None = None
     horizontal_delay: float | None = None
@@ -198,10 +212,16 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
         value = _strip_setup_value(raw_value)
 
         if key_u == ":MAINWINDOW:SOURCEORDER":
+            source_tokens = [token.strip() for token in value.split(";")]
             setup.order = [
                 _normalize_channel(token)
-                for token in value.split(";")
+                for token in source_tokens
                 if re.fullmatch(r"(?:math|m)\d+", token, flags=re.I)
+            ]
+            setup.remote_order = [
+                token.upper()
+                for token in source_tokens
+                if re.fullmatch(r"s\d+_ch[1-8]", token, flags=re.I)
             ]
             continue
 
@@ -248,6 +268,13 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
                 setup.labels[label_key] = value
             continue
 
+        remote_label_match = re.fullmatch(r":(S\d+_CH[1-8]):LABEL:NAME", key_u)
+        if remote_label_match:
+            remote_key = remote_label_match.group(1)
+            if value:
+                setup.remote_labels[remote_key] = value
+            continue
+
         invert_match = re.fullmatch(r":(CH[1-8]):INVERT", key_u)
         if invert_match:
             channel_key = _normalize_channel(invert_match.group(1))
@@ -255,6 +282,15 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
                 setup.channel_inversions.add(channel_key)
             else:
                 setup.channel_inversions.discard(channel_key)
+            continue
+
+        remote_invert_match = re.fullmatch(r":(S\d+_CH[1-8]):INVERT", key_u)
+        if remote_invert_match:
+            remote_key = remote_invert_match.group(1)
+            if _setup_bool_enabled(value):
+                setup.remote_channel_inversions.add(remote_key)
+            else:
+                setup.remote_channel_inversions.discard(remote_key)
             continue
 
         math_invert_match = re.fullmatch(r":MATH:(MATH\d+):INVERT", key_u)
@@ -274,10 +310,32 @@ def _parse_tss_math_setup(zf: zipfile.ZipFile) -> _MathSetup:
                 pass
             continue
 
+        remote_scale_match = re.fullmatch(
+            r":DISPLAY:WAVEVIEW\d+:(S\d+_CH[1-8]):VERTICAL:SCALE",
+            key_u,
+        )
+        if remote_scale_match:
+            try:
+                setup.remote_vdiv[remote_scale_match.group(1)] = float(value)
+            except ValueError:
+                pass
+            continue
+
         pos_match = re.fullmatch(r":DISPLAY:WAVEVIEW\d+:MATH:(MATH\d+):VERTICAL:POSITION", key_u)
         if pos_match:
             try:
                 setup.y_position[_normalize_channel(pos_match.group(1))] = float(value)
+            except ValueError:
+                pass
+            continue
+
+        remote_pos_match = re.fullmatch(
+            r":DISPLAY:WAVEVIEW\d+:(S\d+_CH[1-8]):VERTICAL:POSITION",
+            key_u,
+        )
+        if remote_pos_match:
+            try:
+                setup.remote_y_position[remote_pos_match.group(1)] = float(value)
             except ValueError:
                 pass
             continue
@@ -519,6 +577,7 @@ class TssParser:
         meta = TekMetadata()
         t_ref: np.ndarray | None = None
         computed_math_channels: set[str] = set()
+        active_remote_session = False
 
         with zipfile.ZipFile(path, "r") as zf:
             math_setup = _parse_tss_math_setup(zf)
@@ -531,6 +590,16 @@ class TssParser:
             )
             if not wfm_members:
                 raise ValueError("TSS 会话: 未找到 .wfm 波形文件")
+            if math_setup.remote_order:
+                active_remote_sources = set(math_setup.remote_order)
+                remote_members = [
+                    name
+                    for name in wfm_members
+                    if _remote_source_from_member(name) in active_remote_sources
+                ]
+                if remote_members:
+                    wfm_members = remote_members
+                    active_remote_session = True
 
             waveform_total = len(wfm_members)
             if progress_callback is not None:
@@ -604,29 +673,30 @@ class TssParser:
             if len(y) != n:
                 channels[ch] = y[:n] if len(y) > n else np.pad(y, (0, n - len(y)))
 
-        if math_setup.formulas:
-            math_order = math_setup.order or sorted(math_setup.formulas, key=_math_sort_key)
+        formula_definitions = {} if active_remote_session else math_setup.formulas
+        if formula_definitions:
+            math_order = math_setup.order or sorted(formula_definitions, key=_math_sort_key)
             formula_sources = {
                 channel: np.asarray(values, dtype=np.float64)
                 for channel, values in channels.items()
             }
             for math_key in math_order:
-                if math_key in channels or math_key not in math_setup.formulas:
+                if math_key in channels or math_key not in formula_definitions:
                     continue
                 try:
                     channels[math_key] = _FormulaEvaluator(t_ref, formula_sources).evaluate(
-                        math_setup.formulas[math_key]
+                        formula_definitions[math_key]
                     )
                     formula_sources[math_key] = channels[math_key]
                     computed_math_channels.add(math_key)
                 except (SyntaxError, ValueError, ZeroDivisionError, FloatingPointError):
                     continue
-            for math_key in sorted(math_setup.formulas, key=_math_sort_key):
+            for math_key in sorted(formula_definitions, key=_math_sort_key):
                 if math_key in channels:
                     continue
                 try:
                     channels[math_key] = _FormulaEvaluator(t_ref, formula_sources).evaluate(
-                        math_setup.formulas[math_key]
+                        formula_definitions[math_key]
                     )
                     formula_sources[math_key] = channels[math_key]
                     computed_math_channels.add(math_key)
@@ -635,27 +705,61 @@ class TssParser:
 
         meta.source_path = str(path.resolve())
         meta.channel_labels = labels
-        meta.channel_labels.update(math_setup.labels)
         meta.channel_vdiv = vdiv
-        meta.channel_vdiv.update(math_setup.vdiv)
         meta.channel_units = channel_units
         meta.channel_y_position = y_position
-        meta.channel_y_position.update(math_setup.y_position)
+        if active_remote_session:
+            remote_to_channel = {
+                source: _normalize_channel(source.split("_", 1)[1])
+                for source in math_setup.remote_order
+            }
+            meta.channel_labels.update(
+                {
+                    remote_to_channel[source]: label
+                    for source, label in math_setup.remote_labels.items()
+                    if source in remote_to_channel
+                }
+            )
+            meta.channel_vdiv.update(
+                {
+                    remote_to_channel[source]: scale
+                    for source, scale in math_setup.remote_vdiv.items()
+                    if source in remote_to_channel
+                }
+            )
+            meta.channel_y_position.update(
+                {
+                    remote_to_channel[source]: position
+                    for source, position in math_setup.remote_y_position.items()
+                    if source in remote_to_channel
+                }
+            )
+        else:
+            meta.channel_labels.update(math_setup.labels)
+            meta.channel_vdiv.update(math_setup.vdiv)
+            meta.channel_y_position.update(math_setup.y_position)
         meta.channel_math_formulas = {
-            key: expr for key, expr in math_setup.formulas.items() if key in channels
+            key: expr for key, expr in formula_definitions.items() if key in channels
         }
         meta.computed_math_channels = computed_math_channels
-        source_inversions = {
-            channel
-            for channel in math_setup.channel_inversions
-            if channel in channels
-        }
+        if active_remote_session:
+            source_inversions = {
+                _normalize_channel(source.split("_", 1)[1])
+                for source in math_setup.remote_channel_inversions
+                if source in remote_to_channel
+            }
+        else:
+            source_inversions = {
+                channel
+                for channel in math_setup.channel_inversions
+                if channel in channels
+            }
         meta.source_channel_inversions = set(source_inversions)
         meta.channel_display_inversions = set(source_inversions)
         meta.horizontal_scale_per_div = math_setup.horizontal_scale_per_div
         meta.horizontal_position_percent = math_setup.horizontal_position_percent
         meta.horizontal_delay = math_setup.horizontal_delay
-        meta.offset_measurements = [
+        meta.offset_measurements = [] if active_remote_session else [
             item
             for item in math_setup.offset_measurements
             if item[0] in channels

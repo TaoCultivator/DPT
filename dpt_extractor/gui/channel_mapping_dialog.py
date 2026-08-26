@@ -24,6 +24,7 @@ from dpt_extractor.models.channel_mapping import (
     channels_for_mapping,
     default_mapping_for,
     infer_mapping_from_bundle,
+    infer_mapping_from_waveform_trends,
     resolve_mapping_conflicts,
     validate_mapping,
 )
@@ -230,6 +231,10 @@ class ChannelMappingDialog(QDialog):
         )
         if custom:
             self._apply_mapping_to_ui(custom)
+            return
+        inferred = infer_mapping_from_waveform_trends(self._bundle, self._bridge)
+        if inferred is not None:
+            self._apply_mapping_to_ui(inferred)
             return
         self._apply_mapping_to_ui(default_mapping_for(self._phase, self._bridge))
 

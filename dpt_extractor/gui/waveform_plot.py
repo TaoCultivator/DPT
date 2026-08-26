@@ -674,9 +674,11 @@ from dpt_extractor.gui.theme import (
     WAVEFORM_TRACE_STYLES,
     apply_combo_popup_style,
 )
+from dpt_extractor.io.wfm_scope_display import saved_scope_horizontal_window_s
 from dpt_extractor.models.bridge_profile import BridgeProfile
 from dpt_extractor.models.results import ExtractResult, SegmentIndices
 from dpt_extractor.models.waveform import (
+    TekMetadata,
     WaveformBundle,
     channel_reference_base_name,
     channel_reference_sign,
@@ -970,6 +972,26 @@ def _exact_x_us_per_div(span_us: float) -> float:
     if span_us <= 0:
         return 0.0
     return span_us / HORIZONTAL_DIV_COUNT
+
+
+def _saved_horizontal_window_us(
+    full_range_us: tuple[float, float],
+    scale_per_div_s: float | None,
+    position_percent: float | None,
+    delay_s: float | None,
+) -> tuple[float, float]:
+    """Return the saved TekScope screen window in microseconds."""
+
+    meta = TekMetadata(
+        horizontal_scale_per_div=scale_per_div_s,
+        horizontal_position_percent=position_percent,
+        horizontal_delay=delay_s,
+    )
+    window_s = saved_scope_horizontal_window_s(
+        meta,
+        (float(full_range_us[0]) * 1e-6, float(full_range_us[1]) * 1e-6),
+    )
+    return window_s[0] * 1e6, window_s[1] * 1e6
 
 
 def _quantize_x_us_per_div(scale_us: float) -> float:
@@ -2199,6 +2221,14 @@ class WaveformPlot(QWidget):
         if not (np.isfinite(float(x0)) and np.isfinite(float(x1))):
             return None
         return min(float(x0), float(x1)), max(float(x0), float(x1))
+
+    def current_local_x_window_us(self) -> tuple[float, float] | None:
+        """Return the exact current X window only while the plot is local."""
+
+        current = self.current_x_range_us()
+        if current is None or not self._is_local_x_window(*current):
+            return None
+        return current
 
     def current_local_x_window_contains_us(self, *times_us: float) -> bool:
         """Whether the visible local window contains every required time.
@@ -5164,9 +5194,15 @@ class WaveformPlot(QWidget):
         self._active_channel = self._display_key_for_channel("ic")
         self._build_channel_bar()
 
-        # ---- 默认 X：铺满双脉冲全景（用原始 t 而非降采样后的 t_us，避免精度损失）----
-        full_min = float(t[0] * 1e6)
-        full_max = float(t[-1] * 1e6)
+        # ---- 全局预览按 TSS 保存的 TekScope 主时基；原始长记录不冒充局部放大 ----
+        record_min = float(t[0] * 1e6)
+        record_max = float(t[-1] * 1e6)
+        full_min, full_max = _saved_horizontal_window_us(
+            (record_min, record_max),
+            bundle.meta.horizontal_scale_per_div,
+            bundle.meta.horizontal_position_percent,
+            bundle.meta.horizontal_delay,
+        )
         full_span = full_max - full_min
         self._full_x_range = (full_min, full_max)
         if is_new_source:

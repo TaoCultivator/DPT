@@ -160,6 +160,56 @@ class TestTssParser(unittest.TestCase):
         bundle.meta.channel_display_inversions.discard("CH2")
         np.testing.assert_allclose(bundle.get("CH2"), -values["CH2"])
 
+    def test_remote_scope_sources_ignore_stale_local_setup_and_restore_display(self):
+        setup_text = (
+            ':MAINWINDOW:SOURCEORDER "0%3Bs1_ch1%3Bs1_ch2%3Bs1_ch3%3Bs1_ch4";'
+            ':CH1:LABEL:NAME "STALE_LOCAL_GATE";'
+            ':CH2:LABEL:NAME "STALE_LOCAL_VCE";'
+            ':MATH:MATH1:DEFINE "Ch1%2BCh2";'
+            ':DISPLAY:GLOBAL:MATH1:STATE 1;'
+            ':S1_CH1:LABEL:NAME "REMOTE_GATE";'
+            ":S1_CH2:INVERT 1;"
+            ":DISPLAY:WAVEVIEW1:S1_CH1:VERTICAL:SCALE 3.2;"
+            ":DISPLAY:WAVEVIEW1:S1_CH2:VERTICAL:SCALE 140.0;"
+            ":DISPLAY:WAVEVIEW1:S1_CH1:VERTICAL:POSITION -1.52;"
+            ":DISPLAY:WAVEVIEW1:S1_CH2:VERTICAL:POSITION -3.48;"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tss_path = Path(tmp) / "remote_scope.tss"
+            with zipfile.ZipFile(tss_path, "w") as zf:
+                zf.writestr("ch1.wfm", b"stale-local")
+                for index in range(1, 5):
+                    zf.writestr(f"s1_ch{index}.wfm", b"remote")
+                zf.writestr("remote_scope.set", self._make_setup_zip(setup_text))
+
+            def fake_read(path: str):
+                stem = Path(path).stem.lower()
+                index = int(stem.rsplit("ch", 1)[1])
+                wfm = self._make_wfm(n=8, label="")
+                wfm.source_name = ""
+                wfm.y_axis_units = "A" if index == 4 else "V"
+                wfm.y_axis_values = np.linspace(float(index), float(index + 1), 8)
+                return wfm
+
+            with (
+                patch("dpt_extractor.io.tss_parser.read_file", side_effect=fake_read),
+                patch(
+                    "dpt_extractor.io.tss_parser.read_wfm_vertical_scale_per_div",
+                    return_value=999.0,
+                ),
+                patch("dpt_extractor.io.tss_parser.read_wfm_vertical_unit", return_value=""),
+            ):
+                bundle = TssParser().parse(tss_path)
+
+        self.assertEqual(set(bundle.channels), {"CH1", "CH2", "CH3", "CH4"})
+        self.assertEqual(bundle.meta.channel_labels, {"CH1": "REMOTE_GATE"})
+        self.assertAlmostEqual(bundle.meta.channel_vdiv["CH1"], 3.2)
+        self.assertAlmostEqual(bundle.meta.channel_vdiv["CH2"], 140.0)
+        self.assertAlmostEqual(bundle.meta.channel_y_position["CH1"], -1.52)
+        self.assertAlmostEqual(bundle.meta.channel_y_position["CH2"], -3.48)
+        self.assertEqual(bundle.meta.source_channel_inversions, {"CH2"})
+        self.assertEqual(bundle.meta.channel_math_formulas, {})
+
     def test_setup_math_uses_default_display_inversion_sources(self):
         values = {
             "CH1": np.array([1.0, 2.0, 3.0], dtype=np.float64),

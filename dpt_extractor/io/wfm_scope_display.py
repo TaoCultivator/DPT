@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import struct
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from dpt_extractor.models.waveform import TekMetadata, channel_reference_base_na
 # Tek .wfm: scope V/div = explicit_dimensions.scale × this factor.
 # explicit_user_view.scale is zoom-adjusted and does not match the V/div readout.
 _TEK_WFM_VERT_SCALE_TO_VDIV: float = 6400.0
+_TEK_HORIZONTAL_DIV_COUNT: float = 10.0
 
 WFMFile = None
 WfmFormat = None
@@ -47,6 +49,53 @@ def normalize_wfm_unit(unit: object) -> str:
         return ""
     compact = text.replace(" ", "").upper()
     return _UNIT_ALIASES.get(compact, text)
+
+
+def saved_scope_horizontal_window_s(
+    meta: TekMetadata,
+    full_range_s: tuple[float, float],
+) -> tuple[float, float]:
+    """Return the TekScope screen window saved in a session, clamped to its record."""
+
+    full_min, full_max = float(full_range_s[0]), float(full_range_s[1])
+    full_span = full_max - full_min
+    if not math.isfinite(full_min) or not math.isfinite(full_max) or full_span <= 0.0:
+        return full_min, full_max
+    try:
+        screen_span = float(meta.horizontal_scale_per_div) * _TEK_HORIZONTAL_DIV_COUNT
+    except (TypeError, ValueError):
+        return full_min, full_max
+    if (
+        not math.isfinite(screen_span)
+        or screen_span <= 0.0
+        or screen_span >= full_span - max(1e-12, full_span * 1e-5)
+    ):
+        return full_min, full_max
+
+    try:
+        position = float(meta.horizontal_position_percent)
+    except (TypeError, ValueError):
+        position = 50.0
+    if not math.isfinite(position) or not 0.0 <= position <= 100.0:
+        position = 50.0
+    try:
+        delay = float(meta.horizontal_delay)
+    except (TypeError, ValueError):
+        delay = 0.0
+    if not math.isfinite(delay):
+        delay = 0.0
+
+    screen_min = delay - screen_span * position / 100.0
+    screen_max = screen_min + screen_span
+    if screen_max <= full_min or screen_min >= full_max:
+        return full_min, full_max
+    if screen_min < full_min:
+        screen_max += full_min - screen_min
+        screen_min = full_min
+    if screen_max > full_max:
+        screen_min -= screen_max - full_max
+        screen_max = full_max
+    return max(full_min, screen_min), min(full_max, screen_max)
 
 
 def _wfm_dependencies():
