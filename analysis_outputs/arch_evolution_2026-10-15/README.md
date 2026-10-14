@@ -3,7 +3,11 @@
 > 议题 `k-mv89ep9q-2`　·　日期 2026-10-15
 > **本目录不修改 `dpt_extractor/` 下任何文件**，全部为只读调用 + 新增测量脚本。
 
-结论文档：**[`docs/DECISION.md`](docs/DECISION.md)**（先读这个）
+结论文档：**[`DECISION.md`](DECISION.md)**（先读这个）
+
+> 注：本目录刻意**不叫 `docs/`**——仓库根 `.gitignore` 第 6 行有一条**未加锚点**的
+> `docs/` 规则，会匹配到任意层级的 `docs/` 目录。若把交付文档放在 `docs/` 下，
+> 它会被静默排除在提交之外（本议题第一版就踩了这个坑，已改正）。
 
 ---
 
@@ -173,7 +177,7 @@ $env:QT_QPA_PLATFORM='offscreen'
 - 只有显式传 `--rel-tol` 才会放宽为相对误差；**放宽必须由人签字并写进 PR**。
 - 退出码：`PASS` → 0，`FAIL` → 1，便于接进 CI。
 
-工具自验证记录（含反向对照）见 `docs/DECISION.md` 第 4.1 节。
+工具自验证记录（含反向对照）见 [`DECISION.md`](DECISION.md) 第 4.1 节。
 
 ---
 
