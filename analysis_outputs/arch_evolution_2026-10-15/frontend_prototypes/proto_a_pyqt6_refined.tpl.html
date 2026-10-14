@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>原型 A · PyQt6 精致化（现状延续）</title>
+<style>
+  /* 原型 A：在现有 PyQt6 + pyqtgraph 栈内做精致化。
+     视觉语言刻意保持「桌面专业仪器」：近直角、细描边、高信息密度、
+     克制的动效。代表「零迁移风险」路线的审美上限。 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1440px; height: 900px; overflow: hidden;
+    font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    background: #1e1f24; color: #d8dae0; -webkit-font-smoothing: antialiased; }
+
+  .titlebar { height: 34px; display: flex; align-items: center; gap: 9px;
+    padding: 0 12px; background: #2b2d33; border-bottom: 1px solid #3a3d44; font-size: 12.5px; }
+  .titlebar .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .titlebar .name { font-weight: 600; }
+  .titlebar .meta { margin-left: auto; color: #8b8f99;
+    font-family: "Cascadia Mono", monospace; font-size: 11.5px; }
+
+  .toolbar { height: 42px; display: flex; align-items: center; gap: 7px;
+    padding: 0 12px; background: #26282e; border-bottom: 1px solid #3a3d44; font-size: 12px; }
+  .btn { height: 26px; padding: 0 12px; background: #34373e; border: 1px solid #464a53;
+    color: #cfd2d9; font-size: 12px; border-radius: 2px; }
+  .btn.primary { background: #2f6fd0; border-color: #3f83e8; color: #fff; font-weight: 600; }
+  .sep { width: 1px; height: 20px; background: #3f434b; margin: 0 4px; }
+  .field { display: flex; align-items: center; gap: 6px; color: #9aa0ab; }
+  .field input { height: 24px; width: 92px; background: #1b1d22; border: 1px solid #464a53;
+    color: #e2e5ea; padding: 0 7px; border-radius: 2px;
+    font-family: "Cascadia Mono", monospace; font-size: 12px; }
+  .spacer { margin-left: auto; }
+
+  .body { display: flex; height: 800px; }
+  .plotwrap { flex: 1; position: relative; background: #17181c; }
+  canvas { display: block; }
+
+  .legend { position: absolute; left: 12px; top: 10px; display: flex; gap: 14px;
+    background: rgba(30,32,38,.86); border: 1px solid #3a3d44; padding: 5px 10px; border-radius: 2px; }
+  .legend div { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .legend i { width: 16px; height: 2px; display: block; }
+
+  .cursorread { position: absolute; right: 12px; top: 10px; background: rgba(30,32,38,.9);
+    border: 1px solid #3a3d44; border-radius: 2px; padding: 8px 10px;
+    font-family: "Cascadia Mono", monospace; font-size: 11.5px; line-height: 1.72; min-width: 236px; }
+  .cursorread .h { color: #8b8f99; font-size: 10.5px; letter-spacing: .6px;
+    text-transform: uppercase; border-bottom: 1px solid #3a3d44; padding-bottom: 4px; margin-bottom: 4px; }
+  .cursorread .r { display: flex; justify-content: space-between; }
+  .cursorread .k { color: #8b8f99; }
+  .cursorread .v { color: #e8ebf0; }
+
+  .side { width: 336px; border-left: 1px solid #3a3d44; background: #22242a;
+    display: flex; flex-direction: column; }
+  .sidetabs { height: 30px; display: flex; border-bottom: 1px solid #3a3d44; }
+  .sidetabs div { flex: 1; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: #8b8f99; border-right: 1px solid #34373e; }
+  .sidetabs div.on { color: #e8ebf0; background: #2b2d33;
+    box-shadow: inset 0 -2px 0 #2f6fd0; font-weight: 600; }
+  .tb { flex: 1; overflow: hidden; font-size: 12px; }
+  .tbrow { display: grid; grid-template-columns: 1fr 70px 94px; }
+  .tbrow > div { padding: 4px 9px; border-bottom: 1px solid #2c2e35; }
+  .tbrow.section { background: #2a2c33; }
+  .tbrow.section > div { color: #9fb6d8; font-weight: 700; font-size: 11.5px;
+    letter-spacing: .4px; border-bottom: 1px solid #3a3d44; }
+  .tbrow .nm { color: #c3c7d0; }
+  .tbrow .val { font-family: "Cascadia Mono", monospace; text-align: right;
+    color: #e8ebf0; font-weight: 600; }
+  .tbrow .rng { font-family: "Cascadia Mono", monospace; text-align: right;
+    color: #858b96; font-size: 11px; }
+  .tbrow.sel { background: #2f4a76; }
+  .tbrow.sel .nm, .tbrow.sel .val { color: #fff; }
+  .tbrow.energy .val { color: #ffd23f; }
+
+  .statusbar { height: 24px; display: flex; align-items: center; gap: 16px; padding: 0 12px;
+    background: #1b1d22; border-top: 1px solid #3a3d44; color: #7d838e; font-size: 11.5px;
+    font-family: "Cascadia Mono", monospace; }
+  .statusbar b { color: #b9bec8; }
+
+  .badge { position: absolute; left: 12px; bottom: 10px; background: rgba(46,50,58,.92);
+    border: 1px solid #4a4f59; color: #aeb4bf; font-size: 11px; padding: 4px 9px; border-radius: 2px; }
+  .fps { position: absolute; right: 12px; bottom: 10px; background: rgba(46,50,58,.92);
+    border: 1px solid #4a4f59; color: #aeb4bf; font-size: 11px; padding: 4px 9px;
+    border-radius: 2px; font-family: "Cascadia Mono", monospace; }
+</style>
+</head>
+<body>
+  <div class="titlebar">
+    <span class="dot" style="background:#ff5f57"></span>
+    <span class="dot" style="background:#febc2e"></span>
+    <span class="dot" style="background:#28c840"></span>
+    <span class="name">DPT 双脉冲参数提取工具</span>
+    <span class="meta" id="tmeta"></span>
+  </div>
+
+  <div class="toolbar">
+    <button class="btn primary">选择 TSS 文件</button>
+    <button class="btn">重新提取</button>
+    <button class="btn">导出报告</button>
+    <div class="sep"></div>
+    <div class="field">桥臂 <input value="UH" readonly></div>
+    <div class="field">相 <input value="RT" readonly></div>
+    <div class="field">温度 <input value="25" readonly></div>
+    <div class="sep"></div>
+    <button class="btn">自动光标</button>
+    <button class="btn">手动光标</button>
+    <div class="spacer"></div>
+    <div class="field" style="font-family:'Cascadia Mono',monospace">时间窗 0.15～2.35 us</div>
+  </div>
+
+  <div class="body">
+    <div class="plotwrap">
+      <canvas id="cv" width="1104" height="800"></canvas>
+      <div class="legend">
+        <div><i style="background:#3ee07f"></i>Vge</div>
+        <div><i style="background:#ffd23f"></i>Ic</div>
+        <div><i style="background:#4aa8ff"></i>Vce</div>
+      </div>
+      <div class="cursorread">
+        <div class="h">区间读数 · 关断过程</div>
+        <div class="r"><span class="k">Ha (t)</span><span class="v" id="ra">1.4200 us</span></div>
+        <div class="r"><span class="k">Hb (t)</span><span class="v" id="rb">1.8300 us</span></div>
+        <div class="r"><span class="k">Δt</span><span class="v" id="rd">0.4100 us</span></div>
+        <div class="r"><span class="k">Vce@Ha</span><span class="v">486.0 V</span></div>
+        <div class="r"><span class="k">Vce@Hb</span><span class="v">714.6 V</span></div>
+        <div class="r"><span class="k">ΔVce</span><span class="v">402.6 V</span></div>
+      </div>
+      <div class="badge">原型 A · PyQt6 精致化（零迁移风险）</div>
+      <div class="fps" id="fps">— fps</div>
+    </div>
+
+    <div class="side">
+      <div class="sidetabs"><div class="on">参数表</div><div>通道</div><div>报告</div></div>
+      <div class="tb" id="tb"></div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span>文件 <b>UH_750V_1050A_000.tss</b></span>
+    <span>用尺 <b id="npt"></b></span>
+    <span>识别 <b>双脉冲</b></span>
+    <span>降采样 <b id="env"></b></span>
+    <span>提取 <b>0.42 s</b></span>
+  </div>
+
+<!--INLINE_DATA-->
+<script>
+(function () {
+  "use strict";
+  const { vge, ic, vce } = makeDPT();
+  const traces = [
+    { meta: TRACE_META[0], arr: vge, d: toDisplay(vge, TRACE_META[0].vdiv, TRACE_META[0].ypos) },
+    { meta: TRACE_META[1], arr: ic,  d: toDisplay(ic,  TRACE_META[1].vdiv, TRACE_META[1].ypos) },
+    { meta: TRACE_META[2], arr: vce, d: toDisplay(vce, TRACE_META[2].vdiv, TRACE_META[2].ypos) },
+  ];
+
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  const PADL = 58, PADR = 16, PADT = 54, PADB = 34;
+  const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
+
+  let f0 = CURSORS.window[0], f1 = CURSORS.window[1];
+  const xOf = (t) => PADL + (t - f0) / (f1 - f0) * plotW;
+  const yOf = (v) => PADT + plotH / 2 - (v / (DISP_HALF * 2)) * plotH;
+
+  document.getElementById("npt").textContent = N.toLocaleString() + " 点";
+  document.getElementById("tmeta").textContent =
+    TRACE_META.map((m) => `${m.label} ${m.vdiv}${m.unit}/格`).join(" · ") + ` · ${N} 点`;
+
+  function grid() {
+    ctx.fillStyle = "#17181c"; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = "#262931"; ctx.lineWidth = 1;
+    for (let i = 0; i <= 8; i++) {
+      const x = Math.round(PADL + (i / 8) * plotW) + 0.5;
+      ctx.beginPath(); ctx.moveTo(x, PADT); ctx.lineTo(x, PADT + plotH); ctx.stroke();
+      const y = Math.round(PADT + (i / 8) * plotH) + 0.5;
+      ctx.beginPath(); ctx.moveTo(PADL, y); ctx.lineTo(PADL + plotW, y); ctx.stroke();
+    }
+    ctx.strokeStyle = "#3c414b"; ctx.lineWidth = 1;
+    ctx.strokeRect(PADL + 0.5, PADT + 0.5, plotW - 1, plotH - 1);
+    ctx.fillStyle = "#7d838e"; ctx.font = "11px 'Cascadia Mono', monospace";
+    for (let i = 0; i <= 8; i++) {
+      ctx.textAlign = "center";
+      ctx.fillText((f0 + (i / 8) * (f1 - f0)).toFixed(2), PADL + (i / 8) * plotW, PADT + plotH + 18);
+      ctx.textAlign = "right";
+      ctx.fillText((DISP_HALF - (i / 8) * DISP_HALF * 2).toFixed(1), PADL - 8, PADT + (i / 8) * plotH + 4);
+    }
+    ctx.fillStyle = "#8b8f99"; ctx.textAlign = "center";
+    ctx.fillText("时间 t (us)", PADL + plotW / 2, H - 8);
+  }
+
+  const cols = Math.floor(plotW);
+  function envelopes() {
+    return traces.map((t) => buildEnvelope(t.d, f0, f1, cols, plotW));
+  }
+
+  function drawEnvelope(env, color) {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.beginPath();
+    const e = env.env;
+    for (let c = 0; c < env.cols; c++) {
+      const x = PADL + c + 0.5;
+      ctx.moveTo(x, yOf(e[c * 2 + 1]));
+      ctx.lineTo(x, yOf(e[c * 2]));
+    }
+    ctx.stroke();
+  }
+
+  const HA = CURSORS.a, HB = CURSORS.b;
+  function cursors() {
+    ctx.fillStyle = "rgba(74,168,255,.07)";
+    ctx.fillRect(xOf(HA), PADT, xOf(HB) - xOf(HA), plotH);
+    ctx.save();
+    ctx.setLineDash([5, 4]); ctx.strokeStyle = "#e8ebf0"; ctx.lineWidth = 1;
+    [HA, HB].forEach((t, k) => {
+      const x = Math.round(xOf(t)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(x, PADT); ctx.lineTo(x, PADT + plotH); ctx.stroke();
+      ctx.save(); ctx.setLineDash([]);
+      ctx.fillStyle = "#e8ebf0"; ctx.font = "bold 11px 'Cascadia Mono', monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(k ? "Hb" : "Ha", x, PADT - 8);
+      ctx.restore();
+    });
+    ctx.restore();
+  }
+
+  function paint(envs) {
+    grid();
+    for (let i = 0; i < traces.length; i++) drawEnvelope(envs[i], traces[i].meta.color);
+    cursors();
+  }
+
+  // 参数表
+  const tb = document.getElementById("tb");
+  let html = "", last = null;
+  for (const p of PARAMS) {
+    if (p.section !== last) {
+      html += `<div class="tbrow section"><div>${p.section}</div><div></div><div></div></div>`;
+      last = p.section;
+    }
+    const sel = p.section === "关断过程" && p.name === "ΔVce" ? " sel" : "";
+    html += `<div class="tbrow${sel}${p.energy ? " energy" : ""}">`
+          + `<div class="nm">${p.name}</div><div class="val">${p.value}</div>`
+          + `<div class="rng">${p.range}</div></div>`;
+  }
+  tb.innerHTML = html;
+  document.getElementById("ra").textContent = HA.toFixed(4) + " us";
+  document.getElementById("rb").textContent = HB.toFixed(4) + " us";
+  document.getElementById("rd").textContent = (HB - HA).toFixed(4) + " us";
+
+  paint(envelopes());
+  document.getElementById("env").textContent = cols + " 列包络";
+
+  // 只上报「同步绘制成本」，不上报帧率：
+  // 无头 Chrome 会对 requestAnimationFrame 限频，帧率数字不反映真实交互体验。
+  let frames = 0, t0 = performance.now(), acc = 0;
+  const fpsEl = document.getElementById("fps");
+  function loop() {
+    const a = performance.now();
+    paint(envelopes());
+    acc += performance.now() - a;
+    frames++;
+    const el = performance.now() - t0;
+    if (el >= 1000) {
+      fpsEl.textContent = (acc / frames).toFixed(2) + " ms/帧 · Canvas2D";
+      window.__protoStats = { msPerFrame: acc / frames, framesSampled: frames, backend: "canvas2d" };
+      frames = 0; acc = 0; t0 = performance.now();
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+  window.__protoReady = true;
+})();
+</script>
+</body>
+</html>

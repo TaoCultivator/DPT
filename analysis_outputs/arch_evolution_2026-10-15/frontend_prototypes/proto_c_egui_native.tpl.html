@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>原型 C · egui / iced 原生 Rust（即时模式）</title>
+<style>
+  /* 原型 C：egui / iced（Rust 原生 GUI）能达到的风格。
+     视觉上刻意贴近 egui 默认即时模式外观：无圆角或极小圆角、单色面板、
+     细描边、文字按钮、几乎无阴影无动效。
+     代表「单栈、无 Web 包袱、部署最干净」路线，其审美天花板即体现于此。
+     中文排版与高分屏适配是该路线的重点验证项，本原型用于暴露这一点。 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1440px; height: 900px; overflow: hidden;
+    font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    background: #23262b; color: #c8ccd2; -webkit-font-smoothing: auto; }
+
+  .shell { display: flex; flex-direction: column; height: 900px; }
+
+  /* egui 式菜单栏 */
+  .menubar { height: 26px; display: flex; align-items: center; gap: 2px;
+    padding: 0 6px; background: #2b2f36; border-bottom: 1px solid #3a3f47; font-size: 12.5px; }
+  .menubar span { padding: 2px 9px; color: #b9bec6; }
+  .menubar span.on { background: #3a4049; color: #e6e9ee; }
+  .menubar .right { margin-left: auto; display: flex; gap: 2px; }
+
+  .row { display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+    background: #272b31; border-bottom: 1px solid #3a3f47; font-size: 12.5px; }
+  .row.alt { background: #2a2e35; }
+  .b { padding: 3px 11px; background: #3a4049; border: 1px solid #4a505a;
+    border-radius: 2px; font-size: 12.5px; color: #d2d6dc; }
+  .b.hot { background: #4a5568; border-color: #5a677c; color: #fff; }
+  .b.toggle { background: #46506b; border-color: #5a678a; color: #dfe6f5; }
+  .lbl { color: #8f959d; }
+  .val { color: #dfe3e8; font-family: "Cascadia Mono", "Consolas", monospace; }
+  .spin { display: inline-flex; border: 1px solid #4a505a; border-radius: 2px;
+    background: #1e2126; align-items: stretch; height: 22px; }
+  .spin i { width: 16px; display: grid; place-items: center; color: #8f959d;
+    font-style: normal; border-right: 1px solid #3a3f47; font-size: 10px; }
+  .spin span { padding: 0 8px; display: grid; place-items: center; min-width: 54px;
+    font-family: "Cascadia Mono", "Consolas", monospace; color: #e0e4e9; }
+  .sep { width: 1px; height: 18px; background: #454b54; margin: 0 6px; }
+
+  .main { flex: 1; display: flex; min-height: 0; }
+
+  /* 左侧 egui 侧栏 */
+  .side { width: 322px; background: #272b31; border-right: 1px solid #3a3f47;
+    display: flex; flex-direction: column; min-height: 0; }
+  .side h3 { font-size: 12px; font-weight: 650; color: #d8dce2; padding: 8px 10px 5px 10px; }
+  .collapse { border-bottom: 1px solid #363b43; }
+  .collapse > .head { display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+    background: #2d323a; font-size: 12px; color: #cfd3d9; }
+  .collapse > .head .caret { color: #8f959d; font-size: 10px; }
+  .fields { padding: 7px 10px 10px 10px; display: flex; flex-direction: column; gap: 5px;
+    font-size: 12px; }
+  .fr { display: flex; align-items: center; }
+  .fr .lbl { width: 74px; }
+  .fr .val { flex: 1; }
+  .legend { padding: 7px 10px 10px 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+  .lg { display: flex; align-items: center; gap: 7px; }
+  .lg i { width: 13px; height: 3px; display: block; }
+  .lg .chk { width: 11px; height: 11px; border: 1px solid #5a616b; background: #46506b;
+    display: grid; place-items: center; color: #e6e9ee; font-size: 9px; }
+
+  .grid { flex: 1; overflow: hidden; font-size: 12px; }
+  .ghead { display: grid; grid-template-columns: 1fr 66px 84px; background: #2d323a;
+    border-bottom: 1px solid #3a3f47; color: #949aa3; font-size: 11.5px; }
+  .ghead > div { padding: 4px 8px; }
+  .gr { display: grid; grid-template-columns: 1fr 66px 84px; border-bottom: 1px solid #31363d; }
+  .gr > div { padding: 3px 8px; }
+  .gr:nth-child(even) { background: #2a2e35; }
+  .gr .nm { color: #c6cad1; }
+  .gr .v { font-family: "Cascadia Mono", "Consolas", monospace; text-align: right; color: #e2e6eb; }
+  .gr .g { font-family: "Cascadia Mono", "Consolas", monospace; text-align: right; color: #858b94; font-size: 11px; }
+  .gr.sel { background: #3d4a63; }
+  .gr.sel .nm, .gr.sel .v { color: #fff; }
+  .gr.energy .v { color: #e8c05a; }
+
+  .plotwrap { flex: 1; position: relative; background: #1c1f24; }
+  canvas { display: block; }
+  .plotlabel { position: absolute; left: 10px; top: 8px; font-size: 11.5px;
+    color: #8f959d; font-family: "Cascadia Mono", "Consolas", monospace; }
+  .cursorbox { position: absolute; right: 10px; top: 8px; border: 1px solid #454b54;
+    background: #23262b; padding: 6px 9px; font-size: 11.5px;
+    font-family: "Cascadia Mono", "Consolas", monospace; line-height: 1.7; min-width: 216px; }
+  .cursorbox .t { color: #8f959d; font-size: 10.5px; border-bottom: 1px solid #3a3f47;
+    padding-bottom: 3px; margin-bottom: 3px; letter-spacing: .4px; }
+  .cursorbox .q { display: flex; justify-content: space-between; }
+  .cursorbox .q span:first-child { color: #8f959d; }
+  .cursorbox .q span:last-child { color: #e2e6eb; }
+  .badge { position: absolute; left: 10px; bottom: 8px; border: 1px solid #454b54;
+    background: #23262b; padding: 3px 8px; font-size: 11px; color: #9aa0a8; }
+  .fps { position: absolute; right: 10px; bottom: 8px; border: 1px solid #454b54;
+    background: #23262b; padding: 3px 8px; font-size: 11px; color: #9aa0a8;
+    font-family: "Cascadia Mono", "Consolas", monospace; }
+
+  .statusbar { height: 24px; display: flex; align-items: center; gap: 14px; padding: 0 9px;
+    background: #2b2f36; border-top: 1px solid #3a3f47; color: #858b94; font-size: 11.5px;
+    font-family: "Cascadia Mono", "Consolas", monospace; }
+  .statusbar b { color: #c3c7ce; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="menubar">
+    <span>文件</span><span>编辑</span><span>视图</span><span class="on">测量</span>
+    <span>报告</span><span>仪器</span><span>帮助</span>
+    <div class="right"><span>—</span><span>□</span><span>×</span></div>
+  </div>
+
+  <div class="row">
+    <div class="b hot">打开 TSS</div>
+    <div class="b">提取</div>
+    <div class="b">导出</div>
+    <div class="sep"></div>
+    <span class="lbl">桥臂</span><div class="spin"><i>▾</i><span>UH</span></div>
+    <span class="lbl">相</span><div class="spin"><i>▾</i><span>RT</span></div>
+    <span class="lbl">温度</span><div class="spin"><i>▲</i><span>25 ℃</span><i style="border:0;border-left:1px solid #3a3f47">▼</i></div>
+    <div class="sep"></div>
+    <div class="b toggle">自动光标</div>
+    <div class="b">手动光标</div>
+    <div style="margin-left:auto" class="lbl">UH_750V_1050A_000.tss</div>
+  </div>
+
+  <div class="row alt">
+    <span class="lbl">时间窗</span><div class="spin"><span>0.15 us</span></div>
+    <span class="lbl">→</span><div class="spin"><span>2.35 us</span></div>
+    <div class="sep"></div>
+    <span class="lbl">vdiv 自动</span>
+    <div class="b toggle">网格</div>
+    <div class="b">全览</div>
+    <div class="sep"></div>
+    <span class="lbl">降采样</span><div class="spin"><i>▾</i><span>min/max</span></div>
+  </div>
+
+  <div class="main">
+    <div class="side">
+      <div class="collapse">
+        <div class="head"><span class="caret">▾</span>通道显示</div>
+        <div class="fields">
+          <div class="fr"><span class="lbl">Vge</span><span class="val">5.0 V/格 · +1.15</span></div>
+          <div class="fr"><span class="lbl">Ic</span><span class="val">400 A/格 · 0.00</span></div>
+          <div class="fr"><span class="lbl">Vce</span><span class="val">200 V/格 · −1.55</span></div>
+        </div>
+      </div>
+      <div class="collapse">
+        <div class="head"><span class="caret">▾</span>图例</div>
+        <div class="legend">
+          <div class="lg"><span class="chk">✓</span><i style="background:#3ee07f"></i>Vge</div>
+          <div class="lg"><span class="chk">✓</span><i style="background:#ffd23f"></i>Ic</div>
+          <div class="lg"><span class="chk">✓</span><i style="background:#4aa8ff"></i>Vce</div>
+        </div>
+      </div>
+      <h3>参数表</h3>
+      <div class="grid" id="grid"></div>
+    </div>
+
+    <div class="plotwrap">
+      <canvas id="cv" width="1090" height="762"></canvas>
+      <div class="plotlabel" id="plabel"></div>
+      <div class="cursorbox">
+        <div class="t">区间读数</div>
+        <div class="q"><span>Ha</span><span>1.4200 us</span></div>
+        <div class="q"><span>Hb</span><span>1.8300 us</span></div>
+        <div class="q"><span>Δt</span><span>0.4100 us</span></div>
+        <div class="q"><span>ΔVce</span><span>402.6 V</span></div>
+        <div class="q"><span>Eoff</span><span>148.72 mJ</span></div>
+      </div>
+      <div class="badge">原型 C · egui / iced 原生 Rust</div>
+      <div class="fps" id="fps">— fps</div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span>就绪</span>
+    <span>点数 <b id="npt"></b></span>
+    <span>识别 <b>双脉冲</b></span>
+    <span>提取 <b>0.42 s</b></span>
+    <span style="margin-left:auto">Rust 内核 · 单 exe · 无 WebView</span>
+  </div>
+</div>
+
+<!--INLINE_DATA-->
+<script>
+(function () {
+  "use strict";
+  const { vge, ic, vce } = makeDPT();
+  const traces = [
+    { meta: TRACE_META[0], d: toDisplay(vge, TRACE_META[0].vdiv, TRACE_META[0].ypos) },
+    { meta: TRACE_META[1], d: toDisplay(ic,  TRACE_META[1].vdiv, TRACE_META[1].ypos) },
+    { meta: TRACE_META[2], d: toDisplay(vce, TRACE_META[2].vdiv, TRACE_META[2].ypos) },
+  ];
+
+  document.getElementById("npt").textContent = N.toLocaleString();
+
+  // egui 风格表格
+  const grid = document.getElementById("grid");
+  let html = `<div class="ghead"><div>参数</div><div style="text-align:right">数值</div>`
+           + `<div style="text-align:right">范围</div></div>`;
+  for (const p of PARAMS) {
+    const sel = p.section === "关断过程" && p.name === "ΔVce" ? " sel" : "";
+    html += `<div class="gr${sel}${p.energy ? " energy" : ""}">`
+          + `<div class="nm">${p.name}</div><div class="v">${p.value}</div>`
+          + `<div class="g">${p.range}</div></div>`;
+  }
+  grid.innerHTML = html;
+
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  const PADL = 56, PADR = 14, PADT = 34, PADB = 30;
+  const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
+  let f0 = CURSORS.window[0], f1 = CURSORS.window[1];
+  const xOf = (t) => PADL + (t - f0) / (f1 - f0) * plotW;
+  const yOf = (v) => PADT + plotH / 2 - (v / (DISP_HALF * 2)) * plotH;
+  document.getElementById("plabel").textContent =
+    "时间 (us)  ·  " + f0.toFixed(2) + " → " + f1.toFixed(2);
+
+  const cols = Math.floor(plotW);
+  const envs = traces.map((t) => buildEnvelope(t.d, f0, f1, cols, plotW));
+
+  function paint() {
+    ctx.fillStyle = "#1c1f24"; ctx.fillRect(0, 0, W, H);
+    // egui 默认网格更稀疏、颜色更淡
+    ctx.strokeStyle = "#2a2e34"; ctx.lineWidth = 1;
+    for (let i = 0; i <= 8; i++) {
+      const x = Math.round(PADL + (i / 8) * plotW) + 0.5;
+      ctx.beginPath(); ctx.moveTo(x, PADT); ctx.lineTo(x, PADT + plotH); ctx.stroke();
+      const y = Math.round(PADT + (i / 8) * plotH) + 0.5;
+      ctx.beginPath(); ctx.moveTo(PADL, y); ctx.lineTo(PADL + plotW, y); ctx.stroke();
+    }
+    ctx.strokeStyle = "#3a3f47";
+    ctx.strokeRect(PADL + 0.5, PADT + 0.5, plotW - 1, plotH - 1);
+
+    ctx.fillStyle = "#7f858d"; ctx.font = "10.5px 'Cascadia Mono', Consolas, monospace";
+    for (let i = 0; i <= 8; i++) {
+      ctx.textAlign = "center";
+      ctx.fillText((f0 + (i / 8) * (f1 - f0)).toFixed(2), PADL + (i / 8) * plotW, PADT + plotH + 15);
+      ctx.textAlign = "right";
+      ctx.fillText((DISP_HALF - (i / 8) * DISP_HALF * 2).toFixed(1), PADL - 6, PADT + (i / 8) * plotH + 3.5);
+    }
+
+    for (let i = 0; i < traces.length; i++) {
+      const e = envs[i].env;
+      ctx.strokeStyle = traces[i].meta.color; ctx.lineWidth = 1; ctx.beginPath();
+      for (let c = 0; c < cols; c++) {
+        const x = PADL + c + 0.5;
+        ctx.moveTo(x, yOf(e[c * 2 + 1]));
+        ctx.lineTo(x, yOf(e[c * 2]));
+      }
+      ctx.stroke();
+    }
+
+    // 光标：egui 习惯用实线 + 文字标签
+    ctx.strokeStyle = "#e8ebf0"; ctx.lineWidth = 1;
+    [CURSORS.a, CURSORS.b].forEach((t, k) => {
+      const x = Math.round(xOf(t)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(x, PADT); ctx.lineTo(x, PADT + plotH); ctx.stroke();
+      ctx.fillStyle = "#e8ebf0"; ctx.font = "10.5px 'Cascadia Mono', Consolas, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(k ? "Hb" : "Ha", x, PADT - 5);
+    });
+  }
+
+  paint();
+
+  // 只上报同步绘制成本（无头 Chrome 限频 rAF，帧率数字无意义）
+  let frames = 0, t0 = performance.now(), acc = 0;
+  const fpsEl = document.getElementById("fps");
+  function loop() {
+    const a = performance.now();
+    paint();
+    acc += performance.now() - a;
+    frames++;
+    const el = performance.now() - t0;
+    if (el >= 1000) {
+      fpsEl.textContent = (acc / frames).toFixed(2) + " ms/帧 · 光栅化";
+      window.__protoStats = { msPerFrame: acc / frames, framesSampled: frames, backend: "cpu-raster" };
+      frames = 0; acc = 0; t0 = performance.now();
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+  window.__protoReady = true;
+})();
+</script>
+</body>
+</html>

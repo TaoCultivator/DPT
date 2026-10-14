@@ -1,0 +1,39 @@
+{
+  "files": 24,
+  "cpu_count": 16,
+  "serial_s": 30.19,
+  "serial_failed": 0,
+  "parallel": {
+    "2": {
+      "wall_s": 16.695,
+      "speedup": 1.808,
+      "efficiency": 0.9042,
+      "failed": 0
+    },
+    "4": {
+      "wall_s": 10.301,
+      "speedup": 2.931,
+      "efficiency": 0.7327,
+      "failed": 0
+    },
+    "8": {
+      "wall_s": 9.06,
+      "speedup": 3.332,
+      "efficiency": 0.4165,
+      "failed": 0
+    },
+    "12": {
+      "wall_s": 8.584,
+      "speedup": 3.517,
+      "efficiency": 0.2931,
+      "failed": 0
+    }
+  },
+  "best": {
+    "workers": 12,
+    "wall_s": 8.584,
+    "speedup": 3.517,
+    "efficiency": 0.2931,
+    "failed": 0
+  }
+}

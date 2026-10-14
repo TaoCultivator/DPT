@@ -1,0 +1,45 @@
+sample: WL_750V_805A_000.tss  (1425.4 KB)
+channels: {'CH1': array([-4.403125  , -4.39921875, -4.403125  , ..., -4.6       ,
+       -4.60234375, -4.5984375 ], shape=(375000,)), 'CH2': array([-5.15625, -4.5    , -4.03125, ..., -3.875  , -4.3125 , -3.9375 ],
+      shape=(375000,)), 'CH3': array([ -9.5   ,  -8.4375,  -7.4375, ..., -23.3125, -23.25  , -24.625 ],
+      shape=(375000,)), 'CH4': array([ -2.71875,  -3.96875,  -5.6875 , ..., 948.25   , 948.5625 ,
+       947.625  ], shape=(375000,)), 'CH5': array([752.0625 , 751.96875, 752.0625 , ..., 744.65625, 744.8125 ,
+       743.0625 ], shape=(375000,)), 'CH6': array([-4.2984375 , -4.29296875, -4.30234375, ..., -4.29609375,
+       -4.3046875 , -4.30546875], shape=(375000,)), 'MATH1': array([  -6.78125,   -4.46875,   -1.75   , ..., -971.5625 , -971.8125 ,
+       -972.25   ], shape=(375000,)), 'MATH2': array([ 0.00000000e+00, -5.39573203e-07, -1.01710125e-06, ...,
+        1.69234110e-02,  1.69220240e-02,  1.69205994e-02], shape=(375000,)), 'MATH3': array([ 0.00000000e+00,  2.20300781e-09,  3.28957031e-09, ...,
+       -1.76087398e-01, -1.76087080e-01, -1.76086759e-01], shape=(375000,))}  n=375000  mapping=trend
+
+单次 extract_all 插桩总耗时（各函数自身耗时之和）: 3007.2 ms/run
+
+按成本种类：
+  numpy: 其他                1461.30 ms   48.6%  ########################
+  第三方其他                     989.91 ms   32.9%  ################
+  本项目代码                     516.96 ms   17.2%  ########
+  numpy: 排序/搜索               30.04 ms    1.0%  #
+  numpy: 算术/ufunc             6.67 ms    0.2%  #
+  numpy: 索引/形状                0.91 ms    0.0%  #
+  scipy                       0.65 ms    0.0%  #
+  numpy: 分配/拷贝                0.63 ms    0.0%  #
+  Python 内建/字节码               0.14 ms    0.0%  #
+
+  Python 侧（项目字节码 + 解释器内建）合计占比: 17.2%
+
+项目内热点 Top15：
+  metrics/plateau_level.py:10 _quiet_plateau_mid                   271.66 ms  调用       4/次
+  metrics/iec_windows.py:437 _local_extrema_indices                91.46 ms  调用      11/次
+  detect/pulse_detector.py:42 detect_all                            33.24 ms  调用       1/次
+  metrics/iec_windows.py:814 _first_sustained_rise_crossing        15.75 ms  调用       4/次
+  metrics/iec_windows.py:355 _crossing_pair_indices                15.26 ms  调用      11/次
+  metrics/plateau_level.py:57 _plateau_mid_without_isolated_spik    11.16 ms  调用      10/次
+  metrics/commutation_inductance.py:27 _finite_series                        11.02 ms  调用       2/次
+  detect/pulse_detector.py:177 _refine_pulse_off                      6.43 ms  调用       1/次
+  metrics/iec_windows.py:1464 _main_edge_level_crossing              4.44 ms  调用       6/次
+  metrics/plateau_level.py:634 _turn_on_rise_index                    3.80 ms  调用       2/次
+  metrics/iec_windows.py:1017 _three_full_cycle_settle_region        3.77 ms  调用       5/次
+  metrics/iec_windows.py:3353 _err_vd_main_rise_search               3.31 ms  调用       3/次
+  metrics/slopes.py:858 _turn_on_main_rise_between_base_to     3.06 ms  调用       1/次
+  metrics/iec_windows.py:3543 _err_irr_fall_cross_ha_t               2.48 ms  调用       1/次
+  metrics/iec_windows.py:3415 _err_vd_rise_cross_hb_t                2.46 ms  调用       2/次
+
+raw -> E:\Works\DPT-vk-k-mv89ep9q-2\analysis_outputs\arch_evolution_2026-10-15\raw\profile_extract_inner.json
