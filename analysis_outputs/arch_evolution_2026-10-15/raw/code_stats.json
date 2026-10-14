@@ -1,0 +1,246 @@
+{
+  "primary": {
+    "root": "E:\\Works\\DPT-vk-k-mv89ep9q-2",
+    "product_files": 60,
+    "product_lines": 50025,
+    "product_nonempty_lines": 45870,
+    "test_files": 61,
+    "test_lines": 34557,
+    "modules": {
+      "gui": {
+        "files": 10,
+        "lines": 25858,
+        "nonempty": 24095
+      },
+      "metrics": {
+        "files": 11,
+        "lines": 11587,
+        "nonempty": 10631
+      },
+      "export": {
+        "files": 5,
+        "lines": 5103,
+        "nonempty": 4555
+      },
+      "io": {
+        "files": 7,
+        "lines": 2512,
+        "nonempty": 2204
+      },
+      "pipeline": {
+        "files": 5,
+        "lines": 2185,
+        "nonempty": 2033
+      },
+      "models": {
+        "files": 7,
+        "lines": 1419,
+        "nonempty": 1208
+      },
+      "utils": {
+        "files": 7,
+        "lines": 716,
+        "nonempty": 607
+      },
+      "detect": {
+        "files": 3,
+        "lines": 385,
+        "nonempty": 341
+      },
+      "config": {
+        "files": 2,
+        "lines": 136,
+        "nonempty": 102
+      },
+      "cli": {
+        "files": 1,
+        "lines": 74,
+        "nonempty": 60
+      },
+      "(dpt_extractor 顶层)": {
+        "files": 1,
+        "lines": 3,
+        "nonempty": 2
+      },
+      "main.py": {
+        "files": 1,
+        "lines": 47,
+        "nonempty": 32
+      }
+    },
+    "largest_product_files": [
+      {
+        "rel": "dpt_extractor\\gui\\main_window.py",
+        "lines": 11368,
+        "kb": 455.7
+      },
+      {
+        "rel": "dpt_extractor\\gui\\waveform_plot.py",
+        "lines": 10067,
+        "kb": 403.8
+      },
+      {
+        "rel": "scripts\\validate_gui_cursors.py",
+        "lines": 4365,
+        "kb": 192.7
+      },
+      {
+        "rel": "dpt_extractor\\export\\report_template.py",
+        "lines": 4328,
+        "kb": 145.9
+      },
+      {
+        "rel": "dpt_extractor\\metrics\\iec_windows.py",
+        "lines": 4173,
+        "kb": 142.2
+      },
+      {
+        "rel": "dpt_extractor\\metrics\\slopes.py",
+        "lines": 3390,
+        "kb": 114.0
+      },
+      {
+        "rel": "dpt_extractor\\gui\\result_table.py",
+        "lines": 1922,
+        "kb": 74.6
+      },
+      {
+        "rel": "dpt_extractor\\metrics\\plateau_level.py",
+        "lines": 1668,
+        "kb": 58.8
+      },
+      {
+        "rel": "scripts\\validate_tss_samples.py",
+        "lines": 1198,
+        "kb": 41.1
+      },
+      {
+        "rel": "dpt_extractor\\pipeline\\short_circuit_extract.py",
+        "lines": 1051,
+        "kb": 34.5
+      }
+    ]
+  },
+  "compare": {
+    "root": "E:\\Works\\DPT",
+    "product_files": 62,
+    "product_lines": 55056,
+    "product_nonempty_lines": 50597,
+    "test_files": 81,
+    "test_lines": 43727,
+    "modules": {
+      "gui": {
+        "files": 10,
+        "lines": 27836,
+        "nonempty": 25981
+      },
+      "metrics": {
+        "files": 12,
+        "lines": 13992,
+        "nonempty": 12879
+      },
+      "export": {
+        "files": 5,
+        "lines": 5146,
+        "nonempty": 4598
+      },
+      "io": {
+        "files": 7,
+        "lines": 2869,
+        "nonempty": 2523
+      },
+      "pipeline": {
+        "files": 5,
+        "lines": 2367,
+        "nonempty": 2206
+      },
+      "models": {
+        "files": 7,
+        "lines": 1445,
+        "nonempty": 1234
+      },
+      "utils": {
+        "files": 8,
+        "lines": 749,
+        "nonempty": 632
+      },
+      "detect": {
+        "files": 3,
+        "lines": 385,
+        "nonempty": 341
+      },
+      "config": {
+        "files": 2,
+        "lines": 136,
+        "nonempty": 102
+      },
+      "cli": {
+        "files": 1,
+        "lines": 74,
+        "nonempty": 60
+      },
+      "(dpt_extractor 顶层)": {
+        "files": 1,
+        "lines": 3,
+        "nonempty": 2
+      },
+      "main.py": {
+        "files": 1,
+        "lines": 54,
+        "nonempty": 39
+      }
+    },
+    "largest_product_files": [
+      {
+        "rel": "dpt_extractor\\gui\\main_window.py",
+        "lines": 13017,
+        "kb": 521.0
+      },
+      {
+        "rel": "dpt_extractor\\gui\\waveform_plot.py",
+        "lines": 10389,
+        "kb": 412.7
+      },
+      {
+        "rel": "scripts\\validate_gui_cursors.py",
+        "lines": 6108,
+        "kb": 263.7
+      },
+      {
+        "rel": "dpt_extractor\\metrics\\iec_windows.py",
+        "lines": 5049,
+        "kb": 169.2
+      },
+      {
+        "rel": "dpt_extractor\\export\\report_template.py",
+        "lines": 4371,
+        "kb": 143.9
+      },
+      {
+        "rel": "outputs\\report_chart_update_20260827\\node_modules\\pnpm\\dist\\node_modules\\node-gyp\\gyp\\pylib\\gyp\\generator\\msvs.py",
+        "lines": 3970,
+        "kb": 147.7
+      },
+      {
+        "rel": "outputs\\01a0146b-f6bc-7be0-b8a5-407a450143ca\\node_modules\\pnpm\\dist\\node_modules\\node-gyp\\gyp\\pylib\\gyp\\generator\\msvs.py",
+        "lines": 3970,
+        "kb": 147.7
+      },
+      {
+        "rel": "analysis_outputs\\spreadsheet_audit_v2033_root\\node_modules\\pnpm\\dist\\node_modules\\node-gyp\\gyp\\pylib\\gyp\\generator\\msvs.py",
+        "lines": 3970,
+        "kb": 147.7
+      },
+      {
+        "rel": "analysis_outputs\\spreadsheet_audit_v2032\\node_modules\\pnpm\\dist\\node_modules\\node-gyp\\gyp\\pylib\\gyp\\generator\\msvs.py",
+        "lines": 3970,
+        "kb": 147.7
+      },
+      {
+        "rel": "analysis_outputs\\node_modules\\pnpm\\dist\\node_modules\\node-gyp\\gyp\\pylib\\gyp\\generator\\msvs.py",
+        "lines": 3970,
+        "kb": 147.7
+      }
+    ]
+  }
+}

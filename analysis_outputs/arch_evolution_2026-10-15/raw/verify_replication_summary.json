@@ -1,0 +1,199 @@
+{
+  "purpose": "第二轮执行者对已入库测量结果的独立复跑对照（不做重新测量以外的任何修改）",
+  "rows": [
+    {
+      "item": "PoC-1 逐元素穿越点向量化（GUI 参数卡路径）",
+      "committed": {
+        "calls": 35,
+        "bitwise_equal": 35,
+        "corpus_mismatch": 0,
+        "fuzz_rounds": 4000,
+        "fuzz_mismatch": 0,
+        "speedup": 59.38
+      },
+      "replicated": {
+        "calls": 14,
+        "bitwise_equal": 14,
+        "corpus_mismatch": 0,
+        "fuzz_rounds": 1500,
+        "fuzz_mismatch": 0,
+        "speedup": 70.28
+      },
+      "verdict": "一致：两次运行均 0 处数值差异，加速比同量级"
+    },
+    {
+      "item": "PoC-2 平台窗中值向量化（提取第一热点）",
+      "committed": {
+        "calls": 48,
+        "bitwise_equal": 48,
+        "corpus_mismatch": 0,
+        "fuzz_rounds": 8000,
+        "fuzz_mismatch": 0,
+        "speedup": 62.31
+      },
+      "replicated": {
+        "calls": 16,
+        "bitwise_equal": 16,
+        "corpus_mismatch": 0,
+        "fuzz_rounds": 3000,
+        "fuzz_mismatch": 0,
+        "speedup": 60.87
+      },
+      "verdict": "一致：两次运行均 0 处数值差异，加速比同量级"
+    },
+    {
+      "item": "全语料解析/提取吞吐基线（抽样复跑 24 文件）",
+      "committed": {
+        "files": 488,
+        "files_ok": 484,
+        "sum_t_total_s": 581.676,
+        "median_t_extract_s": 1.17396,
+        "extract_share_of_total": 0.92
+      },
+      "replicated": {
+        "sample_files": 24,
+        "sum_t_total_s": 26.017,
+        "ref_sum_t_total_s": 30.351,
+        "median_total_ratio": 0.866,
+        "extract_share": 0.9145
+      },
+      "verdict": "一致：复跑整体快 13%（通道更空闲），逐文件比值中位 0.866，提取占比 0.914 ≈ 基线 0.920"
+    },
+    {
+      "item": "热点函数集合（项目内 tottime）",
+      "committed": {
+        "sampled_files": 9,
+        "repeat": 4,
+        "top5": [
+          [
+            "metrics/plateau_level.py:10",
+            "_quiet_plateau_mid",
+            0.3586
+          ],
+          [
+            "detect/pulse_detector.py:42",
+            "detect_all",
+            0.1957
+          ],
+          [
+            "metrics/iec_windows.py:437",
+            "_local_extrema_indices",
+            0.1005
+          ],
+          [
+            "metrics/commutation_inductance.py:27",
+            "_finite_series",
+            0.0689
+          ],
+          [
+            "metrics/iec_windows.py:814",
+            "_first_sustained_rise_crossing",
+            0.0301
+          ]
+        ]
+      },
+      "replicated": {
+        "sampled_files": 3,
+        "repeat": 2,
+        "top5": [
+          [
+            "detect/pulse_detector.py:42",
+            "detect_all",
+            0.3494
+          ],
+          [
+            "metrics/plateau_level.py:10",
+            "_quiet_plateau_mid",
+            0.1432
+          ],
+          [
+            "metrics/commutation_inductance.py:27",
+            "_finite_series",
+            0.1352
+          ],
+          [
+            "metrics/iec_windows.py:437",
+            "_local_extrema_indices",
+            0.0592
+          ],
+          [
+            "metrics/iec_windows.py:814",
+            "_first_sustained_rise_crossing",
+            0.0248
+          ]
+        ]
+      },
+      "verdict": "集合一致（同样几个函数占据前列）；小样本下 Top3 内部排序有波动"
+    },
+    {
+      "item": "GUI 交互基线（offscreen Qt，单次 CPU 成本）",
+      "committed": {
+        "window_construct_ms": 112.17,
+        "first_screen_ms": 2645.47,
+        "repaint_full_window_ms": 101.9,
+        "pan_view_set_ms": 14.28,
+        "pan_repaint_ms": 47.67,
+        "zoom_repaint_ms": 43.69,
+        "param_switch_median_ms": 59.81,
+        "param_switch_max_ms": 816.312,
+        "cursor_drag_median_ms": 9.66
+      },
+      "replicated": {
+        "window_construct_ms": 112.52,
+        "first_screen_ms": 1823.42,
+        "repaint_full_window_ms": 79.05,
+        "pan_view_set_ms": 9.75,
+        "pan_repaint_ms": 38.24,
+        "zoom_repaint_ms": 39.04,
+        "param_switch_median_ms": 55.8,
+        "param_switch_max_ms": 639.592,
+        "cursor_drag_median_ms": 8.74
+      },
+      "verdict": "一致：全部指标同量级、同方向；复跑整体快 15–30%（机器更空闲）"
+    },
+    {
+      "item": "参数卡切换尖峰与热点归属",
+      "committed": {
+        "all_median_ms": 59.58,
+        "all_max_ms": 848.71,
+        "all_max_item": {
+          "i": 4,
+          "section": "关断过程",
+          "name": "di/dt",
+          "ms": 848.71
+        }
+      },
+      "replicated": {
+        "all_median_ms": 54.61,
+        "all_max_ms": 692.4,
+        "all_max_item": {
+          "i": 4,
+          "section": "关断过程",
+          "name": "di/dt",
+          "ms": 692.4
+        }
+      },
+      "verdict": "一致：最慢项仍是 关断过程/di/dt（848.7 ms → 692.4 ms），热点仍是 _nearest_raw_level_crossing_time_us"
+    },
+    {
+      "item": "差分验收器自验证（基准 vs 自身 / 基准 vs 篡改）",
+      "committed": {
+        "self": "PASS 8/8",
+        "tampered": "FAIL 检出 1-LSB 索引与 1e-9 漂移"
+      },
+      "replicated": {
+        "self": "PASS",
+        "files_compared": 5,
+        "field_diffs": 0,
+        "tampered": "FAIL",
+        "tampered_diffs": 2
+      },
+      "verdict": "一致：恒等快照 PASS（退出码 0），篡改快照 FAIL（退出码 1）"
+    }
+  ],
+  "notes": [
+    "复跑使用同一台机器、同一语料、同一 Python 解释器；机器当时更空闲，因此复跑普遍快 10–30%。",
+    "所有复跑产物逐字段保存在 raw/verify_*.json，可自行核对。",
+    "Rust 工具链在本机缺失，两轮均未产生任何 Rust 基准数据。"
+  ]
+}

@@ -1,0 +1,197 @@
+{
+  "purpose": "核查热点函数是否与现行（主工作树）代码保持一致",
+  "primary_root": "E:\\Works\\DPT-vk-k-mv89ep9q-2",
+  "other_root": "E:\\Works\\DPT",
+  "source": "raw/hotspots.json top_project_by_tottime",
+  "top": 20,
+  "rows": [
+    {
+      "file": "dpt_extractor/metrics/plateau_level.py",
+      "line": 10,
+      "func": "_quiet_plateau_mid",
+      "share_of_project_tt": 0.35863,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/detect/pulse_detector.py",
+      "line": 42,
+      "func": "detect_all",
+      "share_of_project_tt": 0.19567,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 437,
+      "func": "_local_extrema_indices",
+      "share_of_project_tt": 0.10051,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/commutation_inductance.py",
+      "line": 27,
+      "func": "_finite_series",
+      "share_of_project_tt": 0.06895,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 814,
+      "func": "_first_sustained_rise_crossing",
+      "share_of_project_tt": 0.03013,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 197,
+      "func": "_parse_tss_math_setup",
+      "share_of_project_tt": 0.02065,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 355,
+      "func": "_crossing_pair_indices",
+      "share_of_project_tt": 0.01707,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/plateau_level.py",
+      "line": 57,
+      "func": "_plateau_mid_without_isolated_spikes",
+      "share_of_project_tt": 0.01487,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 425,
+      "func": "_eval",
+      "share_of_project_tt": 0.01138,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 4057,
+      "func": "integrate_err_recovery",
+      "share_of_project_tt": 0.00888,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/detect/pulse_detector.py",
+      "line": 177,
+      "func": "_refine_pulse_off",
+      "share_of_project_tt": 0.00822,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 119,
+      "func": "_sample_interval_from_time",
+      "share_of_project_tt": 0.00781,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/plateau_level.py",
+      "line": 634,
+      "func": "_turn_on_rise_index",
+      "share_of_project_tt": 0.00764,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/rr_tail.py",
+      "line": 6,
+      "func": "reverse_recovery_tail_end_index",
+      "share_of_project_tt": 0.00738,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/commutation_inductance.py",
+      "line": 61,
+      "func": "_window_series",
+      "share_of_project_tt": 0.00734,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 1464,
+      "func": "_main_edge_level_crossing",
+      "share_of_project_tt": 0.00644,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 2506,
+      "func": "_legacy_err_recovery_settled_base",
+      "share_of_project_tt": 0.00604,
+      "primary_present": true,
+      "other_present": true,
+      "status": "有差异",
+      "primary_lines": 5,
+      "other_lines": 7
+    },
+    {
+      "file": "dpt_extractor/models/waveform.py",
+      "line": 182,
+      "func": "_finite_percentiles",
+      "share_of_project_tt": 0.00587,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 148,
+      "func": "_strip_setup_value",
+      "share_of_project_tt": 0.00482,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    },
+    {
+      "file": "dpt_extractor/utils/timing_adapt.py",
+      "line": 180,
+      "func": "scope_turn_on_bases",
+      "share_of_project_tt": 0.00468,
+      "primary_present": true,
+      "other_present": true,
+      "status": "一致"
+    }
+  ],
+  "summary": {
+    "identical": 19,
+    "different": 1,
+    "missing": 0,
+    "compared": 20
+  }
+}

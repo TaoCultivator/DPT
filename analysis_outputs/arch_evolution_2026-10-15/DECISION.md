@@ -1,7 +1,7 @@
 # DPT 架构演进选型与可行性研究
 
 > 议题：`k-mv89ep9q-2`　·　类型：**研究/选型（不重写生产代码）**
-> 测量日期：2026-10-15　·　测量机：Windows / Python 3.13.12 / 本机 venv
+> 测量日期：2026-10-15　·　测量机：Windows / Python 3.13.12（系统解释器，无 venv）
 > 语料：`E:\Works\DPT\示例文件` 下 **488 个真实 `.tss`**（共 652.3 MB）
 
 ---
@@ -20,7 +20,7 @@
 
 | 阶段 | 内容 | 实测预期收益 | 风险 | 是否引入新依赖 |
 |---|---|---|---|---|
-| **P0 还债**（1–2 周） | 拆 `gui/main_window.py`(521 KB, 11 368 行) 与 `gui/waveform_plot.py`(413 KB) | 解锁后续一切改动 | 低（纯搬迁） | 否 |
+| **P0 还债**（1–2 周） | 拆 `gui/main_window.py`（主工作树 521 KB / 13 017 行；测量检出 11 368 行）与 `gui/waveform_plot.py`（412.7 KB / 10 389 行） | 解锁后续一切改动 | 低（纯搬迁） | 否 |
 | **P1 热点向量化**（1–2 周） | 向量化 `plateau_level.py` / `iec_windows.py` / `pulse_detector.py` 与 GUI 光标投影中的 Python 元素循环 | **单函数 59–62×**（已实测，见第四节），参数提取整体预计下降一个数量级 | 低（逐值可位级验证） | 否 |
 | **P2 批处理并行**（按需，2–3 周） | 批次级多进程，按文件并行 | **约 3.5×**（已实测；4 进程以上效率急剧衰减，见 PoC-3） | 中（进程模型、numba 缓存、内存带宽饱和） | 否 |
 | **P3 前端精致化** | 在 PyQt6 内做视觉与交互打磨 | 取决于有显示环境实测 | 中 | 否 |
@@ -36,8 +36,8 @@
 | 路线 | 否决理由（基于实测，不是偏好） |
 |---|---|
 | **B. Rust 独立进程 + IPC/Arrow** | 单文件端到端中，**提取占 92%、加载占 7.6%**；热点是**解释器分派开销**。搬进 Rust 进程能让这部分开销「消失」，但**同样的收益用 P1 向量化即可拿到（实测 60× 量级）且无进程复杂度**。实测多进程并行也只有约 3.5×（见 PoC-3），远低于理论值——说明该场景对内存带宽敏感，不是加进程/换语言能解决的。**否决，不进入 P4。** |
-| **C. 全栈 Rust** | 成本集中在三块而非计算：GUI 25 981 行、仪器桥（PowerShell 24.7 KB + C# 10.4 KB + TekVISA FFI）、Excel 报表保真（模板含 3 个 externalLink、51.8 KB styles.xml、854 KB 大表）。这三块**没有一行**能靠 Rust 提速，却要整体重建。**否决。** |
-| **前端 B. Tauri + Web 前端** | 审美上限确实最高（原型 B 实测 WebGL 绘制 0.27 ms/帧），但要付出：重写 25 981 行 GUI 交互、自研降采样/WebGL、WebView2 运行时依赖与打包改造、中文排版与高分屏重新验证。**在 P0 还债之前不具备可执行性**；建议 **P0 完成后**用真实波形做 WebGL 帧率与光标手感实测再决策。 |
+| **C. 全栈 Rust** | 成本集中在三块而非计算：GUI **27 836 行**、仪器桥（PowerShell 24.7 KB + C# 10.4 KB + TekVISA FFI）、Excel 报表保真（模板含 3 个 externalLink、51.8 KB styles.xml、854 KB 大表）。这三块**没有一行**能靠 Rust 提速，却要整体重建。**否决。** |
+| **前端 B. Tauri + Web 前端** | 审美上限确实最高（原型 B 实测 WebGL 绘制 0.27 ms/帧），但要付出：重写 **27 836 行** GUI 交互、自研降采样/WebGL、WebView2 运行时依赖与打包改造、中文排版与高分屏重新验证。**在 P0 还债之前不具备可执行性**；建议 **P0 完成后**用真实波形做 WebGL 帧率与光标手感实测再决策。 |
 | **前端 D. Qt + Rust 绑定** | 复杂度最高（两套运行时），而 Qt 侧的性能问题（见第四节：`QWidget.grab()` 整窗重绘 101.9 ms）**并不会因语言改变而消失**。**否决。** |
 | **前端 C. egui / iced** | 原型 C 显示其审美上限明显低于 A/B（即时模式的无圆角单色外观），中文排版与高分屏适配需另行验证。**当前否决**，保留为「极端追求单栈/单 exe」时的备选。 |
 
@@ -52,7 +52,8 @@
 
 ## 二、对议题既有事实的复核（有错必纠）
 
-议题描述里的大部分实测数据准确，但**有两处需要纠正**，因为它们直接影响路线判断：
+议题描述里的实测数据**基本准确**（模块级行数逐字吻合，见纠正 2）。
+复核后需要做 **1 处实质纠正 + 1 处口径澄清**，两者都直接影响路线判断：
 
 ### 纠正 1：`.tss` 解析**不是**自研，最内层是第三方纯 Python 库
 
@@ -73,23 +74,48 @@ dpt_extractor/io/wfm_scope_display.py:109-112  from tm_data_types.files_and_form
 
 **影响**：Rust 若要自研等价实现，不止要写 zip + setup 解析，还要**完整复刻 `tm_data_types` 的 WFM 编解码语义**（字节序、版本号、缩放、单位、`String8` 等）。这把「可控项」变成**中等风险项**，也意味着即使转 Rust，**仍要对该第三方解析结果做逐值对齐**。
 
-### 纠正 2：代码体量与议题数字有偏差（实测值见下）
+### 纠正 2：代码体量——议题数字**基本准确**，但必须先说清「哪棵树」
 
-| 项 | 议题描述 | 本机实测 | 差异 |
+第一轮报告曾把议题的体量数字判为「偏高 8–10%」。**第二轮复核推翻了那个结论**：
+成因是**两棵树混算**——议题的数字对应**主工作树 `E:\Works\DPT`（带未提交改动）**，
+而第一轮的统计口径落在**本分支检出的干净树（`937dc8ad`）**上。
+
+第二轮用同一个脚本（[`scripts/count_code_stats.py`](scripts/count_code_stats.py)，
+产出 [`raw/code_stats.json`](raw/code_stats.json)）把两棵树按同一口径各测一遍：
+
+| 项 | 议题描述 | **主工作树（现行，含未提交改动）** | 本议题测量所用检出（`937dc8ad`） |
 |---|---|---|---|
-| 产品代码行数 | 约 55 000 行 | **50 556 行** | −4 444 |
-| gui 模块 | 27 836 行（10 文件） | **25 981 行**（10 文件） | −1 855 |
-| 测试文件数 | 73 个 | **73 个** ✅ | 一致 |
-| 测试行数 | 41 596 行 | **37 493 行** | −4 103 |
-| `gui/main_window.py` | 533 KB | **521.0 KB** | −12 KB |
-| `gui/waveform_plot.py` | 422 KB | **412.7 KB** | −9.3 KB |
-| `.tss` 样例数 | 488 个 | **488 个** ✅ | 一致 |
+| 产品代码 | 约 55 000 行 | **55 056 行**（62 文件）✅ 吻合 | 50 025 行（60 文件） |
+| gui 模块 | 27 836 行 / 10 文件 | **27 836 行 / 10 文件** ✅ 逐字吻合 | 25 858 行 / 10 文件 |
+| metrics | 13 992 行 | **13 992 行** ✅ 逐字吻合 | 11 587 行 |
+| export / io / pipeline | 5 146 / 2 869 / 2 367 | **5 146 / 2 869 / 2 367** ✅ 逐字吻合 | 5 103 / 2 512 / 2 185 |
+| models / utils / detect / config / cli | 1 445 / 749 / 385 / 136 / 74 | **1 445 / 749 / 385 / 136 / 74** ✅ 逐字吻合 | 1 419 / 716 / 385 / 136 / 74 |
+| `gui/main_window.py` | 533 KB | **521.0 KB / 13 017 行**（略低于议题值） | 455.7 KB / 11 368 行 |
+| `gui/waveform_plot.py` | 422 KB | **412.7 KB / 10 389 行** | 403.8 KB / 10 067 行 |
+| 测试文件数 / 行数 | 73 个 / 41 596 行 | **81 个 / 43 727 行**（比议题略多） | 61 个 / 34 557 行 |
+| `.tss` 样例数 | 488 个 | 488 个 ✅ | 488 个 ✅ |
 
-数据源差异会让「重写成本」被高估约 8–10%。**建议后续以本报告脚本产出的数字为准。**
+**结论修正**：
+
+1. 议题给出的模块级行数与主工作树**逐字吻合**，不需要「纠偏」——**该数字是可信的**。
+2. 真正需要声明的是**版本口径**：本议题的**全部测量与 PoC 都在 `937dc8ad` 上完成**，
+   而主工作树当时带着 **34 个文件的未提交改动（+12 987 / −1 253 行）**。
+3. 因此**搬运成本应按主工作树的体量估**（产品 55 056 行、GUI 27 836 行），
+   而不是按测量时所处检出估——两者差约 10%。
+4. 好消息是**这不影响热点名单**：第二轮做了逐函数比对
+   （[`scripts/check_hotspot_stability.py`](scripts/check_hotspot_stability.py)，
+   产出 [`raw/verify_hotspot_stability.json`](raw/verify_hotspot_stability.json)），
+   **Top20 里有 19 个函数在主工作树与测量检出上逐字符相同**，
+   唯一不同的是 `iec_windows.py:_legacy_err_recovery_settled_base`（占 0.60%）。
+   即：热点结论对现行代码**依然成立**。
+
+> 行号口径：3.3 节与 4.2 节引用的 `文件:行` 均以 **`937dc8ad`** 为准。
+> 主工作树因为多了约 5 000 行代码，部分文件的后续行号会整体下移。
 
 ### 确认正确的事实（实测复核通过）
 
-- ✅ 运行时：Python 3.13.12 + PyQt6 + pyqtgraph 0.14.0；numpy 2.2.6 / scipy 1.18.0 / pandas 3.0.3；openpyxl 出报表。
+- ✅ 运行时：Python 3.13.12（系统解释器 `D:\System-XG\Python\python-3.13.12\python.exe`）+ PyQt6 6.11.0 + pyqtgraph 0.14.0；numpy 2.2.6 / **scipy 1.17.1** / **pandas 3.0.2**；openpyxl 3.1.5 出报表。
+  （议题描述中的「scipy 1.18 / pandas 3.0」与本机实测的 **1.17.1 / 3.0.2** 有细微出入，以本机 `pip list` 实测为准。）
 - ✅ 打包：`DPT.spec` 单文件 Windows GUI，随包带 `config/default.yaml`、`io/tek_scope_bridge.ps1`、`io/tekvisa_native.cs`、`默认报告模板.xlsx`、`assets/noncommercial_authorization_poster.png`。
 - ✅ 仪器桥：`tek_scope_bridge.ps1` + `tekvisa_native.cs` 走 TekVISA，属高风险项。
 - ✅ **本机没有 Rust 工具链**：`rustc`/`cargo`/`rustup`/`maturin` 均不在 PATH，`~/.cargo` 与 `~/.rustup` 目录不存在；MSVC `cl` 与 `gcc` 也不可用。→ 详见 `raw/rust_toolchain.json` 与第五节。
@@ -126,9 +152,18 @@ dpt_extractor/io/wfm_scope_display.py:109-112  from tm_data_types.files_and_form
 
 **提取占端到端 92%。解析不是瓶颈（7.6%），通道映射不是瓶颈（0.4%）。**
 
-**4 个失败文件**均为 `extract:KeyError`：短路样例被按双脉冲 profile 提取，缺总电流通道。
-语料中短路与双脉冲混放，我的脚手架按目录名/文件名约定判定算路；这属**测量脚手架的
-算路判定问题，不是生产缺陷**（生产由用户在界面选定模式）。
+**4 个失败文件**均为 `extract:KeyError: Total current channel is not available in bundle`，
+全部来自 `likangkang\NED34jixian\{short,uh}\{750v,915v}-{vh,uh}-short-25c_000.tss`。
+
+**根因（第二轮复核后修正，见第八节）**：这 4 个文件被脚手架**正确地**路由到了
+`extract_short_circuit`（记录的 `short_circuit=true` 与目录约定一致），失败发生在提取内部——
+它们的 `.tss` 自身标注了 `CH3=IUH`（总电流），但波形负载只带了 CH1/CH2/CH4/CH5/CH6，
+**CH3 的波形数据在文件里就不存在**，于是 `models/waveform.py:159 bundle_total_current()`
+抛 `KeyError`。
+
+即：**不是「短路样例被按双脉冲算路提取」，而是「样例文件自身缺少其标注声明的 CH3 通道数据」**。
+脚手架里没有用户可以手动改映射，所以直接失败；这 4 个文件（0.8%）不影响任何吞吐结论，
+但**是否属于生产缺陷需另议**（GUI 里用户可自行调整通道映射或换用其它可用通道）。
 
 **首个文件明显更慢**（冷启动 0.368 s，含 numba 缓存校验与惰性导入），后续稳定。
 这与 `utils/app_paths.py::configure_numba_cache_dir` 的存在相互印证——该函数注释本身
@@ -173,6 +208,12 @@ t ≈ 1052.69 ms + 86.16 ns × n        R² = 0.0116
 
 抽样策略：488 个语料按体积三分层各取 3 个 → 9 个文件 × 4 轮 = 36 次提取。
 方法：标准库 `cProfile`（确定性插桩）。完整表见 `raw/hotspots.json`。
+
+> **抽样敏感性（第二轮复跑补充）**：用更小的样本（3 文件 × 2 轮，
+> `raw/verify_hotspots_replication.json`）复跑时，前列**集合完全一致**，
+> 但内部排序有波动——`detect_all` 升到第 1（34.9%）、`_quiet_plateau_mid` 降到第 2（14.3%）。
+> 结论：**Top20 名单是稳定的，但排序会随样本变化**；P1 的施工顺序应以「函数集合 + 大样本排序」
+> 为准，不要拿单次小样本的百分比起步。
 
 | # | 位置 | 函数 | 占本项目代码 |
 |---|---|---|---|
@@ -256,6 +297,12 @@ for wlen in range(wlen_lo, wlen_hi + 1):        # 13 个窗长
 | 光标拖动 | 9.7 ms | 37.4 ms |
 | 结果表面板重绘 | 5.1 ms | 5.3 ms |
 
+> **复跑对照（第二轮，`raw/verify_bench_gui_replication.json`）**：各指标的**量级与方向完全一致**，
+> 复跑整体快 15–30%（当时机器更空闲）：构造 112.5 ms、首屏 1823 ms、整窗重绘 79.1 ms、
+> 平移重绘 38.2 ms、缩放重绘 39.0 ms、参数卡切换中位 55.8 ms / 最大 639.6 ms、光标拖动 8.7 ms。
+> **口径提醒**：本表只可用于**相对比较**（哪一项贵、差几倍），绝对值有 ±30% 的运行间波动，
+> 不要把它当 SLA 数字引用。
+
 ### 3.7 参数卡切换的尖峰：848 ms 定位到单个 Python 标量循环
 
 `raw/bench_param_switch.json`：32 个参数项逐个切换，**首个 477 ms、最慢项 848 ms（`di/dt`）、其余中位 59 ms**。
@@ -297,13 +344,23 @@ return float(min(candidates, key=lambda value: abs(value - ref_t))) * 1e6
 
 构建：`node prototypes/build.mjs`　截图：`node prototypes/shoot.mjs`（用本机 Chrome 无头模式，未新增 npm 依赖）
 
-| 原型 | 视觉语言 | 同步绘制成本 | 审美上限判断 |
+| 原型 | 视觉语言 | 同步绘制成本（两次独立渲染） | 审美上限判断 |
 |---|---|---|---|
-| **A. PyQt6 精致化** | 桌面仪器风：近直角、细描边、高信息密度、克制动效 | 0.40 ms/帧 · Canvas2D | 中。**零迁移风险**，但圆角/阴影/动效天花板低 |
-| **B. Tauri + Web（WebGL）** | 现代设计系统：玻璃拟态、渐变层次、大留白、呼吸动效 | **0.27 ms/帧 · WebGL** | **最高**。代价是 WebView 依赖 + 25 981 行 GUI 重写 |
-| **C. egui / iced 原生** | 即时模式：小圆角、单色面板、文字按钮、几乎无阴影 | 0.10 ms/帧 · 光栅化 | 低。单栈/单 exe 最干净，但外观明显朴素 |
+| **A. PyQt6 精致化** | 桌面仪器风：近直角、细描边、高信息密度、克制动效 | 0.40 / 0.45 ms/帧 · Canvas2D | 中。**零迁移风险**，但圆角/阴影/动效天花板低 |
+| **B. Tauri + Web（WebGL）** | 现代设计系统：玻璃拟态、渐变层次、大留白、呼吸动效 | **0.27 / 0.23 ms/帧 · WebGL** | **最高**。代价是 WebView 依赖 + **27 836 行** GUI 重写 |
+| **C. egui / iced 原生** | 即时模式：小圆角、单色面板、文字按钮、几乎无阴影 | 0.10 / 0.10 ms/帧 · 光栅化 | 低。单栈/单 exe 最干净，但外观明显朴素 |
 
 截图见 `frontend_prototypes/shots/`。可直接在浏览器打开三个 `.html` 做交互对比。
+
+> **原型的数值是合成演示数据**：`frontend_prototypes/data.mjs` 生成同一条演示波形与同一组
+> 演示参数值（三个原型共用），**不是**对真实 `.tss` 的提取结果。原型要比较的是
+> **技术栈与视觉语言的差异**，不是测量结果；三个原型显示的参数值逐项相同（ΔVce 402.6、
+> Toff 1.8013、Eoff 148.72 …），因此横向对比是公平的。
+
+> **构建可复现（第二轮实测）**：`node build.mjs` 重跑后三个 `proto_*.html` 的 sha256
+> **逐字节不变**；`node shoot.mjs` 重跑 3/3 成功，其中原型 C 的截图与上一轮**逐字节相同**，
+> A/B 因动效时序差异有极轻微像素变化。三个原型 HTML 均不含任何外部 URL / CDN 引用，
+> 可离线打开。
 
 > **诚实声明**：表中「绘制成本」是在无头 Chrome 中测的**同步绘制耗时**，不是用户体验帧率；
 > 无头模式会限频 `requestAnimationFrame`，因此原型内**不显示 FPS 数字**（第一版曾显示，已移除以免误导）。
@@ -380,6 +437,7 @@ Rust 工具链缺失（见第五节），因此 PoC 选择**不依赖 Rust 也�
 | 原实现 | 416.24 ms（11 892.7 µs/次） |
 | 向量化实现 | 7.01 ms（200.3 µs/次） |
 | **加速比** | **59.4×** |
+| **独立复跑**（第二轮，12 文件 / 14 次调用 / 1 500 轮模糊） | **14/14 按位一致 · 0 例不一致 · 加速比 70.3×** |
 
 **意义**：直接消除第 3.6 节定位的「参数卡最慢项 848 ms」卡顿点，
 且不需要引入任何 Rust 组件。
@@ -395,6 +453,7 @@ Rust 工具链缺失（见第五节），因此 PoC 选择**不依赖 Rust 也�
 | 原实现 | 12 110.76 ms（252 307.5 µs/次） |
 | 向量化实现 | 194.36 ms（4 049.2 µs/次） |
 | **加速比** | **62.3×** |
+| **独立复跑**（第二轮，12 文件 / 16 次调用 / 3 000 轮模糊） | **16/16 按位一致 · 0 例不一致 · 加速比 60.9×** |
 
 **意义**：单个函数占据参数提取自身耗时的 35.9%，62.3× 意味着**提取阶段可获得
 数量级级别的改善**，且同样不需要 Rust。
@@ -530,7 +589,7 @@ cargo bench
 
 | 项 | 内容 |
 |---|---|
-| 目标 | 把 `main_window.py`(11 368 行) 与 `waveform_plot.py`(约 8 900 行) 拆成职责清晰的模块 |
+| 目标 | 把 `main_window.py`（主工作树 13 017 行 / 测量检出 11 368 行）与 `waveform_plot.py`（10 389 行）拆成职责清晰的模块 |
 | 方式 | **纯搬迁**：类与函数原样移动，不改一行数值逻辑；用现有 73 个测试文件兜底 |
 | 验收 | 全部测试通过 + `diff_tester` 对全语料 PASS |
 | 回滚点 | 每个模块一次提交，可单独 `git revert` |
@@ -608,14 +667,82 @@ cargo bench
 
 ---
 
-## 八、交付物清单
+## 八、独立复现核查（第二轮执行者复核）
+
+本节的目的是回答一个问题：**上面所有数字，是「测过一次」还是「可以重跑出来」？**
+
+第二轮执行者在**不改动任何生产代码、不改动任何第一轮产物**的前提下，对下面这些关键结论
+逐项做了一次独立重跑或独立核查，产物保存在 `raw/verify_*.json` / `raw/code_stats.json`，汇总见
+[`raw/verify_replication_summary.json`](raw/verify_replication_summary.json)
+（由 `scripts/collect_replication_summary.py` 从原始文件机械拼出，不修约任何数字）。
+
+| 核查项 | 复跑参数 | 结果 | 与第一轮 |
+|---|---|---|---|
+| **全语料吞吐基线** | 分层抽样 24 文件（`replicate_baseline.py --n 24`） | 逐文件耗时比值中位 **0.866**（复跑更快），提取占比 **0.914** | 与基线 0.920 一致 ✅ |
+| **PoC-2 向量化** | 12 文件 / 16 次调用 / 3 000 轮模糊 | 16/16 按位一致、0 例不一致、**60.9×** | 与 62.3× 同量级 ✅ |
+| **PoC-1 向量化** | 12 文件 / 14 次调用 / 1 500 轮模糊 | 14/14 按位一致、0 例不一致、**70.3×** | 与 59.4× 同量级 ✅ |
+| **热点集合** | 3 文件 × 2 轮 | 前列函数**集合一致**，Top3 内部排序波动 | 结论不变（3.3 节已注明敏感性） |
+| **GUI 交互基线** | 同一 offscreen 样本 | 全部指标同量级（构造 112.5 ms、首屏 1823 ms、参数卡最大 639.6 ms） | 一致，复跑快 15–30% ✅ |
+| **参数卡尖峰归属** | 同上 | 最慢项仍是 `关断过程/di/dt`，热点仍是 `main_window.py:379` | 一致 ✅ |
+| **差分验收器** | 恒等快照 / 篡改快照 | PASS（退出码 0）/ FAIL（退出码 1，检出索引 +1 与 1e-9 漂移） | 一致 ✅ |
+| **前端原型构建** | `node build.mjs` + `node shoot.mjs` | 三个 HTML **逐字节不变**；截图 3/3 重新生成成功 | 可复现 ✅ |
+| **生产代码未被改动** | 对 PoC 冻结文件复核 sha256 | `metrics/plateau_level.py` = `d54c3c2d…`、`gui/main_window.py` = `29e79dfa…`，与两轮记录一致 | ✅ |
+| **热点函数对现行代码是否仍成立** | 逐函数切块比对（`check_hotspot_stability.py`） | **Top20 中 19 个逐字符相同**，仅 `_legacy_err_recovery_settled_base`(0.60%) 有差异 | 结论成立 ✅ |
+| **代码体量口径** | 同一脚本测两棵树（`count_code_stats.py --compare`） | 议题的模块级行数与**主工作树逐字吻合**；与测量检出差约 10% | **推翻第一轮「议题数字偏高」的结论** ⚠️ |
+| **生产代码可用性** | 28 个测试模块 / 310 个用例（`python -m unittest`） | **全部 OK**（跳过 127 个，多为需语料或可选依赖） | ✅ |
+
+> **测试口径说明**：本机**没有安装 pytest**（第一轮 README 写的 `python -m pytest` 在本机跑不起来），
+> 第二轮改用标准库 `unittest` runner 分模块跑，共 **310 个用例通过**。
+> 这也是一条旁证：**本议题没有改动生产代码，产品自身测试在测量检出上仍然全绿**。
+
+**核查结论**：四类基线（吞吐 / 热点 / 交互 / PoC）**均可重跑复现**，量级与方向稳定；
+绝对值存在 **±30% 的运行间波动**（复跑时机更空闲，普遍快 10–30%），
+因此本报告的绝对数字**只用于相对比较，不应作为验收阈值或 SLA 引用**。
+
+**三处由第二轮复核修正的内容**：
+
+1. **3.1 节「4 个失败文件」的原因**：原描述（「短路样例被按双脉冲 profile 提取」）与代码路径不符，
+   已修正为「文件自身缺少其标注声明的 CH3 通道数据」。
+2. **3.6 节新增口径提醒**：GUI 绝对值仅可用于相对比较。
+3. **第二节「纠正 2」整体改写**：第一轮把议题的代码体量判为「偏高 8–10%」，
+   实际是**两棵树混算**（议题描述对应主工作树）。已改为双列对照表，
+   并补上「热点函数对现行代码仍成立」的逐函数证据。
+
+**复现命令**（从仓库根运行，`PYTHONIOENCODING=utf-8` 可避免中文在 GBK 控制台下显示为乱码）：
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'
+python analysis_outputs\arch_evolution_2026-10-15\scripts\replicate_baseline.py --n 24
+python analysis_outputs\arch_evolution_2026-10-15\scripts\poc_plateau_vectorize.py --files 12 --fuzz 3000
+python analysis_outputs\arch_evolution_2026-10-15\scripts\poc_crossing_vectorize.py --files 12 --fuzz 1500
+python analysis_outputs\arch_evolution_2026-10-15\scripts\bench_gui.py
+python analysis_outputs\arch_evolution_2026-10-15\scripts\bench_param_switch.py
+python analysis_outputs\arch_evolution_2026-10-15\scripts\collect_replication_summary.py
+python analysis_outputs\arch_evolution_2026-10-15\scripts\count_code_stats.py --compare E:\Works\DPT
+python analysis_outputs\arch_evolution_2026-10-15\scripts\check_hotspot_stability.py --other-root E:\Works\DPT --top 20
+# 生产代码自身测试（本机无 pytest，用标准库 runner；310 个用例）
+$env:QT_QPA_PLATFORM='offscreen'
+python -m unittest discover -s dpt_extractor\tests -t . 2>&1 | Select-Object -Last 5
+node analysis_outputs\arch_evolution_2026-10-15\frontend_prototypes\build.mjs
+node analysis_outputs\arch_evolution_2026-10-15\frontend_prototypes\shoot.mjs
+```
+
+> `replicate_baseline.py`、`collect_replication_summary.py`、`count_code_stats.py`、
+> `check_hotspot_stability.py` 是第二轮**新增**的脚本
+> （仍全部位于 `analysis_outputs/` 内，不触及 `dpt_extractor/`）。
+
+---
+
+## 九、交付物清单
 
 | 交付物 | 路径 |
 |---|---|
 | 本决策文档 | [`DECISION.md`](DECISION.md)（本文件） |
 | 复现说明 | [`README.md`](README.md) |
-| 测量与验证脚本 | [`scripts/`](scripts/)（21 个脚本） |
-| 原始数据与日志 | [`raw/`](raw/)（22 个文件） |
+| 测量与验证脚本 | [`scripts/`](scripts/)（25 个脚本，含第二轮新增的 `replicate_baseline.py` / `collect_replication_summary.py` / `count_code_stats.py` / `check_hotspot_stability.py`） |
+| 原始数据与日志 | [`raw/`](raw/)（32 个文件） |
+| **独立复现核查产物** | [`raw/verify_replication_summary.json`](raw/verify_replication_summary.json) 及同前缀的 10 个 `verify_*.json` |
+| **代码体量口径** | [`raw/code_stats.json`](raw/code_stats.json)（同一脚本测两棵树） |
 | 前端原型（3 个，可直接打开） | [`frontend_prototypes/proto_a_pyqt6_refined.html`](frontend_prototypes/proto_a_pyqt6_refined.html) 等 3 个 |
 | 原型对照页 | [`frontend_prototypes/index.html`](frontend_prototypes/index.html) |
 | 原型截图 | [`frontend_prototypes/shots/`](frontend_prototypes/shots/) |
@@ -625,11 +752,15 @@ cargo bench
 | 验收标准 | 状态 | 证据位置 |
 |---|---|---|
 | 一页结论：推荐路线 + 理由 + 被否路线否决理由 | ✅ | 第一节 |
-| 可复现的性能基线报告（解析/提取/交互三类，含原始数据与脚本） | ✅ | 第三节 + `raw/` + `scripts/` |
-| 热点 Top 20 清单（文件:行 + 占比） | ✅ | 3.3 节 + `raw/hotspots.json` |
-| ≥1 个 PoC：实测加速比 + 数值一致性证据 | ✅ **3 个** | 4.2 节（62.3× / 59.4× / 3.5×） |
+| 可复现的性能基线报告（解析/提取/交互三类，含原始数据与脚本） | ✅ **且经独立复跑** | 第三节 + 第八节 + `raw/` + `scripts/` |
+| 热点 Top 20 清单（文件:行 + 占比） | ✅ | 3.3 节 + `raw/hotspots.json`（复跑敏感性见 3.3 注释） |
+| ≥1 个 PoC：实测加速比 + 数值一致性证据 | ✅ **3 个，均被独立复现** | 4.2 节（62.3×→60.9× / 59.4×→70.3× / 3.5×） |
 | 迁移路线图（分阶段 + 回滚点）+ 风险清单（TekVISA/Excel/打包/双跑比对） | ✅ | 第六、七节 |
-| 前端方案 2–3 个可比较原型或截图 | ✅ **3 个 + 截图** | `frontend_prototypes/` |
+| 前端方案 2–3 个可比较原型或截图 | ✅ **3 个 + 截图** | `frontend_prototypes/`（构建逐字节可复现，见 3.8 节） |
 | 明确列出「不改」的边界 | ✅ | 第一节末 + 第 4.3 节 |
 
-**本议题未修改 `dpt_extractor/` 下任何文件**（`git status -- dpt_extractor` 为空）。
+**本议题未修改 `dpt_extractor/` 下任何文件**（`git status -- dpt_extractor` 为空；
+PoC 冻结文件的 sha256 复核见第八节）。
+
+**Rust 相关声明**：本机无 Rust 工具链，**本报告不含任何 Rust 编译产物、基准数据或加速比**；
+所有加速比均来自「等价向量化」与「多进程并行」这两条本机可执行的路径（见第四节与第五节）。
