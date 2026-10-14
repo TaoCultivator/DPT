@@ -1,0 +1,36 @@
+[
+  {
+    "bundle": "dsh-cost-meter",
+    "rule": "unknown-service-method",
+    "severity": "high",
+    "guarded": true,
+    "file": "lib/index.js",
+    "line": 1101,
+    "service": "settings",
+    "method": "get",
+    "message": "settings.get() 在宿主契约里不存在（经由别名 settings，声明在第 1100 行） —— 调用点有 typeof/undefined 守卫，**不会抛异常，但该分支永不生效（静默降级）**",
+    "evidence": "可用方法：configure / prepareDocument / describe / update / replace / mutate"
+  },
+  {
+    "bundle": "dsh-better-sidebar",
+    "rule": "service-not-in-catalog",
+    "severity": "low",
+    "file": "lib/index.js",
+    "line": 6874,
+    "service": "webRuntime",
+    "method": null,
+    "message": "inject 的 webRuntime 不在 Service 目录里，但已由宿主源码确证存在（审计目录覆盖盲区，非缺陷）",
+    "evidence": "由 @deepseek-ai/dsh-web-app 提供；证据：app.asar 内 `const WEB_RUNTIME_SERVICE = \"webRuntime\"` 与 patch 文档 `inject: [webRuntime]`。不在 listService 目录中。"
+  },
+  {
+    "bundle": "dsh-better-sidebar",
+    "rule": "service-not-in-catalog",
+    "severity": "low",
+    "file": "src/index.ts",
+    "line": 114,
+    "service": "webRuntime",
+    "method": null,
+    "message": "inject 的 webRuntime 不在 Service 目录里，但已由宿主源码确证存在（审计目录覆盖盲区，非缺陷）",
+    "evidence": "由 @deepseek-ai/dsh-web-app 提供；证据：app.asar 内 `const WEB_RUNTIME_SERVICE = \"webRuntime\"` 与 patch 文档 `inject: [webRuntime]`。不在 listService 目录中。"
+  }
+]

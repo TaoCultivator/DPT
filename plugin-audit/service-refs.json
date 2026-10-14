@@ -1,0 +1,3229 @@
+[
+  {
+    "name": "@deepseek-ai/dsh-base",
+    "inject": [],
+    "calls": [],
+    "silentCatch": []
+  },
+  {
+    "name": "@deepseek-ai/dsh-web-app",
+    "inject": [],
+    "calls": [],
+    "silentCatch": []
+  },
+  {
+    "name": "@deepseek-ai/dsh-experimental-auto-review",
+    "inject": [],
+    "calls": [],
+    "silentCatch": []
+  },
+  {
+    "name": "@deepseek-ai/dsh-experimental-agent-team-profile",
+    "inject": [],
+    "calls": [],
+    "silentCatch": []
+  },
+  {
+    "name": "@deepseek-ai/dsh-experimental-schedule-bundle",
+    "inject": [],
+    "calls": [],
+    "silentCatch": []
+  },
+  {
+    "name": "@deepseek-ai/dsh-experimental-voice-input-bundle",
+    "inject": [],
+    "calls": [],
+    "silentCatch": []
+  },
+  {
+    "name": "dsh-sidenote",
+    "inject": [
+      "sessions",
+      "workspaces",
+      "slots",
+      "connection",
+      "locale"
+    ],
+    "calls": [],
+    "silentCatch": [
+      {
+        "file": "lib/index.js",
+        "line": 1761,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2315,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2475,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3131,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 4128,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "src/index.ts",
+        "line": 150,
+        "kind": "console-only",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "dshmarket",
+    "inject": [
+      "slots",
+      "locale",
+      "theme"
+    ],
+    "calls": [],
+    "silentCatch": [
+      {
+        "file": "lib/restart.js",
+        "line": 338,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/restart.js",
+        "line": 366,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/types/restart.d.ts",
+        "line": 206,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "src/restart.ts",
+        "line": 367,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "src/restart.ts",
+        "line": 401,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "dsh-better-sidebar",
+    "inject": [
+      "slots",
+      "sessions",
+      "locale",
+      "modules",
+      "connection",
+      "remote",
+      "remote.session",
+      "webServer",
+      "webRuntime",
+      "tools",
+      "invariants"
+    ],
+    "calls": [
+      {
+        "file": "lib/index.js",
+        "line": 3286,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"prefix\",\n\t\tpath: \"/sidebar/bundle\",\n\t\thandler: createBundleRouteHandler(fence)\n\t}",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 4464,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n\t\tname: \"sidebar_open\",\n\t\tdescription: \"Open a local file, a local folder, or an HTTP(S) page in the sidebar of the calling conversation. A file opens in the sidebar editor (per-path dedu",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5395,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5678,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6769,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6915,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6995,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7279,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7527,
+        "service": "sessions",
+        "method": "get",
+        "args": "record.sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7540,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7788,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"prefix\",\n\t\tpath: \"/sidebar/api\",\n\t\thandler: async (req, res) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\twriteJson(res, 403, {\n\t\t\t\t\tok: false,\n\t\t\t\t\terror: {\n\t\t\t\t\t\tcode: \"forbidden\",\n\t\t\t\t\t\tmessage: \"forb",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7828,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"exact\",\n\t\tpath: \"/sidebar/upload\",\n\t\thandler: async (req, res) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\twriteJson(res, 403, {\n\t\t\t\t\tok: false,\n\t\t\t\t\terror: {\n\t\t\t\t\t\tcode: \"forbidden\",\n\t\t\t\t\t\tmessage: \"fo",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7873,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"exact\",\n\t\tpath: \"/sidebar/write\",\n\t\thandler: async (req, res) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\twriteJson(res, 403, {\n\t\t\t\t\tok: false,\n\t\t\t\t\terror: {\n\t\t\t\t\t\tcode: \"forbidden\",\n\t\t\t\t\t\tmessage: \"for",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7921,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"exact\",\n\t\tpath: \"/sidebar/archive\",\n\t\thandler: async (req, res) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\twriteJson(res, 403, {\n\t\t\t\t\tok: false,\n\t\t\t\t\terror: {\n\t\t\t\t\t\tcode: \"forbidden\",\n\t\t\t\t\t\tmessage: \"f",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7956,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"prefix\",\n\t\tpath: \"/sidebar/file\",\n\t\thandler: async (req, res) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\tres.writeHead(403);\n\t\t\t\tres.end(\"forbidden\");\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tif (req.method !== \"GET\") {\n\t\t",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7995,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"prefix\",\n\t\tpath: \"/sidebar/html\",\n\t\thandler: async (req, res) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\tres.writeHead(403);\n\t\t\t\tres.end(\"forbidden\");\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tif (req.method !== \"GET\") {\n\t\t",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 8033,
+        "service": "webServer",
+        "method": "registerUpgrade",
+        "args": "{\n\t\tpath: \"/sidebar/ws/agent-opens\",\n\t\thandler: (req, socket, head) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\tsocket.destroy();\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tagentOpenWss.handleUpgrade(req, socket, head, (ws) => {\n\t\t\t\tatt",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 8046,
+        "service": "webServer",
+        "method": "registerUpgrade",
+        "args": "{\n\t\tpath: \"/sidebar/ws/fs-watch\",\n\t\thandler: (req, socket, head) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\tsocket.destroy();\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tfsWatchWss.handleUpgrade(req, socket, head, (ws) => {\n\t\t\t\tattachFs",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 8063,
+        "service": "webServer",
+        "method": "registerUpgrade",
+        "args": "{\n\t\tpath: \"/sidebar/ws/sidechat\",\n\t\thandler: (req, socket, head) => {\n\t\t\tif (!fence(req)) {\n\t\t\t\tsocket.destroy();\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tsidechatWss.handleUpgrade(req, socket, head, (ws) => {\n\t\t\t\tsidecha",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5380,
+        "service": "subagents",
+        "method": "listDescendants",
+        "args": "rootSessionId",
+        "how": "经由别名 subagents（声明在第 5665 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5668,
+        "service": "subagents",
+        "method": "listDescendants",
+        "args": "rootSessionId",
+        "how": "经由别名 subagents（声明在第 5665 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5460,
+        "service": "agentTeams",
+        "method": "tryMembership",
+        "args": "agent",
+        "how": "经由别名 teams（声明在第 5447 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5973,
+        "service": "agents",
+        "method": "resume",
+        "args": "{\n\t\t\tresumeSessionId: childId,\n\t\t\tsetup\n\t\t}",
+        "how": "经由别名 agents（声明在第 6100 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6104,
+        "service": "agents",
+        "method": "create",
+        "args": "options",
+        "how": "经由别名 agents（声明在第 6100 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5697,
+        "service": "sessionPersistence",
+        "method": "open",
+        "args": "sessionId, \"read\"",
+        "how": "经由别名 persistence（声明在第 7542 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5779,
+        "service": "agentPresets",
+        "method": "resolve",
+        "args": "presetId",
+        "how": "经由别名 presets（声明在第 5794 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5783,
+        "service": "agentPresets",
+        "method": "mount",
+        "args": "agentCtx, resolved.id",
+        "how": "经由别名 presets（声明在第 5794 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5796,
+        "service": "agentPresets",
+        "method": "resolve",
+        "args": "presetId",
+        "how": "经由别名 presets（声明在第 5794 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5798,
+        "service": "agentPresets",
+        "method": "mount",
+        "args": "agentCtx, resolved.id",
+        "how": "经由别名 presets（声明在第 5794 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5993,
+        "service": "llm",
+        "method": "resolveCallConfig",
+        "args": "{\n\t\t\tprovider: requested.provider,\n\t\t\tmodel: requested.model,\n\t\t\t...requested.reasoningEffort === void 0 ? {} : { reasoningEffort: ReasoningEffortId(requested.reasoningEffort) }\n\t\t}",
+        "how": "经由别名 llm（声明在第 7506 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7022,
+        "service": "llm",
+        "method": "resolveModelInfo",
+        "args": "route.provider, route.model",
+        "how": "经由别名 llm（声明在第 7506 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7037,
+        "service": "llm",
+        "method": "stream",
+        "args": "{\n\t\t\tprovider: route.provider,\n\t\t\tmodel: route.model,\n\t\t\tmessages: [createUserMessage({\n\t\t\t\tcontent: [{\n\t\t\t\t\ttype: \"text\",\n\t\t\t\t\ttext: user\n\t\t\t\t}],\n\t\t\t\tsource: { kind: \"plugin:dsh-better-sidebar\" }\n\t\t\t",
+        "how": "经由别名 llm（声明在第 7506 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7507,
+        "service": "llm",
+        "method": "listProviders",
+        "args": "",
+        "how": "经由别名 llm（声明在第 7506 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7514,
+        "service": "llm",
+        "method": "listModels",
+        "args": "parsed.provider",
+        "how": "经由别名 llm（声明在第 7506 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6022,
+        "service": "sessionController",
+        "method": "modelCatalog",
+        "args": "",
+        "how": "经由别名 service（声明在第 6015 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6115,
+        "service": "sessionTitle",
+        "method": "rename",
+        "args": "handle.agent.session, label",
+        "how": "经由别名 titles（声明在第 6141 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6143,
+        "service": "sessionTitle",
+        "method": "rename",
+        "args": "agent.session, sideLabel(text)",
+        "how": "经由别名 titles（声明在第 6141 行）"
+      },
+      {
+        "file": "lib/invariant.js",
+        "line": 20,
+        "service": "invariants",
+        "method": "register",
+        "args": "PACKAGE_NAME, install",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/types/team-routes.d.ts",
+        "line": 35,
+        "service": "agents",
+        "method": "get",
+        "args": "rootSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/active-worktree.ts",
+        "line": 229,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/agent-opens.ts",
+        "line": 204,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n    name: 'sidebar_open',\n    description:\n      'Open a local file, a local folder, or an HTTP(S) page in the sidebar of the calling conversation. '\n      + 'A file opens in the sidebar ",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/bundle-route.ts",
+        "line": 124,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    kind: 'prefix',\n    path: '/sidebar/bundle',\n    handler: createBundleRouteHandler(fence),\n  }",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 153,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 255,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 670,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1031,
+        "service": "sessions",
+        "method": "get",
+        "args": "record.sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1060,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1453,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    kind: 'prefix',\n    path: '/sidebar/api',\n    handler: async (req, res) => {\n      if (!fence(req)) {\n        writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } ",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1495,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    kind: 'exact',\n    path: '/sidebar/upload',\n    handler: async (req, res) => {\n      if (!fence(req)) {\n        writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' ",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1533,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    kind: 'exact',\n    path: '/sidebar/write',\n    handler: async (req, res) => {\n      if (!fence(req)) {\n        writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' }",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1586,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    kind: 'exact',\n    path: '/sidebar/archive',\n    handler: async (req, res) => {\n      if (!fence(req)) {\n        writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden'",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1611,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    kind: 'prefix',\n    path: '/sidebar/file',\n    handler: async (req, res) => {\n      if (!fence(req)) {\n        res.writeHead(403)\n        res.end('forbidden')\n        return\n      }\n      if (re",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1681,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    kind: 'prefix',\n    path: '/sidebar/html',\n    handler: async (req, res) => {\n      if (!fence(req)) {\n        res.writeHead(403)\n        res.end('forbidden')\n        return\n      }\n      if (re",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1740,
+        "service": "webServer",
+        "method": "registerUpgrade",
+        "args": "{\n    path: '/sidebar/ws/agent-opens',\n    handler: (req, socket, head) => {\n      if (!fence(req)) {\n        socket.destroy()\n        return\n      }\n      agentOpenWss.handleUpgrade(req as unknown as",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1761,
+        "service": "webServer",
+        "method": "registerUpgrade",
+        "args": "{\n    path: '/sidebar/ws/fs-watch',\n    handler: (req, socket, head) => {\n      if (!fence(req)) {\n        socket.destroy()\n        return\n      }\n      fsWatchWss.handleUpgrade(req as unknown as Inco",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1783,
+        "service": "webServer",
+        "method": "registerUpgrade",
+        "args": "{\n    path: '/sidebar/ws/sidechat',\n    handler: (req, socket, head) => {\n      if (!fence(req)) {\n        socket.destroy()\n        return\n      }\n      sidechatWss.handleUpgrade(req as unknown as Inc",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 292,
+        "service": "llm",
+        "method": "resolveModelInfo",
+        "args": "route.provider, route.model",
+        "how": "经由别名 llm（声明在第 1004 行）"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 327,
+        "service": "llm",
+        "method": "stream",
+        "args": "{\n      provider: route.provider,\n      model: route.model,\n      messages: [createUserMessage({\n        content: [{ type: 'text', text: user }],\n        // The plugin's producer-owned source kind (0.",
+        "how": "经由别名 llm（声明在第 1004 行）"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1008,
+        "service": "llm",
+        "method": "listProviders",
+        "args": "",
+        "how": "经由别名 llm（声明在第 1004 行）"
+      },
+      {
+        "file": "src/index.ts",
+        "line": 1013,
+        "service": "llm",
+        "method": "listModels",
+        "args": "parsed.provider",
+        "how": "经由别名 llm（声明在第 1004 行）"
+      },
+      {
+        "file": "src/invariant.ts",
+        "line": 31,
+        "service": "invariants",
+        "method": "register",
+        "args": "PACKAGE_NAME, install",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/session-store.ts",
+        "line": 34,
+        "service": "sessionPersistence",
+        "method": "open",
+        "args": "sessionId, 'read'",
+        "how": "经由别名 persistence（声明在第 58 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 204,
+        "service": "agentPresets",
+        "method": "resolve",
+        "args": "presetId",
+        "how": "经由别名 presets（声明在第 223 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 207,
+        "service": "agentPresets",
+        "method": "mount",
+        "args": "agentCtx, resolved.id",
+        "how": "经由别名 presets（声明在第 223 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 227,
+        "service": "agentPresets",
+        "method": "resolve",
+        "args": "presetId",
+        "how": "经由别名 presets（声明在第 223 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 228,
+        "service": "agentPresets",
+        "method": "mount",
+        "args": "agentCtx, resolved.id",
+        "how": "经由别名 presets（声明在第 223 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 435,
+        "service": "agents",
+        "method": "resume",
+        "args": "{ resumeSessionId: childId as SessionId, setup }",
+        "how": "经由别名 agents（声明在第 618 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 624,
+        "service": "agents",
+        "method": "create",
+        "args": "options",
+        "how": "经由别名 agents（声明在第 618 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 465,
+        "service": "llm",
+        "method": "resolveCallConfig",
+        "args": "{\n      provider: requested.provider,\n      model: requested.model,\n      ...(requested.reasoningEffort === undefined\n        ? {}\n        : { reasoningEffort: ReasoningEffortId(requested.reasoningEff",
+        "how": "经由别名 llm（声明在第 461 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 495,
+        "service": "sessionController",
+        "method": "modelCatalog",
+        "args": "",
+        "how": "经由别名 service（声明在第 490 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 656,
+        "service": "sessionTitle",
+        "method": "rename",
+        "args": "handle.agent.session, label",
+        "how": "经由别名 titles（声明在第 696 行）"
+      },
+      {
+        "file": "src/sidechat-routes.ts",
+        "line": 699,
+        "service": "sessionTitle",
+        "method": "rename",
+        "args": "agent.session, sideLabel(text)",
+        "how": "经由别名 titles（声明在第 696 行）"
+      },
+      {
+        "file": "src/subagent-live-route.ts",
+        "line": 83,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/subagent-live-route.ts",
+        "line": 63,
+        "service": "subagents",
+        "method": "listDescendants",
+        "args": "rootSessionId",
+        "how": "经由别名 subagents（声明在第 53 行）"
+      },
+      {
+        "file": "src/team-routes.ts",
+        "line": 35,
+        "service": "agents",
+        "method": "get",
+        "args": "rootSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/team-routes.ts",
+        "line": 110,
+        "service": "agentTeams",
+        "method": "tryMembership",
+        "args": "agent",
+        "how": "经由别名 teams（声明在第 88 行）"
+      },
+      {
+        "file": "src/team-routes.ts",
+        "line": 35,
+        "service": "agents",
+        "method": "get",
+        "args": "rootSessionId",
+        "how": "经由别名 agents（声明在第 89 行）"
+      },
+      {
+        "file": "src/workflow-routes.ts",
+        "line": 106,
+        "service": "sessions",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "src/workflow-routes.ts",
+        "line": 88,
+        "service": "subagents",
+        "method": "listDescendants",
+        "args": "rootSessionId",
+        "how": "经由别名 subagents（声明在第 83 行）"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "lib/index.js",
+        "line": 488,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2266,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2944,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3487,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 4238,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5399,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5683,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 5881,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6116,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6144,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6162,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6189,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6675,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 7545,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "dsh-context",
+    "inject": [
+      "slots",
+      "locale",
+      "sessionProjections"
+    ],
+    "calls": [
+      {
+        "file": "lib/index.js",
+        "line": 3634,
+        "service": "sessionProjections",
+        "method": "register",
+        "args": "createFallbackTimelineDefinition(harnessVersion)",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3635,
+        "service": "sessionProjections",
+        "method": "register",
+        "args": "createFallbackHeadersDefinition()",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3636,
+        "service": "sessionProjections",
+        "method": "register",
+        "args": "createFallbackActivityDefinition()",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3642,
+        "service": "sessionProjections",
+        "method": "register",
+        "args": "createContextTimelineDefinition(config, () => gate.live)",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3643,
+        "service": "sessionProjections",
+        "method": "register",
+        "args": "createContextHeadersDefinition((name) => attribution.ownerOf(name))",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3644,
+        "service": "sessionProjections",
+        "method": "register",
+        "args": "createContextActivityDefinition()",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2746,
+        "service": "sessionQuery",
+        "method": "listSessions",
+        "args": "abort.signal",
+        "how": "经由别名 query（声明在第 3308 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2221,
+        "service": "attachments",
+        "method": "fileHostPath",
+        "args": "{\n\t\t\tattachmentId: ref.attachmentId,\n\t\t\tname: ref.name ?? \"\",\n\t\t\tbytes: ref.bytes ?? 0\n\t\t}",
+        "how": "经由别名 store（声明在第 2288 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2235,
+        "service": "attachments",
+        "method": "imageHostPath",
+        "args": "{\n\t\t\tattachmentId: ref.attachmentId,\n\t\t\t...ref.mediaType !== void 0 ? { mediaType: ref.mediaType } : {},\n\t\t\t...ref.bytes !== void 0 ? { bytes: ref.bytes } : {},\n\t\t\t...ref.width !== void 0 ? { width: r",
+        "how": "经由别名 store（声明在第 2288 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2491,
+        "service": "settings",
+        "method": "describe",
+        "args": "",
+        "how": "经由别名 settings（声明在第 2488 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2865,
+        "service": "sessionProjections",
+        "method": "stateOf",
+        "args": "session, \"contextTimeline\"",
+        "how": "经由别名 projections（声明在第 2852 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2623,
+        "service": "sessionPersistence",
+        "method": "open",
+        "args": "id, \"read\", { signal }",
+        "how": "经由别名 persistence（声明在第 2886 行）"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "lib/index.js",
+        "line": 46,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2204,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2379,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2469,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2571,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2631,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3428,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3523,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3620,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "deep-read-summarize",
+    "inject": [
+      "skills"
+    ],
+    "calls": [
+      {
+        "file": "index.js",
+        "line": 105,
+        "service": "skills",
+        "method": "register",
+        "args": "{\n    name: 'deep-read-summarize',\n    description: workflow.meta.description,\n    whenToUse: workflow.meta.whenToUse,\n    content: buildSkillContent(config),\n    resourceBase: { kind: 'directory', pa",
+        "how": "ctx.<svc>.<method>() 直调"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "parsers/index.js",
+        "line": 51,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "scripts/lint.js",
+        "line": 25,
+        "kind": "console-only",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "dsh-video-understand",
+    "inject": [
+      "tools"
+    ],
+    "calls": [
+      {
+        "file": "dsh/index.js",
+        "line": 241,
+        "service": "tools",
+        "method": "register",
+        "args": "tool(config.toolName || 'video_understand')",
+        "how": "ctx.<svc>.<method>() 直调"
+      }
+    ],
+    "silentCatch": []
+  },
+  {
+    "name": "dsh-genui",
+    "inject": [
+      "slots",
+      "select",
+      "$mftable",
+      "TreeRoot",
+      "parentTree",
+      "moreIcon",
+      "form",
+      "formItem",
+      "systemPrompt",
+      "webServer"
+    ],
+    "calls": [
+      {
+        "file": "lib/index.js",
+        "line": 6171,
+        "service": "systemPrompt",
+        "method": "section",
+        "args": "section",
+        "how": "经由别名 systemPrompt（声明在第 6348 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6391,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"exact\",\n\t\tpath: GENUI_PROMPT_CONTROL_URL,\n\t\thandler: createGenuiPromptControlHandler(endpointControl)\n\t}",
+        "how": "经由别名 webServer（声明在第 6390 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6396,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"exact\",\n\t\tpath: GENUI_RUNTIME_URL,\n\t\thandler: serveStaticFile(artifacts.js, \"text/javascript; charset=utf-8\")\n\t}",
+        "how": "经由别名 webServer（声明在第 6390 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 6401,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n\t\tkind: \"exact\",\n\t\tpath: GENUI_RUNTIME_MAP_URL,\n\t\thandler: serveStaticFile(artifacts.map, \"application/json; charset=utf-8\")\n\t}",
+        "how": "经由别名 webServer（声明在第 6390 行）"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 27,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 27,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 35,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 66,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 77,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 101,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 110,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 204,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 231,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 231,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 237,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 258,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 259,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 270,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 270,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 270,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 272,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 272,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 314,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 320,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 320,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 674,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 674,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 674,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 674,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 674,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 674,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 674,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 674,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/genui-runtime.js",
+        "line": 973,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "dsh-mcp-connector",
+    "inject": [
+      "slots",
+      "sessions",
+      "workspaces",
+      "conversation",
+      "tools",
+      "storageDomain",
+      "loader",
+      "workspaceRegistry"
+    ],
+    "calls": [
+      {
+        "file": "lib/connection-scopes.js",
+        "line": 275,
+        "service": "tools",
+        "method": "guard",
+        "args": "(execution) => {\n        const record = recordForPublicName(execution.name);\n        if (!record || visible(record, execution.agent)) return undefined;\n        return `MCP 工具 ${execution.name} 不属于当前工作",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/connection-scopes.js",
+        "line": 285,
+        "service": "tools",
+        "method": "schemas",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/connection-scopes.js",
+        "line": 307,
+        "service": "tools",
+        "method": "restrict",
+        "args": "{ deny: denied }",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/governance.js",
+        "line": 297,
+        "service": "tools",
+        "method": "guard",
+        "args": "(execution) => {\n        const resolved = inspect(execution.name);\n        if (resolved?.policy.effect !== 'deny') return undefined;\n        return `MCP 工具 ${execution.name} 已被${resolved.policy.source",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/governance.js",
+        "line": 307,
+        "service": "tools",
+        "method": "schemas",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/governance.js",
+        "line": 330,
+        "service": "tools",
+        "method": "restrict",
+        "args": "{ deny: denied }",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 138,
+        "service": "storageDomain",
+        "method": "open",
+        "args": "defineConnectorDomain()",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 205,
+        "service": "workspaceRegistry",
+        "method": "list",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 998,
+        "service": "tools",
+        "method": "schemas",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1427,
+        "service": "tools",
+        "method": "schemas",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/session-injection.js",
+        "line": 73,
+        "service": "tools",
+        "method": "schemas",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/session-injection.js",
+        "line": 156,
+        "service": "tools",
+        "method": "restrict",
+        "args": "{ deny: denied }",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/session-injection.js",
+        "line": 189,
+        "service": "tools",
+        "method": "guard",
+        "args": "(execution) => {\n        const record = recordForPublicName(execution.name);\n        if (!record || normalizeInjectionMode(record.injectionMode) !== 'session') return undefined;\n        if (record.ena",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 174,
+        "service": "tools",
+        "method": "register",
+        "args": "{\n    ...def,\n    async execute(args, exec) {\n      return toLossless(await def.execute(args, exec));\n    },\n  }",
+        "how": "ctx.<svc>.<method>() 直调"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "lib/connection-editor.js",
+        "line": 31,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3245,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/mcp-http.js",
+        "line": 56,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/mcp-http.js",
+        "line": 117,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/mcp-validation.js",
+        "line": 41,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/probe.js",
+        "line": 25,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "dsh-task-board",
+    "inject": [
+      "slots",
+      "sessions",
+      "workspaces",
+      "tools",
+      "webServer",
+      "fs",
+      "timer",
+      "subagents",
+      "agents",
+      "workspaceRegistry",
+      "agentDefaultModel",
+      "llm",
+      "shell"
+    ],
+    "calls": [
+      {
+        "file": "lib/index.js",
+        "line": 161,
+        "service": "sandboxPolicy",
+        "method": "resolve",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1412,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\r\n      kind: 'exact',\r\n      path: '/dsh-task-board',\r\n      handler: async (req, res) => {\r\n        res.setHeader('Content-Type', 'application/json')\r\n        res.setHeader('Cache-Control', 'no-sto",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1636,
+        "service": "tools",
+        "method": "register",
+        "args": "tool",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 48,
+        "service": "fs",
+        "method": "resolve",
+        "args": "'.dsh/kanban-state.json', { cwd: store.ws.path }",
+        "how": "经由别名 fs（声明在第 4 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 49,
+        "service": "fs",
+        "method": "readText",
+        "args": "target",
+        "how": "经由别名 fs（声明在第 4 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 84,
+        "service": "fs",
+        "method": "writeText",
+        "args": "bak, String(raw || ''), undefined, undefined, { mode: 'danger-full-access', workspaceRoot: store.ws.path }",
+        "how": "经由别名 fs（声明在第 4 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 232,
+        "service": "fs",
+        "method": "resolve",
+        "args": "'.dsh/kanban-state.json', { cwd: store.ws.path }",
+        "how": "经由别名 fs（声明在第 4 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 237,
+        "service": "fs",
+        "method": "readText",
+        "args": "target",
+        "how": "经由别名 fs（声明在第 4 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 251,
+        "service": "fs",
+        "method": "writeText",
+        "args": "target, json, undefined, undefined, { mode: 'danger-full-access', workspaceRoot: store.ws.path }",
+        "how": "经由别名 fs（声明在第 4 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 490,
+        "service": "fs",
+        "method": "writeText",
+        "args": "dir + '/' + name, String(text || ''), undefined, undefined, { mode: 'danger-full-access', workspaceRoot: ws.path }",
+        "how": "经由别名 fs（声明在第 4 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 685,
+        "service": "fs",
+        "method": "resolve",
+        "args": "'.git', { cwd: store.ws.path }",
+        "how": "经由别名 fs（声明在第 4 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 723,
+        "service": "timer",
+        "method": "timeout",
+        "args": "() => { void runBatchLoop(store) }, 150",
+        "how": "经由别名 timer（声明在第 5 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 738,
+        "service": "timer",
+        "method": "interval",
+        "args": "() => {\r\n        if (!store.state || !store.state.autoExec || !store.state.autoExec.enabled) return\r\n        if (store.busy.has('batch')) return\r\n        // poll: dispatch any pending todo issues\r\n   ",
+        "how": "经由别名 timer（声明在第 5 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 857,
+        "service": "timer",
+        "method": "timeout",
+        "args": "() => { void runAcceptancePass(store) }, 300",
+        "how": "经由别名 timer（声明在第 5 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1643,
+        "service": "timer",
+        "method": "interval",
+        "args": "() => { void healthScanAll() }, HEALTH_SCAN_MS",
+        "how": "经由别名 timer（声明在第 5 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 600,
+        "service": "subagents",
+        "method": "start",
+        "args": "'spawn', {\r\n          label: 'executor-' + issue.id,\r\n          prompt: [{ type: 'text', text: buildExecutorPrompt(issue, ws) }],\r\n          persona: EXECUTOR_PERSONA,\r\n          outputSchema: {\r\n    ",
+        "how": "经由别名 subagents（声明在第 6 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 781,
+        "service": "subagents",
+        "method": "start",
+        "args": "'spawn', {\r\n          label: 'acceptance-' + id,\r\n          prompt: [{ type: 'text', text: buildAcceptancePrompt(issue, ws) }],\r\n          persona: ACCEPT_PERSONA,\r\n          outputSchema: {\r\n        ",
+        "how": "经由别名 subagents（声明在第 6 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 124,
+        "service": "agents",
+        "method": "get",
+        "args": "i.run.subagentId",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 363,
+        "service": "agents",
+        "method": "currentInitiator",
+        "args": "",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 371,
+        "service": "agents",
+        "method": "get",
+        "args": "init.session.id",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 380,
+        "service": "agents",
+        "method": "get",
+        "args": "sid",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 390,
+        "service": "agents",
+        "method": "list",
+        "args": "",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 884,
+        "service": "agents",
+        "method": "get",
+        "args": "i.run.subagentId",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 907,
+        "service": "agents",
+        "method": "get",
+        "args": "i.acceptanceSubagentId",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 945,
+        "service": "agents",
+        "method": "currentInitiator",
+        "args": "",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1456,
+        "service": "agents",
+        "method": "currentInitiator",
+        "args": "",
+        "how": "经由别名 agents（声明在第 7 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 93,
+        "service": "workspaceRegistry",
+        "method": "get",
+        "args": "workspaceId",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 942,
+        "service": "workspaceRegistry",
+        "method": "list",
+        "args": "",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 948,
+        "service": "workspaceRegistry",
+        "method": "resolveByPath",
+        "args": "cwd",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1322,
+        "service": "workspaceRegistry",
+        "method": "create",
+        "args": "path, args.title || undefined",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1334,
+        "service": "workspaceRegistry",
+        "method": "delete",
+        "args": "id",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1460,
+        "service": "workspaceRegistry",
+        "method": "resolveByPath",
+        "args": "cwd",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1496,
+        "service": "workspaceRegistry",
+        "method": "resolveByPath",
+        "args": "args.workspacePath",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1513,
+        "service": "workspaceRegistry",
+        "method": "resolveByPath",
+        "args": "args.workspacePath",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1586,
+        "service": "workspaceRegistry",
+        "method": "list",
+        "args": "",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1622,
+        "service": "workspaceRegistry",
+        "method": "resolveByPath",
+        "args": "args.workspacePath",
+        "how": "经由别名 workspaceRegistry（声明在第 8 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1236,
+        "service": "agentDefaultModel",
+        "method": "currentSelection",
+        "args": "",
+        "how": "经由别名 agentDefaultModel（声明在第 9 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1240,
+        "service": "llm",
+        "method": "listModels",
+        "args": "provider",
+        "how": "经由别名 llm（声明在第 10 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 191,
+        "service": "shell",
+        "method": "execute",
+        "args": "spec",
+        "how": "经由别名 shell（声明在第 11 行）"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "lib/index.js",
+        "line": 86,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 210,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 217,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 225,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 244,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 253,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 263,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 296,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 376,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 392,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 487,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 540,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 547,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 639,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 640,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 709,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 733,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 767,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 805,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 806,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 933,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 951,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "cc-safety-net",
+    "inject": [
+      "tools"
+    ],
+    "calls": [],
+    "silentCatch": [
+      {
+        "file": "dist/amp/cc-safety-net/index.ts",
+        "line": 7,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/amp/cc-safety-net/index.ts",
+        "line": 52,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/amp/cc-safety-net/index.ts",
+        "line": 53,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/amp/cc-safety-net/index.ts",
+        "line": 53,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/amp/cc-safety-net/index.ts",
+        "line": 53,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/amp/cc-safety-net/index.ts",
+        "line": 54,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/bin/hook.js",
+        "line": 5,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/bin/hook.js",
+        "line": 5,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/bin/hook.js",
+        "line": 50,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/bin/hook.js",
+        "line": 51,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/bin/hook.js",
+        "line": 51,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/bin/hook.js",
+        "line": 51,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/bin/hook.js",
+        "line": 52,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/bin/hook.js",
+        "line": 52,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "dist/chunks/index-7h15fjs7.js",
+        "line": 1,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/chunks/index-7h15fjs7.js",
+        "line": 2,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/chunks/index-7h15fjs7.js",
+        "line": 2,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/chunks/index-7h15fjs7.js",
+        "line": 2,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/chunks/index-7h15fjs7.js",
+        "line": 3,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/chunks/index-babcfevy.js",
+        "line": 3,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/chunks/index-babcfevy.js",
+        "line": 5,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/chunks/index-babcfevy.js",
+        "line": 5,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/cli.js",
+        "line": 37,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "dist/cli.js",
+        "line": 229,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/cli.js",
+        "line": 281,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/openclaw/cc-safety-net/index.js",
+        "line": 6,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/openclaw/cc-safety-net/index.js",
+        "line": 51,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/openclaw/cc-safety-net/index.js",
+        "line": 52,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/openclaw/cc-safety-net/index.js",
+        "line": 52,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/openclaw/cc-safety-net/index.js",
+        "line": 52,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/openclaw/cc-safety-net/index.js",
+        "line": 53,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "dsh-cost-meter",
+    "inject": [],
+    "calls": [
+      {
+        "file": "lib/backfill.js",
+        "line": 1072,
+        "service": "llm",
+        "method": "stream",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/billing-stream.js",
+        "line": 4,
+        "service": "llm",
+        "method": "stream",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/billing-stream.js",
+        "line": 6,
+        "service": "llm",
+        "method": "stream",
+        "args": "{ ..., provider: upstream }",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/billing-stream.js",
+        "line": 11,
+        "service": "llm",
+        "method": "stream",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/billing-stream.js",
+        "line": 24,
+        "service": "llm",
+        "method": "stream",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/billing-stream.js",
+        "line": 57,
+        "service": "llm",
+        "method": "stream",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/context-costs.js",
+        "line": 18,
+        "service": "pluginManager",
+        "method": "listBundles",
+        "args": "",
+        "how": "经由别名 manager（声明在第 16 行）"
+      },
+      {
+        "file": "lib/custom-balance.js",
+        "line": 114,
+        "service": "credentials",
+        "method": "resolve",
+        "args": "credentialRef(name)",
+        "how": "经由别名 credentials（声明在第 111 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3304,
+        "service": "llm",
+        "method": "stream",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 765,
+        "service": "credentials",
+        "method": "resolve",
+        "args": "credentialRef(name)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 870,
+        "service": "credentials",
+        "method": "resolve",
+        "args": "credentialRef(name)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 905,
+        "service": "credentials",
+        "method": "resolve",
+        "args": "credentialRef(name)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 911,
+        "service": "credentials",
+        "method": "resolve",
+        "args": "credentialRef(name)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1190,
+        "service": "credentials",
+        "method": "describe",
+        "args": "credentialRef(name)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1393,
+        "service": "credentials",
+        "method": "describe",
+        "args": "credentialRef(akRef)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1394,
+        "service": "credentials",
+        "method": "describe",
+        "args": "credentialRef(skRef)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1410,
+        "service": "credentials",
+        "method": "describe",
+        "args": "credentialRef(ref)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1433,
+        "service": "credentials",
+        "method": "describe",
+        "args": "credentialRef(name)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1552,
+        "service": "credentials",
+        "method": "describe",
+        "args": "credentialRef(varName)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2420,
+        "service": "credentials",
+        "method": "set",
+        "args": "credentialRef(ref), value.trim()",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2469,
+        "service": "credentials",
+        "method": "unset",
+        "args": "credentialRef(ref)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2733,
+        "service": "credentials",
+        "method": "describe",
+        "args": "credentialRef(ref)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2752,
+        "service": "credentials",
+        "method": "set",
+        "args": "credentialRef(ref), value",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2923,
+        "service": "credentials",
+        "method": "describe",
+        "args": "credentialRef(item.varName)",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2939,
+        "service": "credentials",
+        "method": "set",
+        "args": "credentialRef(item.varName), item.value",
+        "how": "经由别名 credentials（声明在第 898 行）"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "lib/billing-stream.js",
+        "line": 74,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/client.statistics.js",
+        "line": 41,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/client.statistics.js",
+        "line": 48,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/coding-plans.js",
+        "line": 1252,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/coding-plans.js",
+        "line": 1333,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/coding-plans.js",
+        "line": 1339,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/coding-plans.js",
+        "line": 1384,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/custom-balance.js",
+        "line": 219,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/gateway-quotas.js",
+        "line": 308,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 907,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 913,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 973,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1554,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/ledger-persistence.js",
+        "line": 28,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 83,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 87,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 95,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 115,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 196,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 301,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 310,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 319,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/native-search-billing.js",
+        "line": 384,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/openrouter-catalog.js",
+        "line": 24,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/openrouter-pricing.js",
+        "line": 44,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/store.js",
+        "line": 2012,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/store.js",
+        "line": 2056,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "@nanmicoder/dsh-agent-teams",
+    "inject": [
+      "uiConversation",
+      "slots",
+      "sessions",
+      "locale",
+      "modelDirectories",
+      "layout",
+      "tools",
+      "llm",
+      "subagents",
+      "systemPrompt",
+      "agents"
+    ],
+    "calls": [
+      {
+        "file": "lib/capabilities.js",
+        "line": 85,
+        "service": "tools",
+        "method": "restrict",
+        "args": "{\n                    deny: TEAM_TOOL_NAMES.filter(name => !MEMBER_TOOL_NAMES.includes(name)),\n                }",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/capabilities.js",
+        "line": 96,
+        "service": "systemPrompt",
+        "method": "section",
+        "args": "{\n        name: 'agent-teams:usage', order: config.order ?? 117,\n        text: ({ agent }) => {\n            return agent !== undefined && states.get(agent)?.member ? TEAM_MEMBER_PROMPT : captainPrompt",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/capabilities.js",
+        "line": 108,
+        "service": "agents",
+        "method": "list",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/command.js",
+        "line": 76,
+        "service": "commands",
+        "method": "register",
+        "args": "{\n            name: AGENT_TEAMS_COMMAND,\n            description: 'run a goal with a multi-agent team (you become the captain)',\n            input: { hint: '[--profile <name>] <goal>' },\n            h",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/command.js",
+        "line": 100,
+        "service": "commands",
+        "method": "register",
+        "args": "{\n                name: commandName,\n                description: `run a goal with the AgentTeams ${profileName} profile`,\n                input: { hint: '<goal>' },\n                handler(invocation",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/events.js",
+        "line": 58,
+        "service": "agents",
+        "method": "get",
+        "args": "captainSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 230,
+        "service": "agents",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 287,
+        "service": "agents",
+        "method": "get",
+        "args": "sessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/lineage.js",
+        "line": 25,
+        "service": "agents",
+        "method": "get",
+        "args": "branded",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/lineage.js",
+        "line": 159,
+        "service": "agents",
+        "method": "get",
+        "args": "team.captainSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/lineage.js",
+        "line": 164,
+        "service": "agents",
+        "method": "list",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 89,
+        "service": "llm",
+        "method": "listModels",
+        "args": "selection.provider",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 233,
+        "service": "agents",
+        "method": "get",
+        "args": "brandedSessionId(member.id)",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 404,
+        "service": "llm",
+        "method": "resolveCallConfig",
+        "args": "{\n            provider,\n            model,\n            ...reasoningEffort === undefined\n                ? {}\n                : { reasoningEffort },\n        }, signal",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 443,
+        "service": "llm",
+        "method": "listModels",
+        "args": "provider.id",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 724,
+        "service": "subagents",
+        "method": "getProvider",
+        "args": "config.provider",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 726,
+        "service": "subagents",
+        "method": "list",
+        "args": "",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 747,
+        "service": "subagents",
+        "method": "startContinuable",
+        "args": "{\n            provider: config.provider,\n            label,\n            request: {\n                prompt: [{ type: 'text', text: initialPrompt ?? memberWelcome(team, member.name) }],\n                ",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 802,
+        "service": "agents",
+        "method": "get",
+        "args": "brandedSessionId(childId)",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 821,
+        "service": "subagents",
+        "method": "interrupt",
+        "args": "brandedSessionId(childId), { kind: 'ancestor', agent: captain }",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 877,
+        "service": "agents",
+        "method": "get",
+        "args": "parentId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/members.js",
+        "line": 920,
+        "service": "agents",
+        "method": "get",
+        "args": "brandedSessionId(id)",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/scheduler.js",
+        "line": 103,
+        "service": "agents",
+        "method": "get",
+        "args": "captainSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/scheduler.js",
+        "line": 106,
+        "service": "agents",
+        "method": "get",
+        "args": "member.id",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 294,
+        "service": "agents",
+        "method": "get",
+        "args": "team.captainSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 316,
+        "service": "agents",
+        "method": "get",
+        "args": "team.captainSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 362,
+        "service": "agents",
+        "method": "get",
+        "args": "team.captainSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 376,
+        "service": "subagents",
+        "method": "drainContinuableChildren",
+        "args": "captain, memberIds",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 426,
+        "service": "agents",
+        "method": "get",
+        "args": "halted.captainSessionId",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 776,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_create',\n        description: 'Create a team. Use approval=required for a two-phase plan: members and tasks remain unspawned/unclaimed until the user reviews th",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 987,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_edit_plan',\n        description: 'Atomically revise an AgentTeams plan. While staged, edit tasks and roster without starting work. While running, only update_ta",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 1116,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_approve',\n        description: 'Approve and start a staged team plan. Call this only in response to an explicit user approval in a new user turn; never call it ",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 1148,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_add_member',\n        description: 'Add a member to the team roster. Planning and idle roster rows do not call a model. After approval, the member session starts",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 1252,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_remove_member',\n        description: 'Remove a member safely: revoke its current attempts, return all unfinished owned tasks to the shared pending pool, interru",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 1312,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_create_task',\n        description: 'Create a task in your team\\'s task list. Use kind=work (default) for research, repository audits and general tasks. kind=rev",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 1471,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_reassign_task',\n        description: 'Atomically retry, reassign, or let the captain take over one ready unfinished/failed task. The old attempt is revoked befo",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 1607,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_claim_task',\n        description: 'Members claim their own ready task or read their existing attempt_id. Captains must use reassign_task to assign and wake a me",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 1709,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_update_task',\n        description: 'Update a task status/output. Members must supply the current attempt_id returned by claim_task; stale attempts are rejected ",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 1936,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_amend_task',\n        description: 'Captain-only controlled contract amendment for one non-terminal quality task: replace a wrong objective/acceptance/verify/inS",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 2016,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_send_message',\n        description: 'Send coordination or current-task guidance directly to the captain or a teammate. A running recipient receives it at the ne",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 2145,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_status',\n        description: 'Team snapshot: members with live activity and tasks with status/assignee/dependencies/output. Captains also see every team mailbo",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 2276,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_resume',\n        description: 'Explicitly resume a halted team. Requires a non-empty reason. Does not recreate cancelled tasks; only still-pending work is sched",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/tools.js",
+        "line": 2329,
+        "service": "tools",
+        "method": "register",
+        "args": "defineTool({\n        name: 'agent_teams_delete',\n        description: 'End and archive your team: interrupts members and moves the current tasks and mailboxes out of active state for later inspection.",
+        "how": "ctx.<svc>.<method>() 直调"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "scripts/doctor.mjs",
+        "line": 127,
+        "kind": "console-only",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "@linxin666/dsh-client-ui-skin-center",
+    "inject": [
+      "slots",
+      "locale",
+      "theme",
+      "configForms",
+      "webServer"
+    ],
+    "calls": [
+      {
+        "file": "lib/index.js",
+        "line": 4042,
+        "service": "webServer",
+        "method": "register",
+        "args": "route",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "lib/index.js",
+        "line": 4052,
+        "service": "webServer",
+        "method": "tapIndex",
+        "args": "makeSkinIndexTap(indexDeps)",
+        "how": "ctx.<svc>.<method>() 直调"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "lib/index.js",
+        "line": 523,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1161,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 1205,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 2617,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3595,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 3603,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 4034,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 4061,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 4066,
+        "kind": "console-only",
+        "vendored": false
+      },
+      {
+        "file": "lib/index.js",
+        "line": 4077,
+        "kind": "console-only",
+        "vendored": false
+      }
+    ]
+  },
+  {
+    "name": "@liustack/modlens",
+    "inject": [
+      "tools",
+      "agents",
+      "attachments",
+      "llm"
+    ],
+    "calls": [
+      {
+        "file": "dsh/index.js",
+        "line": 312,
+        "service": "tools",
+        "method": "register",
+        "args": "readImageTool(preferred)",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 489,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    name: 'modlens-paste',\n    kind: 'exact',\n    path: '/modlens/paste',\n    handler: async (req, res) => {\n      // Same fence as /modlens/config, for the same reason: a page on this\n      // mach",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 1510,
+        "service": "attachments",
+        "method": "readImage",
+        "args": "block.attachment, signal",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 2187,
+        "service": "webServer",
+        "method": "register",
+        "args": "{\n    name: 'modlens-config',\n    kind: 'exact',\n    path: '/modlens/config',\n    handler: async (req, res) => {\n      const send = (status, body) => {\n        res.writeHead(status, { 'content-type': ",
+        "how": "ctx.<svc>.<method>() 直调"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 402,
+        "service": "llm",
+        "method": "listProviders",
+        "args": "",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 415,
+        "service": "llm",
+        "method": "listModels",
+        "args": "providerId",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 777,
+        "service": "llm",
+        "method": "registerAdapter",
+        "args": "[providerId], {\n        // Duck-typing LlmAdapter: providerInfo/providerRetryPolicy are\n        // base-class defaults a plain object must supply itself (their\n        // absence is exactly the silent",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 796,
+        "service": "llm",
+        "method": "providerRetryPolicy",
+        "args": "upstream",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 801,
+        "service": "llm",
+        "method": "listModels",
+        "args": "upstream, signal",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 808,
+        "service": "llm",
+        "method": "resolveModelInfo",
+        "args": "upstream, model, signal",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 859,
+        "service": "llm",
+        "method": "stream",
+        "args": "{ ...options, provider: upstream, messages, via: providerId }",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 905,
+        "service": "llm",
+        "method": "listProviders",
+        "args": "",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 923,
+        "service": "llm",
+        "method": "providerRetryPolicy",
+        "args": "upstream",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 973,
+        "service": "llm",
+        "method": "listProviders",
+        "args": "",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 1001,
+        "service": "llm",
+        "method": "listProviders",
+        "args": "",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 1107,
+        "service": "llm",
+        "method": "listProviders",
+        "args": "",
+        "how": "经由别名 llm（声明在第 714 行）"
+      },
+      {
+        "file": "dsh/index.js",
+        "line": 1134,
+        "service": "llm",
+        "method": "listModels",
+        "args": "id",
+        "how": "经由别名 llm（声明在第 714 行）"
+      }
+    ],
+    "silentCatch": [
+      {
+        "file": "dist/main.js",
+        "line": 1427,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 1905,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 2206,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 2474,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 3011,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 3140,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 3522,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 3540,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 3623,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 3633,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 4154,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 4355,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 4403,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 4429,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 4599,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 4720,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 4736,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 4751,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 5354,
+        "kind": "empty",
+        "vendored": false
+      },
+      {
+        "file": "dist/main.js",
+        "line": 5493,
+        "kind": "empty",
+        "vendored": false
+      }
+    ]
+  }
+]
