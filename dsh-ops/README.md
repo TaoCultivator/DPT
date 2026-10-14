@@ -20,8 +20,10 @@
    pwsh -NoProfile -File 'E:\AI图书馆\DSH-学习库\03-运行时取证\脚本\dsh-restart-once.ps1' `
         -Request .\restart-request.json -DelaySeconds 45
    ```
-   自检用 `-DryRun`（不杀进程、不重启、不写锁、不标记 `usedAt`）。
-4. **runner**：延时 → 结束 DSH → 重新拉起 → 自清理标记/锁/自身，过程写 `restart-runner.log`。
+   自检：`-DryRun`（干跑：不杀进程、不重启、不写锁、不标记 `usedAt`）；`-SelfTestSpawn`（链路实证自检：
+   拉起无害探针 runner，**等它真写出日志才判定通过**，不碰 DSH、不需要标记）。**真机重启前先跑 `-SelfTestSpawn`**。
+   `-RunnerSpawn auto|wmi|schtasks`：auto 默认走 `schtasks` 一次性任务（计划任务服务代建、自删），失败回落 `wmi`。
+4. **runner**：延时 → 结束 DSH → 重新拉起 → 自清理标记/锁/启动器/自身/一次性任务，过程写 `restart-runner.log`（1/5–5/5 五步）。
 5. **重启后自动续跑**：宿主启动时即重新计算日程，到点把消息投进原会话（**不需要用户打开会话**；重启窗口内到期的会补投，可能重复一次，所以 prompt 要幂等）。
 6. **回填结论**：写进被验证的议题；流程自身的问题回填 `k-mv8ak8zi-4`。
 
@@ -32,13 +34,21 @@
 | 日程提醒（`@deepseek-ai/dsh-schedule`） | 宿主重启后 `requestDrive()` 重新计算，投递时 `resolveAgent` 恢复冷会话 | **默认必排** |
 | 看板自动执行（`dsh-task-board`，本工作区 `autoExec` 已开启、间隔 60s） | 重启后插件重新加载，自动派发 `todo` 议题给新的 executor | 需要**独立执行者**做代码级核验时叠加 |
 
-## 本机已知缺陷（**未修**，别当成"能用"）
+## 本机已知缺陷
 
 | 编号 | 缺陷 | 后果 |
 |---|---|---|
-| D1 | 触发段的 WMI 路线被本机拒绝（`Invoke-CimMethod Win32_Process Create` **返回码 8**） | 触发即失败：写了 `usedAt`/锁/日志后退出，runner 从未生成，DSH 不会被关闭。替代候选 `schtasks` / `explorer` / 人工，均待实测 |
+| D1 | ~~触发段不可用（WMI 被拒 / 返回码 8）~~ **已修（2026-10-15）** | 根因不是「WMI 整体被拒」：① 被 WMI 创建的 `cmd.exe` **无法创建 System32 的 `powershell.exe`**（拒绝访问，子进程不出现），而能创建 pwsh 别名 → 宿主顺序已重排；② 正常触发分支漏写 `run.cmd` 启动器 → 已补；③ 失败不回滚 `usedAt`/锁 → 已改为回滚。默认路线改为 `schtasks`（已实证端到端可用）。证据：`…\2026-10-15-重启触发链路半程验证.md` |
 | D2 | "请求主窗口关闭"在 Windows 上只是**隐藏到托盘**，不是退出 | 真正停掉 DSH 的是随后的 `Stop-Process -Force`：**硬杀**，不是优雅退出 |
-| D3 | 硬杀跳过应用收尾（`before-quit` / `finishQuit`） | 正在生成的回合、会话尾部、插件外部状态可能丢 |
+| D3 | 硬杀跳过应用收尾（`before-quit` / `finishQuit`） | 正在生成的回合、会话尾部、插件外部状态可能丢；并行议题在跑时风险更高 |
+
+## 已验证到什么程度（2026-10-15）
+
+- ✅ **全链路半程验证**：用无害替身程序（cmd 副本改名 `probeapp.exe`，副本内断言不含 `DeepSeek` 字样）跑通
+  「触发 → runner 五步 → 关窗/强杀/拉起 → 自清理」，标记/锁/启动器/runner/一次性任务全部自清理；
+- ✅ 防滥用 10/10 用例通过（一次性、短有效期、白名单、并发锁、`-DryRun` 无副作用、失败回滚）；
+- ✅ `-SelfTestSpawn` 在 schtasks / wmi 两条路线均能拉起探针，且第 3 行证明**脱离 Job**；
+- ⏳ **未做**：真实 DSH 的那一次「关闭 → 拉起」与重启后日程投递核对 —— 需用户批准、并行任务清空后由人执行。
 
 ## 红线
 
