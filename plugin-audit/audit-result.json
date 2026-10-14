@@ -5,22 +5,135 @@
   "contractServiceCount": 91,
   "clientContractAvailable": false,
   "clientContractServiceCount": 0,
+  "liveSource": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+  "asarPath": "D:\\Ai-XG\\Deepseek Harness\\resources\\app.asar",
   "bundleCount": 20,
   "bundles": [
     {
       "name": "@deepseek-ai/dsh-base",
       "kind": "官方",
-      "version": null,
-      "dir": null,
+      "version": "0.2.0-rc.2",
+      "dir": "asar:/dsh/node_modules/@deepseek-ai/dsh-base",
       "isLink": false,
       "linkTargetExists": null,
-      "staticScanReachable": false,
-      "staticScanReason": "profile/node_modules 下无该包（官方 bundle 打包在 app.asar 内，普通 fs 读不到）",
-      "fileCount": 0,
+      "fromAsar": true,
+      "staticScanReachable": true,
+      "staticScanReason": null,
+      "fileCount": 7,
+      "asarJsFiles": 1,
       "clientEntries": [],
-      "dshBundlePatch": null,
-      "patchExists": null,
-      "depsDeclared": 0,
+      "dshBundlePatch": "./cordis.patch.yml",
+      "patchExists": true,
+      "declaredIdCount": 94,
+      "declaredIds": [
+        "tool-plugin-manager",
+        "plugin-manager",
+        "timer",
+        "hmr",
+        "llm",
+        "deepseek-llm-api-extensions",
+        "session",
+        "session-log-deepseek",
+        "typert",
+        "typert-loader",
+        "typert-gateway",
+        "session-title",
+        "session-title-llm",
+        "user-questions",
+        "agent",
+        "plugin-package-inventory-deepseek",
+        "agent-default-model",
+        "jobs",
+        "llm-retry",
+        "config-editor",
+        "settings",
+        "authorization",
+        "deepseek-account",
+        "credentials",
+        "llm-pi-ai",
+        "session-persistence-jsonl",
+        "attachment-local",
+        "session-query-sqlite",
+        "session-projection",
+        "storage",
+        "storage-json",
+        "storage-domain",
+        "session-projection-cache",
+        "otel",
+        "session-telemetry-otel",
+        "subprocess",
+        "sandbox",
+        "sandbox-policy",
+        "bash-sandbox",
+        "pwsh-sandbox",
+        "approval",
+        "permission",
+        "shell-env",
+        "tool-bash",
+        "tool-pwsh",
+        "tool-jobs",
+        "fs-observation-policy",
+        "tool-fs",
+        "tool-fs-search",
+        "agent-instructions",
+        "skill",
+        "skill-filesystem",
+        "skill-badge",
+        "tool-skill",
+        "commands",
+        "command-feedback",
+        "goal",
+        "goal-round-driver",
+        "command-goal",
+        "plan-mode",
+        "token-meter",
+        "compaction-basic",
+        "command-compact",
+        "subagent",
+        "subagent-spawn-in-process",
+        "subagent-fork-in-process",
+        "tool-subagent-control",
+        "tool-subagent-list-agents",
+        "tool-subagent",
+        "tool-subagent-fork",
+        "ptc-runtime",
+        "workflow-ptc",
+        "tool-workflow",
+        "timeout-policy",
+        "spill-local",
+        "spill-policy",
+        "session-checkpoint-policy",
+        "tool-result-pruner",
+        "image-offload",
+        "tool-todo",
+        "tool-goal",
+        "tool-ralph",
+        "repeat-tool-reminder",
+        "web",
+        "web-search-deepseek",
+        "web-fetch-http",
+        "tool-web",
+        "mcp-resources",
+        "tools",
+        "system-prompt",
+        "agent-loop",
+        "fs-sandbox",
+        "llm-deepseek",
+        "llm-deepseek-account"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 20780,
+          "ids": 94
+        }
+      ],
+      "liveStatus": {
+        "coverage": "快照未覆盖该组合包（只录入了用户侧 20 个组合包对应的行）",
+        "checked": false
+      },
+      "liveMissing": [],
+      "depsDeclared": 93,
       "depsMissing": [],
       "enginesDsh": null,
       "enginesOk": null,
@@ -28,6 +141,7 @@
       "compatVerdict": null,
       "inject": [],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 0,
       "silentCatchCount": 0,
       "silentCatchVendored": 0,
@@ -36,78 +150,293 @@
       "findings": [],
       "l1l2": {
         "claim": "DSH 基座：session / llm / tools / fs / sandbox 等核心服务",
-        "l1": "由 @deepseek-ai/dsh-base 提供的全部核心行 · enabled=true · fiberPhase=active",
-        "l2": "本会话全部读写、工具调用、模型调用都跑在它提供的服务上（91 个实时工具、91 个宿主服务目录可读）",
+        "l1": "补丁清单声明 94 行（app.asar 内 `./cordis.patch.yml` 静态解析）· 全部 enabled=true · fiberPhase=active",
+        "l2": "本会话全部读写、工具调用、模型调用都跑在它提供的服务上（91 条实时工具、91 个宿主服务目录可读）",
         "conclusion": "可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#基座与-web-宿主",
-          "contracts.json"
+          "evidence/l2-probes.md#七基座与-web-宿主",
+          "contracts.json",
+          "evidence/l4-env.md"
         ],
-        "note": "第三方插件全部 inject 的服务（tools/fs/webServer/shell/timer/subagents/agents/llm 等）均由该 bundle 提供。"
+        "note": "第三方插件全部 inject 的服务（tools/fs/webServer/shell/timer/subagents/agents/llm 等）均由该 bundle 提供。L4：包在 app.asar 内（v0.2.0-rc.2，93 个依赖全部可达，7 个条目），首版「静态不可达」已作废。"
       },
       "conclusion": "可用"
     },
     {
       "name": "@deepseek-ai/dsh-web-app",
       "kind": "官方",
-      "version": null,
-      "dir": null,
+      "version": "0.2.0-rc.2",
+      "dir": "asar:/dsh/node_modules/@deepseek-ai/dsh-web-app",
       "isLink": false,
       "linkTargetExists": null,
-      "staticScanReachable": false,
-      "staticScanReason": "profile/node_modules 下无该包（官方 bundle 打包在 app.asar 内，普通 fs 读不到）",
-      "fileCount": 0,
+      "fromAsar": true,
+      "staticScanReachable": true,
+      "staticScanReason": null,
+      "fileCount": 12,
+      "asarJsFiles": 2,
       "clientEntries": [],
-      "dshBundlePatch": null,
-      "patchExists": null,
-      "depsDeclared": 0,
+      "dshBundlePatch": [
+        "./cordis.patch.yml",
+        "./presets/standard.patch.yml",
+        "./presets/ptc.patch.yml",
+        "./presets/minimal.patch.yml",
+        "./presets/cordis.patch.yml"
+      ],
+      "patchExists": true,
+      "declaredIdCount": 136,
+      "declaredIds": [
+        "system-prompt",
+        "session-query-sqlite",
+        "tools",
+        "desktop-product-telemetry",
+        "product-analytics",
+        "subagent-model-selection-settings",
+        "message-feedback",
+        "session-log-download",
+        "open-in-app",
+        "ui-open-in-app",
+        "workspace",
+        "session-reference",
+        "file-reference-local",
+        "session-stats",
+        "session-turn-outline",
+        "directory-picker",
+        "plugin-inventory",
+        "session-controller",
+        "job-controller",
+        "terminal-controller",
+        "workspace-files",
+        "ui-settings-account",
+        "account-controller",
+        "settings-controller",
+        "workspace-controller",
+        "cordis-host-runner",
+        "cordis-inspect-providers",
+        "web-startup",
+        "webserver",
+        "web-runtime",
+        "client-hmr",
+        "modules",
+        "connection",
+        "file-upload",
+        "api-remotes",
+        "cordis-client-runner",
+        "ui-theme",
+        "locale",
+        "shortcuts",
+        "ui-shortcuts",
+        "ui-layout",
+        "ui-renderer",
+        "ui-session",
+        "resources",
+        "ui-sidebar",
+        "ui-sidebar-right",
+        "office-to-pdf",
+        "ui-sidebar-documentpreview",
+        "ui-sidebar-browser",
+        "ui-sidebar-terminal",
+        "ui-sidebar-files",
+        "ui-settings",
+        "ui-settings-general",
+        "ui-settings-models",
+        "ui-plugin-manager",
+        "ui-settings-plugin-inventory",
+        "ui-conversation",
+        "ui-approval",
+        "ui-chat",
+        "ui-brand-official",
+        "ui-attachment",
+        "ui-tool",
+        "ui-cordis",
+        "ui-deliverables",
+        "workspace-changes",
+        "ui-workspace",
+        "ui-workflow-run",
+        "ui-input-trigger",
+        "ui-commands",
+        "ui-skill",
+        "ui-subagent",
+        "ui-reference",
+        "ui-jobs",
+        "ui-goal",
+        "ui-message-feedback",
+        "ui-model-selection",
+        "ui-permission",
+        "ui-agent-preset",
+        "ui-settings-session-log",
+        "ui-settings-plugins",
+        "ui-settings-shell",
+        "ui-settings-agent-loop",
+        "ui-settings-subagent",
+        "ui-settings-web-search",
+        "ui-plan",
+        "ui-user-questions",
+        "ui-trajectory",
+        "tool-plugin-manager",
+        "tool-bash",
+        "tool-pwsh",
+        "tool-jobs",
+        "tool-fs",
+        "tool-fs-search",
+        "skill-filesystem",
+        "tool-skill",
+        "command-goal",
+        "tool-goal",
+        "plan-mode",
+        "compaction-basic",
+        "command-compact",
+        "tool-result-pruner",
+        "tool-subagent-control",
+        "tool-subagent-list-agents",
+        "tool-subagent",
+        "tool-subagent-fork",
+        "workflow-ptc",
+        "tool-workflow",
+        "tool-ralph",
+        "agent-instructions",
+        "tool-todo",
+        "tool-web",
+        "agent-preset-registry",
+        "preset-standard",
+        "standard",
+        "persona",
+        "planning",
+        "compaction",
+        "delegation",
+        "tool-subagent-codex",
+        "tool-subagent-claude-code",
+        "tool-ask-user",
+        "present",
+        "preset-ptc",
+        "ptc",
+        "tool-presentation",
+        "preset-minimal",
+        "minimal",
+        "persistent-shell",
+        "pty",
+        "terminal-bash",
+        "persistent-bash",
+        "terminal-pwsh",
+        "persistent-pwsh",
+        "preset-cordis",
+        "cordis",
+        "tool-cordis"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 21637,
+          "ids": 112
+        },
+        {
+          "patch": "./presets/standard.patch.yml",
+          "bytes": 7511,
+          "ids": 34
+        },
+        {
+          "patch": "./presets/ptc.patch.yml",
+          "bytes": 7697,
+          "ids": 35
+        },
+        {
+          "patch": "./presets/minimal.patch.yml",
+          "bytes": 3184,
+          "ids": 9
+        },
+        {
+          "patch": "./presets/cordis.patch.yml",
+          "bytes": 8089,
+          "ids": 35
+        }
+      ],
+      "liveStatus": {
+        "coverage": "快照未覆盖该组合包（只录入了用户侧 20 个组合包对应的行）",
+        "checked": false
+      },
+      "liveMissing": [],
+      "depsDeclared": 127,
       "depsMissing": [],
       "enginesDsh": null,
       "enginesOk": null,
       "compatRange": null,
       "compatVerdict": null,
-      "inject": [],
+      "inject": [
+        "webServer",
+        "cmdlineArgs"
+      ],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 0,
-      "silentCatchCount": 0,
+      "silentCatchCount": 1,
       "silentCatchVendored": 0,
       "silentCatchEmpty": 0,
       "clientSilentCatchCount": 0,
       "findings": [],
       "l1l2": {
         "claim": "Web 宿主：HTTP 载体、客户端模块装配、索引注入",
-        "l1": "web-startup / webserver / web-runtime / client-modules 等行 active",
-        "l2": "本会话的 GUI 就在 127.0.0.1:19387 由该 bundle 提供；对 8 条插件路由的回环探测全部有响应",
+        "l1": "补丁清单声明 136 行（主清单 112 + 4 个 preset 层 34/35/9/35 的并集）· 相关行全部 active",
+        "l2": "本会话的 GUI 就在 127.0.0.1:19387 由该 bundle 提供；本轮对 9 条插件路由的回环探测全部有响应（3×200 / 3×405 / 1×401 / 2×404 属探测方式不适用）",
         "conclusion": "可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#回环-http-路由探测"
+          "evidence/l2-probes.md#二回环-http-路由探测本轮重新实测",
+          "evidence/l4-env.md"
         ],
-        "note": "第三方插件注册的 /sidebar、/mcp-connector、/dsh-market、/dsh-task-board、/sidenote、/modlens、/plugins/dsh-agent-teams、/genui 路由都挂在这台服务器上。"
+        "note": "第三方插件注册的 /sidebar、/mcp-connector、/dsh-market、/dsh-task-board、/sidenote、/modlens、/plugins/dsh-agent-teams、/genui 路由都挂在这台服务器上。L4：asar 内 v0.2.0-rc.2，127 个依赖全部可达，声明 136 行为 5 个补丁文件的并集（未逐层去重）。"
       },
       "conclusion": "可用"
     },
     {
       "name": "@deepseek-ai/dsh-experimental-auto-review",
       "kind": "官方",
-      "version": null,
-      "dir": null,
+      "version": "0.2.0-rc.2",
+      "dir": "asar:/dsh/node_modules/@deepseek-ai/dsh-experimental-auto-review",
       "isLink": false,
       "linkTargetExists": null,
-      "staticScanReachable": false,
-      "staticScanReason": "profile/node_modules 下无该包（官方 bundle 打包在 app.asar 内，普通 fs 读不到）",
-      "fileCount": 0,
+      "fromAsar": true,
+      "staticScanReachable": true,
+      "staticScanReason": null,
+      "fileCount": 10,
+      "asarJsFiles": 1,
       "clientEntries": [],
-      "dshBundlePatch": null,
-      "patchExists": null,
-      "depsDeclared": 0,
+      "dshBundlePatch": "./cordis.patch.yml",
+      "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "auto-review"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 88,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
+      "depsDeclared": 1,
       "depsMissing": [],
       "enginesDsh": null,
       "enginesOk": null,
       "compatRange": null,
       "compatVerdict": null,
-      "inject": [],
+      "inject": [
+        "approval",
+        "llm",
+        "permissionPresets",
+        "sessions",
+        "tools"
+      ],
       "unknownServiceKeys": [],
-      "callCount": 0,
+      "weakUnknownKeys": [],
+      "callCount": 7,
       "silentCatchCount": 0,
       "silentCatchVendored": 0,
       "silentCatchEmpty": 0,
@@ -115,30 +444,65 @@
       "findings": [],
       "l1l2": {
         "claim": "自动验收：议题进入待验收后派验收子代理",
-        "l1": "auto-review 行 enabled=true · fiberPhase=active",
+        "l1": "补丁声明 1 行（auto-review）· enabled=true · fiberPhase=active · 逐 id 比对命中 1/1",
         "l2": "未验证 —— 本议题内不派发验收、不改生产状态，无法在不留副作用的前提下触发一次真实验收",
         "conclusion": "未验证",
         "evidencePaths": [
-          "evidence/l1-rows.md"
+          "evidence/l1-rows.md",
+          "evidence/l4-env.md"
         ],
-        "note": "验证路径：看板 autoAccept=true 时进入待验收即触发；由用户决定何时开启（用户手动设置的开关，agent 不得代改）。"
+        "note": "验证路径：看板 autoAccept=true 时进入待验收即触发；由用户决定何时开启（用户手动设置的开关，agent 不得代改）。该包是官方 6 包里唯一有真实 JS 实现的（lib/index.js 24 KB），已静态扫描：无契约缺陷。"
       },
       "conclusion": "未验证"
     },
     {
       "name": "@deepseek-ai/dsh-experimental-agent-team-profile",
       "kind": "官方",
-      "version": null,
-      "dir": null,
+      "version": "0.2.0-rc.2",
+      "dir": "asar:/dsh/node_modules/@deepseek-ai/dsh-experimental-agent-team-profile",
       "isLink": false,
       "linkTargetExists": null,
-      "staticScanReachable": false,
-      "staticScanReason": "profile/node_modules 下无该包（官方 bundle 打包在 app.asar 内，普通 fs 读不到）",
-      "fileCount": 0,
+      "fromAsar": true,
+      "staticScanReachable": true,
+      "staticScanReason": null,
+      "fileCount": 10,
+      "asarJsFiles": 1,
       "clientEntries": [],
-      "dshBundlePatch": null,
-      "patchExists": null,
-      "depsDeclared": 0,
+      "dshBundlePatch": "./cordis.patch.yml",
+      "patchExists": true,
+      "declaredIdCount": 7,
+      "declaredIds": [
+        "tool-subagent-control",
+        "tool-subagent-list-agents",
+        "tool-subagent",
+        "tool-subagent-fork",
+        "agent-team",
+        "tool-agent-team",
+        "ui-agent-team"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 818,
+          "ids": 7
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 7,
+        "matched": 7,
+        "missing": [],
+        "inactiveExpected": [
+          "tool-subagent-control",
+          "tool-subagent-list-agents",
+          "tool-subagent",
+          "tool-subagent-fork"
+        ],
+        "inactive": []
+      },
+      "liveMissing": [],
+      "depsDeclared": 3,
       "depsMissing": [],
       "enginesDsh": null,
       "enginesOk": null,
@@ -146,6 +510,7 @@
       "compatVerdict": null,
       "inject": [],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 0,
       "silentCatchCount": 0,
       "silentCatchVendored": 0,
@@ -153,12 +518,13 @@
       "clientSilentCatchCount": 0,
       "findings": [],
       "l1l2": {
-        "claim": "AgentTeams 相关行（3 行）",
-        "l1": "agent-team / tool-agent-team / ui-agent-team 三行 enabled=true · fiberPhase=active",
+        "claim": "AgentTeams 相关行（3 启用 + 4 主动禁用）",
+        "l1": "补丁声明 7 行（agent-team / tool-agent-team / ui-agent-team 启用；tool-subagent* 4 行补丁自写 disabled: true）· 逐 id 比对命中 7/7，其中 4 行非 active 属预期",
         "l2": "部分可用 —— 宿主 agentTeams 服务在实时 Service 目录中存在；agent_teams_status 调用返回语义化结果（非崩溃）。本议题内不建队、不派成员，避免留副作用",
         "conclusion": "未验证",
         "evidencePaths": [
-          "evidence/l2-probes.md#agent-teams"
+          "evidence/l2-probes.md#五agent-teams",
+          "evidence/l1-rows.md"
         ],
         "note": "与第三方 @nanmicoder/dsh-agent-teams 记录同源证据。"
       },
@@ -167,17 +533,42 @@
     {
       "name": "@deepseek-ai/dsh-experimental-schedule-bundle",
       "kind": "官方",
-      "version": null,
-      "dir": null,
+      "version": "0.2.0-rc.2",
+      "dir": "asar:/dsh/node_modules/@deepseek-ai/dsh-experimental-schedule-bundle",
       "isLink": false,
       "linkTargetExists": null,
-      "staticScanReachable": false,
-      "staticScanReason": "profile/node_modules 下无该包（官方 bundle 打包在 app.asar 内，普通 fs 读不到）",
-      "fileCount": 0,
+      "fromAsar": true,
+      "staticScanReachable": true,
+      "staticScanReason": null,
+      "fileCount": 10,
+      "asarJsFiles": 1,
       "clientEntries": [],
-      "dshBundlePatch": null,
-      "patchExists": null,
-      "depsDeclared": 0,
+      "dshBundlePatch": "./cordis.patch.yml",
+      "patchExists": true,
+      "declaredIdCount": 3,
+      "declaredIds": [
+        "time-context",
+        "schedule",
+        "ui-schedule"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 639,
+          "ids": 3
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 3,
+        "matched": 3,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
+      "depsDeclared": 3,
       "depsMissing": [],
       "enginesDsh": null,
       "enginesOk": null,
@@ -185,6 +576,7 @@
       "compatVerdict": null,
       "inject": [],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 0,
       "silentCatchCount": 0,
       "silentCatchVendored": 0,
@@ -192,31 +584,58 @@
       "clientSilentCatchCount": 0,
       "findings": [],
       "l1l2": {
-        "claim": "定时计划（2 行）",
-        "l1": "schedule / ui-schedule 两行 enabled=true · fiberPhase=active",
+        "claim": "定时计划（schedule / ui-schedule / time-context 三行）",
+        "l1": "补丁声明 3 行 · 逐 id 比对命中 3/3 · 全部 enabled=true / active",
         "l2": "未验证 —— 宿主 schedule 服务在实时 Service 目录中存在；未创建任何计划任务（会产生真实副作用）",
         "conclusion": "未验证",
         "evidencePaths": [
-          "contracts.json"
+          "evidence/l1-rows.md",
+          "evidence/l4-env.md"
         ],
-        "note": "验证路径：界面创建一个一次性提醒后观察是否触发。"
+        "note": "验证路径：界面创建一个一次性提醒后观察是否触发。另：首版行表快照漏录了第 3 行 time-context，比对报出「缺失」后经复核补录 —— 该反例已写进 l1-rows.md。"
       },
       "conclusion": "未验证"
     },
     {
       "name": "@deepseek-ai/dsh-experimental-voice-input-bundle",
       "kind": "官方",
-      "version": null,
-      "dir": null,
+      "version": "0.2.0-rc.2",
+      "dir": "asar:/dsh/node_modules/@deepseek-ai/dsh-experimental-voice-input-bundle",
       "isLink": false,
       "linkTargetExists": null,
-      "staticScanReachable": false,
-      "staticScanReason": "profile/node_modules 下无该包（官方 bundle 打包在 app.asar 内，普通 fs 读不到）",
-      "fileCount": 0,
+      "fromAsar": true,
+      "staticScanReachable": true,
+      "staticScanReason": null,
+      "fileCount": 10,
+      "asarJsFiles": 1,
       "clientEntries": [],
-      "dshBundlePatch": null,
-      "patchExists": null,
-      "depsDeclared": 0,
+      "dshBundlePatch": "./cordis.patch.yml",
+      "patchExists": true,
+      "declaredIdCount": 4,
+      "declaredIds": [
+        "speech-to-text",
+        "speech-to-text-sensevoice",
+        "api-speech-to-text",
+        "ui-voice-input"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 520,
+          "ids": 4
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 4,
+        "matched": 4,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
+      "depsDeclared": 4,
       "depsMissing": [],
       "enginesDsh": null,
       "enginesOk": null,
@@ -224,6 +643,7 @@
       "compatVerdict": null,
       "inject": [],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 0,
       "silentCatchCount": 0,
       "silentCatchVendored": 0,
@@ -232,11 +652,12 @@
       "findings": [],
       "l1l2": {
         "claim": "语音输入（4 行）",
-        "l1": "speech-to-text / speech-to-text-sensevoice / api-speech-to-text / ui-voice-input 四行 active",
+        "l1": "补丁声明 4 行 · 逐 id 比对命中 4/4 · 全部 enabled=true / active",
         "l2": "未验证 —— 宿主 speechToText / speechController 服务在实时 Service 目录中存在；真实识别需要麦克风与界面动作",
         "conclusion": "未验证",
         "evidencePaths": [
-          "contracts.json"
+          "evidence/l1-rows.md",
+          "evidence/l4-env.md"
         ],
         "note": "speech-to-text-sensevoice 依赖 app.asar.unpacked 里的 sherpa-onnx 原生包（该目录实测存在）。"
       },
@@ -249,6 +670,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dsh-sidenote",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 122,
@@ -257,6 +679,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "side-chat"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 642,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 0,
       "depsMissing": [],
       "enginesDsh": ">=0.1.1-rc.1 <0.2.0 || =0.2.0-rc.2",
@@ -270,24 +713,23 @@
         "connection",
         "locale"
       ],
-      "unknownServiceKeys": [
-        "get"
-      ],
+      "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 0,
       "silentCatchCount": 6,
       "silentCatchVendored": 0,
       "silentCatchEmpty": 4,
-      "clientSilentCatchCount": 54,
+      "clientSilentCatchCount": 78,
       "findings": [],
       "l1l2": {
         "claim": "侧边聊天（side-chat）：把结论回流到主会话",
-        "l1": "以「side-chat」行挂载 · enabled=true · fiberPhase=active",
+        "l1": "补丁声明 1 行（side-chat）· 逐 id 比对命中 1/1 · enabled=true / active",
         "l2": "部分可用 —— 宿主路由 /sidenote/reflow 回环探测返回 HTTP 405（路由已挂载，仅接受 POST），说明宿主半边装配成功；未做真实界面动作（会向主会话注入文本，属生产副作用）",
         "conclusion": "部分可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#回环-http-路由探测"
+          "evidence/l2-probes.md#二回环-http-路由探测本轮重新实测"
         ],
-        "note": "engines.dsh 声明 `>=0.1.1-rc.1 <0.2.0 || =0.2.0-rc.2`，本机 0.2.0-rc.2 命中，兼容闸通过。"
+        "note": "engines.dsh 声明 `>=0.1.1-rc.1 <0.2.0 || =0.2.0-rc.2`，本机 0.2.0-rc.2 命中，兼容闸通过；该包另有本机易失补丁（批注编号按轮重置），不属本议题范围。"
       },
       "conclusion": "部分可用"
     },
@@ -298,6 +740,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dshmarket",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 157,
@@ -306,6 +749,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "dsh-market"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 125,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 2,
       "depsMissing": [],
       "enginesDsh": null,
@@ -317,26 +781,24 @@
         "locale",
         "theme"
       ],
-      "unknownServiceKeys": [
-        "plugin",
-        "configForms"
-      ],
+      "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 0,
-      "silentCatchCount": 5,
+      "silentCatchCount": 85,
       "silentCatchVendored": 0,
-      "silentCatchEmpty": 5,
-      "clientSilentCatchCount": 24,
+      "silentCatchEmpty": 85,
+      "clientSilentCatchCount": 25,
       "findings": [],
       "l1l2": {
         "claim": "插件市场：浏览 / 安装 / 卸载 / 启停插件",
-        "l1": "以「dsh-market」行挂载 · enabled=true · fiberPhase=active",
+        "l1": "补丁声明 1 行（dsh-market）· 逐 id 比对命中 1/1 · enabled=true / active",
         "l2": "可用 —— 真实调用 marketplace 能力：plugin_manager list_plugins 返回 211 行全量清单（三次分页）；HTTP GET /dsh-market/api/v1/capabilities 返回 200 + 660 字节",
         "conclusion": "可用",
         "evidencePaths": [
           "evidence/l1-rows.md",
-          "evidence/l2-probes.md#回环-http-路由探测"
+          "evidence/l2-probes.md#二回环-http-路由探测本轮重新实测"
         ],
-        "note": "plugin_manager 工具即为该插件的宿主能力入口（DSH 自带的 tool-plugin-manager 行是 disabled 状态）。"
+        "note": "plugin_manager 工具即为该插件的宿主能力入口（DSH 自带的 tool-plugin-manager 行是 disabled 状态）。静态扫描 157 个源文件：无契约缺陷；它的 lib/verify.js 曾是本审计「注释假警报」的实证来源，已修。"
       },
       "conclusion": "可用"
     },
@@ -347,6 +809,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dsh-better-sidebar",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 376,
@@ -355,6 +818,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "better-sidebar"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 2270,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 33,
       "depsMissing": [],
       "enginesDsh": null,
@@ -375,11 +859,12 @@
         "invariants"
       ],
       "unknownServiceKeys": [],
-      "callCount": 79,
-      "silentCatchCount": 14,
+      "weakUnknownKeys": [],
+      "callCount": 76,
+      "silentCatchCount": 28,
       "silentCatchVendored": 0,
-      "silentCatchEmpty": 14,
-      "clientSilentCatchCount": 82,
+      "silentCatchEmpty": 28,
+      "clientSilentCatchCount": 93,
       "findings": [
         {
           "rule": "service-not-in-catalog",
@@ -404,13 +889,13 @@
       ],
       "l1l2": {
         "claim": "右侧栏：会话/文件/终端/附件多标签",
-        "l1": "以「better-sidebar」行挂载 · enabled=true · fiberPhase=active（补丁内有防重复挂载的 !!js 守卫）",
+        "l1": "补丁声明 1 行（better-sidebar）· 逐 id 比对命中 1/1 · enabled=true / active",
         "l2": "部分可用 —— 宿主路由 /sidebar/api 回环探测返回 HTTP 405（已挂载、仅接受 POST）；/sidebar/bundle 返回 404（该路由用了非字面路径匹配，本次探测方式不适用）；界面动作未验证",
         "conclusion": "部分可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#回环-http-路由探测"
+          "evidence/l2-probes.md#二回环-http-路由探测本轮重新实测"
         ],
-        "note": "本机未安装 @linxin666/dsh-web-ui-all 聚合包，故 !!js 守卫不会把本行关掉（实测该行确实 active）。"
+        "note": "本机未安装 @linxin666/dsh-web-ui-all 聚合包，故 !!js 守卫不会把本行关掉（实测该行确实 active）。L3 只报 2 条 low（webRuntime 目录盲区，非缺陷）。"
       },
       "conclusion": "部分可用"
     },
@@ -421,6 +906,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dsh-context",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 3,
@@ -429,6 +915,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "dsh-context"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 256,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 1,
       "depsMissing": [],
       "enginesDsh": null,
@@ -441,21 +948,22 @@
         "sessionProjections"
       ],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 12,
       "silentCatchCount": 9,
       "silentCatchVendored": 0,
       "silentCatchEmpty": 9,
-      "clientSilentCatchCount": 17,
+      "clientSilentCatchCount": 16,
       "findings": [],
       "l1l2": {
         "claim": "上下文可视：按会话投影展示上下文构成 / 时间线",
-        "l1": "以「dsh-context」行挂载 · enabled=true · fiberPhase=active",
+        "l1": "补丁声明 1 行（dsh-context）· 逐 id 比对命中 1/1 · enabled=true / active",
         "l2": "未验证 —— 宿主半边只声明服务依赖、不注册工具、也不注册字面路由；其宿主能力表现为向 sessionProjections 注册 contextBreakdown / contextTimeline 投影，读取需要客户端界面动作",
         "conclusion": "未验证",
         "evidencePaths": [
           "service-refs.json"
         ],
-        "note": "客户端 inspect 在本会话不可达（Client 查询 10s 超时），客户端契约无法比对。"
+        "note": "客户端 Service 契约在本机不可达（cordis_inspect(platform=client) 两次调用均 10s 超时），客户端半边只登记引用、不做契约比对。静态扫描 3 个源文件：无契约缺陷。"
       },
       "conclusion": "未验证"
     },
@@ -466,12 +974,34 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\deep-read-summarize",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 13,
       "clientEntries": [],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "deep-read-summarize"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 1698,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 0,
       "depsMissing": [],
       "enginesDsh": ">=0.1.0-rc.6",
@@ -482,19 +1012,20 @@
         "skills"
       ],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 1,
-      "silentCatchCount": 2,
+      "silentCatchCount": 6,
       "silentCatchVendored": 0,
-      "silentCatchEmpty": 0,
+      "silentCatchEmpty": 4,
       "clientSilentCatchCount": 0,
       "findings": [],
       "l1l2": {
         "claim": "深度阅读：书 / 论文 / 视频 / 网页 → 结构化 Markdown 笔记（workflow + 技能）",
-        "l1": "以「deep-read-summarize」行挂载 · enabled=true · fiberPhase=active",
-        "l2": "部分可用 —— 该插件注册的 workflow 工具在实时工具表中存在（meta 名 deep-read-summarize，见 91 个工具清单）；未做一次真实深读运行（会产出文件并消耗大量 token）",
+        "l1": "补丁声明 1 行（deep-read-summarize）· 逐 id 比对命中 1/1 · enabled=true / active",
+        "l2": "部分可用 —— 该插件注册的 workflow 工具在实时工具表中存在（meta 名 deep-read-summarize）；未做一次真实深读运行（会产出文件并消耗大量 token）",
         "conclusion": "部分可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#工具层"
+          "evidence/l2-probes.md#一工具层能力真的注册进宿主了吗"
         ],
         "note": "engines.dsh `>=0.1.0-rc.6` 兼容闸通过。"
       },
@@ -507,12 +1038,34 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dsh-video-understand",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 6,
       "clientEntries": [],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "video-understand"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 303,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 0,
       "depsMissing": [],
       "enginesDsh": null,
@@ -523,6 +1076,7 @@
         "tools"
       ],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 1,
       "silentCatchCount": 0,
       "silentCatchVendored": 0,
@@ -531,11 +1085,12 @@
       "findings": [],
       "l1l2": {
         "claim": "视频理解：B 站链接 / 本地视频 → 摘要 + 问答",
-        "l1": "以「video-understand」行挂载 · enabled=true · fiberPhase=active",
-        "l2": "部分可用 —— video_understand 工具在实时工具表中存在且参数契约完整；未做真实视频调用（需下载或上传帧到 MiMo API，有成本与外发）",
+        "l1": "补丁声明 1 行（video-understand）· 逐 id 比对命中 1/1 · enabled=true / active",
+        "l2": "部分可用 —— video_understand 工具在实时工具表中存在且参数契约完整；**未在本议题内运行**（需下载视频或把帧上传 MiMo API，有成本与外发）。旁证：~/.dsh/cache/video-understand/transcripts/ 有 2 个真实转写产物（2026-10-14 17:22），说明该链路此前真的跑通过",
         "conclusion": "部分可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#工具层"
+          "evidence/l2-probes.md#一工具层能力真的注册进宿主了吗",
+          "evidence/l4-env.md#外部服务的本地缓存旁证真的被用过"
         ],
         "note": "该行在 profile 补丁里被显式 disabled: false 覆盖过一次（见 cordis.patch.yml）。"
       },
@@ -548,6 +1103,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dsh-genui",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 3,
@@ -556,6 +1112,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "genui"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 228,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 0,
       "depsMissing": [],
       "enginesDsh": null,
@@ -574,9 +1151,9 @@
         "systemPrompt",
         "webServer"
       ],
-      "unknownServiceKeys": [
-        "data",
-        "parsedType"
+      "unknownServiceKeys": [],
+      "weakUnknownKeys": [
+        "data"
       ],
       "callCount": 4,
       "silentCatchCount": 30,
@@ -586,13 +1163,13 @@
       "findings": [],
       "l1l2": {
         "claim": "生成式 UI：让模型输出卡片 schemaJson 并由前端渲染",
-        "l1": "以「genui」行挂载 · enabled=true · fiberPhase=active",
+        "l1": "补丁声明 1 行（genui）· 逐 id 比对命中 1/1 · enabled=true / active",
         "l2": "部分可用 —— 宿主半边的系统提示注入已生效（本会话系统提示里确实有 genui 卡片契约：schemaJson 代码块、组件白名单、生成规则）；客户端渲染未验证",
         "conclusion": "部分可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#genui"
+          "evidence/l2-probes.md#六genui"
         ],
-        "note": "配置 sectionName=genui:cards / sectionOrder=80 / promptEnabled=true。"
+        "note": "配置 sectionName=genui:cards / sectionOrder=80 / promptEnabled=true。扫描时它内联了打包的 zod，其内部也使用 `ctx.data` 命名 → 只进 weakUnknownKeys（弱信号），不作结论。"
       },
       "conclusion": "部分可用"
     },
@@ -603,6 +1180,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dsh-mcp-connector",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 39,
@@ -611,6 +1189,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "mcp-connector"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 538,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 1,
       "depsMissing": [],
       "enginesDsh": null,
@@ -628,21 +1227,22 @@
         "workspaceRegistry"
       ],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 14,
-      "silentCatchCount": 6,
+      "silentCatchCount": 8,
       "silentCatchVendored": 0,
-      "silentCatchEmpty": 6,
+      "silentCatchEmpty": 8,
       "clientSilentCatchCount": 5,
       "findings": [],
       "l1l2": {
         "claim": "MCP 连接器：目录 / 三通道连接 / 凭据存储 / 动态条目配置",
-        "l1": "以「mcp-connector」行挂载 · enabled=true · fiberPhase=active",
-        "l2": "可用 —— 真实调用 mcp_connector_catalog 返回 113 个已上架连接器（含分类与鉴权方式）；HTTP GET /mcp-connector/ui 返回 200 + 142 KB 静态 SPA",
+        "l1": "补丁声明 1 行（mcp-connector）· 逐 id 比对命中 1/1 · enabled=true / active",
+        "l2": "可用 —— 真实调用 mcp_connector_catalog 返回 113 个已上架连接器（含分类与鉴权方式）；mcp_connector_status 正常应答「共 0 条连接」（插件可用，用户尚未配置任何连接）；HTTP GET /mcp-connector/ui 返回 200 + 142 KB 静态 SPA",
         "conclusion": "可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#回环-http-路由探测"
+          "evidence/l2-probes.md#二回环-http-路由探测本轮重新实测"
         ],
-        "note": "本机凭据文件 ~/.dsh/.credentials.yaml 存在（仅记录键名，未读取任何值）。"
+        "note": "本机凭据文件 ~/.dsh/.credentials.yaml 存在（仅记录键名，未读取任何值）。「0 条连接」是用户未使用，不作为缺陷。"
       },
       "conclusion": "可用"
     },
@@ -653,6 +1253,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dsh-task-board",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 2,
@@ -661,6 +1262,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "dsh-task-board"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 210,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 0,
       "depsMissing": [],
       "enginesDsh": null,
@@ -683,22 +1305,23 @@
         "shell"
       ],
       "unknownServiceKeys": [],
-      "callCount": 39,
-      "silentCatchCount": 22,
+      "weakUnknownKeys": [],
+      "callCount": 38,
+      "silentCatchCount": 27,
       "silentCatchVendored": 0,
-      "silentCatchEmpty": 18,
+      "silentCatchEmpty": 23,
       "clientSilentCatchCount": 17,
       "findings": [],
       "l1l2": {
         "claim": "任务看板：工作区 → 待执行 → 自动执行 → 待验收 → 自动验收 → 完成",
-        "l1": "以「dsh-task-board」行挂载 · enabled=true · fiberPhase=active",
-        "l2": "部分可用 —— 读路径可用（kanban_list_issues 返回 6 条真实议题）；写路径：宿主 00:18:37 启动（晚于 v4 写盘 00:09:26，即当前进程装载的就是 v4），此后 12 分钟零新增失败，且 .dsh/kanban-state.json 在 00:25:40 被成功写入（version=46）、无残留锁；但 00:09:26–00:18:37 之间仍有 5 条 state file lock timeout（调用栈指向 v4 的 withFileLock），无法确认属 v3 还是 v4",
+        "l1": "补丁声明 1 行（dsh-task-board）· 逐 id 比对命中 1/1 · enabled=true / active",
+        "l2": "部分可用 —— 读路径可用（kanban_list_issues 返回 6 条真实议题）；写路径：线上是 **v5**（00:31:26，sha256 前 16 位 0DC982AE18BFC56C），宿主当前进程组 **00:32:31 启动（晚于 v5 写盘）**，此后 40+ 分钟 **零新增落盘失败**（诊断日志 mtime 停在 00:17:24），且 .dsh/kanban-state.json 持续被写（version 46 → 69 → 71，01:04:56），无残留锁；但 00:08–00:17 的 8 条 lock timeout 属 v3 还是 v4 已无法回溯",
         "conclusion": "部分可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#task-board",
+          "evidence/l2-probes.md#四task-boarddsh-task-boardv5-与当前落盘状态",
           "evidence/task-board-ledger.md"
         ],
-        "note": "v4 = 部分已验证，定论需一次受控启动（把 persistDiag 扩记 exitCode/stderr/sandbox/命令行）→ 标注 待 k-mv8ak8zi-4。另观察到健康扫描在 5 分 26 秒无议题更新后把仍在运行的执行体打回 todo（autoExec=true 时存在重复派发风险），详见台账。本议题内不做任何重启、不改任何开关。"
+        "note": "「当前进程下链路是活的」已实测；「根因已消除」未验证 —— 需一次受控启动并把 persistDiag 扩记 exitCode/stderr/sandbox/命令行/锁目录 → 标注 待 k-mv8ak8zi-4。健康扫描误判（原缺陷 #3）已由 v5 修，仍待长任务观察。本议题内不做任何重启、不改任何开关。"
       },
       "conclusion": "部分可用"
     },
@@ -709,12 +1332,34 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\cc-safety-net",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 19,
       "clientEntries": [],
       "dshBundlePatch": "./dist/deepseek-harness/cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "cc-safety-net"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./dist/deepseek-harness/cordis.patch.yml",
+          "bytes": 57,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 0,
       "depsMissing": [],
       "enginesDsh": null,
@@ -725,6 +1370,7 @@
         "tools"
       ],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 0,
       "silentCatchCount": 31,
       "silentCatchVendored": 0,
@@ -733,13 +1379,13 @@
       "findings": [],
       "l1l2": {
         "claim": "命令安全网：在执行前拦截危险命令",
-        "l1": "以「cc-safety-net」行挂载（moduleName 是 file:/// 本地路径）· enabled=true · fiberPhase=active",
-        "l2": "可用 —— 拒绝路径实测生效两次：`git push --force` 被拦（Rule: git.push-force）、审计收尾时跨目录的 `Remove-Item -Recurse -Force` 被拦（Rule: powershell.remove-item-recursive-force-outside-cwd，按它给的替代路径改 `workdir` 后同命令通过，闭环正确）；放行路径实测生效：对自建临时目录的删除被放行（属策略允许，不是失效）",
+        "l1": "补丁声明 1 行（cc-safety-net，moduleName 是 file:/// 本地路径）· 逐 id 比对命中 1/1 · enabled=true / active",
+        "l2": "可用 —— 本轮再次实测拒绝路径两次：① 含 `git push --force` 的**复合命令被整条拦下**（Rule: git.push-force，未执行任何一段）；② `Remove-Item $out -Recurse -Force` 目标在 cwd 之外被拦（Rule: powershell.remove-item-recursive-force-outside-cwd），按它给的替代路径（切工作目录 + 只删显式相对路径）后同命令通过 → 拦截与替代路径闭环正确；放行路径亦正常（策略内删除成功）",
         "conclusion": "可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#cc-safety-net"
+          "evidence/l2-probes.md#三cc-safety-net拦截与放行本轮实测含被整条拦下的复合命令"
         ],
-        "note": "该插件只挂工具层（inject: [\"tools\"]），拦不到插件进程内的 shell 服务调用 —— 这条边界已写进 L3 风险规则。"
+        "note": "该插件只挂工具层（inject: [\"tools\"]），拦不到插件进程内的 shell 服务调用 —— 这条边界已写进 L3 风险规则，并用于排除「看板取锁被权限插件拦截」的假设。"
       },
       "conclusion": "可用"
     },
@@ -750,6 +1396,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\dsh-cost-meter",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 43,
@@ -758,6 +1405,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "cost-meter"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 271,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 1,
       "depsMissing": [],
       "enginesDsh": null,
@@ -765,13 +1433,12 @@
       "compatRange": ">=0.1.0-rc.5",
       "compatVerdict": "compatible",
       "inject": [],
-      "unknownServiceKeys": [
-        "get"
-      ],
-      "callCount": 25,
-      "silentCatchCount": 27,
+      "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
+      "callCount": 18,
+      "silentCatchCount": 55,
       "silentCatchVendored": 0,
-      "silentCatchEmpty": 26,
+      "silentCatchEmpty": 54,
       "clientSilentCatchCount": 9,
       "findings": [
         {
@@ -788,8 +1455,8 @@
       ],
       "l1l2": {
         "claim": "成本计量：按会话 / 供应商 / 模型显示 token 与费用",
-        "l1": "以「cost-meter」行挂载 · enabled=true · fiberPhase=active",
-        "l2": "部分可用 —— 宿主半边可装载、逐版兼容闸判定 0.2.0-rc.2 = compatible；但 L3 发现它调用了宿主 settings 服务不存在的方法（见缺陷 #1），DeepSeek 余额查询会静默降级到环境变量兜底",
+        "l1": "补丁声明 1 行（cost-meter）· 逐 id 比对命中 1/1 · enabled=true / active",
+        "l2": "部分可用 —— 宿主半边可装载、逐版兼容闸判定 0.2.0-rc.2 = compatible、账本在持续写（~/.dsh/storages/cost-meter/ledger.json 215,827 字节，01:06 仍在更新）；但 L3 发现它调用了宿主 settings 服务不存在的方法（见缺陷 #1），DeepSeek 余额查询链路静默降级到环境变量兜底",
         "conclusion": "部分可用",
         "evidencePaths": [
           "findings.json",
@@ -806,6 +1473,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\@nanmicoder\\dsh-agent-teams",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 76,
@@ -814,6 +1482,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "agent-teams"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 1108,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 0,
       "depsMissing": [],
       "enginesDsh": null,
@@ -833,9 +1522,8 @@
         "systemPrompt",
         "agents"
       ],
-      "unknownServiceKeys": [
-        "get"
-      ],
+      "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 43,
       "silentCatchCount": 1,
       "silentCatchVendored": 0,
@@ -844,14 +1532,13 @@
       "findings": [],
       "l1l2": {
         "claim": "AgentTeams：多智能体团队协作（建队 / 任务 DAG / 成员调度）",
-        "l1": "以「agent-teams」行挂载 · enabled=true · fiberPhase=active",
-        "l2": "可用 —— 16 个 agent_teams_* 工具全部在实时工具表中；实测 agent_teams_status 返回语义化结果（本会话为 fork 子代理、无团队，返回明确原因而非崩溃）",
+        "l1": "补丁声明 1 行（agent-teams）· 逐 id 比对命中 1/1 · enabled=true / active",
+        "l2": "可用 —— 14 个 agent_teams_* + 4 个 team_task_* 工具在实时工具表中；实测 agent_teams_status 返回语义化结果（本会话为 fork 子代理、无团队，返回明确原因而非崩溃）",
         "conclusion": "可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#agent-teams",
-          "evidence/l2-probes.md#工具层"
+          "evidence/l2-probes.md#五agent-teams"
         ],
-        "note": "本议题内不建队（会在工作区留下 .agent-teams 目录）。"
+        "note": "本议题内不建队（会在工作区留下 .agent-teams 目录）→「建队→派成员→收报告」全链路未验证。首轮记的「16 个工具」口径已更正为 14（按工具名去重实测）。"
       },
       "conclusion": "可用"
     },
@@ -862,6 +1549,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\@linxin666\\dsh-client-ui-skin-center",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 4,
@@ -870,6 +1558,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "ui-skin-center"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 289,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 2,
       "depsMissing": [],
       "enginesDsh": ">=0.1.7-rc.1",
@@ -884,6 +1593,7 @@
         "webServer"
       ],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 2,
       "silentCatchCount": 10,
       "silentCatchVendored": 0,
@@ -892,7 +1602,7 @@
       "findings": [],
       "l1l2": {
         "claim": "皮肤中心：主题 / 皮肤切换",
-        "l1": "以「ui-skin-center」行挂载 · enabled=true · fiberPhase=active",
+        "l1": "补丁声明 1 行（ui-skin-center）· 逐 id 比对命中 1/1 · enabled=true / active",
         "l2": "部分可用 —— 宿主半边已运行并落盘：~/.dsh/skin-center-active.json 内容为 {\"active\": null, \"initialized\": true}；皮肤渲染本身在客户端，未做界面动作",
         "conclusion": "部分可用",
         "evidencePaths": [
@@ -909,6 +1619,7 @@
       "dir": "C:\\Users\\songzhenxi\\.dsh\\profiles\\desktop\\node_modules\\@liustack\\modlens",
       "isLink": false,
       "linkTargetExists": null,
+      "fromAsar": false,
       "staticScanReachable": true,
       "staticScanReason": null,
       "fileCount": 5,
@@ -917,6 +1628,27 @@
       ],
       "dshBundlePatch": "./cordis.patch.yml",
       "patchExists": true,
+      "declaredIdCount": 1,
+      "declaredIds": [
+        "modlens"
+      ],
+      "declaredSources": [
+        {
+          "patch": "./cordis.patch.yml",
+          "bytes": 213,
+          "ids": 1
+        }
+      ],
+      "liveStatus": {
+        "checked": true,
+        "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+        "declared": 1,
+        "matched": 1,
+        "missing": [],
+        "inactiveExpected": [],
+        "inactive": []
+      },
+      "liveMissing": [],
       "depsDeclared": 2,
       "depsMissing": [],
       "enginesDsh": null,
@@ -930,21 +1662,22 @@
         "llm"
       ],
       "unknownServiceKeys": [],
+      "weakUnknownKeys": [],
       "callCount": 17,
-      "silentCatchCount": 20,
+      "silentCatchCount": 23,
       "silentCatchVendored": 0,
-      "silentCatchEmpty": 20,
+      "silentCatchEmpty": 23,
       "clientSilentCatchCount": 0,
       "findings": [],
       "l1l2": {
         "claim": "视觉理解桥：读图 / OCR / 版面与语义证据",
-        "l1": "以「modlens」行挂载 · enabled=true · fiberPhase=active",
-        "l2": "可用 —— 真实调用 modlens_read_image 读取仓库内一张 1.18 MB PNG，返回完整 OCR 全文 + 版面 + 语义结论（内容与图片实际文字一致）",
+        "l1": "补丁声明 1 行（modlens）· 逐 id 比对命中 1/1 · enabled=true / active",
+        "l2": "可用 —— 本轮复跑 modlens_read_image 读取仓库内一张 PNG，返回完整转写（「DPT 双脉冲测试参数提取工具 / 禁止商用 / PolyForm Noncommercial License 1.0.0 …」）+ 版面与语义结论，与图片实际内容一致",
         "conclusion": "可用",
         "evidencePaths": [
-          "evidence/l2-probes.md#modlens"
+          "evidence/l2-probes.md#一工具层能力真的注册进宿主了吗"
         ],
-        "note": "另注册 /modlens/paste、/modlens/config 两条宿主路由，/modlens/config 回环探测返回 200。"
+        "note": "另注册 /modlens/paste、/modlens/config 两条宿主路由，/modlens/config 回环探测返回 200 + 653 字节。"
       },
       "conclusion": "可用"
     }
@@ -987,15 +1720,17 @@
   ],
   "summary": {
     "bundles": 20,
-    "staticScanned": 14,
-    "staticUnreachable": 6,
+    "staticScanned": 20,
+    "staticUnreachable": 0,
+    "liveChecked": 18,
+    "liveMissingRows": 0,
     "blocker": 0,
     "high": 1,
     "medium": 0,
     "low": 2,
-    "silentCatch": 183,
+    "silentCatch": 320,
     "silentCatchVendored": 0,
-    "clientSilentCatch": 219,
+    "clientSilentCatch": 254,
     "unavailable": 0,
     "partial": 8,
     "verified": 7,

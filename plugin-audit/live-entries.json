@@ -1,0 +1,60 @@
+{
+  "source": "plugin_manager list_plugins（2026-10-15 01:0x 本会话三次分页采集，全表 211 行）",
+  "coverage": "只录入用户侧 20 个组合包对应的行（211 行全表的子集）；未收录的行不参与比对，未覆盖的组合包在矩阵里标注「未比对」",
+  "capturedAtLocal": "2026-10-15T01:02+08:00",
+  "coveredBundles": [
+    "dsh-sidenote",
+    "dshmarket",
+    "dsh-better-sidebar",
+    "dsh-context",
+    "deep-read-summarize",
+    "dsh-video-understand",
+    "dsh-genui",
+    "dsh-mcp-connector",
+    "dsh-task-board",
+    "cc-safety-net",
+    "dsh-cost-meter",
+    "@nanmicoder/dsh-agent-teams",
+    "@linxin666/dsh-client-ui-skin-center",
+    "@liustack/modlens",
+    "@deepseek-ai/dsh-experimental-auto-review",
+    "@deepseek-ai/dsh-experimental-agent-team-profile",
+    "@deepseek-ai/dsh-experimental-schedule-bundle",
+    "@deepseek-ai/dsh-experimental-voice-input-bundle"
+  ],
+  "entries": [
+    { "entryId": "include:side-chat", "id": "side-chat", "moduleName": "dsh-sidenote", "enabled": true, "fiberPhase": "active", "bundle": "dsh-sidenote" },
+    { "entryId": "include:dsh-market", "id": "dsh-market", "moduleName": "dshmarket", "enabled": true, "fiberPhase": "active", "bundle": "dshmarket" },
+    { "entryId": "include:better-sidebar", "id": "better-sidebar", "moduleName": "dsh-better-sidebar", "enabled": true, "fiberPhase": "active", "bundle": "dsh-better-sidebar" },
+    { "entryId": "include:dsh-context", "id": "dsh-context", "moduleName": "dsh-context", "enabled": true, "fiberPhase": "active", "bundle": "dsh-context" },
+    { "entryId": "include:deep-read-summarize", "id": "deep-read-summarize", "moduleName": "deep-read-summarize", "enabled": true, "fiberPhase": "active", "bundle": "deep-read-summarize" },
+    { "entryId": "include:video-understand", "id": "video-understand", "moduleName": "dsh-video-understand", "enabled": true, "fiberPhase": "active", "bundle": "dsh-video-understand" },
+    { "entryId": "include:genui", "id": "genui", "moduleName": "dsh-genui", "enabled": true, "fiberPhase": "active", "bundle": "dsh-genui" },
+    { "entryId": "include:mcp-connector", "id": "mcp-connector", "moduleName": "dsh-mcp-connector", "enabled": true, "fiberPhase": "active", "bundle": "dsh-mcp-connector" },
+    { "entryId": "include:dsh-task-board", "id": "dsh-task-board", "moduleName": "dsh-task-board", "enabled": true, "fiberPhase": "active", "bundle": "dsh-task-board" },
+    { "entryId": "include:cc-safety-net", "id": "cc-safety-net", "moduleName": "file:///C:/Users/songzhenxi/.dsh/profiles/desktop/node_modules/cc-safety-net/dist/deepseek-harness/index.js", "enabled": true, "fiberPhase": "active", "bundle": "cc-safety-net" },
+    { "entryId": "include:cost-meter", "id": "cost-meter", "moduleName": "dsh-cost-meter", "enabled": true, "fiberPhase": "active", "bundle": "dsh-cost-meter" },
+    { "entryId": "include:agent-teams", "id": "agent-teams", "moduleName": "@nanmicoder/dsh-agent-teams", "enabled": true, "fiberPhase": "active", "bundle": "@nanmicoder/dsh-agent-teams" },
+    { "entryId": "include:ui-skin-center", "id": "ui-skin-center", "moduleName": "@linxin666/dsh-client-ui-skin-center", "enabled": true, "fiberPhase": "active", "bundle": "@linxin666/dsh-client-ui-skin-center" },
+    { "entryId": "include:modlens", "id": "modlens", "moduleName": "@liustack/modlens", "enabled": true, "fiberPhase": "active", "bundle": "@liustack/modlens" },
+
+    { "entryId": "include:auto-review", "id": "auto-review", "moduleName": "@deepseek-ai/dsh-experimental-auto-review", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-auto-review" },
+
+    { "entryId": "include:agent-team", "id": "agent-team", "moduleName": "@deepseek-ai/dsh-experimental-agent-team", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-agent-team-profile" },
+    { "entryId": "include:tool-agent-team", "id": "tool-agent-team", "moduleName": "@deepseek-ai/dsh-experimental-tool-agent-team", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-agent-team-profile" },
+    { "entryId": "include:ui-agent-team", "id": "ui-agent-team", "moduleName": "@deepseek-ai/dsh-experimental-client-ui-agent-team", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-agent-team-profile" },
+    { "entryId": "include:tool-subagent-control", "id": "tool-subagent-control", "moduleName": "@deepseek-ai/dsh-tool-subagent-control", "enabled": false, "fiberPhase": null, "disabledByPatch": true, "bundle": "@deepseek-ai/dsh-experimental-agent-team-profile" },
+    { "entryId": "include:tool-subagent-list-agents", "id": "tool-subagent-list-agents", "moduleName": "@deepseek-ai/dsh-tool-subagent-control/list-agents", "enabled": false, "fiberPhase": null, "disabledByPatch": true, "bundle": "@deepseek-ai/dsh-experimental-agent-team-profile" },
+    { "entryId": "include:tool-subagent", "id": "tool-subagent", "moduleName": "@deepseek-ai/dsh-tool-subagent", "enabled": false, "fiberPhase": null, "disabledByPatch": true, "bundle": "@deepseek-ai/dsh-experimental-agent-team-profile" },
+    { "entryId": "include:tool-subagent-fork", "id": "tool-subagent-fork", "moduleName": "@deepseek-ai/dsh-tool-subagent", "enabled": false, "fiberPhase": null, "disabledByPatch": true, "bundle": "@deepseek-ai/dsh-experimental-agent-team-profile" },
+
+    { "entryId": "include:schedule", "id": "schedule", "moduleName": "@deepseek-ai/dsh-schedule", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-schedule-bundle" },
+    { "entryId": "include:ui-schedule", "id": "ui-schedule", "moduleName": "@deepseek-ai/dsh-client-ui-schedule", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-schedule-bundle" },
+    { "entryId": "include:time-context", "id": "time-context", "moduleName": "@deepseek-ai/dsh-time-context", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-schedule-bundle" },
+
+    { "entryId": "include:speech-to-text", "id": "speech-to-text", "moduleName": "@deepseek-ai/dsh-experimental-speech-to-text", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-voice-input-bundle" },
+    { "entryId": "include:speech-to-text-sensevoice", "id": "speech-to-text-sensevoice", "moduleName": "@deepseek-ai/dsh-experimental-speech-to-text-sensevoice", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-voice-input-bundle" },
+    { "entryId": "include:api-speech-to-text", "id": "api-speech-to-text", "moduleName": "@deepseek-ai/dsh-experimental-api-speech-to-text", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-voice-input-bundle" },
+    { "entryId": "include:ui-voice-input", "id": "ui-voice-input", "moduleName": "@deepseek-ai/dsh-experimental-client-ui-voice-input", "enabled": true, "fiberPhase": "active", "bundle": "@deepseek-ai/dsh-experimental-voice-input-bundle" }
+  ]
+}

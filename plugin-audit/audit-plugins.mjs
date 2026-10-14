@@ -31,7 +31,7 @@
  *   3) 契约方法名剥掉泛型：`open<S extends DomainSpec>(...)` 归一为 `open`
  */
 
-import { readFileSync, existsSync, lstatSync, readdirSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs'
+import { readFileSync, existsSync, lstatSync, readdirSync, writeFileSync, mkdirSync, realpathSync, openSync, readSync, closeSync } from 'node:fs'
 import { join, dirname, resolve, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
@@ -41,14 +41,16 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 /* ------------------------------------------------------------------ 参数 */
 
 function parseArgs(argv) {
-  const out = { profile: null, out: null, print: false, quiet: false }
+  const out = { profile: null, out: null, print: false, quiet: false, asar: null, live: null }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--profile') out.profile = argv[++i]
     else if (a === '--out') out.out = argv[++i]
+    else if (a === '--asar') out.asar = argv[++i]
+    else if (a === '--live') out.live = argv[++i]
     else if (a === '--print') out.print = true
     else if (a === '--quiet') out.quiet = true
-    else if (a === '--help' || a === '-h') { console.log('node audit-plugins.mjs [--profile <dir>] [--out <dir>] [--print] [--quiet]'); process.exit(0) }
+    else if (a === '--help' || a === '-h') { console.log('node audit-plugins.mjs [--profile <dir>] [--out <dir>] [--asar <app.asar>] [--live <live-entries.json>] [--print] [--quiet]'); process.exit(0) }
   }
   return out
 }
@@ -60,6 +62,10 @@ const OUT_DIR = ARGS.out ? resolve(ARGS.out) : HERE
 const CONTRACTS_PATH = join(HERE, 'contracts.json')
 const CLIENT_CONTRACTS_PATH = join(HERE, 'contracts.client.json')
 const EVIDENCE_PATH = join(HERE, 'evidence.json')
+const LIVE_PATH = ARGS.live ? resolve(ARGS.live) : join(HERE, 'live-entries.json')
+// 官方 6 个组合包打包在 app.asar 内（profile/node_modules 里没有）。普通 Node 进程能读 asar：
+// 布局已在学习库脚本（asar头部探测.cjs）里验证过 —— 头部长度在 offset 12，JSON 从 16 开始。
+const ASAR_PATH = ARGS.asar || process.env.DSH_ASAR || 'D:\\Ai-XG\\Deepseek Harness\\resources\\app.asar'
 
 /* ------------------------------------------------------------------ 工具 */
 
@@ -103,6 +109,86 @@ function linkInfo(p) {
     try { return { isLink: true, target: realpathSync(p), targetExists: true } }
     catch { return { isLink: true, target: null, targetExists: false } }
   } catch { return { isLink: false, target: null, targetExists: null } }
+}
+
+/* --------------------------------------------------- 去注释（精度必需） */
+
+/**
+ * 把 // 行注释与块注释的内容替换成**等长空格**（换行原样保留 → 行号不变）。
+ * 为什么必须做：dshmarket 的 `lib/verify.js` 在**注释里**写了
+ * `const forms = ctx.configForms; forms.get("x")` 作为反例说明 —— 不剥注释就会把这段
+ * 注释当成真实调用点，产出「configForms.get 不存在」的假警报（本机实测发生过）。
+ * 已知边界：正则字面量里出现裸 `//`（如 /[\/\/]/）会被误当行注释，最多丢掉该行剩余内容，
+ * 属保守侧误差（可能漏报，不会误报）。
+ */
+function stripComments(text) {
+  let out = ''
+  let i = 0
+  let quote = null
+  while (i < text.length) {
+    const ch = text[i]
+    if (quote) {
+      out += ch
+      if (ch === '\\') { out += text[i + 1] === undefined ? '' : text[i + 1]; i += 2; continue }
+      if (ch === quote) quote = null
+      i++
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; out += ch; i++; continue }
+    if (ch === '/' && text[i + 1] === '/') { while (i < text.length && text[i] !== '\n') { out += ' '; i++ } continue }
+    if (ch === '/' && text[i + 1] === '*') {
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) { out += text[i] === '\n' ? '\n' : ' '; i++ }
+      if (i < text.length) { out += '  '; i += 2 }
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
+}
+
+/* ------------------------------------------------- asar 读取（官方 bundle） */
+
+/** 打开 app.asar 只读句柄（Electron asar：offset 12 = 头部 JSON 字节数，JSON 自 16 起） */
+function openAsar(path) {
+  if (!path || !existsSync(path)) return null
+  try {
+    const fd = openSync(path, 'r')
+    const head = Buffer.alloc(16)
+    readSync(fd, head, 0, 16, 0)
+    const headerSize = head.readUInt32LE(12)
+    if (!headerSize || headerSize > 64 * 1024 * 1024) { closeSync(fd); return null }
+    const jb = Buffer.alloc(headerSize)
+    readSync(fd, jb, 0, headerSize, 16)
+    const header = JSON.parse(jb.toString('utf8'))
+    return { fd, header, base: 16 + headerSize, path }
+  } catch { return null }
+}
+function asarNode(a, parts) {
+  let cur = a.header
+  for (const p of parts) { if (!cur || !cur.files || !cur.files[p]) return null; cur = cur.files[p] }
+  return cur
+}
+function asarReadText(a, node) {
+  try {
+    const b = Buffer.alloc(Number(node.size))
+    readSync(a.fd, b, 0, Number(node.size), a.base + Number(node.offset))
+    return b.toString('utf8')
+  } catch { return null }
+}
+function asarList(node, prefix = '', acc = []) {
+  for (const [k, v] of Object.entries(node.files || {})) {
+    const p = prefix + '/' + k
+    if (v.files) asarList(v, p, acc)
+    else acc.push({ rel: p.slice(1), size: Number(v.size), node: v })
+  }
+  return acc
+}
+/** 从补丁清单里宽松解析行 id（`- id: x` / `id: x`），只用于「声明了多少行」这类静态证据 */
+function declaredIds(yamlText) {
+  const ids = []
+  for (const m of String(yamlText || '').matchAll(/^[ \t]*(?:-[ \t]*)?id:[ \t]*['"]?([\w@/.:-]+)/gm)) ids.push(m[1])
+  return [...new Set(ids)]
 }
 
 /* --------------------------------------------------------------- 最小 semver */
@@ -210,8 +296,11 @@ function loadContracts() {
 /* --------------------------------------------------------------- L3 扫描 */
 
 const RE = {
-  // 别名：RHS 必须是精确的 ctx.<svc>，后面不能跟 . / ?. / 标识符（否则是 ctx.svc.method() 或 ctx.svc?.x 的链式结果）
-  aliasCtx: /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:this\.)?ctx\.([A-Za-z_$][\w$]*)\s*(?![.\w$?])/g,
+  // 别名：RHS 必须是精确的 ctx.<svc>，后面不能跟 . / ?. / 标识符 / **(**。
+  // 排除 `(` 很关键：`const handle = ctx.plugin(HotTree, ...)` 里 `ctx.plugin` 是**调用**
+  // （cordis 核心 API，返回 fiber 句柄），不是服务引用；不排除就会把 `handle.dispose()`
+  // 误判成「服务 plugin 的 dispose 方法」，进而把 plugin 报成目录外的服务 key（实测假警报）。
+  aliasCtx: /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:this\.)?ctx\.([A-Za-z_$][\w$]*)\s*(?![.\w$?(])/g,
   aliasIndex: /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:this\.)?ctx\[['"]([\w$]+)['"]\]\s*(?![.\w$?])/g,
   aliasGet: /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:this\.)?ctx\.get\(\s*['"]([\w$]+)['"]\s*\)\s*(?![.\w$?[])/g,
   destruct: /\b(?:const|let|var)\s*\{([^}]{1,400})\}\s*=\s*(?:this\.)?ctx\b/g,
@@ -267,17 +356,23 @@ function guardedMethods(text) {
 
 function scanFile(relPath, text, plane, contracts, findings, refs) {
   const aliases = new Map()
+  text = stripComments(text)
   const guarded = guardedMethods(text)
   // 打包进来的第三方运行时（如 dsh-genui 内联的 zod）也用 ctx 命名，必须与插件自身代码区分
   const vendored = /__commonJS\(|__toCommonJS\(|__require\(/.test(text)
   let m
 
   RE.aliasCtx.lastIndex = 0
-  while ((m = RE.aliasCtx.exec(text))) aliases.set(m[1], { service: m[2], line: lineOf(text, m.index) })
+  while ((m = RE.aliasCtx.exec(text))) {
+    // `const get = ctx.get` 是拿「服务反射访问器」本身（agent-teams 用它做 optionalService 兜底），
+    // 不是服务引用；不排除就会把随后的 `get.call(ctx, name)` 误当成「服务 get 的 call 方法」。
+    if (m[2] === 'get') continue
+    aliases.set(m[1], { service: m[2], line: lineOf(text, m.index), via: 'property' })
+  }
   RE.aliasIndex.lastIndex = 0
-  while ((m = RE.aliasIndex.exec(text))) aliases.set(m[1], { service: m[2], line: lineOf(text, m.index) })
+  while ((m = RE.aliasIndex.exec(text))) aliases.set(m[1], { service: m[2], line: lineOf(text, m.index), via: 'index' })
   RE.aliasGet.lastIndex = 0
-  while ((m = RE.aliasGet.exec(text))) aliases.set(m[1], { service: m[2], line: lineOf(text, m.index) })
+  while ((m = RE.aliasGet.exec(text))) aliases.set(m[1], { service: m[2], line: lineOf(text, m.index), via: 'get' })
   RE.destruct.lastIndex = 0
   while ((m = RE.destruct.exec(text))) {
     const line = lineOf(text, m.index)
@@ -285,9 +380,9 @@ function scanFile(relPath, text, plane, contracts, findings, refs) {
       const t = piece.trim()
       if (!t) continue
       const asMatch = t.match(/^([\w$]+)\s*:\s*([\w$]+)/)
-      if (asMatch) { aliases.set(asMatch[2], { service: asMatch[1], line }); continue }
+      if (asMatch) { aliases.set(asMatch[2], { service: asMatch[1], line, via: 'destruct' }); continue }
       const plain = t.match(/^([\w$]+)/)
-      if (plain) aliases.set(plain[1], { service: plain[1], line })
+      if (plain) aliases.set(plain[1], { service: plain[1], line, via: 'destruct' })
     }
   }
 
@@ -323,21 +418,26 @@ function scanFile(relPath, text, plane, contracts, findings, refs) {
     }
   }
 
-  const judge = (service, method, line, argsText, how) => {
+  const judge = (service, method, line, argsText, how, via) => {
     if (!table) {
-      refs.calls.push({ file: relPath, line, service, method, plane: 'client', args: (argsText || '').slice(0, 200), how })
+      refs.calls.push({ file: relPath, line, service, method, plane: 'client', args: (argsText || '').slice(0, 200), how, via })
       refs.clientContractUnavailable = true
       return
     }
     const svc = table[service]
     if (!svc) {
-      // 不在目录里：cordis 核心成员忽略；其余登记为「目录覆盖盲区」候选，供人工复核
-      if (plane === 'host' && !vendored && !CORDIS_CORE.has(service)) {
-        refs.unknownServiceKeys.push({ file: relPath, line, service, method })
+      // 不在目录里：cordis 核心成员忽略；其余按**来源强度**分两桶登记供人工复核 ——
+      //   via==='get'   ：插件用 ctx.get('名字') **显式按名字要过**这个服务 → 强信号（真可能是服务名错）
+      //   其它           ：`ctx.<key>.<method>()` 属性访问 → 弱信号（打包进来的第三方运行时也用 ctx 命名，
+      //                    例如 genui 内联 zod 的 `ctx.data.entries()`；不据此下结论，只留痕）
+      if (plane === 'host' && !vendored && !CORDIS_CORE.has(service) && !BUILTIN_NAMES.has(method)) {
+        const rec = { file: relPath, line, service, method, via }
+        if (via === 'get') refs.unknownServiceKeys.push(rec)
+        else refs.weakUnknownServiceKeys.push(rec)
       }
       return
     }
-    refs.calls.push({ file: relPath, line, service, method, args: (argsText || '').slice(0, 200), how })
+    refs.calls.push({ file: relPath, line, service, method, args: (argsText || '').slice(0, 200), how, via })
     if (svc.byName.has(method)) {
       const sig = svc.byName.get(method)
       if (/sandboxPolicy/.test(sig) && !hasSandboxPolicy(argsText)) {
@@ -368,7 +468,7 @@ function scanFile(relPath, text, plane, contracts, findings, refs) {
   RE.directCall.lastIndex = 0
   while ((m = RE.directCall.exec(text))) {
     const open = text.indexOf('(', m.index + m[0].length - 1)
-    judge(m[1], m[2], lineOf(text, m.index), readCallArgs(text, open), 'ctx.<svc>.<method>() 直调')
+    judge(m[1], m[2], lineOf(text, m.index), readCallArgs(text, open), 'ctx.<svc>.<method>() 直调', 'direct')
   }
 
   for (const [alias, info] of aliases) {
@@ -395,7 +495,7 @@ function scanFile(relPath, text, plane, contracts, findings, refs) {
           evidence: '可用方法：' + (svc.methods.slice(0, 8).map(signatureToMethodName).join(' / ') || '（无）') + (svc.methods.length > 8 ? ' …共 ' + svc.methods.length + ' 个' : ''),
         })
       } else {
-        judge(info.service, method, line, argsText, '经由别名 ' + alias + '（声明在第 ' + info.line + ' 行）')
+        judge(info.service, method, line, argsText, '经由别名 ' + alias + '（声明在第 ' + info.line + ' 行）', info.via)
       }
       // fs 系列第一参必须是 FsTarget
       if (svc && /^(writeText|editText|readText|listDir|stat)$/.test(method) && /^\s*['"`]/.test(argsText)) {
@@ -433,21 +533,137 @@ function clientEntries(pkg, dir) {
   return [...out]
 }
 
-function checkBundle(profileDir, name, runtimeVersion, contracts) {
+/* ------------------------------------------- 官方 bundle：从 app.asar 里读 */
+
+/**
+ * 官方 6 个组合包都打包在 app.asar 内，profile/node_modules 里没有它们。
+ * 旧版脚本对它们只能输出「包未解析」（缺陷 #6）。这里用 asar 只读句柄把它们读出来：
+ * 包是否在位 / 版本 / 补丁清单声明了哪些行 id / 依赖是否可达 / 包内 JS（多数只有 11 字节占位）。
+ */
+function checkBundleFromAsar(asar, name, runtimeVersion, contracts, result) {
+  if (!asar) return false
+  const parts = ['dsh', 'node_modules', ...name.split('/')]
+  const node = asarNode(asar, parts)
+  if (!node || !node.files || !node.files['package.json']) return false
+  const pkgText = asarReadText(asar, node.files['package.json'])
+  let pkg
+  try { pkg = JSON.parse(pkgText) } catch { result.staticScanReason = 'app.asar 内 package.json 解析失败'; return true }
+  result.fromAsar = true
+  result.dir = 'asar:/dsh/node_modules/' + name
+  result.realDir = result.dir
+  result.version = pkg.version || null
+  result.enginesRange = (pkg.dsh && pkg.dsh.engines && pkg.dsh.engines.dsh) || (pkg.engines && pkg.engines.dsh) || null
+  result.enginesDsh = result.enginesRange
+  if (result.enginesRange && runtimeVersion) result.enginesOk = satisfies(runtimeVersion, result.enginesRange)
+
+  // 补丁清单：声明了哪些行（这是官方组合包「声称能力」的权威静态来源）
+  const decl = (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) || null
+  result.dshBundlePatch = decl
+  const patchList = Array.isArray(decl) ? decl : (decl ? [decl] : [])
+  const declared = []
+  let allExist = patchList.length > 0
+  for (const rel of patchList) {
+    const p = String(rel).replace(/^\.\//, '')
+    const pn = node.files[p] || asarNode(asar, [...parts, ...p.split('/')])
+    if (!pn) { allExist = false; continue }
+    const text = asarReadText(asar, pn) || ''
+    const ids = declaredIds(text)
+    declared.push(...ids)
+    result.declaredSources.push({ patch: String(rel), bytes: Number(pn.size), ids: ids.length })
+  }
+  result.patchExists = patchList.length ? allExist : null
+  result.declaredIds = [...new Set(declared)]
+  result.declaredIdCount = result.declaredIds.length
+
+  // 依赖：官方运行时的依赖层也在 asar 里（dsh/node_modules/<dep>）
+  const deps = Object.keys(pkg.dependencies || {})
+  result.depsDeclared = deps.length
+  for (const d of deps) {
+    const inAsar = !!asarNode(asar, ['dsh', 'node_modules', ...d.split('/')]) || !!asarNode(asar, ['node_modules', ...d.split('/')])
+    const inProfile = existsSync(join(PROFILE_DIR, 'node_modules', ...d.split('/'), 'package.json'))
+    if (!inAsar && !inProfile) result.depsMissing.push(d)
+  }
+
+  result.clientEntries = clientEntries(pkg, node)
+  const all = asarList(node)
+  result.fileCount = all.length
+  result.staticScanReachable = true
+  result.scanSource = 'app.asar'
+  const jsFiles = all.filter(f => /\.(js|mjs|cjs)$/.test(f.rel) && f.size <= 512 * 1024)
+  result.asarJsFiles = jsFiles.length
+  const clientAbs = new Set(result.clientEntries.map(p => 'asar:/dsh/node_modules/' + name + '/' + p))
+  for (const f of jsFiles) {
+    result.scannedFiles.push(f.rel)
+    const text = asarReadText(asar, f.node)
+    if (text == null) continue
+    const key = 'asar:/dsh/node_modules/' + name + '/' + f.rel
+    const isClient = clientAbs.has(key)
+      || /@deepseek-ai\/dsh-client-[a-z-]+/.test(text)
+      || (clientAbs.size > 0 && /(^|\/)(src\/)?client\//.test(f.rel))
+    const planeRefs = isClient
+      ? { inject: result.refs.inject, calls: result.refs.clientCalls, silentCatch: result.refs.clientSilentCatch }
+      : result.refs
+    scanFile(f.rel, text, isClient ? 'client' : 'host', contracts, isClient ? [] : result.findings, planeRefs)
+  }
+  return true
+}
+
+/** 与实时行表快照（live-entries.json）比对：补丁清单声明的行 id 是否真的挂上了、是否 active */
+function crossCheckLive(result, liveMap) {
+  if (!liveMap || !liveMap.byId) return
+  if (liveMap.coveredBundles && !liveMap.coveredBundles.includes(result.name)) {
+    result.liveStatus = { coverage: '快照未覆盖该组合包（只录入了用户侧 20 个组合包对应的行）', checked: false }
+    return
+  }
+  if (!result.declaredIds.length) return
+  const missing = []
+  const inactiveExpected = []
+  const inactiveUnexpected = []
+  let matched = 0
+  for (const id of result.declaredIds) {
+    const row = liveMap.byId.get(id)
+    if (!row) { missing.push(id); continue }
+    matched++
+    if (!(row.enabled === true && row.fiberPhase === 'active')) {
+      if (row.disabledByPatch === true) inactiveExpected.push(id)
+      else inactiveUnexpected.push(id)
+    }
+  }
+  result.liveMissing = missing
+  result.liveStatus = {
+    checked: true,
+    source: liveMap.source || 'live-entries.json',
+    declared: result.declaredIds.length,
+    matched,
+    missing,
+    inactiveExpected,
+    inactive: inactiveUnexpected,
+  }
+}
+
+function checkBundle(profileDir, name, runtimeVersion, contracts, asar, liveMap) {
   const result = {
     name,
     kind: /^@deepseek-ai\//.test(name) ? '官方' : '第三方',
-    dir: null, realDir: null, isLink: false, linkTargetExists: null,
+    dir: null, realDir: null, isLink: false, linkTargetExists: null, fromAsar: false,
     staticScanReachable: false, staticScanReason: null,
     version: null, dshBundlePatch: null, patchExists: null,
+    declaredIds: [], declaredIdCount: 0, declaredSources: [],
+    liveMissing: [], liveStatus: null,
     clientEntries: [], fileCount: 0, scannedFiles: [],
     depsDeclared: 0, depsMissing: [], enginesDsh: null, enginesRange: null, enginesOk: null,
     compatRange: null, compatReleases: null, compatVerdict: null,
-    findings: [], refs: { inject: [], calls: [], silentCatch: [], clientCalls: [], clientSilentCatch: [], unknownServiceKeys: [] },
+    findings: [], refs: { inject: [], calls: [], silentCatch: [], clientCalls: [], clientSilentCatch: [], unknownServiceKeys: [], weakUnknownServiceKeys: [] },
   }
   const dir = join(profileDir, 'node_modules', ...name.split('/'))
   if (!existsSync(join(dir, 'package.json'))) {
-    result.staticScanReason = 'profile/node_modules 下无该包（官方 bundle 打包在 app.asar 内，普通 fs 读不到）'
+    // 官方 6 个组合包这里必走 asar 分支（它们不在 profile/node_modules 里）
+    const handled = checkBundleFromAsar(asar, name, runtimeVersion, contracts, result)
+    if (!handled) {
+      result.staticScanReason = 'profile/node_modules 与 app.asar 内都找不到该包'
+    }
+    crossCheckLive(result, liveMap)
+    result.findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.rule.localeCompare(b.rule))
     return result
   }
   result.dir = dir
@@ -475,6 +691,21 @@ function checkBundle(profileDir, name, runtimeVersion, contracts) {
   if (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) {
     result.dshBundlePatch = pkg.dsh.bundle.patch
     result.patchExists = existsSync(join(dir, pkg.dsh.bundle.patch))
+  }
+  // 补丁清单声明的行 id（第三方插件同样要抽，用于与实时行表比对）
+  {
+    const decl = result.dshBundlePatch
+    const list = Array.isArray(decl) ? decl : (decl ? [decl] : [])
+    const declared = []
+    for (const rel of list) {
+      const p = join(dir, String(rel))
+      const text = safeReadText(p)
+      const ids = declaredIds(text)
+      declared.push(...ids)
+      result.declaredSources.push({ patch: String(rel), bytes: text ? Buffer.byteLength(text) : 0, ids: ids.length })
+    }
+    result.declaredIds = [...new Set(declared)]
+    result.declaredIdCount = result.declaredIds.length
   }
 
   const deps = Object.keys(pkg.dependencies || {})
@@ -504,6 +735,7 @@ function checkBundle(profileDir, name, runtimeVersion, contracts) {
       : result.refs
     scanFile(rel, text, isClient ? 'client' : 'host', contracts, isClient ? [] : result.findings, planeRefs)
   }
+  crossCheckLive(result, liveMap)
   result.findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.rule.localeCompare(b.rule))
   return result
 }
@@ -517,6 +749,7 @@ function renderMatrix(report) {
   L.push('- 审计对象：`' + report.profile + '` 的 `dsh.profile.bundles` 全量组合包')
   L.push('- 宿主版本：' + (report.runtimeVersion || '未知'))
   L.push('- 契约来源：' + report.contractSource + '（宿主服务 ' + report.contractServiceCount + ' 个' + (report.clientContractAvailable ? '；客户端服务 ' + report.clientContractServiceCount + ' 个' : '；**客户端契约不可达**') + '）')
+  L.push('- 实时行表快照：' + (report.liveSource || '未提供') + '（用于核对「补丁声明的行是否真的挂上了」）')
   L.push('- 生成方式：`node audit-plugins.mjs`（只读、零重启；产物不含时间戳，可逐字节复跑比对）')
   L.push('')
   L.push('## 汇总')
@@ -525,12 +758,13 @@ function renderMatrix(report) {
   L.push('| 指标 | 数量 |')
   L.push('| --- | --- |')
   L.push('| 组合包 | ' + s.bundles + ' |')
-  L.push('| 源码静态可扫（宿主半边） | ' + s.staticScanned + ' |')
-  L.push('| 源码不可达（app.asar 内） | ' + s.staticUnreachable + ' |')
+  L.push('| 源码静态可扫（含 app.asar 内官方包） | ' + s.staticScanned + ' |')
+  L.push('| 源码不可达 | ' + s.staticUnreachable + ' |')
+  L.push('| 补丁声明行 → 实时表比对 | 已比对 ' + s.liveChecked + ' 个组合包，缺失行 ' + s.liveMissingRows + ' |')
   L.push('| 契约缺陷 · blocker | ' + s.blocker + ' |')
   L.push('| 契约缺陷 · high | ' + s.high + ' |')
   L.push('| 契约缺陷 · medium | ' + s.medium + ' |')
-  L.push('| 契约缺陷 · low（疑似内置方法，待人工确认） | ' + s.low + ' |')
+  L.push('| 契约缺陷 · low（目录覆盖盲区 / 疑似内置方法） | ' + s.low + ' |')
   L.push('| 静默 catch（宿主半边，非内联运行时） | ' + s.silentCatch + ' |')
   L.push('| 静默 catch（内联第三方运行时，已分离） | ' + s.silentCatchVendored + ' |')
   L.push('| 静默 catch（客户端半边，另计） | ' + s.clientSilentCatch + ' |')
@@ -548,14 +782,17 @@ function renderMatrix(report) {
     const l3 = !b.staticScanReachable
       ? '静态不可达'
       : (b.findings.length ? b.findings.length + ' 项契约缺陷（' + b.findings.filter(f => f.severity === 'high' || f.severity === 'blocker').length + ' 项高危）' : '无缺陷（' + b.callCount + ' 处服务调用）')
+    const live = b.liveStatus && b.liveStatus.checked
+      ? '（补丁声明 ' + b.liveStatus.declared + ' 行 → 实时表命中 ' + b.liveStatus.matched + '，缺 ' + b.liveStatus.missing.length + '）'
+      : ''
     const l4 = [
-      b.dir ? '包已就位' : '包未解析',
+      b.dir ? (b.fromAsar ? '包在 app.asar 内' : '包已就位') : '包未解析',
       b.isLink ? (b.linkTargetExists ? '软链有效' : '**软链失效**') : null,
       b.depsMissing && b.depsMissing.length ? '**缺依赖 ' + b.depsMissing.length + '**' : null,
       b.enginesOk === false ? '**peer 不兼容**' : (b.enginesOk === true ? 'peer 兼容' : null),
       b.patchExists === false ? '**补丁清单缺失**' : null,
     ].filter(Boolean).join('；')
-    L.push('| ' + (i + 1) + ' | `' + b.name + '` | ' + b.kind + ' | ' + (ev.claim || '—') + ' | ' + (ev.l1 || '未验证') + ' | ' + (ev.l2 || '未验证') + ' | ' + l3 + ' | ' + l4 + ' | **' + b.conclusion + '** |')
+    L.push('| ' + (i + 1) + ' | `' + b.name + '` | ' + b.kind + ' | ' + (ev.claim || '—') + ' | ' + (ev.l1 || '未验证') + live + ' | ' + (ev.l2 || '未验证') + ' | ' + l3 + ' | ' + l4 + ' | **' + b.conclusion + '** |')
   })
   L.push('')
   L.push('## 逐包明细（L3/L4 自动证据）')
@@ -565,15 +802,36 @@ function renderMatrix(report) {
     L.push('')
     L.push('- 类型：' + b.kind + (b.version ? ' · 版本 ' + b.version : ''))
     L.push('- 包目录：' + (b.dir ? '`' + b.dir + '`' : '**未解析**'))
-    L.push('- 静态扫描：' + (b.staticScanReachable ? b.fileCount + ' 个源文件（宿主半边与客户端半边分平面）' : '不可达 —— ' + (b.staticScanReason || '')))
+    L.push('- 静态扫描：' + (b.staticScanReachable
+      ? (b.fromAsar
+        ? 'app.asar 内 ' + b.fileCount + ' 个条目，其中 JS ' + (b.asarJsFiles === undefined ? '—' : b.asarJsFiles) + ' 个（官方 bundle 多数只有补丁清单，JS 是 11 字节占位）'
+        : b.fileCount + ' 个源文件（宿主半边与客户端半边分平面）')
+      : '不可达 —— ' + (b.staticScanReason || '')))
     if (b.clientEntries && b.clientEntries.length) L.push('- 客户端入口：' + b.clientEntries.map(x => '`' + x + '`').join('、'))
-    L.push('- 补丁清单：' + (b.dshBundlePatch ? '`' + b.dshBundlePatch + '`' + (b.patchExists ? '（存在）' : '（**缺失**）') : '未声明'))
+    L.push('- 补丁清单：' + (b.dshBundlePatch ? '`' + (Array.isArray(b.dshBundlePatch) ? b.dshBundlePatch.join('`、`') : b.dshBundlePatch) + '`' + (b.patchExists ? '（存在）' : '（**缺失**）') : '未声明'))
+    if (b.declaredIdCount) {
+      const srcs = (b.declaredSources || []).map(x => '`' + x.patch + '` ' + x.ids + ' 行').join('、')
+      L.push('- 补丁声明的行：共 **' + b.declaredIdCount + '** 个 id（' + srcs + '）')
+    }
+    if (b.liveStatus) {
+      if (b.liveStatus.checked) {
+        L.push('- 与实时行表比对：声明 ' + b.liveStatus.declared + ' → 命中 ' + b.liveStatus.matched
+          + (b.liveStatus.missing.length ? '，**缺失 ' + b.liveStatus.missing.map(x => '`' + x + '`').join('、') + '**' : '，无缺失')
+          + (b.liveStatus.inactiveExpected && b.liveStatus.inactiveExpected.length ? '；补丁主动 disabled 的行（预期非 active）：' + b.liveStatus.inactiveExpected.map(x => '`' + x + '`').join('、') : '')
+          + (b.liveStatus.inactive && b.liveStatus.inactive.length ? '；**声明为启用但非 active：' + b.liveStatus.inactive.map(x => '`' + x + '`').join('、') + '**' : ''))
+      } else {
+        L.push('- 与实时行表比对：未比对 —— ' + (b.liveStatus.coverage || ''))
+      }
+    }
     L.push('- 依赖：声明 ' + b.depsDeclared + ' 个' + (b.depsMissing && b.depsMissing.length ? '，**缺 ' + b.depsMissing.join('、') + '**' : '，全部可达'))
     L.push('- engines.dsh：' + (b.enginesRange ? '`' + b.enginesRange + '` → ' + (b.enginesOk === false ? '**不兼容宿主 ' + report.runtimeVersion + '**' : b.enginesOk === true ? '兼容宿主 ' + report.runtimeVersion : '无法判定') : '未声明'))
     if (b.compatRange || b.compatVerdict) L.push('- 逐版兼容闸（dsh.compatibility）：' + (b.compatRange ? '`' + b.compatRange + '`' : '范围未声明') + (b.compatVerdict ? '；本机 ' + report.runtimeVersion + ' → **' + b.compatVerdict + '**' : ''))
     L.push('- 宿主服务引用：' + (b.callCount ? b.callCount + ' 处调用 / ' + b.inject.length + ' 个 inject key' : '无（或静态不可达）'))
     if (b.unknownServiceKeys && b.unknownServiceKeys.length) {
-      L.push('- 目录外服务 key（覆盖盲区候选，需人工复核）：' + b.unknownServiceKeys.map(k => '`' + k + '`' + (KNOWN_UNREGISTERED_SERVICES[k] ? '（已确证存在）' : '（未确证）')).join('、'))
+      L.push('- 目录外服务 key（**由 `ctx.get(\'名字\')` 显式请求**，需人工复核）：' + b.unknownServiceKeys.map(k => '`' + k + '`' + (KNOWN_UNREGISTERED_SERVICES[k] ? '（已确证存在）' : '（未确证）')).join('、'))
+    }
+    if (b.weakUnknownKeys && b.weakUnknownKeys.length) {
+      L.push('- 目录外服务 key（弱信号：`ctx.<key>.<method>()` 属性访问，不据此下结论）：' + b.weakUnknownKeys.map(k => '`' + k + '`').join('、'))
     }
     L.push('- 静默 catch：宿主半边 ' + b.silentCatchCount + ' 处（空 catch ' + b.silentCatchEmpty + ' 处；内联第三方运行时另计 ' + (b.silentCatchVendored || 0) + ' 处）；客户端半边 ' + (b.clientSilentCatchCount || 0) + ' 处')
     if (b.findings.length) {
@@ -613,9 +871,24 @@ function main() {
 
   const evidence = existsSync(EVIDENCE_PATH) ? JSON.parse(readFileSync(EVIDENCE_PATH, 'utf8')) : { bundles: {} }
 
+  // 实时行表快照（由 plugin_manager list_plugins 采集；脚本是普通 Node 进程，读不到宿主实时状态）
+  let liveMap = null
+  if (existsSync(LIVE_PATH)) {
+    try {
+      const live = JSON.parse(readFileSync(LIVE_PATH, 'utf8'))
+      const byId = new Map()
+      for (const e of live.entries || []) {
+        const id = e.id || String(e.entryId || '').replace(/^include:/, '')
+        if (id) byId.set(id, e)
+      }
+      liveMap = { byId, source: live.source || 'live-entries.json', coveredBundles: live.coveredBundles || null }
+    } catch { liveMap = null }
+  }
+  const asar = openAsar(ASAR_PATH)
+
   const rows = []
   for (const name of bundles) {
-    const b = checkBundle(PROFILE_DIR, name, runtimeVersion, contracts)
+    const b = checkBundle(PROFILE_DIR, name, runtimeVersion, contracts, asar, liveMap)
     const ev = (evidence.bundles && evidence.bundles[name]) || {}
     b.evidence = ev
     b.conclusion = ev.conclusion || (b.findings.some(f => f.severity === 'blocker' || f.severity === 'high') ? '待核（发现 L3 契约缺陷）' : '未验证')
@@ -643,18 +916,23 @@ function main() {
     contractServiceCount: Object.keys(contracts.services).length,
     clientContractAvailable: false,
     clientContractServiceCount: 0,
+    liveSource: liveMap ? liveMap.source : null,
+    asarPath: asar ? ASAR_PATH : null,
     bundleCount: bundles.length,
     bundles: rows.map(r => ({
       name: r.name, kind: r.kind, version: r.version,
-      dir: r.dir, isLink: r.isLink, linkTargetExists: r.linkTargetExists,
+      dir: r.dir, isLink: r.isLink, linkTargetExists: r.linkTargetExists, fromAsar: r.fromAsar,
       staticScanReachable: r.staticScanReachable, staticScanReason: r.staticScanReason,
-      fileCount: r.fileCount, clientEntries: r.clientEntries,
+      fileCount: r.fileCount, asarJsFiles: r.asarJsFiles, clientEntries: r.clientEntries,
       dshBundlePatch: r.dshBundlePatch, patchExists: r.patchExists,
+      declaredIdCount: r.declaredIdCount, declaredIds: r.declaredIds, declaredSources: r.declaredSources,
+      liveStatus: r.liveStatus, liveMissing: r.liveMissing,
       depsDeclared: r.depsDeclared, depsMissing: r.depsMissing,
       enginesDsh: r.enginesDsh, enginesOk: r.enginesOk,
       compatRange: r.compatRange || null, compatVerdict: r.compatVerdict || null,
       inject: [...new Set(r.refs.inject.map(x => x.service))],
       unknownServiceKeys: [...new Set(r.refs.unknownServiceKeys.map(x => x.service))],
+      weakUnknownKeys: [...new Set(r.refs.weakUnknownServiceKeys.map(x => x.service))],
       callCount: r.refs.calls.length,
       silentCatchCount: r.refs.silentCatch.filter(x => !x.vendored).length,
       silentCatchVendored: r.refs.silentCatch.filter(x => x.vendored).length,
@@ -669,6 +947,8 @@ function main() {
       bundles: rows.length,
       staticScanned: rows.filter(r => r.staticScanReachable).length,
       staticUnreachable: rows.filter(r => !r.staticScanReachable).length,
+      liveChecked: rows.filter(r => r.liveStatus && r.liveStatus.checked).length,
+      liveMissingRows: rows.reduce((n, r) => n + (r.liveMissing ? r.liveMissing.length : 0), 0),
       blocker: allFindings.filter(f => f.severity === 'blocker').length,
       high: allFindings.filter(f => f.severity === 'high').length,
       medium: allFindings.filter(f => f.severity === 'medium').length,
@@ -691,12 +971,16 @@ function main() {
   writeFileSync(join(OUT_DIR, 'findings.json'), JSON.stringify(report.findings, null, 2), 'utf8')
   writeFileSync(join(OUT_DIR, 'service-refs.json'), JSON.stringify(rows.map(r => ({
     name: r.name, inject: [...new Set(r.refs.inject.map(x => x.service))],
-    calls: r.refs.calls, silentCatch: r.refs.silentCatch,
+    calls: r.refs.calls,
+    unknownServiceKeys: r.refs.unknownServiceKeys,
+    weakUnknownServiceKeys: r.refs.weakUnknownServiceKeys,
+    silentCatch: r.refs.silentCatch,
   })), null, 2), 'utf8')
 
   if (!ARGS.quiet) {
     const s = report.summary
-    console.log('审计完成：' + s.bundles + ' 个组合包 / 宿主半边静态可扫 ' + s.staticScanned + ' / 不可达 ' + s.staticUnreachable)
+    console.log('审计完成：' + s.bundles + ' 个组合包 / 静态可扫 ' + s.staticScanned + ' / 不可达 ' + s.staticUnreachable + (asar ? '（已读 app.asar）' : '（未读 app.asar）'))
+    console.log('L1 行表比对：已比对 ' + s.liveChecked + ' 个组合包，缺失行 ' + s.liveMissingRows)
     console.log('L3 契约缺陷：blocker ' + s.blocker + ' · high ' + s.high + ' · medium ' + s.medium + ' · low ' + s.low + ' · 静默 catch ' + s.silentCatch + ' 处')
     console.log('结论分布：可用 ' + s.verified + ' / 部分可用 ' + s.partial + ' / 不可用 ' + s.unavailable + ' / 未验证及待核 ' + s.unverified)
     console.log('产物目录：' + OUT_DIR)
