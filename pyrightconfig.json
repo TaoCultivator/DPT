@@ -1,0 +1,28 @@
+{
+  "include": [
+    "main.py",
+    "dpt_extractor"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    ".venv",
+    "build",
+    "dist",
+    ".tmp",
+    ".pytest_tmp",
+    ".codex_tmp",
+    "analysis_outputs",
+    "outputs",
+    "参考工具",
+    "dpt_extractor/tests"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none",
+  "useLibraryCodeForTypes": true
+}
