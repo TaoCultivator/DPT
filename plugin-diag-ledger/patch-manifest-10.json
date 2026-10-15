@@ -1,0 +1,46 @@
+{
+  "purpose": "诊断类分流改为自动立项：先查 decision-ledger，命中即处理，未命中才请用户授权",
+  "baseline": [
+    {
+      "relative": "lib/index.js",
+      "originalSha256": "e28d3142db9a43428d28b9b10172db0679c17e160fd21f364d590480a79e49a4",
+      "candidateSha256": "89d356e64b2977a7995584aa8d349aaa545a5937284e5d05d826922e2b1c11f3"
+    },
+    {
+      "relative": "lib/client.js",
+      "originalSha256": "e5e94801e08e791a73a9ab02496b36417bbf79e4622939e88f78cbec6d4b7777",
+      "candidateSha256": "e5e94801e08e791a73a9ab02496b36417bbf79e4622939e88f78cbec6d4b7777"
+    },
+    {
+      "relative": "lib/scheduler-core.mjs",
+      "originalSha256": "c17179e0efae7472de3a02744ca16f84b7cf4f5d98da8ac45fecaa6303440315",
+      "candidateSha256": "c3a976c58bd48ec03427cfc6164e346d67aab8faa1134ef2cb51bf1a72f4896a"
+    },
+    {
+      "relative": "lib/host-adapter.mjs",
+      "originalSha256": "7913f9aeee9f7a67f678c6fc97b5a240ebadf698116c533e44ac3ff1284f0150",
+      "candidateSha256": "64aa6d2c6910bf1ea82291cecab8397d1e3bd719be57845e179f272c77582ebb"
+    },
+    {
+      "relative": "lib/failure-resolution.mjs",
+      "originalSha256": "9437da963aca892db2253ae30e6ec7731c1d9fde0622a9921ea7ac42988a2fb8",
+      "candidateSha256": "ca70295c8262d99246c2ec16f11696a8e4b58793a882ed398a811618e9656ad5"
+    },
+    {
+      "relative": "lib/bounded-write.mjs",
+      "originalSha256": "f15b2c3e51de57b1fec07d979c0de5f0dff0a391fb191989739adef2b5cd091b",
+      "candidateSha256": "f15b2c3e51de57b1fec07d979c0de5f0dff0a391fb191989739adef2b5cd091b"
+    },
+    {
+      "relative": "lib/review-interruption.mjs",
+      "originalSha256": "8a3a262d9f029168e50e293965ad4a6302450917aa667f48f5b35e112786e601",
+      "candidateSha256": "8a3a262d9f029168e50e293965ad4a6302450917aa667f48f5b35e112786e601"
+    },
+    {
+      "relative": "lib/restart-recovery.mjs",
+      "originalSha256": "8d5d659b08872f202fe901d62c3c5a46b9d8dd2868ab58abf03ee108ee1ccb9a",
+      "candidateSha256": "8d5d659b08872f202fe901d62c3c5a46b9d8dd2868ab58abf03ee108ee1ccb9a"
+    }
+  ],
+  "createdAt": "2026-10-15T11:09:38.696Z"
+}
