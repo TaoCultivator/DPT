@@ -41,11 +41,14 @@
 ```
 node build10.mjs                              → 候选10 生成；改动集合核对 = failure-resolution.mjs / host-adapter.mjs / index.js / scheduler-core.mjs
 node test10.mjs                               → 9 组通过
-node verify-candidate.mjs candidate-10        → 27 套 190 组全部通过（基线 26 套 181 组原封不动全绿 + 新增 1 套 9 组）
+node verify-candidate.mjs candidate-10        → 27 套 190 组全部通过
+node verify-candidate.mjs candidate-9         → 26 套 181 组全部通过（用同一份改过的回归脚本复现基线，证明脚本改动无副作用）
 node install10.mjs                            → 8/8 模块哈希匹配；4 个文件哈希真的变化
 在线复核（PowerShell 逐文件 SHA256）          → 8 个模块哈希全部等于安装清单
 在线模块 smoke（真机 import + 构造处置卡）    → 卡内 8 个关键须知字符串全部命中，blockedBy 正确
 ```
+
+`verify-candidate.mjs` 里 `test10.mjs` 只在候选号 ≥10 时纳入（旧候选没有该能力，历史基线保持可原样复现）。
 
 - 安装备份目录：`E:\AI图书馆\DSH-学习库\01-插件与技能调研\原始素材\2026-10-15-看板待立项自动领取开关\install-backup10-20261015-1112`
   （内含 `installation.json` 日志；`inspectPlan` 保证回滚不会覆盖安装后的新修改）

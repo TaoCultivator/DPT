@@ -18,7 +18,9 @@ for(const n of shared){const candFile=path.join(dir,cand,'lib',n);
 const nineTests=fs.readdirSync(nine).filter(f=>f.endsWith('.test.mjs'));
 for(const t of nineTests)fs.copyFileSync(path.join(nine,t),path.join(scratch,t));
 // 本目录的用例：把候选路径统一改写到 scratch/plugin-candidate
-const localTests=['test.mjs','test2.mjs','test3.mjs','test4.mjs','test5.mjs','test6.mjs','test7.mjs','test8.mjs','test9.mjs','test10.mjs'];
+const localTests=['test.mjs','test2.mjs','test3.mjs','test4.mjs','test5.mjs','test6.mjs','test7.mjs','test8.mjs','test9.mjs'];
+// 候选10 起新增 test10（诊断类分流自动立项）；更早的候选没有该能力，不强行套用，保证历史基线 26 套 181 组可原样复现。
+if((Number(String(cand).replace(/\D/g,''))||0)>=10)localTests.push('test10.mjs');
 for(const t of localTests){let s=fs.readFileSync(path.join(dir,t),'utf8');
   s=s.replace(/\.\/(candidate-\d+|plugin-candidate)\/lib\//g,'./plugin-candidate/lib/');
   fs.writeFileSync(path.join(scratch,t),s);}
