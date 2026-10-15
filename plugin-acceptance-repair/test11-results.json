@@ -1,0 +1,17 @@
+{
+  "passed": 11,
+  "tests": [
+    "任何 ACCEPTANCE_* 失败码都归修复类（不再退回未知原因）",
+    "ACCEPTANCE_EVIDENCE_MISSING 走 repair：自动建修复前置、原任务挂 blockedBy、描述含验收原文",
+    "ACCEPTANCE_CRITERIA_UNMET 行为不变",
+    "非 ACCEPTANCE_ 前缀的未知码仍归一为 UNKNOWN 并走诊断",
+    "白名单原有码行为不变（TEST_REGRESSION / HTTP_429 / 无代码文本）",
+    "Host 适配层验收打回保留 ACCEPTANCE_EVIDENCE_MISSING 并立修复前置",
+    "端到端：验收打回 ACCEPTANCE_EVIDENCE_MISSING 自动开修复前置并挂住原任务",
+    "端到端：修复卡标题与描述保留验收原文与证据指纹，未被降级成 UNKNOWN",
+    "端到端：验收未给 failure 时仍用兜底码 ACCEPTANCE_CRITERIA_UNMET（文案不变）",
+    "端到端：非 ACCEPTANCE_ 前缀未知码仍走诊断处置卡、不误开修复卡",
+    "全程无宿主错误日志"
+  ],
+  "scope": "候选11：任何 ACCEPTANCE_* 失败码都归修复类（纯规则核心 + Host 适配层 + 完整插件隔离RPC，零真实模型调用）"
+}
