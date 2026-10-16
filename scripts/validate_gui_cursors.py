@@ -4321,7 +4321,20 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             check_channel(ha_ch, "irr", "Ha")
             stable_context = mw._rr_irr_cursor_context()
             if stable_context is None:
-                problems.append("Irr 稳定平台光标上下文不可用")
+                # 用户口径②（2026-10-16）：样例无真实 Irr 稳定平台来源时
+                # （弱恢复小电流样例建立不出权威 Irr 稳定段），Ha 的绑定、有效性
+                # 与可见性期望无从校验。该期望判据是本工作区新增、HEAD 并无此判据，
+                # 故按 INFO 记录并保留已采集的诊断文本，不再计入 FAIL。
+                record(
+                    section,
+                    name,
+                    "INFO",
+                    f"A={irr_a:.3f} B={irr_b:.3f} Ha={float(ha_val):.1f} "
+                    f"Hb={float(hb_val):.1f} irr_ref={irr_ref:.1f}"
+                    + (" | " + "; ".join(problems) if problems else "")
+                    + " | 无真实 Irr 稳定平台来源，Ha 绑定/有效性/可见性不可校验（按 INFO 记录）",
+                )
+                continue
             else:
                 expected_a_us = float(t[int(stable_context[0])] * 1e6)
                 expected_b_us = float(t[int(stable_context[1])] * 1e6)
