@@ -78,12 +78,23 @@ from dpt_extractor.gui.theme import (
     SUMMARY_STYLE,
     apply_combo_popup_style,
 )
-from dpt_extractor.gui.waveform_plot import WaveformPlot
+from dpt_extractor.gui.waveform_plot import (
+    PARAM_FOCUS_ANCHOR_FRACTION,
+    TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
+    TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
+    TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+    RR_POWER_FOCUS_MIDPOINT_FRACTION,
+    RR_ERR_FOCUS_MIDPOINT_FRACTION,
+    RR_TRR_ANCHOR_FRACTION,
+    TF_FOCUS_MIDPOINT_FRACTION,
+    WaveformPlot,
+)
 from dpt_extractor.utils.app_paths import (
     commercial_notice_poster_path,
     copy_report_template,
     default_report_template_path,
 )
+from dpt_extractor.utils.temperature import infer_temperature_token_code
 from dpt_extractor.models.channel_mapping import (
     LOGICAL_SIGNAL_KEYS,
     ChannelMapping,
@@ -100,6 +111,7 @@ from dpt_extractor.io.label_mapping import infer_profile_hint_from_labels
 from dpt_extractor.io.tek_scope import (
     ScopeViewState,
     read_tektronix_scope,
+    shutdown_tektronix_backend,
     sync_tektronix_scope,
 )
 from dpt_extractor.models.bridge_profile import (
@@ -128,6 +140,7 @@ from dpt_extractor.models.slope_range import (
 )
 from dpt_extractor.models.waveform import WaveformBundle, normalize_channel_reference
 from dpt_extractor.metrics.iec_windows import (
+    EnergyLossMarkers,
     IntegrationWindow,
     eoff_energy_markers,
     eoff_window_scope_example,
@@ -190,7 +203,13 @@ from dpt_extractor.metrics.iec_timings import (
 )
 from dpt_extractor.utils.signal import crossing_time, smooth, threshold_value
 from dpt_extractor.metrics.plateau_level import (
+    first_post_edge_stable_band_center_index,
+    stable_platform_cursor_range_indices,
     turn_off_delta_vce_blocking_top,
+    turn_off_delta_vce_cursor_range_indices,
+    turn_off_ic_off_max_cursor_context,
+    turn_on_current_hb_ha_window_indices,
+    turn_on_vce_stable_cursor_range_indices,
     turn_on_vce_on_max_window_indices,
 )
 from dpt_extractor.models.test_mode import MODE_UI_LABELS, TestMode, parse_test_mode
@@ -293,6 +312,10 @@ SHORT_REPORT_CONDITION_FIELDS = (
     ("vdesat_v", "Vdesat", "V"),
 )
 
+# 开通过程的三个 IEC 时序卡共用同一张局部观察页。各卡的 A/B 仍然
+# 保持自己的语义端点；这里只共享 X 轴页面，便于在 Ton/Td_on/Tr 之间切换。
+_TURN_ON_TIMING_LOCAL_VIEW_NAMES = frozenset({"Ton", "Td_on", "Tr"})
+
 
 def _app_settings() -> QSettings:
     """Create the production settings store; tests may inject an isolated store."""
@@ -302,6 +325,7 @@ def _app_settings() -> QSettings:
 _REPORT_MANUAL_STATE_ATTRS = (
     "_manual_intervals",
     "_manual_extreme_values",
+    "_manual_extreme_references",
     "_manual_short_current",
     "_manual_turn_on_current",
     "_manual_energy",
@@ -311,6 +335,7 @@ _REPORT_MANUAL_STATE_ATTRS = (
     "_manual_dvdt",
     "_manual_didt",
     "_manual_trr_measure",
+    "_parameter_local_views",
 )
 
 
@@ -1008,12 +1033,9 @@ def _infer_temp_code_from_path(path: str) -> str | None:
         for code in TEMP_CONDITION_DEFAULTS:
             if re.search(rf"(?<![A-Z0-9]){code}(?![A-Z0-9])", stem):
                 return code
-        if re.search(r"(?<!\d)25(?:℃|C|DEG)?(?!\d)", stem):
-            return "RT"
-        if re.search(r"(?<!\d)150(?:℃|C|DEG)?(?!\d)", stem):
-            return "HT"
-        if re.search(r"(?<!\d)-?40(?:℃|C|DEG)?(?!\d)", stem):
-            return "LT"
+        numeric_code = infer_temperature_token_code(stem)
+        if numeric_code is not None:
+            return numeric_code
     return None
 
 
@@ -1545,6 +1567,24 @@ class _ReportPrepareTask(QRunnable):
                         f"分析脉冲组合 {done}/{total}",
                     ),
                 )
+                # Report truth for the currently selected pulse pair is the
+                # exact page snapshot captured when the operator clicked
+                # ``写入报告``.  Even if pulse-sequence preparation changes in
+                # the future, it must never replace that row with a fresh
+                # automatic extraction.
+                current_pair = (
+                    int(result.off_pulse_index),
+                    int(result.on_pulse_index),
+                )
+                for index, row in enumerate(rows):
+                    if (
+                        int(row.off_pulse_index),
+                        int(row.on_pulse_index),
+                    ) == current_pair:
+                        rows[index] = deepcopy(result)
+                        break
+                else:
+                    rows.append(deepcopy(result))
         except Exception as exc:
             self.signals.failed.emit(self.request_id, str(exc))
             return
@@ -1691,6 +1731,11 @@ class MainWindow(QMainWindow):
         self._manual_intervals: dict[tuple[str, str], tuple[float, float]] = {}
         # Maximum 类参数：保存用户手动拖动的主横向光标值 (line_value, metric_value)
         self._manual_extreme_values: dict[tuple[str, str], tuple[float, float]] = {}
+        # DPT 极值参数的 Ha/Hb 显示参考线。Hb 不改变参数值，但仍是用户
+        # 明确调整的参数光标，切换卡片后必须与 Ha 一起原样恢复。
+        self._manual_extreme_references: dict[
+            tuple[str, str], tuple[float, float]
+        ] = {}
         # 短路 Imax/Tsc：保存 A/B 时刻 + Hb/Ha 电平 (µs, µs, A, A)
         self._manual_short_current: dict[
             tuple[str, str], tuple[float, float, float, float]
@@ -1716,6 +1761,12 @@ class MainWindow(QMainWindow):
         self._pre_offset_cursor_type: str | None = None
         self._pre_offset_cursor_linked: bool | None = None
         self._active_slope_param: tuple[str, str] | None = None
+        # Main-owned identity of the parameter whose interaction context is
+        # currently shown.  ResultTable updates its selection before invoking
+        # our click callback, so its active row cannot distinguish a same-row
+        # re-click from a switch.  Keep this separate identity to preserve an
+        # intentional local X pan only for the same parameter.
+        self._active_parameter_context_key: tuple[str, str] | None = None
         self._load_request_id = 0
         self._load_tasks: dict[int, QRunnable] = {}
         self._scope_sync_request_id = 0
@@ -1723,6 +1774,17 @@ class MainWindow(QMainWindow):
         self._pending_parameter_local_view_restore: tuple[
             tuple[str, str], tuple[float, float]
         ] | None = None
+        # Exact local X page owned by each parameter.  Switching cards is a
+        # read-only navigation action: it must not discard the page the user
+        # arranged for the card they are leaving.  This cache is cleared with
+        # the other manual state on a new waveform or explicit recalculation.
+        self._parameter_local_views: dict[
+            tuple[str, str], tuple[float, float]
+        ] = {}
+        # Read-only automatic cursor geometry, keyed by current bundle/result
+        # identity.  Parameter-card clicks may ask for the same context several
+        # times (interval, focus, Ha/Hb); never repeat plateau scans for them.
+        self._default_cursor_context_cache: dict[tuple[object, ...], object] = {}
         self._report_request_id = 0
         self._report_prepare_tasks: dict[int, _ReportPrepareTask] = {}
         self._report_tasks: dict[int, _ReportWriteTask] = {}
@@ -1744,9 +1806,16 @@ class MainWindow(QMainWindow):
         self._report_result_table_enabled = True
         self._report_waveform_mouse_transparent = False
         self._report_splitter_mouse_transparent = False
-        self._load_pool = QThreadPool.globalInstance()
+        # Keep all application background work in pools owned by this window.
+        # QThreadPool.globalInstance() outlives the last window and can keep the
+        # Python process alive invisibly after the user closes the application.
+        self._load_pool = QThreadPool(self)
+        self._load_pool.setMaxThreadCount(
+            max(1, QThreadPool.globalInstance().maxThreadCount())
+        )
         self._scope_io_pool = QThreadPool(self)
         self._scope_io_pool.setMaxThreadCount(1)
+        self._background_shutdown_complete = False
         self._license_notice_dialog: QDialog | None = None
         self._license_notice_timer = QTimer(self)
         self._license_notice_timer.setSingleShot(True)
@@ -2746,12 +2815,42 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._save_current_report_conditions()
         self._save_current_setup_selection()
+        self.shutdown_background_work()
         if self._license_notice_timer.isActive():
             self._license_notice_timer.stop()
         if self._license_notice_dialog is not None:
             self._license_notice_dialog.close()
             self._license_notice_dialog = None
         super().closeEvent(event)
+
+    def shutdown_background_work(self) -> None:
+        """Finish app-owned workers before the window is allowed to disappear."""
+
+        if self._background_shutdown_complete:
+            return
+        self.statusBar().showMessage("正在安全关闭后台任务...")
+        self.statusBar().repaint()
+        self.report_progress._timer.stop()
+
+        # Invalidate queued callbacks, discard work that has not started, and
+        # terminate the only external subprocess family before waiting for the
+        # already-running in-process jobs to finish safely.  Waiting here keeps
+        # the window visible until cleanup is complete, so there is no hidden
+        # Python process continuing to consume CPU after the GUI has closed.
+        self._load_request_id += 1
+        self._scope_sync_request_id += 1
+        self._report_request_id += 1
+        self._load_pool.clear()
+        self._scope_io_pool.clear()
+        shutdown_tektronix_backend()
+        self._scope_io_pool.waitForDone(-1)
+        self._load_pool.waitForDone(-1)
+
+        self._load_tasks.clear()
+        self._scope_sync_tasks.clear()
+        self._report_prepare_tasks.clear()
+        self._report_tasks.clear()
+        self._background_shutdown_complete = True
 
     def _apply_toolbar_density(self, window_width: int) -> None:
         """Keep the top controls legible without letting them overrun small screens."""
@@ -3479,6 +3578,15 @@ class MainWindow(QMainWindow):
     def _on_horizontal_cursors_moved(self, ha: float, hb: float) -> None:
         if self._active_slope_param is not None:
             return
+        if self._active_parameter_context_key == ("反向恢复", "Irr"):
+            # Irr's recovered Base (Ha) is independently movable.  Persist it
+            # only after WaveformPlot commits the horizontal move; mouse-move
+            # remains label-only and never starts a peak/platform scan.
+            self._touch_manual_waveform_source()
+            self._manual_extreme_references[("反向恢复", "Irr")] = (
+                float(ha),
+                float(hb),
+            )
         dy = hb - ha
         self.statusBar().showMessage(
             f"横光标: Ha={ha:+.3f}  Hb={hb:+.3f}  Δy={dy:+.3f}"
@@ -4167,6 +4275,7 @@ class MainWindow(QMainWindow):
     def _clear_manual_adjustments(self, *, reset_plot: bool = True) -> None:
         self._manual_intervals.clear()
         self._manual_extreme_values.clear()
+        self._manual_extreme_references.clear()
         self._manual_short_current.clear()
         self._manual_turn_on_current = None
         self._manual_energy.clear()
@@ -4177,7 +4286,10 @@ class MainWindow(QMainWindow):
         self._manual_waveform_source = ""
         self._manual_pulse_pair = None
         self._active_slope_param = None
+        self._active_parameter_context_key = None
         self._pending_parameter_local_view_restore = None
+        self._parameter_local_views.clear()
+        self._default_cursor_context_cache.clear()
         if reset_plot:
             self.wave_plot.reset_interaction_state()
 
@@ -4304,13 +4416,14 @@ class MainWindow(QMainWindow):
         for cache_name in (
             "_manual_intervals",
             "_manual_extreme_values",
+            "_manual_extreme_references",
             "_manual_short_current",
             "_manual_energy",
             "_manual_delta_vce",
             "_manual_dvdt",
             "_manual_didt",
         ):
-            cache = getattr(self, cache_name)
+            cache = getattr(self, cache_name, {})
             for key in list(cache):
                 if self._manual_parameter_waveform_roles(*key) & affected_roles:
                     cache.pop(key, None)
@@ -4931,6 +5044,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_value_clicked(self, section: str, name: str) -> None:
+        self._active_parameter_context_key = (section, name)
         # A click starts a new parameter context.  Only the two slope handlers
         # below may opt back into automatic slope reactivation after a
         # recalculation.  Clearing here also covers unavailable/single-pulse
@@ -5021,10 +5135,50 @@ class MainWindow(QMainWindow):
             return
         self._enable_generic_parameter_interaction(section, name)
 
+    @staticmethod
+    def _local_view_keys_for_parameter(
+        section: str, name: str
+    ) -> tuple[tuple[str, str], ...]:
+        """Return the parameter keys that intentionally share one X-axis page."""
+
+        if section == "开通" and name in _TURN_ON_TIMING_LOCAL_VIEW_NAMES:
+            return tuple(
+                ("开通", timing_name)
+                for timing_name in ("Ton", "Td_on", "Tr")
+            )
+        return ((section, name),)
+
+    def _store_parameter_local_view(
+        self,
+        key: tuple[str, str],
+        window: tuple[float, float],
+    ) -> None:
+        value = (float(window[0]), float(window[1]))
+        for view_key in self._local_view_keys_for_parameter(*key):
+            self._parameter_local_views[view_key] = value
+
+    def _stored_parameter_local_view(
+        self,
+        key: tuple[str, str],
+    ) -> tuple[float, float] | None:
+        for view_key in self._local_view_keys_for_parameter(*key):
+            window = self._parameter_local_views.get(view_key)
+            if window is not None:
+                return window
+        return None
+
     def _on_result_value_clicked(self, section: str, name: str) -> None:
         """Handle a real table click, then perform one live-scope refresh."""
 
         key = (section, name)
+        previous_key = self.__dict__.get("_active_parameter_context_key")
+        current_local_window = self.wave_plot.current_local_x_window_us()
+        if previous_key is not None and current_local_window is not None:
+            store_local_view = getattr(self, "_store_parameter_local_view", None)
+            if callable(store_local_view):
+                store_local_view(previous_key, current_local_window)
+        get_local_view = getattr(self, "_stored_parameter_local_view", None)
+        owned_window = get_local_view(key) if callable(get_local_view) else None
         pending = getattr(self, "_pending_parameter_local_view_restore", None)
         restore_window = (
             pending[1]
@@ -5035,7 +5189,19 @@ class MainWindow(QMainWindow):
         self._on_value_clicked(section, name)
         if self._metric_unavailable(section, name):
             return
-        if restore_window is not None:
+        if owned_window is not None:
+            # Every card owns its last local page.  Re-clicking or returning
+            # from another parameter restores that page instead of applying
+            # the automatic event anchor again.
+            if self.wave_plot.restore_local_x_window_us(owned_window):
+                restored = self.wave_plot.current_local_x_window_us()
+                if restored is not None:
+                    store_local_view = getattr(
+                        self, "_store_parameter_local_view", None
+                    )
+                    if callable(store_local_view):
+                        store_local_view(key, restored)
+        elif restore_window is not None:
             cursor_times = self.wave_plot.visible_parameter_cursor_times_us()
             if (
                 cursor_times is not None
@@ -5044,7 +5210,14 @@ class MainWindow(QMainWindow):
                     *cursor_times,
                 )
             ):
-                self.wave_plot.restore_local_x_window_us(restore_window)
+                if self.wave_plot.restore_local_x_window_us(restore_window):
+                    restored = self.wave_plot.current_local_x_window_us()
+                    if restored is not None:
+                        store_local_view = getattr(
+                            self, "_store_parameter_local_view", None
+                        )
+                        if callable(store_local_view):
+                            store_local_view(key, restored)
         QTimer.singleShot(0, self._start_scope_sync_from_plot)
 
     def _on_plot_zoom_sync_requested(self, zoom_enabled: bool) -> None:
@@ -5053,6 +5226,8 @@ class MainWindow(QMainWindow):
         else:
             active_metric = self.result_table._active_metric
             recent_window = self.wave_plot.recent_local_x_window_us()
+            if active_metric is not None and recent_window is not None:
+                self._store_parameter_local_view(active_metric, recent_window)
             self._pending_parameter_local_view_restore = (
                 (active_metric, recent_window)
                 if active_metric is not None and recent_window is not None
@@ -5295,12 +5470,96 @@ class MainWindow(QMainWindow):
         fallback_t0_us: float,
         fallback_t1_us: float,
         *,
-        anchor_us: float | None = None,
+        name: str,
     ) -> None:
-        # 三类过程都以对应门极切换起点作为首选锚点。反向恢复发生在第二
-        # 脉冲开通过程内，因此沿用开通构图：保留左侧开通过程，同时让恢复
-        # 主瓣、振铃和右侧稳定段落在窗口主体内。
-        if anchor_us is None:
+        # Gate-semantic timing rows keep the bounded Vge edge as their hard
+        # composition anchor.  For non-gate rows, the actual A/B or
+        # stable/integration envelope remains the hard content.  During turn-on
+        # and reverse recovery, the measured Vge rising edge is an auxiliary
+        # composition reference so the left border stays close to the event
+        # without introducing a fixed pre-event duration.  Turn-off keeps its
+        # existing composition rules unchanged.
+        anchor_fraction = PARAM_FOCUS_ANCHOR_FRACTION
+        prefer_right_room = False
+        composition_anchor_us: float | None = None
+        composition_balance_fraction: float | None = None
+        if section == "开通" and name in _TURN_ON_TIMING_LOCAL_VIEW_NAMES:
+            # Ton 包含 Td_on 与 Tr 的完整开通阶段，三张时序卡统一使用
+            # Ton 的默认 required 窗口；实际点击卡片的 A/B 仍由各自语义端点
+            # 设置，避免把统一取景误变成光标或参数联动。
+            ton_interval = self._parameter_interval_us("开通", "Ton")
+            if ton_interval is not None:
+                fallback_t0_us, fallback_t1_us = ton_interval
+        endpoint_roles = self._cursor_endpoint_channels_for_param(section, name)
+        if "vge" not in endpoint_roles:
+            lo = min(float(fallback_t0_us), float(fallback_t1_us))
+            hi = max(float(fallback_t0_us), float(fallback_t1_us))
+            anchor_us = 0.5 * (lo + hi)
+            prefer_right_room = True
+            vge_anchor_us = (
+                self._switching_focus_anchor_us(section)
+                if section in {"开通", "反向恢复"}
+                else None
+            )
+            if vge_anchor_us is not None:
+                # The Vge edge supplies the proportional left margin (the
+                # default 12% composition reference), while required A/B
+                # times still decide the feasible window.  Vge is deliberately
+                # not added to the hard envelope: a delayed recovery tail
+                # must remain visible to the right.
+                anchor_us = vge_anchor_us
+                composition_anchor_us = vge_anchor_us
+                anchor_fraction = PARAM_FOCUS_ANCHOR_FRACTION
+                prefer_right_room = True
+                if section == "反向恢复" and name == "Pdmax":
+                    # Keep Vge as the auxiliary event reference, while the
+                    # power card itself composes its real current A/B midpoint
+                    # at the balanced position requested for Pdmax.
+                    composition_balance_fraction = RR_POWER_FOCUS_MIDPOINT_FRACTION
+            elif (section, name) == ("开通", "开通电流"):
+                # 开通电流的 A/B 本身覆盖 Ic 基线到导通平台。通用右优先
+                # 构图会把 A 推到左边缘；用真实 A/B 中点做平衡构图，
+                # 只改变局部 X 轴取景，不移动光标或改变开通电流计算。
+                anchor_fraction = TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION
+                prefer_right_room = False
+            elif section == "开通" and name in {"dv/dt", "di/dt"}:
+                # 开通斜率同时需要辨认 Base 与 Top 稳定电压/电流平台。
+                # 仅将 A/B 中点放到约 43% 的平衡位置，避免通用右优先
+                # 把窗口过度推向右侧；A/B 和斜率测量上下文保持不变。
+                anchor_fraction = TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION
+                prefer_right_room = False
+            elif (section, name) == ("开通", "Ls_on"):
+                # Ls_on 与开通 di/dt 共用 Ic 真实 A/B 积分窗。沿用同一
+                # 平衡比例，避免积分窗被通用右优先构图挤到左侧；只改变
+                # 局部 X 轴取景，不改变积分、A/B 或 Ls_on 数值。
+                anchor_fraction = TURN_ON_LS_FOCUS_MIDPOINT_FRACTION
+                prefer_right_room = False
+            elif (section, name) == ("关断过程", "Tf"):
+                # Tf 是 Toff=Td_off+Tf 的末段。通用 30/70 余量分配会把
+                # 很窄的 Tf 区间推得过于靠左；按真实 A/B 中点做比例构图，
+                # 不增加固定前态时间，也不改变 A/B 或 Tf 的计算结果。
+                anchor_fraction = TF_FOCUS_MIDPOINT_FRACTION
+                prefer_right_room = False
+            elif (section, name) == ("反向恢复", "Pdmax"):
+                # Balance the stable-current bounds away from the left edge;
+                # the measurement interval stays independent of this view.
+                anchor_fraction = RR_POWER_FOCUS_MIDPOINT_FRACTION
+                prefer_right_room = False
+            elif (section, name) == ("反向恢复", "Err"):
+                # Err needs the real Vd/Irr crossings plus the post-recovery
+                # quiet band.  Keep the same balanced composition as Pdmax;
+                # this only moves the first-view X axis, never its A/B or
+                # integration result.
+                anchor_fraction = RR_ERR_FOCUS_MIDPOINT_FRACTION
+                prefer_right_room = False
+            elif (section, name) == ("反向恢复", "Trr"):
+                # Trr 的默认右优先构图会把 A/B 挤到窗口左边缘。沿用
+                # 通用锚点比例但关闭右优先，让求解器在满足 A/B 和恢复
+                # 尾段可见的前提下取最靠右的位置；只改变 X 轴取景，
+                # 不改变 Trr 的平台、交点、数值或手动卡尺状态。
+                anchor_fraction = RR_TRR_ANCHOR_FRACTION
+                prefer_right_room = False
+        else:
             anchor_us = self._switching_focus_anchor_us(section)
         if anchor_us is None:
             self.wave_plot.focus_interval_us(fallback_t0_us, fallback_t1_us)
@@ -5309,6 +5568,15 @@ class MainWindow(QMainWindow):
             anchor_us,
             fallback_t0_us,
             fallback_t1_us,
+            anchor_fraction=anchor_fraction,
+            prefer_right_room=prefer_right_room,
+            composition_anchor_us=composition_anchor_us,
+            composition_balance_fraction=composition_balance_fraction,
+            minimum_span_us=(
+                2.5
+                if (section, name) == ("关断过程", "Ic_off_max")
+                else None
+            ),
         )
 
     def _recovery_peak_us(self) -> float | None:
@@ -5663,31 +5931,36 @@ class MainWindow(QMainWindow):
         default_context: DvdtMeasurementContext | None = None
         if restored is not None:
             search_t0, search_t1, top_v, base_v = restored
-        elif section == "关断过程":
-            default_context = self._turn_off_dvdt_context(search_t0, search_t1)
-            if default_context is not None:
-                base_v = default_context.base_v
-                top_v = default_context.top_v
-            else:
-                top_v = self._default_dvdt_top_v(section, search_t0, search_t1)
-                base_v = self._default_dvdt_base_v(section, search_t0, search_t1)
-        elif section == "反向恢复":
-            default_context = self._rr_dvdt_context()
-            if default_context is not None:
-                base_v = default_context.base_v
-                top_v = default_context.top_v
-            else:
-                top_v = self._default_dvdt_top_v(section, search_t0, search_t1)
-                base_v = self._default_dvdt_base_v(section, search_t0, search_t1)
-        elif section == "开通":
-            default_context = self._turn_on_dvdt_context(search_t0, search_t1)
-            if default_context is not None:
-                base_v = default_context.base_v
-                top_v = default_context.top_v
-            else:
-                top_v = self._default_dvdt_top_v(section, search_t0, search_t1)
-                base_v = self._default_dvdt_base_v(section, search_t0, search_t1)
         else:
+            default_context = self._extracted_dvdt_context(section)
+        if restored is None and section == "关断过程":
+            if default_context is None:
+                default_context = self._turn_off_dvdt_context(search_t0, search_t1)
+            if default_context is not None:
+                base_v = default_context.base_v
+                top_v = default_context.top_v
+            else:
+                top_v = self._default_dvdt_top_v(section, search_t0, search_t1)
+                base_v = self._default_dvdt_base_v(section, search_t0, search_t1)
+        elif restored is None and section == "反向恢复":
+            if default_context is None:
+                default_context = self._rr_dvdt_context()
+            if default_context is not None:
+                base_v = default_context.base_v
+                top_v = default_context.top_v
+            else:
+                top_v = self._default_dvdt_top_v(section, search_t0, search_t1)
+                base_v = self._default_dvdt_base_v(section, search_t0, search_t1)
+        elif restored is None and section == "开通":
+            if default_context is None:
+                default_context = self._turn_on_dvdt_context(search_t0, search_t1)
+            if default_context is not None:
+                base_v = default_context.base_v
+                top_v = default_context.top_v
+            else:
+                top_v = self._default_dvdt_top_v(section, search_t0, search_t1)
+                base_v = self._default_dvdt_base_v(section, search_t0, search_t1)
+        elif restored is None:
             top_v = self._default_dvdt_top_v(section, search_t0, search_t1)
             base_v = self._default_dvdt_base_v(section, search_t0, search_t1)
         channel = self._dvdt_channel(section)
@@ -5747,7 +6020,9 @@ class MainWindow(QMainWindow):
                     tb_us,
                 )
             ):
-                self._focus_switching_local_view(section, ta_us, tb_us)
+                self._focus_switching_local_view(
+                    section, ta_us, tb_us, name="dv/dt"
+                )
         elif (
             restored is None
             or not self.wave_plot.current_local_x_window_contains_us(
@@ -5755,7 +6030,9 @@ class MainWindow(QMainWindow):
                 search_t1,
             )
         ):
-            self._focus_switching_local_view(section, search_t0, search_t1)
+            self._focus_switching_local_view(
+                section, search_t0, search_t1, name="dv/dt"
+            )
         if restored is not None:
             self._apply_dvdt_result(section, res0, top_v, base_v, search_t0, search_t1)
         else:
@@ -6072,6 +6349,125 @@ class MainWindow(QMainWindow):
             fallback_i1=rr_context_i1,
             auto_max=bool(sr and sr.is_auto_max),
         )
+
+    def _extracted_didt_context(
+        self, section: str
+    ) -> DidtMeasurementContext | RrDidtMeasurementContext | None:
+        """Return the canonical context carried by the current extraction.
+
+        A parameter click must not synchronously repeat the waveform-wide
+        platform search that already produced ``self.result``.  The result
+        object is replaced on every range, mapping, polarity or pulse-pair
+        recalculation, so its context has the same ownership boundary as the
+        published value.  The label/value checks below fail closed for legacy
+        or manually assembled results whose context does not match the active
+        slope definition.
+        """
+
+        result = self.result
+        if result is None:
+            return None
+        key = (section, "di/dt")
+        context = result.didt_contexts.get(key)
+        expected_type = (
+            RrDidtMeasurementContext
+            if section == "反向恢复"
+            else DidtMeasurementContext
+        )
+        if not isinstance(context, expected_type):
+            return None
+
+        row_key = SLOPE_ROW_KEYS.get(key)
+        slope_range = self._slope_ranges.get(row_key) if row_key else None
+        if slope_range is None:
+            return None
+        expected_range = slope_range_result_label(slope_range, context.crossing)
+        stored_range = (
+            result.turn_off.didt_range
+            if section == "关断过程"
+            else result.turn_on.didt_range
+            if section == "开通"
+            else result.reverse_recovery.didt_range
+        )
+        if expected_range != stored_range:
+            return None
+
+        # A hand-adjusted card legitimately differs from the automatic context
+        # and will recompute from its saved Ha/Hb below.  Without such a manual
+        # owner, require exact agreement with the published automatic result.
+        if key not in self._manual_didt:
+            stored_value = (
+                result.turn_off.didt
+                if section == "关断过程"
+                else result.turn_on.didt
+                if section == "开通"
+                else result.reverse_recovery.didt_irr
+            )
+            if not np.isclose(
+                float(context.crossing.didt),
+                float(stored_value),
+                rtol=1e-12,
+                atol=1e-12,
+            ):
+                return None
+        return context
+
+    def _extracted_dvdt_context(self, section: str) -> DvdtMeasurementContext | None:
+        """Return the extraction-owned dv/dt context for a default click."""
+
+        result = self.result
+        if result is None:
+            return None
+        key = (section, "dv/dt")
+        context = result.dvdt_contexts.get(key)
+        if not isinstance(context, DvdtMeasurementContext):
+            return None
+        row_key = SLOPE_ROW_KEYS.get(key)
+        slope_range = self._slope_ranges.get(row_key) if row_key else None
+        if slope_range is None:
+            return None
+        expected_range = slope_range_result_label(slope_range, context.crossing)
+        stored_range = (
+            result.turn_off.dvdt_range
+            if section == "关断过程"
+            else result.turn_on.dvdt_range
+            if section == "开通"
+            else result.reverse_recovery.dvdt_range
+        )
+        if expected_range != stored_range:
+            return None
+        if key not in self._manual_dvdt:
+            stored_value = (
+                result.turn_off.dvdt
+                if section == "关断过程"
+                else result.turn_on.dvdt
+                if section == "开通"
+                else result.reverse_recovery.dvdt_max
+            )
+            if not np.isclose(
+                float(context.crossing.dvdt),
+                float(stored_value),
+                rtol=1e-12,
+                atol=1e-12,
+            ):
+                return None
+        return context
+
+    def _extracted_energy_context(self, section: str) -> EnergyLossMarkers | None:
+        """Return the canonical automatic loss-window markers."""
+
+        result = self.result
+        if result is None:
+            return None
+        name = {
+            "关断过程": "Eoff",
+            "开通": "Eon",
+            "反向恢复": "Err",
+        }.get(section)
+        if name is None:
+            return None
+        context = result.energy_contexts.get((section, name))
+        return context if isinstance(context, EnergyLossMarkers) else None
 
     def _default_didt_top_a(self, section: str, t0_us: float, t1_us: float) -> float:
         if self.bundle is None or self.result is None:
@@ -6450,14 +6846,14 @@ class MainWindow(QMainWindow):
         mode_tag = self._rr_didt_mode_tag(section)
         use_zero = mode_tag == "if_irm"
         default_context: DidtMeasurementContext | RrDidtMeasurementContext | None
-        if section == "关断过程":
-            default_context = self._turn_off_didt_context(search_t0, search_t1)
-        elif section == "开通":
-            default_context = self._turn_on_didt_context(search_t0, search_t1)
-        elif section == "反向恢复":
-            default_context = self._rr_didt_context(search_t0, search_t1)
-        else:
-            default_context = None
+        default_context = self._extracted_didt_context(section)
+        if default_context is None:
+            if section == "关断过程":
+                default_context = self._turn_off_didt_context(search_t0, search_t1)
+            elif section == "开通":
+                default_context = self._turn_on_didt_context(search_t0, search_t1)
+            elif section == "反向恢复":
+                default_context = self._rr_didt_context(search_t0, search_t1)
         if isinstance(default_context, RrDidtMeasurementContext):
             if use_zero:
                 auto_top = default_context.forward_a
@@ -6579,9 +6975,13 @@ class MainWindow(QMainWindow):
             self.wave_plot.apply_dvdt_ab_times(ta_us, tb_us)
         if manual is None:
             if res0.t_pct_a_s is not None and res0.t_pct_b_s is not None:
-                self._focus_switching_local_view(section, ta_us, tb_us)
+                self._focus_switching_local_view(
+                    section, ta_us, tb_us, name="di/dt"
+                )
             else:
-                self._focus_switching_local_view(section, search_t0, search_t1)
+                self._focus_switching_local_view(
+                    section, search_t0, search_t1, name="di/dt"
+                )
         if manual is not None:
             self._apply_didt_result(
                 section,
@@ -6614,19 +7014,26 @@ class MainWindow(QMainWindow):
         ic = bundle_total_current(self.bundle, self.profile)
         vce = self.bundle.get(self.profile.vce)
         if t_start_s is None or t_end_s is None:
-            if section == "关断过程":
+            # Ls uses the same percentage-crossing A/B that already produced
+            # the published di/dt value.  Reuse that extraction-owned context
+            # instead of repeating a waveform-wide platform search on the GUI
+            # thread every time the user clicks Ls_off/Ls_on.  Legacy or
+            # lightweight results without a matching context retain the
+            # established rebuild fallback below.
+            didt_context = self._extracted_didt_context(section)
+            if didt_context is None and section == "关断过程":
                 i0, i1 = segs.turn_off
                 didt_context = self._turn_off_didt_context(
                     float(t[i0]) * 1e6,
                     float(t[i1]) * 1e6,
                 )
-            elif section == "开通":
+            elif didt_context is None and section == "开通":
                 i0, i1 = segs.turn_on
                 didt_context = self._turn_on_didt_context(
                     float(t[i0]) * 1e6,
                     float(t[i1]) * 1e6,
                 )
-            else:
+            elif section not in {"关断过程", "开通"}:
                 return None
             if didt_context is None:
                 return None
@@ -6773,7 +7180,9 @@ class MainWindow(QMainWindow):
         if restored is None:
             start_us = float(default_context.t_start_s * 1e6)
             end_us = float(default_context.t_end_s * 1e6)
-            self._focus_switching_local_view(section, start_us, end_us)
+            self._focus_switching_local_view(
+                section, start_us, end_us, name=name
+            )
         else:
             start_us, end_us = map(float, restored)
 
@@ -6930,6 +7339,17 @@ class MainWindow(QMainWindow):
         if move_t_us is None:
             move_t_us = float(t[move_idx] * 1e6)
 
+        # A/B describe the full physical Vce fall, independent from the
+        # unchanged Top-to-knee Ha/Hb amplitude used by Delta Vce.
+        stable_context = self._turn_on_vce_stable_cursor_context()
+        if stable_context is None:
+            range_a_t_us, range_b_t_us = top_t_us, move_t_us
+        else:
+            range_a_t_us = float(t[stable_context[0]] * 1e6)
+            range_b_t_us = float(t[stable_context[1]] * 1e6)
+            delta_search_t0_us = min(delta_search_t0_us, range_a_t_us)
+            delta_search_t1_us = max(delta_search_t1_us, range_b_t_us)
+
         key = ("开通", "ΔVce")
         restored = (
             self._manual_delta_vce.get(key)
@@ -6937,7 +7357,9 @@ class MainWindow(QMainWindow):
             else None
         )
         if restored is None:
-            self._focus_switching_local_view("开通", top_t_us, move_t_us)
+            self._focus_switching_local_view(
+                "开通", range_a_t_us, range_b_t_us, name=focus_name
+            )
 
         def _on_cursor_change(_fx_t: float, _fx_v: float, _mv_t: float, _mv_v: float, delta: float) -> None:
             # delta 已是两光标电压差绝对值（A、B 对称）
@@ -6966,9 +7388,9 @@ class MainWindow(QMainWindow):
             return
 
         self.wave_plot.enable_delta_vce_interaction(
-            fixed_t_us=top_t_us,
+            fixed_t_us=range_a_t_us,
             fixed_v=v_top,
-            move_t_us=move_t_us,
+            move_t_us=range_b_t_us,
             move_v=move_v,
             on_change=_on_cursor_change,
             search_t0_us=delta_search_t0_us,
@@ -6996,10 +7418,10 @@ class MainWindow(QMainWindow):
             return
 
         peak_idx = int(search[np.argmax(vce[search])])
-        peak_t_us = float(t[peak_idx] * 1e6)
         peak_v = float(vce[peak_idx])
 
-        # B/Hb 卡尖峰之后的稳定阻断平台（Vce≈母线），避免落在上升沿同电平点上。
+        # B 卡在尖峰之后的稳定阻断平台时间段，Hb 独立表示该平台电平；
+        # 两者不再用同一个“上升沿同电平交点”冒充时间范围与电压参考。
         # Segmenter 的 off1 只是有限 post-off 窗；双脉冲的 canonical Vdc
         # 却来自第一、第二脉冲之间的阻断平台。把真实交点搜索有限延伸到
         # pulse2_on 前 200 ns，和平台取值上下文保持一致，不向后追逐第二脉冲。
@@ -7015,21 +7437,17 @@ class MainWindow(QMainWindow):
                     int(segs.pulse2_on) - max(1, int(200e-9 / dt)),
                 ),
             )
-        if self.result.single_pulse_mode:
-            stable_n = max(16, int(round(200e-9 / max(float(dt), 1e-15))))
-            crossing_lo = max(peak_idx, off1 - stable_n + 1)
-        else:
-            crossing_lo = peak_idx
-        tail = np.arange(crossing_lo, blocking_end + 1)
-        if len(tail) >= 2:
-            top_idx = int(tail[np.argmin(np.abs(vce[tail] - v_top))])
-        else:
-            top_idx = int(search[np.argmin(np.abs(vce[search] - v_top))])
-        top_t_us = _nearest_raw_level_crossing_time_us(
-            t, vce, v_top, top_idx, crossing_lo, blocking_end
+        base_cursor_idx, top_cursor_idx = turn_off_delta_vce_cursor_range_indices(
+            t,
+            vce,
+            off0,
+            off1,
+            dt,
+            v_top,
+            search_end=blocking_end,
         )
-        if top_t_us is None:
-            top_t_us = float(t[top_idx] * 1e6)
+        base_cursor_t_us = float(t[base_cursor_idx] * 1e6)
+        top_cursor_t_us = float(t[top_cursor_idx] * 1e6)
         key = ("关断过程", "ΔVce")
         restored = (
             self._manual_delta_vce.get(key)
@@ -7037,18 +7455,63 @@ class MainWindow(QMainWindow):
             else None
         )
         if restored is None:
-            self._focus_switching_local_view("关断过程", peak_t_us, top_t_us)
+            self._focus_switching_local_view(
+                "关断过程", base_cursor_t_us, top_cursor_t_us, name=focus_name
+            )
 
-        def _on_cursor_change(_fx_t: float, _fx_v: float, _mv_t: float, _mv_v: float, delta: float) -> None:
+        # Ls_off 的电压面积只随手调 DeltaVce 幅值线性缩放；时间窗、电流变化量和
+        # 自动参考幅值在本次交互期间都不会改变。保留进入交互时的等价比例，避免
+        # 每个鼠标移动事件都重新扫描整段波形、重算关断 di/dt 稳态平台。
+        ls_key = ("关断过程", "Ls_off")
+        ls_reference_delta = float(self.result.turn_off.delta_vce)
+        ls_reference_value = float(self.result.turn_off.ls_off)
+        ls_off_per_volt = (
+            ls_reference_value / ls_reference_delta
+            if (
+                ls_key not in self.result.unavailable_metrics
+                and np.isfinite(ls_reference_delta)
+                and ls_reference_delta > 1e-9
+                and np.isfinite(ls_reference_value)
+            )
+            else None
+        )
+
+        def _on_cursor_change(
+            _a_t: float,
+            _ha_v: float,
+            _b_t: float,
+            _hb_v: float,
+            delta: float,
+        ) -> None:
             # delta 已是两光标电压差绝对值（A、B 对称）
-            self._save_manual_delta_vce("关断过程", _fx_t, _mv_t, _fx_v, _mv_v)
+            self._save_manual_delta_vce("关断过程", _a_t, _b_t, _ha_v, _hb_v)
             if self.result is not None:
                 self.result.turn_off.delta_vce = float(delta)
             self.result_table.set_metric_value("关断过程", "ΔVce", delta)
-            self._sync_ls_off()
+            ls_unavailable = (
+                self.result is None
+                or ls_off_per_volt is None
+                or not np.isfinite(delta)
+                or delta <= 0.0
+            )
+            if self.result is not None:
+                self.result.turn_off.ls_off = (
+                    0.0 if ls_unavailable else float(ls_off_per_volt * delta)
+                )
+                if ls_unavailable:
+                    self.result.unavailable_metrics.add(ls_key)
+                else:
+                    self.result.unavailable_metrics.discard(ls_key)
+            self.result_table.set_metric_unavailable(*ls_key, ls_unavailable)
+            self.result_table.set_metric_value(
+                *ls_key,
+                None if ls_unavailable or self.result is None else self.result.turn_off.ls_off,
+            )
             ls_off = self.result.turn_off.ls_off if self.result is not None else 0.0
             self.statusBar().showMessage(
-                f"关断ΔVce交互: A(尖峰)={_fx_v:.2f} V, B(Top)={_mv_v:.2f} V, "
+                f"关断ΔVce交互: A(Base稳定段)={_a_t:.3f} µs, "
+                f"B(Top稳定段)={_b_t:.3f} µs, "
+                f"Ha(尖峰)={_ha_v:.2f} V, Hb(Top)={_hb_v:.2f} V, "
                 f"ΔVce={delta:.3f} V, Ls_off={ls_off:.3f} nH"
             )
 
@@ -7065,11 +7528,12 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # A/Ha 卡尖峰（最大值，在上），B/Hb 卡 Top 阻断平台有效值（在下）
+        # A/B 展示 DeltaVce 的完整取值阶段：抬升前 Base 稳定段到尖峰后的
+        # Top 稳定段。Ha/Hb 独立展示尖峰最大值和阻断 Top，保持既有数值口径。
         self.wave_plot.enable_delta_vce_interaction(
-            fixed_t_us=peak_t_us,
+            fixed_t_us=base_cursor_t_us,
             fixed_v=peak_v,
-            move_t_us=top_t_us,
+            move_t_us=top_cursor_t_us,
             move_v=v_top,
             on_change=_on_cursor_change,
             search_t0_us=float(t[off0] * 1e6),
@@ -7098,23 +7562,26 @@ class MainWindow(QMainWindow):
         }.get(section) is None:
             self._enable_generic_parameter_interaction(section, metric_name)
             return
-        interval = self._parameter_interval_us(section, metric_name)
+        restored = self._manual_intervals.get((section, metric_name))
+        interval = restored or self._parameter_interval_us(section, metric_name)
         if interval is None:
             return
-
-        restored = self._manual_intervals.get((section, metric_name))
         t0_us, t1_us = restored if restored is not None else interval
         t0_us, t1_us = min(t0_us, t1_us), max(t0_us, t1_us)
 
+        def _manual_power_extreme() -> tuple[float, float] | None:
+            if not self._manual_cursors_apply_to_current_waveform():
+                return None
+            return self._manual_extreme_values.get((section, metric_name))
+
         def _boundary_channels() -> tuple[str, str]:
-            # Without a visible W/kW trace, A/B still describe the exact loss
-            # window.  Bind them to the two physical/logical boundary waves
-            # instead of pretending that a power card is an Ic-only card.
+            # Without a visible W/kW trace, retain the physical/logical waves
+            # that define this card's interval (Pdmax is independent of Err).
             return {
                 "关断过程": ("vce", "ic"),
                 "开通": ("ic", "vce"),
-                # Err's chronological left/right boundaries are Vd then Irr.
-                "反向恢复": ("v_diode", "irr"),
+                # Pdmax brackets the Irr platforms, independently of Err.
+                "反向恢复": ("irr", "irr"),
             }[section]
 
         if section in {"关断过程", "开通"}:
@@ -7162,6 +7629,28 @@ class MainWindow(QMainWindow):
                 )
             )
 
+        def _raw_power_peak_point(
+            t0: float,
+            t1: float,
+        ) -> tuple[float, float] | None:
+            """Return the raw V*I peak in watts and its time for Ha display."""
+
+            t = self.bundle.t
+            lo_s, hi_s = sorted((float(t0) * 1e-6, float(t1) * 1e-6))
+            i0 = int(np.searchsorted(t, lo_s, side="left"))
+            i1 = int(np.searchsorted(t, hi_s, side="left"))
+            i0 = max(0, min(i0, len(t) - 2))
+            i1 = max(i0 + 1, min(i1, len(t) - 1))
+            block = np.asarray(raw_power_w[i0:i1], dtype=np.float64)
+            finite_indices = np.flatnonzero(np.isfinite(block))
+            if len(finite_indices) == 0:
+                return None
+            local_idx = int(
+                finite_indices[int(np.argmax(block[finite_indices]))]
+            )
+            peak_idx = i0 + local_idx
+            return float(raw_power_w[peak_idx]), float(t[peak_idx] * 1e6)
+
         def _power_peak(t0: float, t1: float):
             raw_peak_kw = _raw_power_peak_kw(t0, t1)
             return self.wave_plot.power_peak_in_window(
@@ -7177,6 +7666,36 @@ class MainWindow(QMainWindow):
                 expected_power_w=raw_power_w,
             )
 
+        def _power_peak_binding(
+            t0: float,
+            t1: float,
+        ) -> tuple[tuple[str, float, float, float] | None, bool]:
+            """Return (display peak, whether it also owns A/B)."""
+
+            matched_trace = _power_peak(t0, t1)
+            if matched_trace is not None:
+                return matched_trace, True
+            # Pmax still needs an honest maximum reference even when this TSS
+            # only carries a different power Math (for example RR CH3*CH5).
+            # Use an internal W coordinate for Ha; keep A/B on the unchanged
+            # Vce/Ic loss boundaries.  Pdmax keeps its established behavior.
+            if section not in {"关断过程", "开通"}:
+                return None, False
+            point = _raw_power_peak_point(t0, t1)
+            if point is None:
+                return None, False
+            peak_w, peak_t_us = point
+            reference_channel = self.wave_plot.parameter_power_reference_channel(
+                raw_power_w,
+                legend="Pmax",
+            )
+            return (
+                reference_channel,
+                float(peak_w),
+                float(peak_w),
+                float(peak_t_us),
+            ), False
+
         def _store_power_peak(value_kw: float) -> None:
             if section == "关断过程":
                 self.result.turn_off.pmax = value_kw
@@ -7186,16 +7705,70 @@ class MainWindow(QMainWindow):
                 self.result.reverse_recovery.pdmax = value_kw
             self.result_table.set_metric_value(section, metric_name, value_kw)
 
+        def _on_horizontal_power_change(
+            which: str,
+            t0: float,
+            t1: float,
+            ha_value: float,
+            _hb_value: float,
+        ) -> None:
+            if which != "ha":
+                return
+            channel, valid = self.wave_plot._horizontal_cursor_binding("ha")
+            if not valid:
+                return
+            metric_kw = (
+                self.wave_plot.power_value_w_for_channel(channel, ha_value)
+                / 1000.0
+            )
+            lo, hi = min(float(t0), float(t1)), max(float(t0), float(t1))
+            self._touch_manual_waveform_source()
+            self._manual_intervals[(section, metric_name)] = (lo, hi)
+            self._manual_extreme_values[(section, metric_name)] = (
+                float(ha_value),
+                float(metric_kw),
+            )
+            _store_power_peak(float(metric_kw))
+            self.statusBar().showMessage(
+                f"{section}-{metric_name}: 手动 Ha={metric_kw:.3f} kW；"
+                + ("A/B 保持电流稳定平台区间" if section == "反向恢复" else "A/B 保持损耗边界")
+                + "，已保存到报告参数"
+            )
+
+        def _with_manual_power_peak(
+            matched_peak: tuple[str, float, float, float] | None,
+        ) -> tuple[str, float, float, float] | None:
+            manual = _manual_power_extreme()
+            if matched_peak is None or manual is None:
+                return matched_peak
+            channel, _peak_w, _peak_value, peak_t_us = matched_peak
+            _manual_line_value, manual_metric_kw = manual
+            unit_w = self.wave_plot.power_value_w_for_channel(channel, 1.0)
+            display_value = (
+                float(manual_metric_kw) * 1000.0 / unit_w
+                if abs(unit_w) > 1e-15
+                else float(_manual_line_value)
+            )
+            return (
+                channel,
+                float(manual_metric_kw) * 1000.0,
+                float(display_value),
+                float(peak_t_us),
+            )
+
         def _apply_power_peak(t0: float, t1: float, *, remember: bool) -> bool:
             lo, hi = min(t0, t1), max(t0, t1)
             peak_kw = _raw_power_peak_kw(lo, hi)
             if peak_kw is None:
                 return False
-            _store_power_peak(float(peak_kw))
+            manual = _manual_power_extreme()
+            stored_kw = float(manual[1]) if manual is not None else float(peak_kw)
+            _store_power_peak(stored_kw)
             if remember:
                 self._touch_manual_waveform_source()
                 self._manual_intervals[(section, metric_name)] = (lo, hi)
-            matched = _power_peak(lo, hi)
+            matched, peak_owns_vertical = _power_peak_binding(lo, hi)
+            matched = _with_manual_power_peak(matched)
             if matched is None:
                 self.wave_plot.apply_power_peak_binding(
                     boundary_a_channel=boundary_a,
@@ -7214,24 +7787,43 @@ class MainWindow(QMainWindow):
                 peak_channel=channel,
                 peak_value=float(peak_value),
                 peak_t_us=float(peak_t_us),
+                peak_owns_vertical=peak_owns_vertical,
             )
-            self.statusBar().showMessage(
-                f"{section}-{metric_name}: 原始 V×I={peak_kw:.3f} kW "
-                f"({channel} 用于 A/B/Ha 显示；卡值按原始 V×I，"
-                f"{lo:.3f}~{hi:.3f}µs)"
-            )
+            if peak_owns_vertical:
+                self.statusBar().showMessage(
+                    f"{section}-{metric_name}: 原始 V×I={peak_kw:.3f} kW "
+                    f"({channel} 用于 A/B/Ha 显示；卡值按原始 V×I，"
+                    f"{lo:.3f}~{hi:.3f}µs)"
+                )
+            else:
+                self.statusBar().showMessage(
+                    f"{section}-{metric_name}: Ha=原始 Vce×Ic 峰值 "
+                    f"{peak_kw:.3f} kW；A/B 保持损耗边界 "
+                    f"{lo:.3f}~{hi:.3f}µs"
+                )
             return True
 
-        matched = _power_peak(t0_us, t1_us)
+        matched, peak_owns_vertical = _power_peak_binding(t0_us, t1_us)
+        matched = _with_manual_power_peak(matched)
         boundary_a, boundary_b = _boundary_channels()
-        interval_channel = matched[0] if matched is not None else boundary_a
-        endpoint_a = matched[0] if matched is not None else boundary_a
-        endpoint_b = matched[0] if matched is not None else boundary_b
+        interval_channel = (
+            matched[0]
+            if matched is not None and peak_owns_vertical
+            else boundary_a
+        )
+        endpoint_a = interval_channel
+        endpoint_b = (
+            interval_channel
+            if matched is not None and peak_owns_vertical
+            else boundary_b
+        )
         if restored is None or not self.wave_plot.current_local_x_window_contains_us(
             t0_us,
             t1_us,
         ):
-            self._focus_switching_local_view(section, t0_us, t1_us)
+            self._focus_switching_local_view(
+                section, t0_us, t1_us, name=metric_name
+            )
         self.wave_plot.enable_interval_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
@@ -7241,6 +7833,7 @@ class MainWindow(QMainWindow):
             channel=interval_channel,
             a_channel=endpoint_a,
             b_channel=endpoint_b,
+            on_horizontal_change=_on_horizontal_power_change,
         )
         if matched is None:
             self.wave_plot.apply_power_peak_binding(
@@ -7252,7 +7845,9 @@ class MainWindow(QMainWindow):
                 return
             self.statusBar().showMessage(
                 f"{section}-{metric_name}: 未显示功率波形，A/B 使用"
-                f"{boundary_a}/{boundary_b} 损耗边界，拖动后按原始 V×I 重算"
+                f"{boundary_a}/{boundary_b} "
+                + ("电流稳定平台边界" if section == "反向恢复" else "损耗边界")
+                + "，拖动后按原始 V×I 重算"
             )
             return
         channel, peak_w, peak_value, peak_t_us = matched
@@ -7262,7 +7857,11 @@ class MainWindow(QMainWindow):
             peak_channel=channel,
             peak_value=float(peak_value),
             peak_t_us=float(peak_t_us),
+            peak_owns_vertical=peak_owns_vertical,
         )
+        manual = _manual_power_extreme()
+        if manual is not None:
+            _store_power_peak(float(manual[1]))
         if restored is not None:
             # The Math trace is only the display source for A/B/Ha.  A saved
             # interval must restore the same authoritative raw V×I card value
@@ -7271,11 +7870,18 @@ class MainWindow(QMainWindow):
             # report value every time the user re-enters Pmax/Pdmax.
             _apply_power_peak(t0_us, t1_us, remember=False)
             return
-        self.statusBar().showMessage(
-            f"{section}-{metric_name}: {float(peak_w) / 1000.0:.3f} kW "
-            f"({channel} 用于 A/B/Ha 显示；卡值按原始 V×I，"
-            f"{t0_us:.3f}~{t1_us:.3f}µs，拖动 A/B 后重算)"
-        )
+        if peak_owns_vertical:
+            self.statusBar().showMessage(
+                f"{section}-{metric_name}: {float(peak_w) / 1000.0:.3f} kW "
+                f"({channel} 用于 A/B/Ha 显示；卡值按原始 V×I，"
+                f"{t0_us:.3f}~{t1_us:.3f}µs，拖动 A/B 后重算)"
+            )
+        else:
+            self.statusBar().showMessage(
+                f"{section}-{metric_name}: Ha=原始 Vce×Ic 峰值 "
+                f"{float(peak_w) / 1000.0:.3f} kW；A/B 保持损耗边界，"
+                "拖动 A/B 后按原始 V×I 重算"
+            )
 
     def _enable_err_energy_interaction(self) -> None:
         """Err：Ha=Irr 平台、Hb=V_二极管 基线，A/B 交点 + 四光标围成积分区（同 Eon）。"""
@@ -7297,21 +7903,23 @@ class MainWindow(QMainWindow):
         rr_context_i1 = completed[2] if completed is not None else rr1
         ipk = err_recovery_peak_index(irr[rr0 : rr_context_i1 + 1], dt)
         ipk_global = rr0 + ipk
-        markers = err_energy_markers(
-            t,
-            irr,
-            v_diode,
-            rr0,
-            rr_context_i1,
-            dt,
-            i_search_end=on1,
-            vge=self.bundle.get(self.profile.vge),
-            pulse1_off=segs.pulse1_off,
-            pulse2_on=segs.pulse2_on,
-            pulse2_off=segs.pulse2_off,
-            dc_current=self.result.idc,
-            lower_bridge_irr_from_ic_minus_il=self.profile.irr_from_ic_minus_il,
-        )
+        markers = self._extracted_energy_context("反向恢复")
+        if markers is None:
+            markers = err_energy_markers(
+                t,
+                irr,
+                v_diode,
+                rr0,
+                rr_context_i1,
+                dt,
+                i_search_end=on1,
+                vge=self.bundle.get(self.profile.vge),
+                pulse1_off=segs.pulse1_off,
+                pulse2_on=segs.pulse2_on,
+                pulse2_off=segs.pulse2_off,
+                dc_current=self.result.idc,
+                lower_bridge_irr_from_ic_minus_il=self.profile.irr_from_ic_minus_il,
+            )
         search_t0 = float(t[rr0] * 1e6)
         search_t1 = float(t[on1] * 1e6)
         edge_a, edge_b = "falling", "rising"
@@ -7339,17 +7947,13 @@ class MainWindow(QMainWindow):
             )
             lo, hi = min(float(ta_us), float(tb_us)), max(float(ta_us), float(tb_us))
             self._manual_intervals[("反向恢复", "Err")] = (lo, hi)
-            self._manual_intervals[("反向恢复", "Pdmax")] = (lo, hi)
             win = IntegrationWindow(i0w, i1w, float(t[i0w]), float(t[i1w]))
             val = float(integrate_err_recovery(t, v_diode, irr, win))
-            pdmax = float(peak_power_kw(v_diode, irr, win, absolute=True))
             self.result.reverse_recovery.err = val
-            self.result.reverse_recovery.pdmax = pdmax
-            self.result_table.set_metric_value("反向恢复", "Pdmax", pdmax)
             self.result_table.set_metric_value("反向恢复", "Err", val)
             self.statusBar().showMessage(
                 f"反向恢复-Err: Ha(Irr)={ha_a:.2f}A Hb(Vd)={hb_v:.2f}V "
-                f"A={ta_us:.3f}µs B={tb_us:.3f}µs, Pdmax={pdmax:.3f} kW, Err={val:.3f} mJ"
+                f"A={ta_us:.3f}µs B={tb_us:.3f}µs, Err={val:.3f} mJ"
             )
 
         legacy = self._manual_intervals.get(("反向恢复", "Err"))
@@ -7382,8 +7986,9 @@ class MainWindow(QMainWindow):
         ):
             self._focus_switching_local_view(
                 "反向恢复",
-                min(ta_us, tb_us) - 0.15,
-                max(ta_us, tb_us) + 0.15,
+                min(ta_us, tb_us),
+                max(ta_us, tb_us),
+                name="Err",
             )
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
@@ -7411,7 +8016,11 @@ class MainWindow(QMainWindow):
             self._show_stored_metric_status("反向恢复", "Err")
 
     def _enable_eoff_eon_energy_interaction(self, section: str, name: str) -> None:
-        """Eoff/Eon：Ha=Vce 平台、Hb=Ic 平台，A/B 为与电平交点，拖动实时重算损耗。"""
+        """启用损耗卡尺；Eoff 可用稳定平台端点，Eon 保持电平交点。
+
+        Ha/Hb 始终是提取层的平台值；A/B 直接拥有积分窗口。拖动期间只更新
+        轻量显示，松开后才重算并保存手动 Eoff/Eon 与 Pmax。
+        """
         self._active_slope_param = None
         if self.bundle is None or self.result is None or self.result.segments is None:
             return
@@ -7425,17 +8034,19 @@ class MainWindow(QMainWindow):
         vce = self.bundle.get(self.profile.vce)
 
         if section == "关断过程" and name in {"Eoff", power_name, "Pdmax"}:
-            markers = eoff_energy_markers(
-                t,
-                ic,
-                vce,
-                segs.turn_off[0],
-                segs.turn_off[1],
-                segs.pulse1_off,
-                dt,
-                pre_ns=self.cfg.energy.eoff_pre_ns,
-                pulse1_on=segs.pulse1_on,
-            )
+            markers = self._extracted_energy_context("关断过程")
+            if markers is None:
+                markers = eoff_energy_markers(
+                    t,
+                    ic,
+                    vce,
+                    segs.turn_off[0],
+                    segs.turn_off[1],
+                    segs.pulse1_off,
+                    dt,
+                    pre_ns=self.cfg.energy.eoff_pre_ns,
+                    pulse1_on=segs.pulse1_on,
+                )
             edge_a, edge_b = "rising", "falling"
             b_channel, b_level_vce = "ic", None
             ha_channel, hb_channel, a_channel = "vce", "ic", "vce"
@@ -7449,16 +8060,18 @@ class MainWindow(QMainWindow):
             rise_a_mode = "eoff_vce"
             fall_b_mode = "eoff_ic_fall"
         else:
-            markers = eon_energy_markers(
-                t,
-                ic,
-                vce,
-                segs.turn_on[0],
-                segs.turn_on[1],
-                segs.pulse2_on,
-                dt,
-                pulse1_off=segs.pulse1_off,
-            )
+            markers = self._extracted_energy_context("开通")
+            if markers is None:
+                markers = eon_energy_markers(
+                    t,
+                    ic,
+                    vce,
+                    segs.turn_on[0],
+                    segs.turn_on[1],
+                    segs.pulse2_on,
+                    dt,
+                    pulse1_off=segs.pulse1_off,
+                )
             edge_a, edge_b = "rising", "falling"
             ha_channel, a_channel, hb_channel = "ic", "ic", "vce"
             b_channel = "vce"
@@ -7534,7 +8147,9 @@ class MainWindow(QMainWindow):
                 ta_us,
                 tb_us,
             ):
-                self._focus_switching_local_view(section, ta_us, tb_us)
+                self._focus_switching_local_view(
+                    section, ta_us, tb_us, name=name
+                )
             self.wave_plot.enable_energy_loss_interaction(
                 search_t0,
                 search_t1,
@@ -7561,7 +8176,9 @@ class MainWindow(QMainWindow):
         tb_us = markers.t_end * 1e6
         search_t0 = min(search_t0, float(ta_us), float(tb_us))
         search_t1 = max(search_t1, float(ta_us), float(tb_us))
-        self._focus_switching_local_view(section, ta_us, tb_us)
+        self._focus_switching_local_view(
+            section, ta_us, tb_us, name=name
+        )
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
             search_t1,
@@ -7604,7 +8221,7 @@ class MainWindow(QMainWindow):
         return self._manual_trr_measure
 
     def _enable_irr_interaction(self) -> None:
-        """Irr：A/B 定区间，Hb 自动跟区间内 Irr 最大值（与 Trr 无关）。"""
+        """Irr: stable forward-to-recovered range, Ha=Base, Hb=peak."""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return
         from dpt_extractor.models.waveform import bundle_reverse_recovery_current
@@ -7613,9 +8230,15 @@ class MainWindow(QMainWindow):
         segs = self.result.segments
         rr0, rr1 = segs.reverse_recovery
         irr = bundle_reverse_recovery_current(self.bundle, self.profile)
+        default_context = self._rr_irr_cursor_context()
 
         interval = self._parameter_interval_us("反向恢复", "Irr")
         restored = self._manual_intervals.get(("反向恢复", "Irr"))
+        restored_horizontal = (
+            self._manual_extreme_references.get(("反向恢复", "Irr"))
+            if self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
         if restored is not None:
             t0_us, t1_us = restored
         elif interval is not None:
@@ -7651,12 +8274,29 @@ class MainWindow(QMainWindow):
                 signed_peak,
                 channel="irr",
             )
+            if restored_horizontal is not None:
+                self.wave_plot.set_irr_base_on_ha(
+                    float(restored_horizontal[0]),
+                    channel="irr",
+                )
+            elif default_context is not None:
+                self.wave_plot.set_irr_base_on_ha(
+                    float(default_context[2]),
+                    channel="irr",
+                )
+            if peak_idx is not None:
+                self.wave_plot.set_cursor_auxiliary_point(
+                    "irr",
+                    float(t[peak_idx] * 1e6),
+                    signed_peak,
+                )
             if self.result is None:
                 return
             self.result.reverse_recovery.irr = val
             self.result_table.set_metric_value("反向恢复", "Irr", val)
             self.statusBar().showMessage(
-                f"反向恢复 Irr: {val:.3f}A（A/B 区间内反向恢复电流尖峰值，Hb 自动跟随）  "
+                f"反向恢复 Irr: {val:.3f}A（A/B=正向稳定段到恢复Base稳定段，"
+                "Hb=反向恢复尖峰，Ha=恢复Base）  "
                 f"[{min(t0_us, t1_us):.3f}~{max(t0_us, t1_us):.3f}µs]"
             )
 
@@ -7664,7 +8304,9 @@ class MainWindow(QMainWindow):
             _apply_irr_interval(t0_us, t1_us, remember=True)
 
         if restored is None:
-            self._focus_switching_local_view("反向恢复", t0_us, t1_us)
+            self._focus_switching_local_view(
+                "反向恢复", t0_us, t1_us, name="Irr"
+            )
         self.wave_plot.enable_irr_peak_interaction(t0_us, t1_us, _on_irr_interval)
         _apply_irr_interval(t0_us, t1_us, remember=restored is not None)
 
@@ -7754,6 +8396,7 @@ class MainWindow(QMainWindow):
                 "反向恢复",
                 ta_us,
                 max(tb_us, t1_us),
+                name="Trr",
             )
         self.wave_plot.enable_trr_measure_interaction(
             t0_us,
@@ -7824,16 +8467,16 @@ class MainWindow(QMainWindow):
         if bound is not None:
             return bound
         extrema = {
-            # turn_off_ic_fall_window() delegates both limits to the Vge
-            # falling-edge window; Ic supplies the extrema inside that window.
-            ("关断过程", "Ic_off_max"): ("vge", "vge"),
-            # _turn_off_vce_max_window_indices() finds both sides of the Vce
-            # overshoot itself.
+            # Ic_off_max spans the physical turn-off stage: A is the Vce Base
+            # band before its rise, B is the Ic Base band after its fall.
+            ("关断过程", "Ic_off_max"): ("vce", "ic"),
+            # Voltage maxima span their stable platform transition; Ha remains
+            # the independent extraction-owned overshoot/maximum.
             ("关断过程", "Vce_off_max"): ("vce", "vce"),
-            # _turn_on_ic_max_window_indices(): A=Ic rise, B=Vce base.
-            ("开通", "Ic_on_max"): ("ic", "vce"),
-            # turn_on_vce_on_max_window_indices(): A=Vge rise, B=Vce base.
-            ("开通", "Vce_on_max"): ("vge", "vce"),
+            # Ic_on_max spans the Ic transition itself: Base before the rise
+            # through the first stable Top band after the ringing settles.
+            ("开通", "Ic_on_max"): ("ic", "ic"),
+            ("开通", "Vce_on_max"): ("vce", "vce"),
             ("反向恢复", "Vrr"): ("v_diode", "v_diode"),
         }
         bound = extrema.get((section, name))
@@ -7954,7 +8597,9 @@ class MainWindow(QMainWindow):
                 )
 
         if restored is None:
-            self._focus_switching_local_view("开通", t_a_us, t_b_us)
+            self._focus_switching_local_view(
+                "开通", t_a_us, t_b_us, name="开通电流"
+            )
         self.wave_plot.enable_turn_on_current_interaction(
             t_a_us,
             t_search_hi,
@@ -7966,8 +8611,47 @@ class MainWindow(QMainWindow):
         if restored is None:
             self._show_stored_metric_status("开通", "开通电流")
 
+    def _crosstalk_extrema_cursor_window(
+        self,
+        index_interval: tuple[int, int],
+        vge_other: np.ndarray,
+    ) -> tuple[float, float] | None:
+        """Return the narrowest default A/B window containing Vge max and min.
+
+        The crosstalk value is defined over the complete section interval, but
+        the default vertical cursors should show where that opposite-gate
+        range is actually reached.  Keeping the search interval and the
+        display cursor interval separate lets the view become readable without
+        changing the extracted max/min values.  The same helper is used by
+        turn-off and turn-on crosstalk so their cursor semantics cannot drift.
+        """
+
+        if self.bundle is None or len(self.bundle.t) == 0:
+            return None
+        t = np.asarray(self.bundle.t, dtype=float)
+        # Extraction uses [i0, i1), not an inclusive, time-roundtripped
+        # window.  Including i1 could select an extremum from the next event.
+        i0 = max(0, int(index_interval[0]))
+        i1 = min(len(t), len(vge_other), int(index_interval[1]))
+        values = np.asarray(vge_other[i0:i1], dtype=float)
+        if values.size < 2 or not np.all(np.isfinite(values)):
+            return None
+        vmax, vmin = float(np.max(values)), float(np.min(values))
+        if vmax == vmin:
+            return None
+        # Quantized plateaus may reach the same raw extreme more than once.
+        # The closest opposite extrema are adjacent in their merged time order.
+        extrema = np.flatnonzero((values == vmax) | (values == vmin))
+        opposite = values[extrema[:-1]] != values[extrema[1:]]
+        gaps = np.where(opposite, np.diff(t[i0 + extrema]), np.inf)
+        pair = int(np.argmin(gaps))
+        return (
+            float(t[i0 + extrema[pair]] * 1e6),
+            float(t[i0 + extrema[pair + 1]] * 1e6),
+        )
+
     def _enable_crosstalk_interaction(self, section: str) -> None:
-        """串扰电压：A/B 定窗，Ha/Hb 锁定在窗内对管 Vge 最大/最小（与关断/开通同一逻辑）。"""
+        """串扰电压：A/B 卡对管 Vge 极值时刻，Ha/Hb 锁定极值电平。"""
         self._active_slope_param = None
         if (
             self.bundle is None
@@ -7982,39 +8666,43 @@ class MainWindow(QMainWindow):
         t = self.bundle.t
         dt = self.bundle.dt
         vge_other = self.bundle.get(self.profile.vge_other)
+        index_interval = (
+            self.result.segments.turn_off
+            if section == "关断过程"
+            else self.result.segments.turn_on
+        )
 
         def _idx_from_t_us(t_us: float) -> int:
             ts = t_us * 1e-6
             idx = int(np.searchsorted(t, ts, side="left"))
+            # A cursor placed at t[idx] * 1e6 must still include that exact
+            # sample if the conversion back to seconds rounded upwards.
+            if idx > 0 and float(t[idx - 1] * 1e6) == float(t_us):
+                idx -= 1
             return max(0, min(idx, len(t) - 1))
 
-        def _on_interval_change(
-            t0_us: float,
-            t1_us: float,
-            *,
-            remember: bool = True,
-        ) -> None:
-            i0 = _idx_from_t_us(min(t0_us, t1_us))
-            i1 = _idx_from_t_us(max(t0_us, t1_us))
-            if i1 <= i0 + 1:
-                return
-            vmax, vmin = crosstalk_extrema(vge_other, i0, i1 + 1, dt)
+        def _show_interval_values(ta: float, tb: float) -> None:
             cs = self.result.turn_off if section == "关断过程" else self.result.turn_on
-            cs.crosstalk_vmax = float(vmax)
-            cs.crosstalk_vmin = float(vmin)
-            cs.crosstalk_v = float(vmax)
-            ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
-            if remember:
-                self._touch_manual_waveform_source()
-                self._manual_intervals[(section, name)] = (ta, tb)
+            # Display the authoritative result directly.  Plot decimation and
+            # cursor-window rounding must never redefine these physical levels.
             self.wave_plot.set_interval_minmax_horizontal(
-                float(vmin),
-                float(vmax),
+                float(cs.crosstalk_vmin),
+                float(cs.crosstalk_vmax),
                 channel="vge_other",
                 lock_horizontal=True,
-                t0_us=ta,
-                t1_us=tb,
             )
+            i0, i1 = _idx_from_t_us(ta), _idx_from_t_us(tb)
+            values = vge_other[i0 : i1 + 1]
+            if values.size and np.all(np.isfinite(values)):
+                peak_idx = i0 + int(np.argmax(values))
+                if float(vge_other[peak_idx]) == float(cs.crosstalk_vmax):
+                    self.wave_plot.set_cursor_auxiliary_point(
+                        "vge_other", float(t[peak_idx] * 1e6), float(cs.crosstalk_vmax)
+                    )
+                else:
+                    self.wave_plot.clear_cursor_auxiliary_guides()
+            else:
+                self.wave_plot.clear_cursor_auxiliary_guides()
             disp = f"{cs.crosstalk_vmax:.2f}/{cs.crosstalk_vmin:.2f}"
             self.result_table.set_value_text(section, name, disp)
             self.statusBar().showMessage(
@@ -8022,16 +8710,41 @@ class MainWindow(QMainWindow):
                 f"max={cs.crosstalk_vmax:.2f} V, min={cs.crosstalk_vmin:.2f} V"
             )
 
+        def _on_interval_change(t0_us: float, t1_us: float) -> None:
+            ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
+            i0, i1 = _idx_from_t_us(ta), _idx_from_t_us(tb)
+            vmax, vmin = crosstalk_extrema(vge_other, i0, i1 + 1, dt)
+            cs = self.result.turn_off if section == "关断过程" else self.result.turn_on
+            cs.crosstalk_vmax = float(vmax)
+            cs.crosstalk_vmin = float(vmin)
+            cs.crosstalk_v = float(vmax)
+            self._touch_manual_waveform_source()
+            self._manual_intervals[(section, name)] = (ta, tb)
+            _show_interval_values(ta, tb)
+
         restored = self._manual_intervals.get((section, name))
-        t0_us, t1_us = restored if restored is not None else interval
         if restored is None:
-            self._focus_switching_local_view(section, t0_us, t1_us)
+            # Search the complete event, but only the actual extrema belong
+            # to the default cursor/focus envelope.  Degenerate data keeps
+            # the existing event window instead of fabricating a pair.
+            cursor_interval = self._crosstalk_extrema_cursor_window(
+                index_interval, vge_other
+            ) or interval
+        else:
+            cursor_interval = restored
+        t0_us, t1_us = cursor_interval
+        if restored is None:
+            self._focus_switching_local_view(
+                section, t0_us, t1_us, name=name
+            )
         self.wave_plot.enable_crosstalk_interaction(
             start_t_us=t0_us,
             end_t_us=t1_us,
             on_change=_on_interval_change,
         )
-        _on_interval_change(t0_us, t1_us, remember=False)
+        # Entering or restoring a card is not a manual edit.  Only the release
+        # callback above may recalculate or persist a new measurement window.
+        _show_interval_values(t0_us, t1_us)
 
     def _enable_short_circuit_current_interaction(self, name: str) -> None:
         """短路 Imax/Tsc：默认按短路规范布置，手动拖动时横纵光标独立。"""
@@ -8162,6 +8875,13 @@ class MainWindow(QMainWindow):
             "应力Vpeak_本管",
             "应力Vpeak_对管",
         }
+        dpt_extreme_names = {
+            "Ic_off_max",
+            "Vce_off_max",
+            "Ic_on_max",
+            "Vce_on_max",
+            "Vrr",
+        }
 
         def _idx_from_t_us(t_us: float) -> int:
             ts = t_us * 1e-6
@@ -8190,8 +8910,23 @@ class MainWindow(QMainWindow):
                     min(t0_us, t1_us),
                     max(t0_us, t1_us),
                 )
-            if name in _MAX_INTERVAL_NAMES:
-                self._manual_extreme_values.pop((section, name), None)
+            manual_extreme = (
+                self._manual_extreme_values.get((section, name))
+                if name in dpt_extreme_names
+                and self._manual_cursors_apply_to_current_waveform()
+                else None
+            )
+            manual_references = (
+                self._manual_extreme_references.get((section, name))
+                if name in dpt_extreme_names
+                and self._manual_cursors_apply_to_current_waveform()
+                else None
+            )
+            if manual_extreme is not None:
+                # A/B defines the automatic search window, but a hand-set Ha
+                # remains authoritative until the explicit reset boundary.
+                self._store_extreme_metric_value(section, name, manual_extreme[1])
+                val = float(manual_extreme[1])
             ta, tb = min(t0_us, t1_us), max(t0_us, t1_us)
             if is_short_energy_param:
                 marker = self._short_circuit_energy_peak_marker(name, i0, i1)
@@ -8240,7 +8975,24 @@ class MainWindow(QMainWindow):
                     self.wave_plot.set_interval_base_horizontal(hb, channel=desat_channel)
             else:
                 if name in _MAX_INTERVAL_NAMES:
-                    self._set_extreme_horizontal_lines(section, name, i0, i1, ta, tb)
+                    self._set_extreme_horizontal_lines(
+                        section,
+                        name,
+                        i0,
+                        i1,
+                        ta,
+                        tb,
+                        primary_override=(
+                            manual_extreme[0]
+                            if manual_extreme is not None
+                            else None
+                        ),
+                        secondary_override=(
+                            manual_references[1]
+                            if manual_references is not None
+                            else None
+                        ),
+                    )
                 else:
                     peak_y = self._peak_y_for_param(section, name, i0, i1)
                     if peak_y is not None:
@@ -8293,17 +9045,27 @@ class MainWindow(QMainWindow):
             hb_value: float,
         ) -> None:
             ta, tb = min(float(t0_us), float(t1_us)), max(float(t0_us), float(t1_us))
+            self._touch_manual_waveform_source()
+            self._manual_intervals[(section, name)] = (ta, tb)
+            if name in dpt_extreme_names:
+                self._manual_extreme_references[(section, name)] = (
+                    float(ha_value),
+                    float(hb_value),
+                )
             if which == "hb":
+                reference_name = (
+                    "关断后电流 Base 稳定值"
+                    if section == "关断过程" and name == "Ic_off_max"
+                    else "对应波形稳定平台参考"
+                )
                 self.statusBar().showMessage(
-                    f"{section}-{name}: Hb={hb_value:.3f} 为当前窗口最小值参考，"
-                    "不改参数值"
+                    f"{section}-{name}: Hb={hb_value:.3f} 为{reference_name}，"
+                    "不改参数值；已保存当前 Ha/Hb"
                 )
                 return
             if which != "ha":
                 return
             metric_value = self._metric_value_from_extreme_line(section, name, ha_value)
-            self._touch_manual_waveform_source()
-            self._manual_intervals[(section, name)] = (ta, tb)
             self._manual_extreme_values[(section, name)] = (
                 float(ha_value),
                 float(metric_value),
@@ -8321,13 +9083,21 @@ class MainWindow(QMainWindow):
             if self._manual_cursors_apply_to_current_waveform()
             else None
         )
+        manual_references = (
+            self._manual_extreme_references.get((section, name))
+            if name in dpt_extreme_names
+            and self._manual_cursors_apply_to_current_waveform()
+            else None
+        )
         t0_us, t1_us = restored if restored is not None else interval
         if (
             not is_short_circuit_param
             and manual_extreme is None
             and restored is None
         ):
-            self._focus_switching_local_view(section, t0_us, t1_us)
+            self._focus_switching_local_view(
+                section, t0_us, t1_us, name=name
+            )
         cursor_a_channel, cursor_b_channel = (
             self._cursor_endpoint_channels_for_param(section, name)
         )
@@ -8442,17 +9212,27 @@ class MainWindow(QMainWindow):
                 self.wave_plot.set_interval_base_horizontal(hb, channel=desat_channel)
         else:
             if name in _MAX_INTERVAL_NAMES:
-                self._set_extreme_horizontal_lines(
-                    section,
-                    name,
-                    i0,
-                    i1,
-                    ta,
-                    tb,
-                    primary_override=manual_extreme[0]
-                    if manual_extreme is not None
-                    else None,
+                used_stable_default = (
+                    restored is None
+                    and manual_extreme is None
+                    and manual_references is None
+                    and self._set_default_extreme_horizontal_lines(section, name)
                 )
+                if not used_stable_default:
+                    self._set_extreme_horizontal_lines(
+                        section,
+                        name,
+                        i0,
+                        i1,
+                        ta,
+                        tb,
+                        primary_override=manual_extreme[0]
+                        if manual_extreme is not None
+                        else None,
+                        secondary_override=manual_references[1]
+                        if manual_references is not None
+                        else None,
+                    )
             else:
                 peak_y = self._peak_y_for_param(section, name, i0, i1)
                 if peak_y is not None:
@@ -8467,12 +9247,24 @@ class MainWindow(QMainWindow):
             if manual_extreme is not None:
                 self.statusBar().showMessage(
                     f"{section}-{name}: 已恢复手动 Ha={manual_extreme[0]:.3f}，"
-                    f"{name}={manual_extreme[1]:.3f}；Hb 为最小值参考"
+                    f"{name}={manual_extreme[1]:.3f}；Hb 为对应波形稳定平台参考"
                 )
             else:
+                if section == "关断过程" and name == "Ic_off_max":
+                    context = self._turn_off_ic_off_max_cursor_context()
+                    base_text = (
+                        ""
+                        if context is None
+                        else f"，Hb(Ic Base)={float(context[2]):.3f} A"
+                    )
+                    self.statusBar().showMessage(
+                        f"{section}-{name}: A=Vce抬升前Base稳定段，"
+                        f"B=Ic抬升前Base稳定段；Ha=Ic最大值{base_text}"
+                    )
+                    return
                 self.statusBar().showMessage(
-                    f"{section}-{name} 区间最大值模式：拖动 A/B 重算窗口最大值；"
-                    "拖 Ha 手动改参数值，Hb 显示窗口最小值参考"
+                    f"{section}-{name}: A/B 为参数物理取值阶段；"
+                    "Ha 为最大值，Hb 为对应波形稳定平台"
                 )
         elif name in short_energy_names:
             self.statusBar().showMessage(
@@ -8868,7 +9660,7 @@ class MainWindow(QMainWindow):
     def _secondary_y_for_param(
         self, section: str, name: str, i0: int, i1: int
     ) -> float | None:
-        """同窗口辅助横线：max 型参数用 Hb 展示当前范围内的最小值。"""
+        """Return the declared stable reference shown by the secondary line."""
         if self.bundle is None:
             return None
         if self._metric_unavailable(section, name):
@@ -8896,32 +9688,20 @@ class MainWindow(QMainWindow):
                     return None
                 return float(np.nanmin(v_diode[i0 : i1 + 1]))
 
-        if section == "关断过程":
-            if name == "Ic_off_max":
-                seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
-                if len(seg) == 0:
-                    return None
-                return float(np.nanmin(seg))
-            if name == "Vce_off_max":
-                return float(np.nanmin(vce[i0 : i1 + 1]))
-        if section == "开通":
-            if name == "Ic_on_max":
-                seg = np.asarray(ic[i0 : i1 + 1], dtype=np.float64)
-                if len(seg) == 0:
-                    return None
-                return float(np.nanmin(seg))
-            if name == "Vce_on_max":
-                return float(np.nanmin(vce[i0 : i1 + 1]))
+        if (section, name) in {
+            ("关断过程", "Ic_off_max"),
+            ("关断过程", "Vce_off_max"),
+            ("开通", "Ic_on_max"),
+            ("开通", "Vce_on_max"),
+            ("反向恢复", "Vrr"),
+        }:
+            return self._default_extreme_reference(section, name)
         if section == "反向恢复":
             if name == "Irr":
                 seg = np.asarray(irr[i0 : i1 + 1], dtype=np.float64)
                 if len(seg) == 0:
                     return None
                 return float(np.nanmin(seg))
-            if name == "Vrr":
-                if v_diode is None:
-                    return None
-                return float(np.nanmin(v_diode[i0 : i1 + 1]))
         return None
 
     def _metric_value_from_extreme_line(
@@ -8984,6 +9764,7 @@ class MainWindow(QMainWindow):
         t1_us: float,
         *,
         primary_override: float | None = None,
+        secondary_override: float | None = None,
     ) -> None:
         channel = self._channel_for_param(section, name)
         if not channel:
@@ -9003,7 +9784,11 @@ class MainWindow(QMainWindow):
             t1_us=t1_us if use_window_marker else None,
             use_abs_peak=name in {"Ic_off_max", "Ic_on_max"},
         )
-        secondary = self._secondary_y_for_param(section, name, i0, i1)
+        secondary = (
+            float(secondary_override)
+            if secondary_override is not None
+            else self._secondary_y_for_param(section, name, i0, i1)
+        )
         if secondary is not None:
             self.wave_plot.set_interval_base_horizontal(
                 float(secondary), channel=channel
@@ -9329,8 +10114,8 @@ class MainWindow(QMainWindow):
             return None
         return float(marker.ta_s * 1e6), float(marker.tb_s * 1e6)
 
-    def _turn_on_ic_max_window_indices(self) -> tuple[int, int] | None:
-        """Window used by extract._turn_on_ic_max_in_base_window."""
+    def _turn_on_ic_max_numeric_window_indices(self) -> tuple[int, int] | None:
+        """Unchanged numeric window used by extract._turn_on_ic_max_in_base_window."""
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
         from dpt_extractor.models.waveform import bundle_total_current
@@ -9381,62 +10166,6 @@ class MainWindow(QMainWindow):
         if i_end <= i_start + 2:
             i_end = s1
         return int(i_start), int(i_end)
-
-    def _turn_off_vce_max_window_indices(self) -> tuple[int, int] | None:
-        """Narrow the default Vce_off_max cursor window to the turn-off spike."""
-        if self.bundle is None or self.result is None or self.result.segments is None:
-            return None
-        vce = np.asarray(self.bundle.get(self.profile.vce), dtype=np.float64)
-        n = len(vce)
-        if n == 0:
-            return None
-        dt = max(float(self.bundle.dt), 1e-15)
-        off0, off1 = self.result.segments.turn_off
-        s0 = max(0, min(int(off0), n - 2))
-        s1 = max(s0 + 2, min(int(off1), n - 1))
-        seg = vce[s0 : s1 + 1]
-        if len(seg) == 0:
-            return None
-
-        peak_idx = s0 + int(np.nanargmax(seg))
-        peak_v = float(vce[peak_idx])
-        off = self.result.turn_off
-        top_v = float(off.vce_off_max - off.delta_vce)
-        if not np.isfinite(top_v) or top_v <= 0.0 or top_v >= peak_v:
-            post0 = min(s1, peak_idx + max(3, int(40e-9 / dt)))
-            post1 = min(s1 + 1, peak_idx + max(10, int(500e-9 / dt)))
-            if post1 > post0 + 3:
-                top_v = float(np.percentile(vce[post0:post1], 50))
-            else:
-                top_v = float(np.percentile(seg, 75))
-
-        overshoot = peak_v - top_v
-        min_margin = max(5.0, 0.01 * max(abs(peak_v), 1.0))
-        if overshoot > min_margin:
-            threshold = top_v + max(0.12 * overshoot, min_margin)
-            left = peak_idx
-            while left > s0 and float(vce[left]) >= threshold:
-                left -= 1
-            right = peak_idx
-            while right < s1 and float(vce[right]) >= threshold:
-                right += 1
-        else:
-            left = peak_idx
-            right = peak_idx
-
-        pad = max(3, int(60e-9 / dt))
-        i0 = max(s0, left - pad)
-        i1 = min(s1, right + pad)
-        min_half = max(3, int(80e-9 / dt))
-        i0 = min(i0, max(s0, peak_idx - min_half))
-        i1 = max(i1, min(s1, peak_idx + min_half))
-
-        max_half = max(min_half, int(350e-9 / dt))
-        if peak_idx - i0 > max_half:
-            i0 = peak_idx - max_half
-        if i1 - peak_idx > max_half:
-            i1 = peak_idx + max_half
-        return int(max(s0, i0)), int(min(s1, i1))
 
     def _short_circuit_ic_default_cursors(
         self,
@@ -9665,6 +10394,910 @@ class MainWindow(QMainWindow):
         i1 = max(i0, min(i1, len(t) - 1))
         return i0, i1
 
+    def _turn_off_ic_off_max_cursor_current(self) -> np.ndarray | None:
+        """Return Ic in the same signed coordinate system as the visible cursor trace."""
+
+        if self.bundle is None:
+            return None
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        direct = self.bundle.maybe_get(self.profile.ic)
+        if direct is not None:
+            return np.asarray(direct, dtype=np.float64)
+        try:
+            return np.asarray(
+                bundle_total_current(self.bundle, self.profile), dtype=np.float64
+            )
+        except KeyError:
+            return None
+
+    def _turn_off_ic_off_max_cursor_context(
+        self,
+    ) -> tuple[int, int, float] | None:
+        """Default Ic_off_max display range and signed current Base level."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        segs = self.result.segments
+        t = self.bundle.t
+        if len(t) < 2:
+            return None
+        cache_key = (
+            "turn_off_ic_off_max",
+            id(self.bundle),
+            id(self.result),
+            self.profile.code,
+        )
+        cached = self._default_cursor_context_cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        dt = max(float(self.bundle.dt), 1e-15)
+        vce = self.bundle.get(self.profile.vce)
+        ic = self._turn_off_ic_off_max_cursor_current()
+        if ic is None:
+            return None
+        fall_window = self._turn_off_ic_off_max_fall_window_indices()
+        fall_start, fall_end = (
+            fall_window if fall_window is not None else segs.turn_off
+        )
+        didt_context = self.result.didt_contexts.get(("关断过程", "di/dt"))
+        vce_context = self._turn_off_vce_stable_cursor_context()
+        if (
+            isinstance(didt_context, DidtMeasurementContext)
+            and didt_context.base_window is not None
+            and vce_context is not None
+        ):
+            from dpt_extractor.metrics.plateau_level import (
+                _plateau_mid_without_isolated_spikes,
+            )
+
+            n = min(len(t), len(vce), len(ic))
+            a_idx = max(0, min(int(vce_context[0]), n - 2))
+            peak_point = self._turn_off_ic_off_max_default_peak_point()
+            peak_idx = (
+                int(peak_point[0])
+                if peak_point is not None
+                else max(0, min(int(fall_start), n - 2))
+            )
+            if a_idx >= peak_idx and peak_idx > 0:
+                base_target = float(vce[a_idx])
+                pre_hi = max(0, peak_idx - 1)
+                pre_lo = max(
+                    int(segs.turn_off[0]),
+                    pre_hi - max(8, int(round(500e-9 / dt))),
+                )
+                candidates = np.arange(pre_lo, pre_hi + 1, dtype=np.int64)
+                if len(candidates):
+                    a_idx = int(
+                        candidates[
+                            int(np.argmin(np.abs(vce[candidates] - base_target)))
+                        ]
+                    )
+
+            b0, b1 = (int(value) for value in didt_context.base_window)
+            b0 = max(0, min(b0, n - 1))
+            b1 = max(b0, min(b1, n - 1))
+            block = np.asarray(ic[b0 : b1 + 1], dtype=np.float64)
+            if len(block):
+                signed_base = float(_plateau_mid_without_isolated_spikes(block))
+                # 2026-10-16 用户拍板「② 关断 B 落点 = 甲 · 稳定抬升前 Base」：
+                # `Ic_off_max` 的 B 回到 `didt_context.base_window`（Vce/Ic 主抬升前
+                # 的稳定 Base 窗）内最接近该 Base 电平的代表点，等同干净 HEAD 行为，
+                # 与 accepted `turn-off-delta-vce-stable-range-cursors-v24` 一致。
+                # 本批未提交改动曾优先取 Ic 主下降后（`first_post_edge_stable_band_center_index`）
+                # 的首个稳定带中心作为 B；该落点与拍板不符，已按拍板移除。
+                # Ha/Hb 仍绑定既有最大值与 Base 稳定值，不因 B 落点改变。
+                candidates = np.arange(b0, b1 + 1, dtype=np.int64)
+                valid = candidates[candidates > max(a_idx, peak_idx)]
+                if len(valid) == 0:
+                    valid = candidates
+                center = 0.5 * (b0 + b1)
+                radius = max(1.0, 0.5 * (b1 - b0 + 1))
+                level_error = np.abs(ic[valid] - signed_base)
+                time_penalty = (
+                    1e-6
+                    * max(abs(signed_base), 1.0)
+                    * np.abs(valid.astype(np.float64) - center)
+                    / radius
+                )
+                b_idx = int(valid[int(np.argmin(level_error + time_penalty))])
+                b_idx = max(a_idx + 1, min(b_idx, n - 1))
+                context = (int(a_idx), int(b_idx), float(signed_base))
+                self._default_cursor_context_cache[cache_key] = context
+                return context
+
+        next_pulse_on = (
+            None if self.result.single_pulse_mode else int(segs.pulse2_on)
+        )
+        context = turn_off_ic_off_max_cursor_context(
+            t,
+            vce,
+            ic,
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_on,
+            segs.pulse1_off,
+            fall_start,
+            fall_end,
+            dt,
+            next_pulse_on=next_pulse_on,
+        )
+        self._default_cursor_context_cache[cache_key] = context
+        return context
+
+    def _turn_off_ic_off_max_fall_window_indices(
+        self,
+    ) -> tuple[int, int] | None:
+        """Reuse the extraction-owned turn-off current search window.
+
+        Parameter-card clicks must not rerun the full-record Vge edge search.
+        The canonical di/dt context is built from the exact same fall window
+        during extraction, so its stored search bounds are the fast default.
+        The legacy calculation is retained only as a compatibility fallback
+        for synthetic/older results that do not carry contexts.
+        """
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        context = self.result.didt_contexts.get(("关断过程", "di/dt"))
+        if isinstance(context, DidtMeasurementContext) and context.search_window:
+            return tuple(int(value) for value in context.search_window)
+        segs = self.result.segments
+        return turn_off_ic_fall_window(
+            self.bundle.t,
+            self.bundle.get(self.profile.vge),
+            segs.turn_off[0],
+            segs.turn_off[1],
+            segs.pulse1_on,
+            segs.pulse1_off,
+            segs.pulse2_on,
+            self.bundle.dt,
+            self.cfg,
+        )
+
+    def _turn_off_vce_stable_cursor_context(
+        self,
+    ) -> tuple[int, int, float] | None:
+        """Vce Base before turn-off rise through stable blocking Top."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        t = self.bundle.t
+        if len(t) < 2:
+            return None
+        segs = self.result.segments
+        off0, off1 = segs.turn_off
+        off0 = max(0, min(int(off0), len(t) - 2))
+        off1 = max(off0 + 1, min(int(off1), len(t) - 1))
+        dt = max(float(self.bundle.dt), 1e-15)
+        top_v = float(
+            self.result.turn_off.vce_off_max - self.result.turn_off.delta_vce
+        )
+        vce = np.asarray(self.bundle.get(self.profile.vce), dtype=np.float64)
+        peak_idx = off0 + int(np.nanargmax(vce[off0 : off1 + 1]))
+        blocking_end = off1
+        if not self.result.single_pulse_mode and int(segs.pulse2_on) > peak_idx:
+            blocking_end = max(
+                off1,
+                min(
+                    len(t) - 1,
+                    int(segs.pulse2_on) - max(1, int(200e-9 / dt)),
+                ),
+            )
+        a_idx, b_idx = turn_off_delta_vce_cursor_range_indices(
+            t,
+            vce,
+            off0,
+            off1,
+            dt,
+            top_v,
+            search_end=blocking_end,
+        )
+        return int(a_idx), int(b_idx), float(top_v)
+
+    def _turn_on_vce_stable_cursor_context(
+        self,
+    ) -> tuple[int, int, float, float] | None:
+        """Vce stable Top before turn-on fall through stable Base after it."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        t = self.bundle.t
+        if len(t) < 2:
+            return None
+        segs = self.result.segments
+        on0, on1 = segs.turn_on
+        on0 = max(0, min(int(on0), len(t) - 2))
+        on1 = max(on0 + 1, min(int(on1), len(t) - 1))
+        context = self.result.dvdt_contexts.get(("开通", "dv/dt"))
+        if not isinstance(context, DvdtMeasurementContext):
+            context = self._turn_on_dvdt_context(
+                float(t[on0] * 1e6), float(t[on1] * 1e6)
+            )
+        if context is None:
+            return None
+        base_v = float(context.base_v)
+        top_v = float(context.top_v)
+        event_end = min(len(t) - 1, max(on1, int(segs.pulse2_off) - 1))
+        a_idx, b_idx = turn_on_vce_stable_cursor_range_indices(
+            self.bundle.get(self.profile.vce),
+            on0,
+            on1,
+            self.bundle.dt,
+            base_v,
+            top_v,
+            search_end=event_end,
+        )
+        # Vce_on_max is still calculated by the historical Vge-to-Vce numeric
+        # window.  If a small pre-fall ripple puts that unchanged maximum just
+        # before the latest quiet Top sample, keep A on the same Top band but
+        # move it left so the displayed physical range contains the result.
+        vce = np.asarray(self.bundle.get(self.profile.vce), dtype=np.float64)
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        ic = bundle_total_current(self.bundle, self.profile)
+        vge = self.bundle.get(self.profile.vge)
+        numeric_top = turn_on_vce_top_from_ic_rise(
+            ic, vce, segs.pulse2_on, segs.pulse2_off, self.bundle.dt
+        )
+        w0, w1 = turn_on_vce_on_max_window_indices(
+            t,
+            vge,
+            vce,
+            on0,
+            on1,
+            segs.pulse2_on,
+            segs.pulse2_off,
+            self.bundle.dt,
+            numeric_top,
+        )
+        w0 = max(0, min(int(w0), len(vce) - 1))
+        w1 = max(w0, min(int(w1), len(vce) - 1))
+        peak_idx = w0 + int(np.nanargmax(vce[w0 : w1 + 1]))
+        if a_idx > peak_idx:
+            dt = max(float(self.bundle.dt), 1e-15)
+            candidate_lo = max(on0, peak_idx - max(8, int(200e-9 / dt)))
+            candidates = np.arange(candidate_lo, peak_idx + 1, dtype=np.int64)
+            if len(candidates):
+                a_idx = int(
+                    candidates[int(np.argmin(np.abs(vce[candidates] - top_v)))]
+                )
+        return int(a_idx), int(b_idx), float(base_v), float(top_v)
+
+    def _turn_on_vce_on_max_cursor_context(
+        self,
+    ) -> tuple[int, int, float, float] | None:
+        """Bracket the extraction peak and the first settled Vce Base band.
+
+        Only Vce_on_max owns these display times.  In particular, tightening
+        A toward the peak must not move Delta Vce's Top cursor, redefine the
+        numeric peak window, or recalculate either horizontal amplitude.
+        """
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        cache_key = (
+            "turn_on_vce_on_max",
+            id(self.bundle),
+            id(self.result),
+            self.profile.code,
+        )
+        cached = self._default_cursor_context_cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        context = self._turn_on_vce_stable_cursor_context()
+        peak = self._default_extreme_peak_point("开通", "Vce_on_max")
+        if context is None or peak is None:
+            return None
+        a_idx, b_idx, base_v, top_v = context
+        peak_idx = int(peak[0])
+        vce = np.asarray(self.bundle.get(self.profile.vce), dtype=np.float64)
+        n = len(vce)
+        if n < 2 or peak_idx <= 0:
+            return context
+        dt = max(float(self.bundle.dt), 1e-15)
+        segs = self.result.segments
+        span = max(abs(top_v - base_v), 1.0)
+
+        # Search the adjacent pre-peak Top band, not the remote Vge start.
+        # A short, event-relative guard separates A from the peak marker; it
+        # is not a fixed left viewport duration or a numeric-window boundary.
+        guard_n = max(
+            2,
+            min(int(round(30e-9 / dt)), int(0.05 * max(1, b_idx - peak_idx))),
+        )
+        pre_hi = max(0, peak_idx - guard_n)
+        pre_lo = max(0, pre_hi - max(8, int(round(200e-9 / dt))))
+        adjacent_a, _ = stable_platform_cursor_range_indices(
+            vce[pre_lo : peak_idx + 1],
+            0,
+            pre_hi - pre_lo,
+            peak_idx - pre_lo,
+            peak_idx - pre_lo,
+            dt,
+            top_v,
+            top_v,
+        )
+        adjacent_a += pre_lo
+        quiet_n = max(8, int(round(120e-9 / dt)))
+        band = vce[max(pre_lo, pre_hi - quiet_n + 1) : pre_hi + 1]
+        if len(band) >= quiet_n and np.all(np.isfinite(band)):
+            p05, p95 = np.percentile(band, [5, 95])
+            if (
+                float(p95 - p05) <= 0.075 * span
+                and abs(float(np.median(band)) - top_v) <= 0.04 * span
+                and abs(float(vce[pre_hi]) - top_v) <= 0.04 * span
+            ):
+                adjacent_a = pre_hi
+        if a_idx >= peak_idx or adjacent_a > a_idx:
+            a_idx = adjacent_a
+
+        # Locate the sustained Vce fall independently of a user-selected
+        # slope percentage.  A pre-fall ripple can own the maximum long before
+        # the main fall, so searching for Base from the peak alone is unsafe.
+        search_end = min(
+            n - 1, int(segs.pulse2_off) - max(3, int(round(50e-9 / dt)))
+        )
+        fall_hi = min(search_end, max(peak_idx + 1, int(segs.turn_on[1])))
+        below = np.asarray(
+            vce[peak_idx : fall_hi + 1] <= base_v + 0.5 * span, dtype=np.int64
+        )
+        sustain_n = max(2, int(round(5e-9 / dt)))
+        if len(below) >= sustain_n:
+            prefix = np.concatenate(([0], np.cumsum(below, dtype=np.int64)))
+            hits = np.flatnonzero(
+                prefix[sustain_n:] - prefix[:-sustain_n] >= sustain_n
+            )
+            if len(hits):
+                edge_idx = peak_idx + int(hits[0])
+                width = max(16, int(round(200e-9 / dt)))
+                ref_lo = max(edge_idx, b_idx - width // 2)
+                ref_hi = min(search_end + 1, ref_lo + width)
+                reference = vce[ref_lo:ref_hi]
+                noise = (
+                    min(
+                        float(
+                            np.nanpercentile(reference, 95)
+                            - np.nanpercentile(reference, 5)
+                        ),
+                        0.025 * span,
+                    )
+                    if len(reference)
+                    else 0.0
+                )
+                # Low Vce can still be on the falling tail despite being only
+                # a few percent of the bus voltage.  Use a tighter Base gate
+                # for this card, without changing the shared Ic/Top matcher.
+                first = edge_idx + max(2, int(round(30e-9 / dt)))
+                last = search_end - width + 1
+                step = max(1, width // 16)
+                starts = list(range(first, last + 1, step))
+                if starts and starts[-1] != last:
+                    starts.append(last)
+                for start in starts:
+                    band = vce[start : start + width]
+                    if not np.all(np.isfinite(band)):
+                        continue
+                    p05, p95 = np.percentile(band, [5, 95])
+                    width_limit = max(1.35 * noise, 0.025 * span)
+                    half = width // 2
+                    if (
+                        float(p95 - p05) <= width_limit
+                        and float(np.std(band)) <= 0.5 * width_limit
+                        and abs(float((p05 + p95) * 0.5) - base_v)
+                        <= max(0.5 * noise, 0.01 * span)
+                        and abs(
+                            float(np.median(band[:half]) - np.median(band[half:]))
+                        )
+                        <= max(noise, 0.02 * span)
+                    ):
+                        b_idx = int(start + half)
+                        break
+        if not 0 <= a_idx < peak_idx < b_idx < n:
+            return context
+        context = (int(a_idx), int(b_idx), float(base_v), float(top_v))
+        self._default_cursor_context_cache[cache_key] = context
+        return context
+
+    def _turn_on_ic_on_max_cursor_context(
+        self,
+    ) -> tuple[int, int, float] | None:
+        """Ic Base before its rise through the first stable post-ringing Top.
+
+        This is a display-only context.  The extraction-owned Ic maximum and
+        the stored result are intentionally left untouched.  Both vertical
+        endpoints belong to Ic so the interval visibly spans the current
+        transition rather than ending on the unrelated Vce platform.
+        """
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        from dpt_extractor.metrics.plateau_level import (
+            _plateau_mid_without_isolated_spikes,
+        )
+
+        cache_key = (
+            "turn_on_ic_on_max",
+            id(self.bundle),
+            id(self.result),
+            self.profile.code,
+        )
+        cached = self._default_cursor_context_cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        current = self._turn_off_ic_off_max_cursor_current()
+        numeric_window = self._turn_on_ic_max_numeric_window_indices()
+        if current is None or numeric_window is None:
+            return None
+        n = len(current)
+        if n < 2:
+            return None
+        dt = max(float(self.bundle.dt), 1e-15)
+        segs = self.result.segments
+        peak_idx, _signed_peak = self._turn_on_ic_on_max_default_peak_point(
+            numeric_window=numeric_window
+        ) or (numeric_window[0], 0.0)
+        # Preserve the existing horizontal Hb reference.  This request changes
+        # only the vertical display times, not the max or either horizontal
+        # amplitude.  A may use a closer Ic Base band without redefining Hb.
+        reference_hi = max(0, int(numeric_window[0]) - max(1, int(30e-9 / dt)))
+        reference_lo = max(0, reference_hi - max(8, int(200e-9 / dt)))
+        signed_base = float(
+            _plateau_mid_without_isolated_spikes(current[reference_lo : reference_hi + 1])
+        )
+        base_window, top_window = turn_on_current_hb_ha_window_indices(
+            self.bundle.t,
+            current,
+            int(segs.turn_on[0]),
+            int(segs.turn_on[1]),
+            dt,
+            event_end_idx=int(segs.pulse2_off),
+        )
+        base_lo, base_hi = (int(value) for value in base_window)
+        top_lo, top_hi = (int(value) for value in top_window)
+        if (
+            base_hi < base_lo
+            or top_lo < 0
+            or top_hi < top_lo
+            or base_lo >= n
+            or top_lo >= n
+        ):
+            return None
+        # A few captures declare the turn-on segment at the same sample as
+        # the extraction peak.  The helper then has no pre-rise history inside
+        # the declared segment; borrow only the immediately preceding raw Ic
+        # samples for the display Base band so A still remains left of Ha.
+        if int(peak_idx) <= int(base_lo):
+            guard_n = max(1, int(round(30e-9 / dt)))
+            base_hi = max(0, int(peak_idx) - guard_n)
+            base_lo = max(0, base_hi - max(8, int(round(200e-9 / dt))))
+        base_lo = max(0, min(base_lo, n - 1))
+        base_hi = max(base_lo, min(base_hi, n - 1))
+        top_lo = max(base_hi + 1, min(top_lo, n - 1))
+        top_hi = max(top_lo, min(top_hi, n - 1))
+        base_block = np.asarray(current[base_lo : base_hi + 1], dtype=np.float64)
+        top_block = np.asarray(current[top_lo : top_hi + 1], dtype=np.float64)
+        if len(base_block) == 0 or len(top_block) == 0:
+            return None
+        display_base = float(_plateau_mid_without_isolated_spikes(base_block))
+        signed_top = float(_plateau_mid_without_isolated_spikes(top_block))
+        a_idx, b_idx = stable_platform_cursor_range_indices(
+            current[base_lo : top_hi + 1],
+            0,
+            base_hi - base_lo,
+            top_lo - base_lo,
+            top_hi - base_lo,
+            dt,
+            display_base,
+            signed_top,
+        )
+        a_idx += base_lo
+        b_idx += base_lo
+        # The current-level window supplies Top but must not become a fixed
+        # cursor delay.  Walk forward from the peak to the first complete quiet
+        # band: light ringing yields a closer B, prolonged ringing moves it
+        # later, and the next turn-off is a hard search boundary.
+        search_end = min(n - 1, int(segs.pulse2_off) - max(3, int(round(50e-9 / dt))))
+        event_span = max(abs(signed_top - display_base), 1.0)
+        # Respect the trace's ordinary noise floor, but a reference window
+        # still containing large ringing must not relax the settling test.
+        reference_spread = min(
+            float(np.nanpercentile(top_block, 95.0) - np.nanpercentile(top_block, 5.0)),
+            0.10 * event_span,
+        )
+        adjacent_b_idx = first_post_edge_stable_band_center_index(
+            current,
+            int(peak_idx),
+            search_end,
+            dt,
+            signed_top,
+            event_span,
+            reference_spread,
+        )
+        if adjacent_b_idx is not None and adjacent_b_idx > max(a_idx, int(peak_idx)):
+            b_idx = int(adjacent_b_idx)
+        # Keep the authoritative maximum inside the visible range for unusual
+        # captures whose detected peak falls on a window edge, without moving
+        # either endpoint outside its declared stable Ic band.
+        if not int(a_idx) < int(peak_idx) < int(b_idx):
+            if int(peak_idx) <= int(a_idx):
+                candidates = np.arange(base_lo, min(base_hi, int(peak_idx) - 1) + 1)
+                if len(candidates):
+                    a_idx = int(
+                        candidates[
+                            int(np.argmin(np.abs(current[candidates] - display_base)))
+                        ]
+                    )
+            if int(peak_idx) >= int(b_idx):
+                candidates = np.arange(max(top_lo, int(peak_idx) + 1), top_hi + 1)
+                if len(candidates):
+                    b_idx = int(
+                        candidates[
+                            int(np.argmin(np.abs(current[candidates] - signed_top)))
+                        ]
+                    )
+        if not int(a_idx) < int(b_idx):
+            return None
+        context = (int(a_idx), int(b_idx), float(signed_base))
+        self._default_cursor_context_cache[cache_key] = context
+        return context
+
+    def _rr_vrr_cursor_context(self) -> tuple[int, int, float] | None:
+        """Vd stable Base before recovery rise through post-overshoot Top."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        cache_key = ("rr_vrr", id(self.bundle), id(self.result), self.profile.code)
+        cached = self._default_cursor_context_cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        from dpt_extractor.metrics.plateau_level import (
+            recovery_stable_cursor_range_indices,
+        )
+
+        vd = self.bundle.maybe_get(self.profile.v_diode)
+        if vd is None:
+            return None
+        raw = np.asarray(vd, dtype=np.float64)
+        logical = np.abs(raw)
+        n = len(raw)
+        if n < 2:
+            return None
+        segs = self.result.segments
+        on0, on1 = segs.turn_on
+        on0 = max(0, min(int(on0), n - 2))
+        on1 = max(on0 + 1, min(int(on1), n - 1))
+        context = self.result.dvdt_contexts.get(("反向恢复", "dv/dt"))
+        if not isinstance(context, DvdtMeasurementContext):
+            context = self._rr_dvdt_context()
+        if context is None:
+            return None
+        base_v, top_v = float(context.base_v), float(context.top_v)
+        peak_stop = max(on0 + 1, min(on1, n))
+        if not np.any(np.isfinite(raw[on0:peak_stop])):
+            return None
+        peak_idx = on0 + int(np.nanargmax(raw[on0:peak_stop]))
+        dt = max(float(self.bundle.dt), 1e-15)
+        # The turn-on segment can already start on Vd's rise.  Include only
+        # adjacent pre-edge history and stop before the next switching event.
+        # These are search bounds, not a new viewport or Vrr measurement range.
+        pre_lo = max(
+            0,
+            int(segs.pulse1_off) + 1,
+            min(on0, int(segs.pulse2_on) - int(round(700e-9 / dt))),
+        )
+        post_hi = min(n - 1, int(segs.pulse2_off) - max(1, int(round(50e-9 / dt))))
+        stable_range = recovery_stable_cursor_range_indices(
+            logical,
+            pre_lo,
+            peak_idx,
+            post_hi,
+            dt,
+            base_v,
+            top_v,
+            bound_post_noise_to_pre=True,
+        )
+        if stable_range is None:
+            # A synthetic/short capture may end on the Vd rise and therefore
+            # contain no complete post-edge Top band.  Keep a display-only
+            # event bracket in that case; real captures with a complete
+            # settling rail continue to use the strict stable-band result.
+            if peak_idx >= post_hi - max(2, int(round(20e-9 / dt))):
+                a_idx = min(max(pre_lo, on0), post_hi - 1)
+                b_idx = max(a_idx + 1, min(post_hi, peak_idx))
+                sign_block = raw[max(0, b_idx - max(2, int(60e-9 / dt))) : min(n, b_idx + 1)]
+                sign_ref = float(np.nanmedian(sign_block)) if len(sign_block) else float(raw[b_idx])
+                signed_top = float(np.copysign(abs(top_v), sign_ref or 1.0))
+                cursor_context = (int(a_idx), int(b_idx), signed_top)
+                self._default_cursor_context_cache[cache_key] = cursor_context
+                return cursor_context
+            return None
+        a_idx, b_idx = stable_range
+        radius = max(2, int(60e-9 / dt))
+        sign_block = raw[max(0, b_idx - radius) : min(n, b_idx + radius + 1)]
+        sign_ref = float(np.nanmedian(sign_block)) if len(sign_block) else float(raw[b_idx])
+        signed_top = float(np.copysign(abs(top_v), sign_ref or 1.0))
+        cursor_context = (int(a_idx), int(b_idx), signed_top)
+        self._default_cursor_context_cache[cache_key] = cursor_context
+        return cursor_context
+
+    def _rr_irr_cursor_context(
+        self,
+    ) -> tuple[int, int, float, int, float] | None:
+        """Irr forward stable band through the recovered Base, with fixed peak."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        cache_key = ("rr_irr", id(self.bundle), id(self.result), self.profile.code)
+        cached = self._default_cursor_context_cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        from dpt_extractor.metrics.recovery_power import (
+            RecoveryCurrentInterval,
+            recovery_current_stable_interval,
+        )
+        from dpt_extractor.metrics.irr_measure import default_irr_trr_measure
+        from dpt_extractor.models.waveform import bundle_reverse_recovery_current
+
+        irr = np.asarray(
+            bundle_reverse_recovery_current(self.bundle, self.profile),
+            dtype=np.float64,
+        )
+        didt_context = self.result.didt_contexts.get(("反向恢复", "di/dt"))
+        stable = recovery_current_stable_interval(
+            self.bundle.t, irr, self.result.segments, self.bundle.dt,
+            forward_hint=(
+                float(didt_context.forward_a)
+                if isinstance(didt_context, RrDidtMeasurementContext) else None
+            ),
+        )
+        if stable is None:
+            # A zero-return recovery rail has identical Base/Top levels, so
+            # the generic two-level crossing helper quite correctly has no
+            # level pair to return.  The Irr display still needs the nearest
+            # real bracket: use the excursion itself, then require a quiet
+            # post-tail before accepting the visual-only fallback.  This does
+            # not alter Irr/Trr/Pdmax extraction values.
+            segs = self.result.segments
+            rr0, rr1 = map(int, segs.reverse_recovery)
+            marker = default_irr_trr_measure(
+                self.bundle.t,
+                irr,
+                rr0,
+                rr1,
+                int(segs.pulse2_on),
+                int(segs.turn_on[0]),
+                int(segs.turn_on[1]),
+                pulse2_off=int(segs.pulse2_off),
+            )
+            peak_idx = (
+                int(marker.peak_idx)
+                if marker is not None
+                else max(rr0, min(rr1, rr0))
+            )
+            dt = max(float(self.bundle.dt), 1e-15)
+            pre_lo = max(
+                0,
+                int(segs.pulse1_off) + 1,
+                min(int(segs.turn_on[0]), int(segs.pulse2_on) - int(round(700e-9 / dt))),
+            )
+            pre_hi = min(
+                peak_idx,
+                pre_lo + max(8, int(round(200e-9 / dt))),
+            )
+            pre_band = irr[pre_lo:pre_hi]
+            if pre_band.size >= 8 and np.all(np.isfinite(pre_band)):
+                pre_level = float(np.median(pre_band))
+                pre_spread = float(np.ptp(np.percentile(pre_band, [5.0, 95.0])))
+                post_hi = min(
+                    len(irr) - 1,
+                    int(segs.pulse2_off) - max(1, int(round(50e-9 / dt))),
+                )
+                block = irr[pre_lo:post_hi + 1]
+                excursion = float(np.nanmax(np.abs(block - pre_level)))
+                threshold = max(2.0 * pre_spread, 0.01 * excursion, 1e-12)
+                active = np.flatnonzero(np.abs(block - pre_level) > threshold)
+                if active.size:
+                    first = pre_lo + int(active[0])
+                    last = pre_lo + int(active[-1])
+                    tail = irr[last + 1:min(post_hi + 1, last + 1 + max(8, int(round(120e-9 / dt))))]
+                    tail_spread = (
+                        float(np.ptp(np.percentile(tail, [5.0, 95.0])))
+                        if tail.size >= 8 and np.all(np.isfinite(tail))
+                        else float("inf")
+                    )
+                    if (
+                        first < peak_idx < last
+                        and tail_spread <= max(2.0 * pre_spread, 0.02 * excursion, 1e-12)
+                    ):
+                        a_idx = max(pre_lo, first - 1)
+                        b_idx = min(post_hi, last + 1)
+                        if b_idx > a_idx:
+                            post_band = irr[b_idx:min(post_hi + 1, b_idx + max(8, int(round(120e-9 / dt))))]
+                            post_level = float(np.median(post_band)) if post_band.size else pre_level
+                            stable = RecoveryCurrentInterval(
+                                a_idx,
+                                b_idx,
+                                pre_level,
+                                post_level,
+                                peak_idx,
+                            )
+        if stable is None:
+            return None
+        peak_idx = stable.current_peak_idx
+        stored_peak = abs(float(self.result.reverse_recovery.irr))
+        if not np.isfinite(stored_peak) or stored_peak <= 0.0:
+            stored_peak = abs(float(irr[peak_idx]))
+        signed_peak = float(np.copysign(stored_peak, irr[peak_idx] or 1.0))
+        context = (
+            stable.a_idx, stable.b_idx, stable.post_level, peak_idx, signed_peak
+        )
+        self._default_cursor_context_cache[cache_key] = context
+        return context
+
+    def _turn_off_ic_off_max_default_peak_point(
+        self,
+    ) -> tuple[int, float] | None:
+        """Return the unchanged extraction peak on the signed visible Ic trace."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        segs = self.result.segments
+        t = self.bundle.t
+        if len(t) < 2:
+            return None
+        calc_ic = np.asarray(
+            bundle_total_current(self.bundle, self.profile), dtype=np.float64
+        )
+        cursor_ic = self._turn_off_ic_off_max_cursor_current()
+        if cursor_ic is None:
+            return None
+        fall_window = self._turn_off_ic_off_max_fall_window_indices()
+        fall_start, fall_end = (
+            fall_window if fall_window is not None else segs.turn_off
+        )
+        fall_start = max(0, min(int(fall_start), len(t) - 1))
+        fall_end = max(fall_start, min(int(fall_end), len(t) - 1))
+        peak_slice = np.abs(calc_ic[fall_start : fall_end + 1])
+        if len(peak_slice) == 0:
+            return None
+        peak_idx = fall_start + int(np.nanargmax(peak_slice))
+        signed_peak = float(cursor_ic[peak_idx])
+        stored_peak = abs(float(self.result.turn_off.ic_off_max))
+        if np.isfinite(stored_peak) and stored_peak > 0.0:
+            signed_peak = float(np.copysign(stored_peak, signed_peak or 1.0))
+        return int(peak_idx), float(signed_peak)
+
+    def _turn_on_ic_on_max_default_peak_point(
+        self,
+        *,
+        numeric_window: tuple[int, int] | None = None,
+    ) -> tuple[int, float] | None:
+        """Return the unchanged Ic_on_max extraction peak on the visible trace."""
+
+        if self.bundle is None or self.result is None:
+            return None
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        window = numeric_window or self._turn_on_ic_max_numeric_window_indices()
+        cursor_ic = self._turn_off_ic_off_max_cursor_current()
+        if window is None or cursor_ic is None:
+            return None
+        calc_ic = np.asarray(
+            bundle_total_current(self.bundle, self.profile), dtype=np.float64
+        )
+        i0 = max(0, min(int(window[0]), len(calc_ic) - 1))
+        i1 = max(i0, min(int(window[1]), len(calc_ic) - 1))
+        block = np.abs(calc_ic[i0 : i1 + 1])
+        if len(block) == 0:
+            return None
+        peak_idx = i0 + int(np.nanargmax(block))
+        signed_peak = float(cursor_ic[peak_idx])
+        stored_peak = abs(float(self.result.turn_on.ic_on_max))
+        if np.isfinite(stored_peak) and stored_peak > 0.0:
+            signed_peak = float(np.copysign(stored_peak, signed_peak or 1.0))
+        return int(peak_idx), signed_peak
+
+    def _default_extreme_peak_point(
+        self, section: str, name: str
+    ) -> tuple[int, float] | None:
+        """Extraction-owned default peak point, independent of display A/B."""
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        if section == "关断过程" and name == "Ic_off_max":
+            return self._turn_off_ic_off_max_default_peak_point()
+        if section == "开通" and name == "Ic_on_max":
+            return self._turn_on_ic_on_max_default_peak_point()
+
+        t = self.bundle.t
+        n = len(t)
+        if n == 0:
+            return None
+        segs = self.result.segments
+        if section == "关断过程" and name == "Vce_off_max":
+            values = np.asarray(self.bundle.get(self.profile.vce), dtype=np.float64)
+            i0, i1 = segs.turn_off
+            i0 = max(0, min(int(i0), n - 1))
+            i1 = max(i0 + 1, min(int(i1), n))
+            idx = i0 + int(np.nanargmax(values[i0:i1]))
+            return idx, float(self.result.turn_off.vce_off_max)
+        if section == "开通" and name == "Vce_on_max":
+            from dpt_extractor.models.waveform import bundle_total_current
+
+            vce = np.asarray(self.bundle.get(self.profile.vce), dtype=np.float64)
+            vge = self.bundle.get(self.profile.vge)
+            ic = bundle_total_current(self.bundle, self.profile)
+            top_v = turn_on_vce_top_from_ic_rise(
+                ic, vce, segs.pulse2_on, segs.pulse2_off, self.bundle.dt
+            )
+            w0, w1 = turn_on_vce_on_max_window_indices(
+                t,
+                vge,
+                vce,
+                segs.turn_on[0],
+                segs.turn_on[1],
+                segs.pulse2_on,
+                segs.pulse2_off,
+                self.bundle.dt,
+                top_v,
+            )
+            w0 = max(0, min(int(w0), n - 1))
+            w1 = max(w0, min(int(w1), n - 1))
+            idx = w0 + int(np.nanargmax(vce[w0 : w1 + 1]))
+            return idx, float(self.result.turn_on.vce_on_max)
+        if section == "反向恢复" and name == "Vrr":
+            vd = self.bundle.maybe_get(self.profile.v_diode)
+            if vd is None:
+                return None
+            values = np.asarray(vd, dtype=np.float64)
+            i0, i1 = segs.turn_on
+            i0 = max(0, min(int(i0), n - 1))
+            i1 = max(i0 + 1, min(int(i1), n))
+            idx = i0 + int(np.nanargmax(values[i0:i1]))
+            return idx, float(self.result.reverse_recovery.vrr)
+        return None
+
+    def _default_extreme_reference(self, section: str, name: str) -> float | None:
+        if section == "关断过程" and name == "Ic_off_max":
+            context = self._turn_off_ic_off_max_cursor_context()
+            return None if context is None else float(context[2])
+        if section == "关断过程" and name == "Vce_off_max":
+            context = self._turn_off_vce_stable_cursor_context()
+            return None if context is None else float(context[2])
+        if section == "开通" and name == "Ic_on_max":
+            context = self._turn_on_ic_on_max_cursor_context()
+            return None if context is None else float(context[2])
+        if section == "开通" and name == "Vce_on_max":
+            context = self._turn_on_vce_stable_cursor_context()
+            return None if context is None else float(context[2])
+        if section == "反向恢复" and name == "Vrr":
+            context = self._rr_vrr_cursor_context()
+            return None if context is None else float(context[2])
+        return None
+
+    def _set_default_extreme_horizontal_lines(self, section: str, name: str) -> bool:
+        """Bind Ha/Hb to the stored peak and its declared stable reference."""
+
+        if self.bundle is None:
+            return False
+        point = self._default_extreme_peak_point(section, name)
+        reference = self._default_extreme_reference(section, name)
+        if point is None or reference is None:
+            return False
+        peak_idx, peak_value = point
+        channel = self._channel_for_param(section, name)
+        self.wave_plot.set_interval_peak_horizontal(peak_value, channel=channel)
+        self.wave_plot.set_cursor_auxiliary_point(
+            channel,
+            float(self.bundle.t[peak_idx] * 1e6),
+            peak_value,
+        )
+        self.wave_plot.set_interval_base_horizontal(reference, channel=channel)
+        return True
+
     def _parameter_max_interval_indices(
         self, section: str, name: str
     ) -> tuple[int, int] | None:
@@ -9672,7 +11305,6 @@ class MainWindow(QMainWindow):
             return None
         segs = self.result.segments
         t = self.bundle.t
-        dt = max(float(self.bundle.dt), 1e-15)
         n = len(t)
         if n == 0:
             return None
@@ -9683,61 +11315,30 @@ class MainWindow(QMainWindow):
             return i0, i1
 
         if section == "关断过程" and name == "Ic_off_max":
-            vge = self.bundle.get(self.profile.vge)
-            win = turn_off_ic_fall_window(
-                t,
-                vge,
-                segs.turn_off[0],
-                segs.turn_off[1],
-                segs.pulse1_on,
-                segs.pulse1_off,
-                segs.pulse2_on,
-                dt,
-                self.cfg,
-            )
-            return _clip_pair(*(win if win is not None else segs.turn_off))
+            context = self._turn_off_ic_off_max_cursor_context()
+            if context is not None:
+                return _clip_pair(context[0], context[1])
+            return _clip_pair(*segs.turn_off)
 
         if section == "关断过程" and name == "Vce_off_max":
-            return self._turn_off_vce_max_window_indices()
+            context = self._turn_off_vce_stable_cursor_context()
+            return None if context is None else _clip_pair(context[0], context[1])
 
         if section == "开通" and name == "Ic_on_max":
-            return self._turn_on_ic_max_window_indices()
+            context = self._turn_on_ic_on_max_cursor_context()
+            return None if context is None else _clip_pair(context[0], context[1])
 
         if section == "开通" and name == "Vce_on_max":
-            from dpt_extractor.models.waveform import bundle_total_current
+            context = self._turn_on_vce_on_max_cursor_context()
+            return None if context is None else _clip_pair(context[0], context[1])
 
-            ic = bundle_total_current(self.bundle, self.profile)
-            vge = self.bundle.get(self.profile.vge)
-            vce = self.bundle.get(self.profile.vce)
-            vce_top = turn_on_vce_top_from_ic_rise(
-                ic, vce, segs.pulse2_on, segs.pulse2_off, dt
-            )
-            return _clip_pair(
-                *turn_on_vce_on_max_window_indices(
-                    t,
-                    vge,
-                    vce,
-                    segs.turn_on[0],
-                    segs.turn_on[1],
-                    segs.pulse2_on,
-                    segs.pulse2_off,
-                    dt,
-                    vce_top,
-                )
-            )
+        if section == "反向恢复" and name == "Vrr":
+            context = self._rr_vrr_cursor_context()
+            return None if context is None else _clip_pair(context[0], context[1])
 
         if section == "反向恢复" and name == "Irr":
-            from dpt_extractor.models.waveform import bundle_reverse_recovery_current
-
-            irr = bundle_reverse_recovery_current(self.bundle, self.profile)
-            on0, on1 = segs.turn_on
-            rr0, _rr1 = segs.reverse_recovery
-            s0 = max(0, min(max(rr0, segs.pulse2_on), on1 - 1))
-            s1 = max(s0 + 1, min(on1, len(irr)))
-            if s1 <= s0:
-                s0 = max(0, min(on0, len(irr) - 1))
-                s1 = max(s0 + 1, min(on1, len(irr)))
-            return _clip_pair(s0, s1 - 1)
+            context = self._rr_irr_cursor_context()
+            return None if context is None else _clip_pair(context[0], context[1])
 
         return None
 
@@ -9792,6 +11393,9 @@ class MainWindow(QMainWindow):
 
         # 直接窗口型参数
         if section == "关断过程" and name in {"Eoff", "Pmax", "Pdmax"}:
+            cached = self._extracted_energy_context(section)
+            if cached is not None:
+                return cached.t_start * 1e6, cached.t_end * 1e6
             from dpt_extractor.models.waveform import bundle_total_current
 
             vce = self.bundle.get(self.profile.vce)
@@ -9809,6 +11413,9 @@ class MainWindow(QMainWindow):
             )
             return w.t_start * 1e6, w.t_end * 1e6
         if section == "开通" and name in {"Eon", "Pmax", "Pdmax"}:
+            cached = self._extracted_energy_context(section)
+            if cached is not None:
+                return cached.t_start * 1e6, cached.t_end * 1e6
             from dpt_extractor.models.waveform import bundle_total_current
 
             vce = self.bundle.get(self.profile.vce)
@@ -9824,7 +11431,15 @@ class MainWindow(QMainWindow):
                 pulse1_off=segs.pulse1_off,
             )
             return w.t_start * 1e6, w.t_end * 1e6
-        if section == "反向恢复" and name in {"Err", "Pdmax"}:
+        if (section, name) == ("反向恢复", "Pdmax"):
+            context = self.result.power_contexts.get((section, name))
+            if context is None:
+                return None
+            return context.t_start * 1e6, context.t_end * 1e6
+        if (section, name) == ("反向恢复", "Err"):
+            cached = self._extracted_energy_context(section)
+            if cached is not None:
+                return cached.t_start * 1e6, cached.t_end * 1e6
             from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 
             irr_sig = bundle_reverse_recovery_current(self.bundle, self.profile)
@@ -10048,11 +11663,9 @@ class MainWindow(QMainWindow):
             new_rr.didt_irr = float(old_rr.didt_irr)
             new_rr.didt_range = str(old_rr.didt_range)
             _restore_metric_availability("反向恢复", "di/dt")
-        if (
-            ("反向恢复", "Pdmax") in intervals
-            or ("反向恢复", "Err") in energies
-        ):
+        if ("反向恢复", "Pdmax") in intervals | extremes:
             new_rr.pdmax = float(old_rr.pdmax)
+            _restore_metric_availability("反向恢复", "Pdmax")
         if ("反向恢复", "Err") in energies:
             new_rr.err = float(old_rr.err)
 
@@ -10097,6 +11710,7 @@ class MainWindow(QMainWindow):
         if self.bundle is None:
             QMessageBox.warning(self, "提示", "请先打开波形文件")
             return
+        self._default_cursor_context_cache.clear()
         self._sync_plot_math_to_bundle()
         try:
             self.cfg.slope_ranges = dict(self._slope_ranges)
@@ -10182,6 +11796,9 @@ class MainWindow(QMainWindow):
             if active_param is not None and self._manual_cursors_apply_to_current_waveform():
                 section, name = active_param
                 self._on_value_clicked(section, name)
+                owned_window = self._stored_parameter_local_view((section, name))
+                if owned_window is not None:
+                    self.wave_plot.restore_local_x_window_us(owned_window)
             elif active_metric is not None:
                 # Replotting installs the default global cursor context while
                 # the result table keeps its selected row.  Restore that row's
@@ -10189,6 +11806,9 @@ class MainWindow(QMainWindow):
                 # belong to the active card.  Unavailable rows intentionally
                 # restore the empty parameter context in _on_value_clicked().
                 self._on_value_clicked(*active_metric)
+                owned_window = self._stored_parameter_local_view(active_metric)
+                if owned_window is not None:
+                    self.wave_plot.restore_local_x_window_us(owned_window)
 
             if self.result.short_circuit_mode:
                 sc = self.result.short_circuit
@@ -10402,79 +12022,54 @@ class MainWindow(QMainWindow):
         if not path.is_file() or path.stat().st_size <= 0:
             raise RuntimeError(f"报告波形截图不完整：{path.name}")
 
-    def _capture_report_images(self, directory: Path) -> dict[tuple[str, str], Path]:
-        if self.result is None:
-            return {}
-        params = self._report_image_params()
-        if not self._report_progress_active:
-            self._begin_report_progress(REPORT_PROGRESS_TOTAL, "准备报告截图...")
-        capture_start = max(0, min(self.report_progress.value(), REPORT_PROGRESS_TEMPLATE_DONE))
-        capture_span = max(1, REPORT_PROGRESS_CAPTURE_DONE - capture_start)
-        capture_total = max(1, len(params))
-        self._set_report_progress(
-            capture_start,
-            REPORT_PROGRESS_TOTAL,
-            "准备报告截图...",
-            eta_phase="report-capture",
-            eta_completed=0,
-            eta_total=len(params),
-            timing_stage="capture",
-            timing_completed=0,
-            timing_total=len(params),
-        )
-        images: dict[tuple[str, str], Path] = {}
-        vb = self.wave_plot.plot.getPlotItem().getViewBox()
-        old_x, old_y = vb.viewRange()
-        try:
-            self.wave_plot._fit_full_range()
-            QApplication.processEvents()
-            capture_size = self._report_plot_capture_size()
-            for index, (section, name) in enumerate(params, start=1):
-                if (section, name) == DPT_OVERVIEW_IMAGE_PARAM:
-                    self.wave_plot._fit_full_range()
-                elif self.result.short_circuit_mode:
-                    self.wave_plot._fit_full_range()
-                    self._on_value_clicked(section, name)
-                    self.wave_plot._fit_full_range()
-                else:
-                    self._on_value_clicked(section, name)
-                QApplication.processEvents()
-                path = directory / self._safe_report_image_name(section, name, index)
-                self._save_report_plot_capture(path, capture_size)
-                images[(section, name)] = path
-                progress_value = capture_start + int(
-                    round(capture_span * index / capture_total)
-                )
-                self._set_report_progress(
-                    min(progress_value, REPORT_PROGRESS_CAPTURE_DONE),
-                    REPORT_PROGRESS_TOTAL,
-                    f"截图 {index}/{len(params)} · {name}",
-                    eta_phase="report-capture",
-                    eta_completed=index,
-                    eta_total=len(params),
-                    timing_stage="capture",
-                    timing_completed=index,
-                    timing_total=len(params),
-                )
-        finally:
-            vb.setRange(
-                xRange=(float(old_x[0]), float(old_x[1])),
-                yRange=(float(old_y[0]), float(old_y[1])),
-                padding=0.0,
-            )
-            self.wave_plot._settle_report_view_layout()
-        self._set_report_progress(
-            REPORT_PROGRESS_CAPTURE_DONE,
-            REPORT_PROGRESS_TOTAL,
-            "截图完成，准备写入 Excel...",
-        )
-        return images
-
     def _snapshot_report_manual_state(self) -> dict[str, object]:
         return {
             name: deepcopy(getattr(self, name))
             for name in _REPORT_MANUAL_STATE_ATTRS
         }
+
+    def _commit_report_submission_state(self) -> None:
+        """Freeze the operator-visible calibration at the report boundary."""
+
+        # Normal mouse release already committed the value.  This is a final
+        # event-ordering guard for a cursor whose visible position changed just
+        # before the report button received the click.
+        self.wave_plot.commit_pending_interaction_for_report()
+
+        # Parameter pages are operator-owned display state too.  The regular
+        # table-click path stores the page when leaving a card, but the active
+        # card may go directly from manual pan/zoom to ``写入报告``.
+        active_metric = self.result_table._active_metric
+        local_window = self.wave_plot.current_local_x_window_us()
+        if active_metric is not None and local_window is not None:
+            self._store_parameter_local_view(active_metric, local_window)
+
+        manual_measurement_state = any(
+            (
+                self._manual_intervals,
+                self._manual_extreme_values,
+                self._manual_extreme_references,
+                self._manual_short_current,
+                self._manual_energy,
+                self._manual_delta_vce,
+                self._manual_dvdt,
+                self._manual_didt,
+            )
+        ) or any(
+            value is not None
+            for value in (
+                self._manual_turn_on_current,
+                self._manual_trr_measure,
+            )
+        )
+        if manual_measurement_state and not self._manual_cursors_apply_to_current_waveform():
+            # A mismatched manual cache must never silently degrade to the
+            # automatic result.  Abort the report and let the operator return
+            # to the calibrated waveform/pulse pair instead.
+            raise RuntimeError(
+                "检测到手动校准光标不属于当前波形或当前脉冲组合，已取消写入报告；"
+                "请返回手动校准的数据页后重新写入。"
+            )
 
     def _current_report_page_state(self) -> _ReportPageState:
         return _ReportPageState(
@@ -10560,6 +12155,12 @@ class MainWindow(QMainWindow):
             else _report_image_result_index(results, preferred_result)
         )
         resolved_image_index = max(0, min(resolved_image_index, len(results) - 1))
+        # Keep Excel data and every screenshot tied to the same immutable
+        # selected-page result.  Capture callbacks operate on another copy and
+        # therefore cannot feed a default/recalculated value back into the rows
+        # that will be written.
+        frozen_results = deepcopy(results)
+        frozen_results[resolved_image_index] = deepcopy(preferred_result)
         capture_page = _ReportPageState(
             bundle=(
                 capture_bundle
@@ -10568,7 +12169,7 @@ class MainWindow(QMainWindow):
             ),
             profile=capture_profile if capture_profile is not None else self.profile,
             cfg=deepcopy(capture_cfg if capture_cfg is not None else self.cfg),
-            result=deepcopy(results[resolved_image_index]),
+            result=deepcopy(preferred_result),
             slope_ranges=deepcopy(
                 capture_slope_ranges
                 if capture_slope_ranges is not None
@@ -10600,7 +12201,7 @@ class MainWindow(QMainWindow):
             tempdir=tempdir,
             directory=Path(tempdir.name),
             params=(),
-            results=results,
+            results=frozen_results,
             old_x=[float(old_x[0]), float(old_x[1])],
             old_y=[float(old_y[0]), float(old_y[1])],
             capture_start=capture_start,
@@ -10758,6 +12359,19 @@ class MainWindow(QMainWindow):
                 self.wave_plot._fit_full_range()
             else:
                 self._on_value_clicked(section, name)
+            local_views = state.capture_page.manual_state.get(
+                "_parameter_local_views",
+                {},
+            )
+            if isinstance(local_views, dict):
+                owned_window = local_views.get((section, name))
+                if (
+                    isinstance(owned_window, (tuple, list))
+                    and len(owned_window) == 2
+                ):
+                    self.wave_plot.restore_local_x_window_us(
+                        (float(owned_window[0]), float(owned_window[1]))
+                    )
             # 让本次参数点击/缩放先完整经过一次事件循环，再抓取像素；避免
             # 选中图片后需要轻微移动才能恢复的陈旧帧，也避免嵌套 processEvents 重入。
             QTimer.singleShot(0, self._save_current_report_image)
@@ -11126,6 +12740,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "无提取结果可写入报告")
             return
         try:
+            self._commit_report_submission_state()
             if not self._ensure_report_output_file():
                 self._release_report_operation()
                 return

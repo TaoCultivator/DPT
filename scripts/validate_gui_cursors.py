@@ -7,10 +7,14 @@
 DPT_VALIDATE_ALL_CURSORS=1 可扫描所有示例 .tss。
 DPT_VALIDATE_DPT_ONLY=1 可在全量模式下仅扫描非短路样例，并在分页前过滤。
 DPT_VALIDATE_CURSOR_MATCH 可按路径片段过滤，再由 OFFSET/LIMIT 分批；
+DPT_VALIDATE_SAMPLE_ROOT 可指定仓库外的原始 TSS 语料根目录；
+DPT_VALIDATE_FOCUS_ONLY=1 可只审计参数局部取景、真实 A/B 可见性及
+通道高亮后的绑定稳定性，用于把显示层回归与既有测量语义告警分开；
 OFFSET/LIMIT 同时适用于默认代表样本和全量样本，避免 GUI 长进程累积资源。
 """
 from __future__ import annotations
 
+from dataclasses import fields, is_dataclass
 import os
 import re
 import sys
@@ -31,7 +35,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np  # noqa: E402
 
 from dpt_extractor.gui.waveform_plot import (  # noqa: E402
+    PARAMETER_POWER_REFERENCE_CHANNEL,
     PARAM_FOCUS_ANCHOR_FRACTION,
+    PARAM_FOCUS_REQUIRED_GUARD_US,
+    PARAM_FOCUS_RIGHT_PRIORITY_LATEST_FRACTION,
+    TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
+    TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
+    TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+    RR_POWER_FOCUS_MIDPOINT_FRACTION,
+    TF_FOCUS_MIDPOINT_FRACTION,
     _is_power_unit,
     _solve_parameter_x_window,
 )
@@ -39,10 +51,13 @@ from dpt_extractor.metrics.commutation_inductance import (  # noqa: E402
     turn_on_commutation_inductance,
 )
 from dpt_extractor.metrics.iec_timings import (  # noqa: E402
+    turn_off_ic_fall_window,
     turn_on_vce_top_from_ic_rise,
 )
 from dpt_extractor.metrics.plateau_level import (  # noqa: E402
     _plateau_mid_without_isolated_spikes,
+    turn_off_delta_vce_cursor_range_indices,
+    turn_off_dvdt_base_top_levels,
     turn_on_dvdt_base_top_levels,
     turn_on_current_hb_ha_window_indices,
     turn_on_current_cursor_hb_a_us,
@@ -109,37 +124,41 @@ DPT_PARAMETER_CURSOR_ROLES = {
     ("关断过程", "Toff"): "A=Vge下降90%；B=Ic下降10%；Ha/Hb=不适用",
     ("关断过程", "Td_off"): "A=Vge下降90%；B=Ic下降90%；Ha/Hb=不适用",
     ("关断过程", "Tf"): "A=Ic下降90%；B=Ic下降10%；Ha/Hb=不适用",
-    ("关断过程", "Pmax"): "A/B=Eoff功率窗口；有可信功率轨迹时Ha=Vce×Ic峰，否则Ha/Hb=不适用",
+    ("关断过程", "Pmax"): "A/B=Eoff功率窗口；Ha=Vce×Ic峰（无匹配功率Math时使用只读功率参考）；Hb=不适用",
     ("关断过程", "dv/dt"): "A/B=Vce阈值交点；Ha/Hb=Vce Top/Base",
     ("关断过程", "di/dt"): "A/B=Ic阈值交点；Ha/Hb=Ic Top/Base",
-    ("关断过程", "Eoff"): "A=Vce与Ha交点；B=Ic与Hb交点；Ha=Vce；Hb=Ic",
-    ("关断过程", "ΔVce"): "A/Ha=Vce尖峰；B/Hb=Vce阻断平台",
-    ("关断过程", "Ic_off_max"): "A/B=Vge下降沿窗口；Ha=Ic最大值；Hb=Ic最小值",
-    ("关断过程", "Vce_off_max"): "A/B=Vce取值窗；Ha=Vce最大值；Hb=Vce最小值",
-    ("关断过程", "串扰电压"): "A/B=对管Vge取值窗；Ha=Vge最大值；Hb=Vge最小值",
+    ("关断过程", "Eoff"): (
+        "A=Vce Base稳定带代表点(smooth)/Vce与Ha交点(fallback)；"
+        "B=Ic Base稳定带代表点(smooth)/Ic与Hb交点(fallback)；"
+        "Ha=Vce；Hb=Ic"
+    ),
+    ("关断过程", "ΔVce"): "A=抬升前Vce Base稳定段；B=尖峰后Vce Top稳定段；Ha=Vce尖峰最大值；Hb=Vce Top稳定值",
+    ("关断过程", "Ic_off_max"): "A=Vce抬升前Base稳定段；B=Ic抬升前Base稳定段；Ha=Ic最大值；Hb=Ic Base稳定值",
+    ("关断过程", "Vce_off_max"): "A=Vce抬升前Base稳定段；B=尖峰后Top稳定段；Ha=Vce最大值；Hb=Vce Top稳定值",
+    ("关断过程", "串扰电压"): "A/B=对管Vge最大/最小时刻；Ha=Vge最大值；Hb=Vge最小值",
     ("开通", "dv/dt"): "A/B=Vce阈值交点；Ha/Hb=跌落前后稳定高/低电压平台",
     ("开通", "di/dt"): "A/B=Ic阈值交点；Ha/Hb=Ic Top/Base",
     ("开通", "Eon"): "A=Ic与Ha交点；B=Vce与Hb交点；Ha=Ic；Hb=Vce",
-    ("开通", "ΔVce"): "A/Ha=Vce高平台；B/Hb=Vce下降拐点",
+    ("开通", "ΔVce"): "A=Vce下降前Top稳定段；B=下降后Base稳定段；Ha=Vce Top；Hb=Vce下降拐点",
     ("开通", "开通电流"): "A/Hb=Ic基线；B/Ha=Ic导通平台",
-    ("开通", "Ic_on_max"): "A=Ic上升沿；B=Vce基线；Ha=Ic最大值；Hb=Ic最小值",
-    ("开通", "Vce_on_max"): "A=Vge上升沿；B=Vce基线；Ha=Vce最大值；Hb=Vce最小值",
-    ("开通", "串扰电压"): "A/B=对管Vge取值窗；Ha=Vge最大值；Hb=Vge最小值",
+    ("开通", "Ic_on_max"): "A=Ic抬升前Base稳定段；B=Ic震荡结束后Top稳定段；Ha=Ic最大值；Hb=Ic Base稳定值",
+    ("开通", "Vce_on_max"): "A=Vce最大值左侧相邻Top段；B=Vce下降及震荡结束后首个Base稳定段；Ha=Vce最大值；Hb=Vce Base稳定值",
+    ("开通", "串扰电压"): "A/B=对管Vge最大/最小时刻；Ha=Vge最大值；Hb=Vge最小值",
     ("开通", "Ls_on"): "A/B=Ic斜率交点同步积分窗；Ha/Hb=不适用；逻辑=∫max(Top−Vce,0)dt÷|ΔIc|，受手动ΔVce幅值校准",
     ("开通", "Ton"): "A=Vge上升10%；B=Ic上升90%；Ha/Hb=不适用",
     ("开通", "Td_on"): "A=Vge上升10%；B=Ic上升10%；Ha/Hb=不适用",
     ("开通", "Tr"): "A=Ic上升10%；B=Ic上升90%；Ha/Hb=不适用",
-    ("开通", "Pmax"): "A/B=Eon功率窗口；有可信功率轨迹时Ha=Vce×Ic峰，否则Ha/Hb=不适用",
-    ("反向恢复", "Irr"): "A/B=Irr尖峰取值窗；Ha=不适用；Hb=Irr有符号尖峰",
+    ("开通", "Pmax"): "A/B=Eon功率窗口；Ha=Vce×Ic峰（无匹配功率Math时使用只读功率参考）；Hb=不适用",
+    ("反向恢复", "Irr"): "A=Irr正向稳定段；B=恢复Base稳定段；Ha=Irr恢复Base；Hb=Irr有符号尖峰",
     ("反向恢复", "Trr"): (
         "A/B=逻辑Irr主瓣上升/下降沿与Ha首交点；"
         "Ha=峰后恢复稳定平台max/min平均中线；Hb=有符号I_RM尖峰"
     ),
-    ("反向恢复", "Vrr"): "A/B=Vd取值窗；Ha=Vd最大值；Hb=Vd最小值",
+    ("反向恢复", "Vrr"): "A=Vd抬升前Base稳定段；B=尖峰后Top稳定段；Ha=Vd最大值；Hb=Vd Top稳定值",
     ("反向恢复", "dv/dt"): "A/B=|Vd|阈值交点；Ha/Hb=主上升后/前稳定高/低电压平台",
     ("反向恢复", "di/dt"): "A/B=Irr阈值交点；Ha/Hb=Irr恢复平台/正向平台",
-    ("反向恢复", "Pdmax"): "A/B=Err功率窗口；有可信功率轨迹时Ha=|Vd|×|Irr|峰，否则Ha/Hb=不适用",
-    ("反向恢复", "Err"): "A=Irr与Ha交点；B=Vd与Hb交点；Ha=Irr局部offset Top；Hb=Vd基线",
+    ("反向恢复", "Pdmax"): "A=Irr抬升前稳定平台；B=震荡后首个稳定平台；取A/B间原始|Vd|×|Irr|峰；无可信功率轨迹时Ha/Hb=不适用",
+    ("反向恢复", "Err"): "A=Irr与Ha交点；B=Vd与Hb交点；Ha=Irr首个无显著后续漂移稳定带中点；Hb=Vd主上升前本地Base",
 }
 
 IEC_TIMING_CURSOR_ROLES = {
@@ -166,10 +185,10 @@ GENERIC_MAX_CURSOR_CHANNELS = {
 }
 
 GENERIC_MAX_ENDPOINT_CHANNELS = {
-    ("关断过程", "Ic_off_max"): ("vge", "vge"),
+    ("关断过程", "Ic_off_max"): ("vce", "ic"),
     ("关断过程", "Vce_off_max"): ("vce", "vce"),
-    ("开通", "Ic_on_max"): ("ic", "vce"),
-    ("开通", "Vce_on_max"): ("vge", "vce"),
+    ("开通", "Ic_on_max"): ("ic", "ic"),
+    ("开通", "Vce_on_max"): ("vce", "vce"),
     ("反向恢复", "Vrr"): ("v_diode", "v_diode"),
 }
 
@@ -262,7 +281,7 @@ DPT_HORIZONTAL_BINDINGS = {
     ("开通", "Ton"): ((None, False), (None, False)),
     ("开通", "Td_on"): ((None, False), (None, False)),
     ("开通", "Tr"): ((None, False), (None, False)),
-    ("反向恢复", "Irr"): ((None, False), ("irr", True)),
+    ("反向恢复", "Irr"): (("irr", True), ("irr", True)),
     ("反向恢复", "Trr"): (("irr", True), ("irr", True)),
     ("反向恢复", "Vrr"): (("v_diode", True), ("v_diode", True)),
     ("反向恢复", "dv/dt"): (("v_diode", True), ("v_diode", True)),
@@ -410,6 +429,7 @@ class Capture:
             "enable_energy_loss_interaction",
             "enable_irr_peak_interaction",
             "set_interval_peak_on_hb",
+            "set_irr_base_on_ha",
             "enable_trr_measure_interaction",
             "enable_turn_on_current_interaction",
             "enable_delta_vce_interaction",
@@ -540,6 +560,9 @@ def _captured_cursor_bindings(calls: dict[str, dict]) -> dict[str, object]:
     if "set_interval_peak_on_hb" in calls:
         b = calls["set_interval_peak_on_hb"]["bound"]
         binding["hb"] = (b.get("y"), b.get("channel"))
+    if "set_irr_base_on_ha" in calls:
+        b = calls["set_irr_base_on_ha"]["bound"]
+        binding["ha"] = (b.get("y"), b.get("channel"))
     if "set_interval_minmax_horizontal" in calls:
         b = calls["set_interval_minmax_horizontal"]["bound"]
         channel = b.get("channel")
@@ -550,7 +573,9 @@ def _captured_cursor_bindings(calls: dict[str, dict]) -> dict[str, object]:
 
 def _captured_parameter_focus(
     calls: dict[str, dict],
-) -> tuple[float, tuple[float, ...], float] | None:
+) -> tuple[float, tuple[float, ...], float, bool] | tuple[
+    float, tuple[float, ...], float, bool, float | None
+] | tuple[float, tuple[float, ...], float, bool, float | None, float | None] | None:
     """Read the actual focus call used by the UI, without re-deriving its anchor."""
     call = calls.get("focus_parameter_window_us")
     if call is None:
@@ -559,47 +584,735 @@ def _captured_parameter_focus(
     if "anchor_us" not in bound:
         return None
     required = tuple(float(value) for value in bound.get("required_times_us", ()))
-    return (
+    captured = (
         float(bound["anchor_us"]),
         required,
         float(bound.get("anchor_fraction", PARAM_FOCUS_ANCHOR_FRACTION)),
+        bool(bound.get("prefer_right_room", False)),
     )
+    composition_anchor = bound.get("composition_anchor_us")
+    composition_balance = bound.get("composition_balance_fraction")
+    if composition_anchor is None and composition_balance is None:
+        return captured
+    return (
+        *captured,
+        None if composition_anchor is None else float(composition_anchor),
+        None if composition_balance is None else float(composition_balance),
+    )
+
+
+def _normalize_captured_parameter_focus(
+    captured_focus,
+) -> tuple[float, tuple[float, ...], float, bool, float | None, float | None]:
+    """Keep validator helpers compatible with pre-composition captures."""
+    if len(captured_focus) == 4:
+        return (*captured_focus, None, None)
+    if len(captured_focus) == 5:
+        return (*captured_focus, None)
+    return captured_focus
+
+
+def _captured_parameter_minimum_span_us(calls: dict[str, dict]) -> float | None:
+    call = calls.get("focus_parameter_window_us")
+    if call is None:
+        return None
+    value = call.get("bound", {}).get("minimum_span_us")
+    if value is None or not np.isfinite(float(value)):
+        return None
+    return max(0.0, float(value))
+
+
+def _crosstalk_cursor_display_problems(t, vge, indices, ta, tb) -> list[str]:
+    """Independently check event membership, raw levels and minimum pair span."""
+    i0, i1 = indices
+    values = np.asarray(vge[i0:i1])
+    if values.size < 2 or not np.all(np.isfinite(values)) or np.max(values) == np.min(values):
+        return []  # No distinct finite extrema: the event-window fallback is valid.
+    high = i0 + np.flatnonzero(values == np.max(values))
+    low = i0 + np.flatnonzero(values == np.min(values))
+    tol_us = 1e-8
+    problems = []
+    levels = []
+    for label, time_us in (("A", ta), ("B", tb)):
+        pos = int(np.searchsorted(t, time_us * 1e-6))
+        candidates = range(max(0, pos - 1), min(len(t), pos + 1))
+        idx = min(candidates, key=lambda k: abs(float(t[k] * 1e6) - time_us))
+        if not i0 <= idx < i1 or abs(float(t[idx] * 1e6) - time_us) > tol_us:
+            problems.append(f"串扰{label}未落在本事件原始采样时刻")
+        levels.append(float(vge[idx]))
+    if sorted(levels) != [float(np.min(values)), float(np.max(values))]:
+        problems.append("串扰A/B未分别覆盖对管Vge的raw最大值/最小值")
+    # Nearest-neighbor lookup in the other extrema set, intentionally not
+    # the production helper's merged-adjacency selection algorithm.
+    nearest = np.searchsorted(low, high)
+    gap = min(
+        float(np.min(np.abs(t[high] - t[low[np.clip(nearest, 0, len(low) - 1)]]))),
+        float(np.min(np.abs(t[high] - t[low[np.clip(nearest - 1, 0, len(low) - 1)]]))),
+    ) * 1e6
+    if abs((tb - ta) - gap) > tol_us:
+        problems.append("串扰A/B未选取包含同一raw最大/最小值的最近时刻对")
+    return problems
+
+
+def _audit_state_snapshot(value):
+    """Freeze every dataclass field for NaN-safe mutation detection.
+
+    ``ExtractResult`` intentionally excludes several measurement-context maps
+    from dataclass equality.  Parameter navigation is display-only, so this
+    audit must include those fields as well and must not treat unchanged NaN
+    values as mutations.
+    """
+
+    if value is None or isinstance(value, (str, bytes, bool, int)):
+        return value
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if np.isnan(number):
+            return ("float", "nan")
+        if np.isposinf(number):
+            return ("float", "+inf")
+        if np.isneginf(number):
+            return ("float", "-inf")
+        return ("float", number.hex())
+    if isinstance(value, np.ndarray):
+        contiguous = np.ascontiguousarray(value)
+        return (
+            "ndarray",
+            contiguous.dtype.str,
+            tuple(int(size) for size in contiguous.shape),
+            contiguous.tobytes(),
+        )
+    if is_dataclass(value) and not isinstance(value, type):
+        return (
+            type(value).__qualname__,
+            tuple(
+                (field.name, _audit_state_snapshot(getattr(value, field.name)))
+                for field in fields(value)
+            ),
+        )
+    if isinstance(value, dict):
+        items = [
+            (_audit_state_snapshot(key), _audit_state_snapshot(item))
+            for key, item in value.items()
+        ]
+        return ("dict", tuple(sorted(items, key=repr)))
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_audit_state_snapshot(v) for v in value))
+    if isinstance(value, (set, frozenset)):
+        return (
+            type(value).__name__,
+            tuple(sorted((_audit_state_snapshot(v) for v in value), key=repr)),
+        )
+    return (type(value).__qualname__, repr(value))
+
+
+def _independent_ic_off_max_stable_center_index(
+    t: np.ndarray,
+    ic: np.ndarray,
+    dt: float,
+    didt_context,
+    signed_base: float,
+    peak_idx: int,
+) -> int | None:
+    """Independently locate the first adjacent Ic Base representative point."""
+
+    crossing_s = getattr(getattr(didt_context, "crossing", None), "t_pct_b_s", None)
+    base_window = getattr(didt_context, "base_window", None)
+    if crossing_s is None or base_window is None or not np.isfinite(crossing_s):
+        return None
+    n = min(len(t), len(ic))
+    if n < 2:
+        return None
+    b0 = max(0, min(int(base_window[0]), n - 1))
+    b1 = max(b0, min(int(base_window[1]), n - 1))
+    search_window = getattr(didt_context, "search_window", None)
+    search_end = b1
+    if search_window is not None:
+        search_end = max(search_end, min(int(search_window[1]), n - 1))
+    reference = np.asarray(ic[b0 : b1 + 1], dtype=np.float64)
+    if len(reference) < 8 or not np.isfinite(reference).any():
+        return None
+    p05, p95 = (
+        float(np.nanpercentile(reference, percentile))
+        for percentile in (5.0, 95.0)
+    )
+    reference_spread = max(0.0, p95 - p05)
+    top_a = float(getattr(didt_context, "top_a", signed_base))
+    peak = max(0, min(int(peak_idx), n - 1))
+    event_span = max(
+        abs(top_a - float(signed_base)),
+        abs(float(ic[peak]) - float(signed_base)),
+        1.0,
+    )
+    width_limit = max(1e-12, 1.35 * reference_spread, 0.075 * event_span)
+    level_limit = max(1e-12, 0.50 * reference_spread, 0.040 * event_span)
+    drift_limit = max(1e-12, reference_spread, 0.050 * event_span)
+
+    dt_s = max(float(dt), 1e-15)
+    stable_n = max(16, int(round(200e-9 / dt_s)))
+    guard_n = max(8, int(round(100e-9 / dt_s)))
+    edge_idx = int(np.searchsorted(t[:n], float(crossing_s), side="left"))
+    lo = min(n - 1, max(0, edge_idx) + guard_n)
+    if search_end - lo + 1 < stable_n:
+        return None
+    final_start = search_end - stable_n + 1
+    step = max(1, stable_n // 16)
+    starts = list(range(lo, final_start + 1, step))
+    if not starts or starts[-1] != final_start:
+        starts.append(final_start)
+    for start in starts:
+        block = np.asarray(ic[start : start + stable_n], dtype=np.float64)
+        finite = block[np.isfinite(block)]
+        if len(finite) < max(8, stable_n // 2):
+            continue
+        q05, q95 = (
+            float(np.nanpercentile(finite, percentile))
+            for percentile in (5.0, 95.0)
+        )
+        half = max(1, len(finite) // 2)
+        half_drift = abs(
+            float(np.nanmedian(finite[:half]))
+            - float(np.nanmedian(finite[half:]))
+        )
+        if (
+            q95 - q05 <= width_limit
+            and float(np.nanstd(finite)) <= 0.50 * width_limit
+            and abs(0.5 * (q05 + q95) - float(signed_base)) <= level_limit
+            and half_drift <= drift_limit
+        ):
+            return int(start + stable_n // 2)
+    return None
 
 
 def _parameter_focus_geometry_problem(
     view_range_us: tuple[float, float],
     full_range_us: tuple[float, float],
-    captured_focus: tuple[float, tuple[float, ...], float] | None,
+    captured_focus: tuple[
+        float, tuple[float, ...], float, bool, float | None, float | None
+    ] | None,
     *,
     tolerance_us: float = 0.025,
+    minimum_span_us: float | None = None,
+    parameter_key: tuple[str, str] | None = None,
 ) -> str | None:
     """Verify the real view against the same bounded focus policy used by UI.
 
-    The requested anchor fraction is a preferred composition. Earlier required
-    times may move the anchor right, while the solver still caps that movement
-    so the post-event observation area cannot disappear. Re-solving the policy
-    is therefore stricter and more accurate than requiring an exact 12% ratio.
+    The requested anchor fraction and spare post-event area are preferred
+    composition only. Stable-platform/real-cursor visibility may move the
+    anchor within the same 200 ns/div window; expansion is valid only when the
+    real required-time envelope itself no longer fits. Re-solving the policy is
+    therefore stricter and more accurate than requiring a fixed blank ratio.
     """
     if captured_focus is None:
         return None
-    anchor_us, required_times_us, anchor_fraction = captured_focus
+    (
+        anchor_us,
+        required_times_us,
+        anchor_fraction,
+        prefer_right_room,
+        composition_anchor_us,
+        composition_balance_fraction,
+    ) = _normalize_captured_parameter_focus(captured_focus)
+    numeric_values = (
+        *view_range_us,
+        *full_range_us,
+        anchor_us,
+        anchor_fraction,
+        *required_times_us,
+    )
+    if not all(np.isfinite(float(value)) for value in numeric_values):
+        return "参数 focus 包含 NaN/Inf 几何值"
+    if not float(view_range_us[1]) > float(view_range_us[0]):
+        return "参数 focus 视窗跨度无效"
+    if not float(full_range_us[1]) > float(full_range_us[0]):
+        return "参数 focus 完整范围无效"
     expected_x0, expected_x1 = _solve_parameter_x_window(
         full_range_us,
         anchor_us,
         required_times_us,
+        base_span_us=max(2.0, float(minimum_span_us or 0.0)),
         anchor_fraction=anchor_fraction,
+        prefer_right_room=prefer_right_room,
+        composition_anchor_us=composition_anchor_us,
+        composition_balance_fraction=composition_balance_fraction,
     )
     actual_x0, actual_x1 = map(float, view_range_us)
     tol = max(0.0, float(tolerance_us))
     if (
-        abs(actual_x0 - expected_x0) <= tol
-        and abs(actual_x1 - expected_x1) <= tol
+        abs(actual_x0 - expected_x0) > tol
+        or abs(actual_x1 - expected_x1) > tol
     ):
+        return (
+            f"参数 focus 构图偏离策略: 实际[{actual_x0:.3f},{actual_x1:.3f}]us，"
+            f"期望[{expected_x0:.3f},{expected_x1:.3f}]us"
+        )
+
+    # Independently audit the right-priority geometry instead of accepting a
+    # self-consistent but wrong solver.  No fixed pre-event duration is used:
+    # only the real required envelope and the selected span define the check.
+    if prefer_right_room and required_times_us:
+        required_lo = min(required_times_us)
+        required_hi = max(required_times_us)
+        span = actual_x1 - actual_x0
+        full_x0, full_x1 = map(float, full_range_us)
+        guard = PARAM_FOCUS_REQUIRED_GUARD_US
+        numeric_tol = 1e-6
+        if (
+            required_lo - guard >= full_x0 - numeric_tol
+            and actual_x0 > required_lo - guard + numeric_tol
+        ):
+            return (
+                "参数 focus 裁掉左侧 required 保护距: "
+                f"left={required_lo - actual_x0:.6f}us"
+            )
+        if (
+            required_hi + guard <= full_x1 + numeric_tol
+            and actual_x1 < required_hi + guard - numeric_tol
+        ):
+            return (
+                "参数 focus 裁掉右侧 required 保护距: "
+                f"right={actual_x1 - required_hi:.6f}us"
+            )
+        interior = actual_x0 > full_x0 + tol and actual_x1 < full_x1 - tol
+        if interior:
+            left_room = required_lo - actual_x0
+            right_room = actual_x1 - required_hi
+            if right_room + tol < left_room:
+                return (
+                    "参数 focus 右侧观察区未优先: "
+                    f"左余量={left_room:.3f}us 右余量={right_room:.3f}us"
+                )
+            guarded_width = (
+                required_hi
+                - required_lo
+                + 2.0 * PARAM_FOCUS_REQUIRED_GUARD_US
+            )
+            if (
+                span > 0.0
+                and guarded_width <= 0.5 * span + 1e-9
+                and composition_anchor_us is None
+                and (required_hi - actual_x0) / span
+                > PARAM_FOCUS_RIGHT_PRIORITY_LATEST_FRACTION + tol / span
+            ):
+                return (
+                    "参数 focus 可左置的物理阶段后端越过中线: "
+                    f"position={(required_hi - actual_x0) / span:.3%}"
+                )
+
+    # Turn-on and reverse-recovery views use the measured Vge rising edge as
+    # the proportional composition reference.  The solver still receives the
+    # real A/B/stable-platform envelope as required content; this audit only
+    # checks that the old midpoint/right-priority policies are not used again.
+    if (
+        composition_anchor_us is not None
+        and parameter_key is not None
+        and parameter_key[0] in {"开通", "反向恢复"}
+    ):
+        if not np.isclose(
+            float(anchor_fraction),
+            PARAM_FOCUS_ANCHOR_FRACTION,
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            return (
+                f"开通/反向恢复 Vge 辅助锚点比例={float(anchor_fraction):.3f}≠"
+                f"{PARAM_FOCUS_ANCHOR_FRACTION:.3f}"
+            )
+        if not required_times_us:
+            return "开通/反向恢复 focus 缺少真实必要时刻"
+        if composition_anchor_us is not None:
+            if not np.isfinite(float(composition_anchor_us)):
+                return "开通/反向恢复 Vge 辅助锚点非有限"
+            if not (
+                actual_x0 - PARAM_FOCUS_REQUIRED_GUARD_US
+                <= float(composition_anchor_us)
+                <= actual_x1 + PARAM_FOCUS_REQUIRED_GUARD_US
+            ):
+                return "开通/反向恢复 Vge 辅助锚点未落在局部视窗内"
+            return None
+        span = actual_x1 - actual_x0
+        full_x0, full_x1 = map(float, full_range_us)
+        interior = actual_x0 > full_x0 + tol and actual_x1 < full_x1 - tol
+        if interior and span > 0.0:
+            required_lo = min(required_times_us)
+            required_hi = max(required_times_us)
+            guarded_lo = max(full_x0, required_lo - PARAM_FOCUS_REQUIRED_GUARD_US)
+            guarded_hi = min(full_x1, required_hi + PARAM_FOCUS_REQUIRED_GUARD_US)
+            ideal_x0 = float(anchor_us) - PARAM_FOCUS_ANCHOR_FRACTION * span
+            preferred_fits = (
+                ideal_x0 <= guarded_lo + 1e-9
+                and ideal_x0 + span >= guarded_hi - 1e-9
+            )
+            anchor_position = (float(anchor_us) - actual_x0) / span
+            if (
+                preferred_fits
+                and abs(anchor_position - PARAM_FOCUS_ANCHOR_FRACTION)
+                > tol / span
+            ):
+                return (
+                    "开通/反向恢复 Vge 辅助锚点未按比例落位: "
+                    f"position={anchor_position:.3%}"
+                )
         return None
-    return (
-        f"参数 focus 构图偏离策略: 实际[{actual_x0:.3f},{actual_x1:.3f}]us，"
-        f"期望[{expected_x0:.3f},{expected_x1:.3f}]us"
+
+    if parameter_key == ("开通", "开通电流"):
+        if prefer_right_room:
+            return "开通电流不应继续套用通用右优先构图"
+        if not np.isclose(
+            float(anchor_fraction),
+            TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            return (
+                f"开通电流中点目标={float(anchor_fraction):.3f}≠"
+                f"{TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION:.3f}"
+            )
+        if not required_times_us:
+            return "开通电流 focus 缺少真实 A/B 时刻"
+        span = actual_x1 - actual_x0
+        full_x0, full_x1 = map(float, full_range_us)
+        required_lo = min(required_times_us)
+        required_hi = max(required_times_us)
+        interior = actual_x0 > full_x0 + tol and actual_x1 < full_x1 - tol
+        if interior and span > 0.0:
+            midpoint_position = (float(anchor_us) - actual_x0) / span
+            if (
+                abs(midpoint_position - TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION)
+                > tol / span
+            ):
+                return (
+                    f"开通电流中点位置={midpoint_position:.3%}偏离"
+                    f"{TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION:.1%}"
+                )
+            left_room = required_lo - actual_x0
+            right_room = actual_x1 - required_hi
+            if right_room + tol < left_room:
+                return (
+                    "开通电流右侧观察区不足: "
+                    f"左余量={left_room:.3f}us 右余量={right_room:.3f}us"
+                )
+
+    if parameter_key in {("开通", "dv/dt"), ("开通", "di/dt")}:
+        if prefer_right_room:
+            return "开通斜率不应继续套用通用右优先构图"
+        if not np.isclose(
+            float(anchor_fraction),
+            TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            return (
+                f"开通斜率中点目标={float(anchor_fraction):.3f}≠"
+                f"{TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION:.3f}"
+            )
+        if not required_times_us:
+            return "开通斜率 focus 缺少真实 A/B 时刻"
+        if len(required_times_us) != 2:
+            return "开通斜率 focus 必须只传入真实 A/B，不能混入搜索窗"
+        span = actual_x1 - actual_x0
+        full_x0, full_x1 = map(float, full_range_us)
+        required_lo = min(required_times_us)
+        required_hi = max(required_times_us)
+        if not np.isclose(
+            float(anchor_us),
+            0.5 * (required_lo + required_hi),
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            return "开通斜率 focus 锚点不是实际 A/B 中点"
+        interior = actual_x0 > full_x0 + tol and actual_x1 < full_x1 - tol
+        if interior and span > 0.0:
+            ideal_x0 = float(anchor_us) - TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION * span
+            guarded_lo = max(full_x0, required_lo - PARAM_FOCUS_REQUIRED_GUARD_US)
+            guarded_hi = min(full_x1, required_hi + PARAM_FOCUS_REQUIRED_GUARD_US)
+            preferred_fits = (
+                ideal_x0 <= guarded_lo + 1e-9
+                and ideal_x0 + span >= guarded_hi - 1e-9
+            )
+            midpoint_position = (float(anchor_us) - actual_x0) / span
+            if (
+                preferred_fits
+                and abs(midpoint_position - TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION)
+                > tol / span
+            ):
+                return (
+                    f"开通斜率中点位置={midpoint_position:.3%}偏离"
+                    f"{TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION:.1%}"
+                )
+            left_room = required_lo - actual_x0
+            right_room = actual_x1 - required_hi
+            if right_room + tol < left_room:
+                return (
+                    "开通斜率右侧观察区不足: "
+                    f"左余量={left_room:.3f}us 右余量={right_room:.3f}us"
+                )
+
+    if parameter_key == ("开通", "Ls_on"):
+        if prefer_right_room:
+            return "Ls_on 不应继续套用通用右优先构图"
+        if not np.isclose(
+            float(anchor_fraction),
+            TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            return (
+                f"Ls_on 中点目标={float(anchor_fraction):.3f}≠"
+                f"{TURN_ON_LS_FOCUS_MIDPOINT_FRACTION:.3f}"
+            )
+        if not required_times_us:
+            return "Ls_on focus 缺少真实 A/B 积分时刻"
+        if len(required_times_us) != 2:
+            return "Ls_on focus 必须只传入真实 A/B，不能混入搜索窗"
+        span = actual_x1 - actual_x0
+        full_x0, full_x1 = map(float, full_range_us)
+        required_lo = min(required_times_us)
+        required_hi = max(required_times_us)
+        if not np.isclose(
+            float(anchor_us),
+            0.5 * (required_lo + required_hi),
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            return "Ls_on focus 锚点不是实际 A/B 积分窗中点"
+        interior = actual_x0 > full_x0 + tol and actual_x1 < full_x1 - tol
+        if interior and span > 0.0:
+            ideal_x0 = float(anchor_us) - TURN_ON_LS_FOCUS_MIDPOINT_FRACTION * span
+            guarded_lo = max(full_x0, required_lo - PARAM_FOCUS_REQUIRED_GUARD_US)
+            guarded_hi = min(full_x1, required_hi + PARAM_FOCUS_REQUIRED_GUARD_US)
+            preferred_fits = (
+                ideal_x0 <= guarded_lo + 1e-9
+                and ideal_x0 + span >= guarded_hi - 1e-9
+            )
+            midpoint_position = (float(anchor_us) - actual_x0) / span
+            if (
+                preferred_fits
+                and abs(midpoint_position - TURN_ON_LS_FOCUS_MIDPOINT_FRACTION)
+                > tol / span
+            ):
+                return (
+                    f"Ls_on 中点位置={midpoint_position:.3%}偏离"
+                    f"{TURN_ON_LS_FOCUS_MIDPOINT_FRACTION:.1%}"
+                )
+            left_room = required_lo - actual_x0
+            right_room = actual_x1 - required_hi
+            if right_room + tol < left_room:
+                return (
+                    "Ls_on 右侧稳定平台观察区不足: "
+                    f"左余量={left_room:.3f}us 右余量={right_room:.3f}us"
+                )
+
+    if parameter_key == ("关断过程", "Tf"):
+        if prefer_right_room:
+            return "Tf 不应继续套用通用30/70余量构图"
+        if not np.isclose(
+            float(anchor_fraction),
+            TF_FOCUS_MIDPOINT_FRACTION,
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            return (
+                f"Tf 中点目标={float(anchor_fraction):.3f}≠"
+                f"{TF_FOCUS_MIDPOINT_FRACTION:.3f}"
+            )
+        if not required_times_us:
+            return "Tf focus 缺少真实 A/B 时刻"
+        span = actual_x1 - actual_x0
+        full_x0, full_x1 = map(float, full_range_us)
+        required_lo = min(required_times_us)
+        required_hi = max(required_times_us)
+        interior = actual_x0 > full_x0 + tol and actual_x1 < full_x1 - tol
+        if interior and span > 0.0:
+            midpoint_position = (float(anchor_us) - actual_x0) / span
+            if abs(midpoint_position - TF_FOCUS_MIDPOINT_FRACTION) > tol / span:
+                return (
+                    f"Tf 中点位置={midpoint_position:.3%}偏离"
+                    f"{TF_FOCUS_MIDPOINT_FRACTION:.1%}"
+                )
+            if (required_hi - actual_x0) / span > 0.50 + tol / span:
+                return (
+                    "Tf B 光标越过构图中线: "
+                    f"position={(required_hi - actual_x0) / span:.3%}"
+                )
+            left_room = required_lo - actual_x0
+            right_room = actual_x1 - required_hi
+            if right_room + tol < left_room:
+                return (
+                    "Tf 右侧观察区不足: "
+                    f"左余量={left_room:.3f}us 右余量={right_room:.3f}us"
+                )
+    if parameter_key == ("反向恢复", "Pdmax"):
+        if prefer_right_room or not np.isclose(
+            anchor_fraction, RR_POWER_FOCUS_MIDPOINT_FRACTION, rtol=0.0, atol=1e-9
+        ):
+            return "Pdmax 应使用稳定电流 A/B 中点的平衡构图"
+        if len(required_times_us) != 2:
+            return "Pdmax focus 缺少独立稳定电流 A/B"
+        midpoint = 0.5 * (min(required_times_us) + max(required_times_us))
+        if abs(anchor_us - midpoint) > tol:
+            return "Pdmax focus 锚点偏离稳定平台区间中点"
+        if actual_x1 - max(required_times_us) + tol < min(required_times_us) - actual_x0:
+            return "Pdmax 右侧稳定平台观察余量不足"
+    return None
+
+
+def _parameter_primary_event_geometry_problem(
+    view_range_us: tuple[float, float],
+    full_range_us: tuple[float, float],
+    captured_focus: tuple[
+        float, tuple[float, ...], float, bool, float | None, float | None
+    ] | None,
+    primary_event_us: float | None,
+    *,
+    tolerance_us: float = 0.025,
+) -> str | None:
+    """Independently keep a declared peak/event in the left half when feasible.
+
+    Peak markers are not inputs to the current focus solver.  Auditing them
+    separately prevents a self-consistent A/B envelope from hiding a main
+    overshoot that was accidentally left too far right.  Full-data bounds and
+    every hard required point remain stronger constraints than composition.
+    """
+
+    if captured_focus is None:
+        return None
+    (
+        anchor_us,
+        required_times_us,
+        _anchor_fraction,
+        prefer_right_room,
+        _composition_anchor_us,
+        _composition_balance_fraction,
+    ) = _normalize_captured_parameter_focus(captured_focus)
+    if not prefer_right_room:
+        return None
+
+    numeric_ranges = (*view_range_us, *full_range_us)
+    if not all(np.isfinite(float(value)) for value in numeric_ranges):
+        return "参数主事件取景包含 NaN/Inf 范围"
+    if primary_event_us is None or not np.isfinite(float(primary_event_us)):
+        return "参数主事件时刻缺失或非有限"
+
+    actual_x0, actual_x1 = map(float, view_range_us)
+    full_x0, full_x1 = map(float, full_range_us)
+    event_us = float(primary_event_us)
+    span = actual_x1 - actual_x0
+    tol = max(0.0, float(tolerance_us))
+    if span <= 0.0:
+        return "参数主事件取景跨度无效"
+    if not full_x1 > full_x0:
+        return "参数主事件完整范围无效"
+    if event_us < actual_x0 - tol or event_us > actual_x1 + tol:
+        return (
+            f"参数主事件={event_us:.3f}us 不在视窗"
+            f"[{actual_x0:.3f},{actual_x1:.3f}]us"
+        )
+
+    hard_times = [
+        float(value)
+        for value in (*required_times_us, anchor_us)
+        if np.isfinite(float(value))
+    ]
+    if not hard_times:
+        hard_times = [event_us]
+    hard_times = [float(np.clip(value, full_x0, full_x1)) for value in hard_times]
+    guarded_lo = max(full_x0, min(hard_times) - PARAM_FOCUS_REQUIRED_GUARD_US)
+    guarded_hi = min(full_x1, max(hard_times) + PARAM_FOCUS_REQUIRED_GUARD_US)
+    feasible_lo = max(full_x0, guarded_hi - span)
+    feasible_hi = min(full_x1 - span, guarded_lo)
+    event_left_half_lo = event_us - (
+        PARAM_FOCUS_RIGHT_PRIORITY_LATEST_FRACTION * span
     )
+    can_place_event_left = (
+        max(feasible_lo, event_left_half_lo) <= feasible_hi + tol
+    )
+    event_position = (event_us - actual_x0) / span
+    if (
+        can_place_event_left
+        and event_position
+        > PARAM_FOCUS_RIGHT_PRIORITY_LATEST_FRACTION + tol / span
+    ):
+        return (
+            "参数主事件在可左置时仍越过中线: "
+            f"event={event_us:.3f}us position={event_position:.3%}"
+        )
+    return None
+
+
+def _authoritative_primary_event_us(
+    mw,
+    section: str,
+    name: str,
+    t: np.ndarray,
+    chan: dict[str, np.ndarray],
+    result,
+    cursor_a_us: float | None,
+    cursor_b_us: float | None,
+) -> float | None:
+    """Derive the visible card's main event independently from its focus call."""
+
+    if cursor_a_us is None or cursor_b_us is None or len(t) == 0:
+        return None
+    try:
+        point = mw._default_extreme_peak_point(section, name)
+    except Exception:
+        point = None
+    if point is not None:
+        idx = max(0, min(int(point[0]), len(t) - 1))
+        return float(t[idx] * 1e6)
+
+    lo_us, hi_us = sorted((float(cursor_a_us), float(cursor_b_us)))
+    i0 = max(0, min(int(np.searchsorted(t, lo_us * 1e-6, side="left")), len(t) - 1))
+    i1 = max(i0, min(int(np.searchsorted(t, hi_us * 1e-6, side="right")) - 1, len(t) - 1))
+
+    def _peak_time(values: np.ndarray, *, use_abs: bool = True) -> float | None:
+        block = np.asarray(values[i0 : i1 + 1], dtype=np.float64)
+        if len(block) == 0 or not np.isfinite(block).any():
+            return None
+        ranked = np.abs(block) if use_abs else block
+        ranked = np.where(np.isfinite(ranked), ranked, -np.inf)
+        idx = i0 + int(np.argmax(ranked))
+        return float(t[idx] * 1e6)
+
+    if name in {"Pmax", "Eoff", "Eon"}:
+        return _peak_time(np.asarray(chan["vce"]) * np.asarray(chan["ic"]))
+    if name in {"Pdmax", "Err"}:
+        return _peak_time(
+            np.asarray(chan["v_diode"]) * np.asarray(chan["irr"])
+        )
+    if name in {"Irr", "Trr"}:
+        from dpt_extractor.metrics.irr_measure import irr_parameter_peak_index
+
+        segs = result.segments
+        rr0, rr1 = segs.reverse_recovery
+        peak_idx = int(
+            irr_parameter_peak_index(
+                np.asarray(chan["irr"], dtype=np.float64),
+                rr0,
+                rr1,
+                segs.pulse2_on,
+                segs.turn_on[0],
+                segs.turn_on[1],
+            )
+        )
+        peak_idx = max(0, min(peak_idx, len(t) - 1))
+        return float(t[peak_idx] * 1e6)
+    if name == "串扰电压" and "vge_other" in chan:
+        return _peak_time(np.asarray(chan["vge_other"]))
+    if name == "ΔVce" and section == "关断过程":
+        return _peak_time(np.asarray(chan["vce"]), use_abs=False)
+    if name == "ΔVce" and section == "开通":
+        block = np.asarray(chan["vce"][i0 : i1 + 1], dtype=np.float64)
+        if len(block) >= 2 and np.isfinite(block).any():
+            edge = np.abs(np.diff(block, prepend=block[0]))
+            edge = np.where(np.isfinite(edge), edge, -np.inf)
+            return float(t[i0 + int(np.argmax(edge))] * 1e6)
+
+    # Slopes, Ls and non-gate time ranges use the real physical A/B stage;
+    # its temporal midpoint is independent of the focus solver and is the
+    # appropriate event representative when no unique peak is declared.
+    return 0.5 * (lo_us + hi_us)
 
 
 _COMPACT_AB_FOCUS_PARAMS = {
@@ -617,7 +1330,9 @@ def _unnecessary_ab_focus_expansion(
     name: str,
     view_range_us: tuple[float, float],
     full_range_us: tuple[float, float],
-    captured_focus: tuple[float, tuple[float, ...], float] | None,
+    captured_focus: tuple[
+        float, tuple[float, ...], float, bool, float | None, float | None
+    ] | None,
     cursor_a_us: float | None,
     cursor_b_us: float | None,
     *,
@@ -633,12 +1348,22 @@ def _unnecessary_ab_focus_expansion(
         return None
     if captured_focus is None or cursor_a_us is None or cursor_b_us is None:
         return None
-    anchor_us, _implementation_required, anchor_fraction = captured_focus
+    (
+        anchor_us,
+        _implementation_required,
+        anchor_fraction,
+        prefer_right_room,
+        composition_anchor_us,
+        composition_balance_fraction,
+    ) = _normalize_captured_parameter_focus(captured_focus)
     expected_x0, expected_x1 = _solve_parameter_x_window(
         full_range_us,
         anchor_us,
         (float(cursor_a_us), float(cursor_b_us)),
         anchor_fraction=anchor_fraction,
+        prefer_right_room=prefer_right_room,
+        composition_anchor_us=composition_anchor_us,
+        composition_balance_fraction=composition_balance_fraction,
     )
     actual_span = float(view_range_us[1]) - float(view_range_us[0])
     expected_span = expected_x1 - expected_x0
@@ -769,6 +1494,334 @@ def _cursor_level_binding_problem(
         f"{label}={float(level):.6g} 未贴波形@{float(t_us):.6f}us"
         f"（插值={observed:.6g},tol={tolerance:.6g}）"
     )
+
+
+def _nearest_time_index(t: np.ndarray, t_us: float) -> int | None:
+    """Return the raw sample nearest one visible microsecond cursor time."""
+
+    times = np.asarray(t, dtype=np.float64)
+    if len(times) == 0 or not np.isfinite(float(t_us)):
+        return None
+    target_s = float(t_us) * 1e-6
+    pos = int(np.searchsorted(times, target_s, side="left"))
+    if pos <= 0:
+        return 0
+    if pos >= len(times):
+        return len(times) - 1
+    before = pos - 1
+    return int(
+        before
+        if abs(float(times[before]) - target_s)
+        <= abs(float(times[pos]) - target_s)
+        else pos
+    )
+
+
+def _visible_eoff_energy_mj(
+    t: np.ndarray,
+    vce: np.ndarray,
+    ic: np.ndarray,
+    a_us: float,
+    b_us: float,
+) -> float | None:
+    """Independently integrate raw Vce*Ic from the visible GUI A/B window."""
+
+    times = np.asarray(t, dtype=np.float64)
+    voltage = np.asarray(vce, dtype=np.float64)
+    current = np.asarray(ic, dtype=np.float64)
+    n = min(len(times), len(voltage), len(current))
+    if n < 3 or not (
+        np.isfinite(float(a_us)) and np.isfinite(float(b_us))
+    ):
+        return None
+    lo_s, hi_s = sorted((float(a_us) * 1e-6, float(b_us) * 1e-6))
+    i0 = max(0, min(int(np.searchsorted(times[:n], lo_s, side="left")), n - 2))
+    i1 = max(i0 + 1, min(int(np.searchsorted(times[:n], hi_s, side="left")), n - 1))
+    if i1 <= i0 + 1:
+        return 0.0
+    seg_t = times[i0:i1]
+    power = voltage[i0:i1] * current[i0:i1]
+    finite = np.isfinite(seg_t) & np.isfinite(power)
+    if int(np.count_nonzero(finite)) < 2:
+        return None
+    # Energy windows are contiguous raw samples.  Refuse interior non-finite
+    # values rather than silently stitching separate pieces of a waveform.
+    if not np.all(finite):
+        return None
+    dt_arr = np.diff(seg_t)
+    p_mid = 0.5 * (power[:-1] + power[1:])
+    return float(np.sum(p_mid * dt_arr)) * 1e3
+
+
+def _energy_endpoint_mode(context) -> str:  # noqa: ANN001
+    """Read the compatible endpoint mode; old snapshots remain crossings."""
+
+    return str(getattr(context, "endpoint_mode", "level_crossings"))
+
+
+def _eoff_stable_band_problem(
+    label: str,
+    values: np.ndarray,
+    band_start: int,
+    band_end: int,
+    cursor_idx: int,
+    target_level: float,
+    event_span: float,
+    *,
+    width_fraction: float,
+    level_fraction: float,
+    drift_fraction: float,
+) -> str | None:
+    """Audit raw evidence inside a production-declared stable endpoint band."""
+
+    arr = np.asarray(values, dtype=np.float64)
+    n = len(arr)
+    lo = int(band_start)
+    hi = int(band_end)
+    idx = int(cursor_idx)
+    if (
+        n == 0
+        or lo < 0
+        or hi < lo
+        or hi >= n
+        or not lo <= idx <= hi
+        or not np.isfinite(float(target_level))
+    ):
+        return f"{label}稳定带索引/代表点非法"
+    band = arr[lo : hi + 1]
+    finite = band[np.isfinite(band)]
+    if len(finite) < 8:
+        return f"{label}稳定带有效原始样本不足"
+    p05, p95 = (
+        float(np.nanpercentile(finite, percentile))
+        for percentile in (5.0, 95.0)
+    )
+    center = 0.5 * (p05 + p95)
+    half = max(1, len(finite) // 2)
+    drift = (
+        abs(
+            float(np.nanmedian(finite[:half]))
+            - float(np.nanmedian(finite[half:]))
+        )
+        if len(finite[half:])
+        else 0.0
+    )
+    span = max(abs(float(event_span)), 1.0)
+    width_limit = max(1.0, float(width_fraction) * span)
+    level_limit = max(2.0, float(level_fraction) * span)
+    drift_limit = max(0.75, float(drift_fraction) * span)
+    if p95 - p05 > width_limit:
+        return (
+            f"{label}稳定带峰峰值过大: "
+            f"p95-p05={p95 - p05:.6g}>{width_limit:.6g}"
+        )
+    if abs(center - float(target_level)) > level_limit:
+        return (
+            f"{label}稳定带中心偏离局部平台: "
+            f"center={center:.6g}, level={float(target_level):.6g}"
+        )
+    if drift > drift_limit:
+        return f"{label}稳定带前后漂移过大: {drift:.6g}>{drift_limit:.6g}"
+    return None
+
+
+def _eoff_stable_platform_audit_problems(
+    t: np.ndarray,
+    vce: np.ndarray,
+    ic: np.ndarray,
+    *,
+    a_us: float,
+    b_us: float,
+    ha_v: float,
+    hb_a: float,
+    stored_eoff_mj: float,
+    context,
+) -> tuple[list[str], str]:  # noqa: ANN001
+    """Audit smooth Eoff stable endpoints without imposing Ha/Hb crossings."""
+
+    problems: list[str] = []
+    times = np.asarray(t, dtype=np.float64)
+    voltage = np.asarray(vce, dtype=np.float64)
+    current = np.asarray(ic, dtype=np.float64)
+    n = min(len(times), len(voltage), len(current))
+    required_fields = (
+        "a_idx",
+        "b_idx",
+        "a_band_start_idx",
+        "a_band_end_idx",
+        "b_band_start_idx",
+        "b_band_end_idx",
+        "v10_idx",
+        "v90_idx",
+        "i90_idx",
+        "i10_idx",
+        "search_end_idx",
+    )
+    if context is None or any(not hasattr(context, name) for name in required_fields):
+        return ["Eoff stable_platforms 缺少稳定带证据上下文"], ""
+    indices = {name: int(getattr(context, name)) for name in required_fields}
+    if n < 3 or any(value < 0 or value >= n for value in indices.values()):
+        return ["Eoff stable_platforms 稳定带证据索引越界"], ""
+
+    a_idx = _nearest_time_index(times[:n], float(a_us))
+    b_idx = _nearest_time_index(times[:n], float(b_us))
+    if a_idx is None or b_idx is None:
+        return ["Eoff stable_platforms 可见 A/B 时刻非法"], ""
+    expected_a = indices["a_idx"]
+    expected_b = indices["b_idx"]
+    if abs(int(a_idx) - expected_a) > 1:
+        problems.append(
+            f"Eoff A={float(a_us):.9f}us≠Vce Base稳定带代表点"
+            f"{float(times[expected_a]) * 1e6:.9f}us"
+        )
+    if abs(int(b_idx) - expected_b) > 1:
+        problems.append(
+            f"Eoff B={float(b_us):.9f}us≠Ic Base首个稳定带代表点"
+            f"{float(times[expected_b]) * 1e6:.9f}us"
+        )
+
+    a0, a1 = indices["a_band_start_idx"], indices["a_band_end_idx"]
+    b0, b1 = indices["b_band_start_idx"], indices["b_band_end_idx"]
+    v10, v90 = indices["v10_idx"], indices["v90_idx"]
+    i90, i10 = indices["i90_idx"], indices["i10_idx"]
+    search_end = indices["search_end_idx"]
+    if not (a0 <= expected_a <= a1 < v10 < v90):
+        problems.append("Eoff A稳定带/主Vce上升沿时序非法")
+    if not (v10 <= i90 < i10 <= b0 <= expected_b <= b1):
+        problems.append("Eoff 主Ic下降沿/B首个稳定带时序非法")
+
+    raw_dt = np.diff(times[:n])
+    finite_dt = raw_dt[np.isfinite(raw_dt) & (raw_dt > 0.0)]
+    if len(finite_dt) == 0:
+        problems.append("Eoff stable_platforms 原始时间步长不可用")
+    else:
+        dt_s = float(np.nanmedian(finite_dt))
+        expected_a_width = max(
+            8,
+            int(
+                round(
+                    float(
+                        np.clip(
+                            0.5 * float(times[v90] - times[v10]),
+                            80e-9,
+                            200e-9,
+                        )
+                    )
+                    / dt_s
+                )
+            ),
+        )
+        expected_b_width = max(
+            8,
+            int(
+                round(
+                    float(
+                        np.clip(
+                            0.5 * float(times[i10] - times[i90]),
+                            80e-9,
+                            200e-9,
+                        )
+                    )
+                    / dt_s
+                )
+            ),
+        )
+        if a1 - a0 + 1 != expected_a_width:
+            problems.append(
+                "Eoff A稳定带宽度未与Vce主沿自适应闭环: "
+                f"actual={a1 - a0 + 1}, expected={expected_a_width}"
+            )
+        if b1 - b0 + 1 != expected_b_width:
+            problems.append(
+                "Eoff B稳定带宽度未与Ic主沿自适应闭环: "
+                f"actual={b1 - b0 + 1}, expected={expected_b_width}"
+            )
+        trailing_confirmation = max(
+            0,
+            expected_b_width - 1 - expected_b_width // 2,
+        )
+        if not (
+            expected_b <= search_end
+            and b1 <= min(n - 1, search_end + trailing_confirmation)
+        ):
+            problems.append(
+                "Eoff B代表点/稳定带越过事件门允许的半带确认范围"
+            )
+
+    v_event = voltage[a0 : b1 + 1]
+    i_event = current[a0 : b1 + 1]
+    v_finite = v_event[np.isfinite(v_event)]
+    i_finite = i_event[np.isfinite(i_event)]
+    v_span = (
+        float(np.nanpercentile(v_finite, 95) - np.nanpercentile(v_finite, 5))
+        if len(v_finite)
+        else 1.0
+    )
+    i_span = (
+        float(np.nanpercentile(i_finite, 95) - np.nanpercentile(i_finite, 5))
+        if len(i_finite)
+        else 1.0
+    )
+    for problem in (
+        _eoff_stable_band_problem(
+            "Eoff A/Vce Base",
+            voltage,
+            a0,
+            a1,
+            expected_a,
+            float(ha_v),
+            v_span,
+            width_fraction=0.06,
+            level_fraction=0.08,
+            drift_fraction=0.08,
+        ),
+        _eoff_stable_band_problem(
+            "Eoff B/Ic Base",
+            current,
+            b0,
+            b1,
+            expected_b,
+            float(hb_a),
+            i_span,
+            width_fraction=0.16,
+            level_fraction=0.16,
+            drift_fraction=0.14,
+        ),
+    ):
+        if problem is not None:
+            problems.append(problem)
+
+    peak_lo = max(0, min(v10, n - 1))
+    peak_hi = max(peak_lo, min(b1, n - 1))
+    event_power = voltage[peak_lo : peak_hi + 1] * current[peak_lo : peak_hi + 1]
+    finite_power = np.isfinite(event_power)
+    peak_idx: int | None = None
+    if np.any(finite_power):
+        ranked = np.where(finite_power, event_power, -np.inf)
+        peak_idx = peak_lo + int(np.argmax(ranked))
+        if not int(a_idx) <= peak_idx < int(b_idx):
+            problems.append(
+                "Eoff stable_platforms 可见 A/B 未包含原始 Vce*Ic 主功率峰"
+            )
+    else:
+        problems.append("Eoff stable_platforms 主功率峰审计无有效样本")
+
+    visible_energy = _visible_eoff_energy_mj(
+        times[:n], voltage[:n], current[:n], float(a_us), float(b_us)
+    )
+    if visible_energy is None:
+        problems.append("Eoff 可见 A/B 原始 Vce*Ic 独立积分不可用")
+    elif not _short_values_close(
+        float(stored_eoff_mj), float(visible_energy), floor=1e-9, rtol=2e-8
+    ):
+        problems.append(
+            "Eoff 表值未与可见 A/B 原始 Vce*Ic 积分闭环: "
+            f"stored={float(stored_eoff_mj):.12g}mJ, "
+            f"visible={float(visible_energy):.12g}mJ"
+        )
+    peak_text = "missing" if peak_idx is None else f"{float(times[peak_idx]) * 1e6:.6f}us"
+    energy_text = "missing" if visible_energy is None else f"{float(visible_energy):.9g}mJ"
+    return problems, f"mode=stable_platforms peak={peak_text} visible_Eoff={energy_text}"
 
 
 def _first_trr_stable_platform_crossings(
@@ -1950,6 +3003,11 @@ def audit_short_circuit_file(MainWindow, QApplication, app, path: Path) -> list[
 def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
     sample_id = _sample_trace_id(path)
     mw = MainWindow()
+    focus_only = os.environ.get("DPT_VALIDATE_FOCUS_ONLY", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     validate_auto_slopes = os.environ.get(
         "DPT_VALIDATE_AUTO_SLOPES", ""
     ).lower() in {
@@ -1996,6 +3054,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
         detail = "通道状态更新后参数未计算"
         mw.close()
         return [(sample_id, "通道设置", "CH3反相", "FAIL", detail)]
+    result_before_focus = _audit_state_snapshot(result) if focus_only else None
     t = bundle.t
     segs = result.segments
     chan = {
@@ -2005,6 +3064,11 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
         "irr": bundle_reverse_recovery_current(bundle, profile),
         "v_diode": bundle.get(profile.v_diode),
     }
+    direct_cursor_ic = bundle.maybe_get(profile.ic)
+    cursor_ic = np.asarray(
+        direct_cursor_ic if direct_cursor_ic is not None else chan["ic"],
+        dtype=np.float64,
+    )
     if profile.vge_other:
         try:
             chan["vge_other"] = bundle.get(profile.vge_other)
@@ -2182,6 +3246,11 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
         seg_name = SECTION_SEGMENT[section]
         s0, s1 = seg_idx[seg_name]
         cap.reset()
+        recovery_peak_result_before_click = (
+            _audit_state_snapshot(mw.result)
+            if section == "反向恢复" and name in {"Irr", "Vrr"}
+            else None
+        )
         try:
             mw._on_value_clicked(section, name)
         except Exception as exc:  # noqa: BLE001
@@ -2198,6 +3267,10 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             )
             continue
         problems: list[str] = []
+        if recovery_peak_result_before_click is not None and (
+            _audit_state_snapshot(mw.result) != recovery_peak_result_before_click
+        ):
+            problems.append(f"{name} 默认平台光标改变了提取结果或关联参数数值")
         turn_off_slope_crossing_full: bool | None = None
         parameter_key = (section, name)
         expected_endpoint_channels = DPT_ENDPOINT_CHANNELS.get(parameter_key)
@@ -2217,13 +3290,23 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             if ch not in chan:
                 problems.append(f"{label}未知通道{ch}")
                 return
+            values = (
+                cursor_ic
+                if parameter_key
+                in {
+                    ("关断过程", "Ic_off_max"),
+                    ("开通", "Ic_on_max"),
+                }
+                and ch == "ic"
+                else chan[ch]
+            )
             if win_us is not None:
                 w0 = max(0, min(_idx(t, win_us[0]), len(t) - 1))
                 w1 = max(w0 + 1, min(_idx(t, win_us[1]), len(t) - 1))
             else:
                 w0, w1 = s0, s1
-            if not _level_on_channel(level, chan[ch], w0, w1):
-                lo, hi = _signed_range(chan[ch], w0, w1)
+            if not _level_on_channel(level, values, w0, w1):
+                lo, hi = _signed_range(values, w0, w1)
                 problems.append(
                     f"{label}={level:.2f} 不在{ch}有符号范围[{lo:.1f},{hi:.1f}]"
                 )
@@ -2239,8 +3322,18 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             if channel not in chan:
                 return
             actual_y = float(np.interp(float(t_us), trace_t_us, raw))
+            authoritative = (
+                cursor_ic
+                if parameter_key
+                in {
+                    ("关断过程", "Ic_off_max"),
+                    ("开通", "Ic_on_max"),
+                }
+                and channel == "ic"
+                else np.asarray(chan[channel])
+            )
             expected_y = float(
-                np.interp(float(t_us) * 1e-6, t, np.asarray(chan[channel]))
+                np.interp(float(t_us) * 1e-6, t, authoritative)
             )
             tolerance = max(1e-7, abs(expected_y) * 1e-8)
             if abs(actual_y - expected_y) > tolerance:
@@ -2372,10 +3465,6 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                                     f"关断 di/dt Base窗越界: {base_window!r}"
                                 )
                             else:
-                                from dpt_extractor.metrics.plateau_level import (
-                                    _plateau_mid_without_isolated_spikes,
-                                )
-
                                 base_band = np.asarray(
                                     chan["ic"][b0 : b1 + 1], dtype=np.float64
                                 )
@@ -3024,7 +4113,44 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             )
             check_level(ha_v, ha_ch, "Ha", win)
             check_level(hb_a, hb_ch, "Hb", win)
-            if ha_ch in chan and hb_ch in chan:
+            energy_contexts = getattr(result, "energy_contexts", {})
+            marker_context = (
+                energy_contexts.get((section, name))
+                if isinstance(energy_contexts, dict)
+                else None
+            )
+            endpoint_mode = _energy_endpoint_mode(marker_context)
+            if name == "Eoff" and endpoint_mode == "stable_platforms":
+                stable_context = getattr(
+                    marker_context,
+                    "stable_platform_context",
+                    None,
+                )
+                stable_problems, stable_detail = (
+                    _eoff_stable_platform_audit_problems(
+                        t,
+                        chan["vce"],
+                        chan["ic"],
+                        a_us=float(ta),
+                        b_us=float(tb),
+                        ha_v=float(ha_v),
+                        hb_a=float(hb_a),
+                        stored_eoff_mj=float(result.turn_off.eoff),
+                        context=stable_context,
+                    )
+                )
+                problems.extend(stable_problems)
+            else:
+                stable_detail = f"mode={endpoint_mode}"
+                if endpoint_mode != "level_crossings":
+                    problems.append(
+                        f"{name} 未知损耗端点模式: {endpoint_mode!r}"
+                    )
+            if (
+                not (name == "Eoff" and endpoint_mode == "stable_platforms")
+                and ha_ch in chan
+                and hb_ch in chan
+            ):
                 for problem in (
                     _cursor_level_binding_problem(
                         "A/Ha",
@@ -3045,7 +4171,33 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 ):
                     if problem is not None:
                         problems.append(problem)
-            detail = f"Ha({ha_ch})={ha_v:.1f} Hb({hb_ch})={hb_a:.1f} A={ta:.2f} B={tb:.2f}"
+            if name == "Eoff" and endpoint_mode != "stable_platforms":
+                visible_energy = _visible_eoff_energy_mj(
+                    t,
+                    chan["vce"],
+                    chan["ic"],
+                    float(ta),
+                    float(tb),
+                )
+                if visible_energy is None:
+                    problems.append("Eoff 可见 A/B 原始 Vce*Ic 独立积分不可用")
+                elif not _short_values_close(
+                    float(result.turn_off.eoff),
+                    float(visible_energy),
+                    floor=1e-9,
+                    rtol=2e-8,
+                ):
+                    problems.append(
+                        "Eoff 表值未与可见 A/B 原始 Vce*Ic 积分闭环: "
+                        f"stored={float(result.turn_off.eoff):.12g}mJ, "
+                        f"visible={float(visible_energy):.12g}mJ"
+                    )
+                else:
+                    stable_detail += f" visible_Eoff={float(visible_energy):.9g}mJ"
+            detail = (
+                f"Ha({ha_ch})={ha_v:.1f} Hb({hb_ch})={hb_a:.1f} "
+                f"A={ta:.2f} B={tb:.2f} {stable_detail}"
+            )
 
         elif name == "Err":
             c = calls.get("enable_energy_loss_interaction")
@@ -3163,6 +4315,31 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             hb_val = hb_call["bound"].get("y") if hb_call else float("nan")
             ch = hb_call["bound"].get("channel") if hb_call else None
             check_channel(ch, "irr", "Hb")
+            ha_call = calls.get("set_irr_base_on_ha")
+            ha_val = ha_call["bound"].get("y") if ha_call else float("nan")
+            ha_ch = ha_call["bound"].get("channel") if ha_call else None
+            check_channel(ha_ch, "irr", "Ha")
+            stable_context = mw._rr_irr_cursor_context()
+            if stable_context is None:
+                problems.append("Irr 稳定平台光标上下文不可用")
+            else:
+                expected_a_us = float(t[int(stable_context[0])] * 1e6)
+                expected_b_us = float(t[int(stable_context[1])] * 1e6)
+                expected_base = float(stable_context[2])
+                if not _short_values_close(irr_a, expected_a_us, floor=1e-9):
+                    problems.append(
+                        f"Irr A={irr_a:.9f}us≠正向稳定段{expected_a_us:.9f}us"
+                    )
+                if not _short_values_close(irr_b, expected_b_us, floor=1e-9):
+                    problems.append(
+                        f"Irr B={irr_b:.9f}us≠恢复Base稳定段{expected_b_us:.9f}us"
+                    )
+                if not np.isfinite(float(ha_val)) or not _short_values_close(
+                    float(ha_val), expected_base, floor=1e-8
+                ):
+                    problems.append(
+                        f"Irr Ha={float(ha_val):.9g}≠恢复Base{expected_base:.9g}"
+                    )
             from dpt_extractor.metrics.irr_measure import irr_parameter_peak_index
 
             expected_idx = int(
@@ -3190,7 +4367,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 problems.append(f"Irr峰|Hb|={abs(hb_val):.1f} 与提取Irr={irr_ref:.1f}不符")
             detail = (
                 f"ch={ch} A={irr_a:.3f} B={irr_b:.3f} "
-                f"Hb={float(hb_val):.1f} irr_ref={irr_ref:.1f}"
+                f"Ha={float(ha_val):.1f} Hb={float(hb_val):.1f} irr_ref={irr_ref:.1f}"
             )
 
         elif name == "Trr":
@@ -3547,22 +4724,94 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 check_level(move_v, "vce", "Hb", win_us=search_window_us)
             if str(getattr(mw.wave_plot, "_active_channel", "")) != "vce":
                 problems.append("ΔVce A/B/Ha/Hb 未绑定 vce 活动通道")
-            for label, cursor_us, level in (
-                ("A/Ha", fixed_t, fixed_v),
-                ("B/Hb", move_t, move_v),
-            ):
-                if level is None:
-                    continue
-                problem = _cursor_level_binding_problem(
-                    label,
-                    float(cursor_us),
-                    float(level),
+            if section == "关断过程" and move_v is not None:
+                off0, off1 = result.segments.turn_off
+                blocking_end = off1
+                if not result.single_pulse_mode and result.segments.pulse2_on > off0:
+                    blocking_end = max(
+                        off1,
+                        min(
+                            len(t) - 1,
+                            int(result.segments.pulse2_on)
+                            - max(1, int(200e-9 / mw.bundle.dt)),
+                        ),
+                    )
+                expected_a, expected_b = turn_off_delta_vce_cursor_range_indices(
                     t,
                     chan["vce"],
-                    floor=0.05,
+                    off0,
+                    off1,
+                    mw.bundle.dt,
+                    float(move_v),
+                    search_end=blocking_end,
                 )
-                if problem is not None:
-                    problems.append(problem)
+                expected_a_us = float(t[expected_a] * 1e6)
+                expected_b_us = float(t[expected_b] * 1e6)
+                if not _short_values_close(
+                    float(fixed_t), expected_a_us, floor=1e-9
+                ):
+                    problems.append(
+                        f"ΔVce A={float(fixed_t):.9f}us≠Base稳定段"
+                        f"{expected_a_us:.9f}us"
+                    )
+                if not _short_values_close(
+                    float(move_t), expected_b_us, floor=1e-9
+                ):
+                    problems.append(
+                        f"ΔVce B={float(move_t):.9f}us≠Top稳定段"
+                        f"{expected_b_us:.9f}us"
+                    )
+                peak_idx = off0 + int(np.argmax(chan["vce"][off0 : off1 + 1]))
+                peak_us = float(t[peak_idx] * 1e6)
+                if not float(fixed_t) < peak_us < float(move_t):
+                    problems.append(
+                        f"ΔVce范围未包住抬升尖峰: "
+                        f"A/peak/B={float(fixed_t):.6f}/{peak_us:.6f}/"
+                        f"{float(move_t):.6f}us"
+                    )
+                base_v, _stable_top_v = turn_off_dvdt_base_top_levels(
+                    t, chan["vce"], off0, off1
+                )
+                event_span = max(abs(float(move_v) - float(base_v)), 1.0)
+                if abs(float(chan["vce"][expected_a]) - float(base_v)) > max(
+                    1.0, 0.04 * event_span
+                ):
+                    problems.append("ΔVce A未落在Vce Base稳定带")
+                if abs(float(chan["vce"][expected_b]) - float(move_v)) > max(
+                    1.0, 0.04 * event_span
+                ):
+                    problems.append("ΔVce B未落在Vce Top稳定带")
+                if not _short_values_close(
+                    float(fixed_v),
+                    float(result.turn_off.vce_off_max),
+                    floor=1e-6,
+                ):
+                    problems.append("ΔVce Ha未绑定Vce尖峰最大值")
+            else:
+                stable_context = mw._turn_on_vce_stable_cursor_context()
+                if stable_context is None:
+                    problems.append("开通ΔVce稳定 Top/Base 光标上下文不可用")
+                else:
+                    expected_a, expected_b, base_v, top_v = stable_context
+                    expected_a_us = float(t[int(expected_a)] * 1e6)
+                    expected_b_us = float(t[int(expected_b)] * 1e6)
+                    if not _short_values_close(
+                        float(fixed_t), expected_a_us, floor=1e-9
+                    ):
+                        problems.append("开通ΔVce A未绑定Vce Top稳定段")
+                    if not _short_values_close(
+                        float(move_t), expected_b_us, floor=1e-9
+                    ):
+                        problems.append("开通ΔVce B未绑定Vce Base稳定段")
+                    span_v = max(abs(float(top_v) - float(base_v)), 1.0)
+                    if abs(float(chan["vce"][int(expected_a)]) - float(top_v)) > max(
+                        1.0, 0.04 * span_v
+                    ):
+                        problems.append("开通ΔVce A未落在Vce Top稳定带")
+                    if abs(float(chan["vce"][int(expected_b)]) - float(base_v)) > max(
+                        1.0, 0.04 * span_v
+                    ):
+                        problems.append("开通ΔVce B未落在Vce Base稳定带")
             move_text = "missing" if move_v is None else f"{float(move_v):.1f}"
             if move_v is not None:
                 delta = abs(float(fixed_v) - float(move_v))
@@ -3573,10 +4822,17 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     float(process_result.delta_vce), delta, floor=1e-6
                 ):
                     problems.append("ΔVce结果未绑定 abs(Ha-Hb)")
-            detail = (
-                f"ch=vce A/Ha={fixed_t:.3f}us/{fixed_v:.1f}V "
-                f"B/Hb={move_t:.3f}us/{move_text}V"
-            )
+            if section == "关断过程":
+                detail = (
+                    f"ch=vce A(Base)={fixed_t:.3f}us "
+                    f"B(Top)={move_t:.3f}us Ha(peak)={fixed_v:.1f}V "
+                    f"Hb(Top)={move_text}V"
+                )
+            else:
+                detail = (
+                    f"ch=vce A(Top)={fixed_t:.3f}us B(Base)={move_t:.3f}us "
+                    f"Ha(Top)={fixed_v:.1f}V Hb(knee)={move_text}V"
+                )
 
         elif name in {"Ls_on", "Ls_off"}:
             c = calls.get("enable_interval_interaction")
@@ -3640,9 +4896,8 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 problems.append(f"功率A({float(ta):.6f})应早于B({float(tb):.6f})")
             expected_power_interval = mw._parameter_interval_us(section, name)
             if expected_power_interval is not None:
-                # Err keeps semantic A=Irr/B=Vd even when B is earlier than A,
-                # whereas the P(d)max interval UI displays the same integration
-                # bounds in chronological left/right order.
+                # Switching Pmax uses loss bounds; Pdmax independently uses
+                # the current's pre/post stable bands, in chronological order.
                 expected_power_interval = tuple(sorted(expected_power_interval))
                 power_segment = (
                     _idx(t, float(expected_power_interval[0])),
@@ -3709,7 +4964,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 expected_endpoint_channels = {
                     "关断过程": ("vce", "ic"),
                     "开通": ("ic", "vce"),
-                    "反向恢复": ("v_diode", "irr"),
+                    "反向恢复": ("irr", "irr"),
                 }[section]
                 expected_horizontal_bindings = (
                     (None, False),
@@ -3726,7 +4981,18 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             else:
                 peak_channel = peak["bound"].get("channel")
                 peak_y = peak["bound"].get("y")
-                expected_endpoint_channels = (peak_channel, peak_channel)
+                raw_reference = (
+                    peak_channel == PARAMETER_POWER_REFERENCE_CHANNEL
+                )
+                expected_endpoint_channels = (
+                    {
+                        "关断过程": ("vce", "ic"),
+                        "开通": ("ic", "vce"),
+                        "反向恢复": ("irr", "irr"),
+                    }[section]
+                    if raw_reference
+                    else (peak_channel, peak_channel)
+                )
                 expected_horizontal_bindings = (
                     (peak_channel, True),
                     (None, False),
@@ -3735,7 +5001,13 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     problems.append(f"功率峰值无效: {peak_y}")
                 else:
                     peak_text = f" Ha({peak_channel})={float(peak_y):.1f}"
-                if interval_channel != peak_channel:
+                if raw_reference:
+                    if interval_channel != expected_endpoint_channels[0]:
+                        problems.append(
+                            f"Pmax 原始功率Ha不得改写A/B通道: "
+                            f"{interval_channel}≠{expected_endpoint_channels[0]}"
+                        )
+                elif interval_channel != peak_channel:
                     problems.append(
                         f"功率A/B通道={interval_channel}≠Ha通道{peak_channel}"
                     )
@@ -3748,33 +5020,44 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     problems.append(
                         f"功率Ha通道={peak_channel}单位={unit!r}，不是功率波形"
                     )
-                target_kw = (
-                    result.turn_off.pmax
-                    if section == "关断过程"
-                    else result.turn_on.pmax
-                    if section == "开通"
-                    else result.reverse_recovery.pdmax
-                )
-                expected_power = mw.wave_plot.power_peak_in_window(
-                    float(ta),
-                    float(tb),
-                    target_w=float(target_kw) * 1000.0,
-                    prefer_abs=section == "反向恢复",
-                    required_roles=expected_power_roles,
-                    expected_power_w=expected_power_series_w,
-                )
-                if expected_power is None:
-                    problems.append("A/B 内权威功率峰不可用")
-                else:
-                    expected_power_channel, _peak_w, expected_y, _peak_t = expected_power
-                    if peak_channel != expected_power_channel:
-                        problems.append(
-                            f"功率Ha通道={peak_channel}≠权威{expected_power_channel}"
-                        )
-                    if peak_y is None or not np.isclose(
-                        float(peak_y), float(expected_y), rtol=1e-10, atol=1e-8
+                if raw_reference:
+                    if section not in {"关断过程", "开通"}:
+                        problems.append("Pdmax 不应使用 Pmax 原始功率参考通道")
+                    elif peak_y is None or not np.isclose(
+                        float(peak_y),
+                        float(raw_peak_kw) * 1000.0,
+                        rtol=1e-10,
+                        atol=1e-8,
                     ):
-                        problems.append("功率Ha未绑定A/B内权威峰值")
+                        problems.append("Pmax Ha未绑定原始Vce×Ic峰值")
+                else:
+                    target_kw = (
+                        result.turn_off.pmax
+                        if section == "关断过程"
+                        else result.turn_on.pmax
+                        if section == "开通"
+                        else result.reverse_recovery.pdmax
+                    )
+                    expected_power = mw.wave_plot.power_peak_in_window(
+                        float(ta),
+                        float(tb),
+                        target_w=float(target_kw) * 1000.0,
+                        prefer_abs=section == "反向恢复",
+                        required_roles=expected_power_roles,
+                        expected_power_w=expected_power_series_w,
+                    )
+                    if expected_power is None:
+                        problems.append("A/B 内权威功率峰不可用")
+                    else:
+                        expected_power_channel, _peak_w, expected_y, _peak_t = expected_power
+                        if peak_channel != expected_power_channel:
+                            problems.append(
+                                f"功率Ha通道={peak_channel}≠权威{expected_power_channel}"
+                            )
+                        if peak_y is None or not np.isclose(
+                            float(peak_y), float(expected_y), rtol=1e-10, atol=1e-8
+                        ):
+                            problems.append("功率Ha未绑定A/B内权威峰值")
             detail = (
                 f"A/B({interval_channel})={ta:.3f}/{tb:.3f}us"
                 f"{peak_text}"
@@ -3795,6 +5078,13 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             check_time(tb, "B")
             if not ta < tb:
                 problems.append(f"串扰A({ta:.6f})应早于B({tb:.6f})")
+            crosstalk_display_problems = []
+            if "vge_other" in chan:
+                indices = result.segments.turn_off if section == "关断过程" else result.segments.turn_on
+                crosstalk_display_problems = _crosstalk_cursor_display_problems(
+                    t, chan["vge_other"], indices, ta, tb
+                )
+                problems.extend(crosstalk_display_problems)
             horizontal = calls.get("set_interval_minmax_horizontal")
             if horizontal is None:
                 problems.append("串扰电压缺少 Ha/Hb 最大最小参考线")
@@ -3881,7 +5171,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 f"roles={IEC_TIMING_CURSOR_ROLES[(section, name)]}"
             )
 
-        else:  # Ic/Vce/Vrr 最大值卡：A/B、Ha、Hb 均必须绑定同一波形。
+        else:  # Ic/Vce/Vrr 最大值卡；端点按各参数的物理范围绑定。
             expected = GENERIC_MAX_CURSOR_CHANNELS.get(name)
             if expected is None:
                 record(section, name, "FAIL", "审计矩阵存在未覆盖参数卡")
@@ -3935,19 +5225,22 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             base = calls.get("set_interval_base_horizontal")
             min_y = None
             if base is None:
-                problems.append("最大值参数缺少 Hb 最小值参考线")
+                problems.append("最大值参数缺少 Hb 稳定平台参考线")
             else:
                 bb = base["bound"]
                 min_y = bb.get("y")
                 min_ch = bb.get("channel")
-                check_channel(min_ch, expected, "Hb最小值")
+                check_channel(min_ch, expected, "Hb稳定平台")
                 if min_y is None:
                     problems.append("最大值参数 Hb 数值缺失")
                 else:
-                    check_level(float(min_y), expected, "Hb最小值", win)
+                    check_level(float(min_y), expected, "Hb稳定平台", (ta, tb))
             i0 = max(0, min(_idx(t, min(ta, tb)), len(t) - 1))
             i1 = max(i0, min(_idx(t, max(ta, tb)), len(t) - 1))
-            expected_peak = mw._peak_y_for_param(section, name, i0, i1)
+            default_peak_point = mw._default_extreme_peak_point(section, name)
+            expected_peak = (
+                None if default_peak_point is None else float(default_peak_point[1])
+            )
             expected_base = mw._secondary_y_for_param(section, name, i0, i1)
             if (
                 peak_y is not None
@@ -3957,7 +5250,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 )
             ):
                 problems.append(
-                    f"Ha={float(peak_y):.9g}≠{expected}窗口极值{float(expected_peak):.9g}"
+                    f"Ha={float(peak_y):.9g}≠{expected}提取极值{float(expected_peak):.9g}"
                 )
             if (
                 min_y is not None
@@ -3967,8 +5260,264 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 )
             ):
                 problems.append(
-                    f"Hb={float(min_y):.9g}≠{expected}窗口最小值{float(expected_base):.9g}"
+                    f"Hb={float(min_y):.9g}≠{expected}稳定平台{float(expected_base):.9g}"
                 )
+
+            stable_context = None
+            if (section, name) == ("关断过程", "Vce_off_max"):
+                stable_context = mw._turn_off_vce_stable_cursor_context()
+            elif (section, name) == ("开通", "Ic_on_max"):
+                stable_context = mw._turn_on_ic_on_max_cursor_context()
+            elif (section, name) == ("开通", "Vce_on_max"):
+                stable_context = mw._turn_on_vce_on_max_cursor_context()
+            elif (section, name) == ("反向恢复", "Vrr"):
+                stable_context = mw._rr_vrr_cursor_context()
+                if stable_context is None:
+                    problems.append("Vrr 缺少完整 Base/Top 稳定带证据")
+                else:
+                    a_idx, b_idx, _top = stable_context
+                    slope = result.dvdt_contexts[("反向恢复", "dv/dt")]
+                    span = max(abs(slope.top_v - slope.base_v), 1.0)
+                    width = max(8, int(round(200e-9 / max(bundle.dt, 1e-15))))
+                    for label, index, level in (
+                        ("A", a_idx, slope.base_v), ("B", b_idx, slope.top_v)
+                    ):
+                        start = max(0, index - width // 2)
+                        band = np.abs(chan["v_diode"][start : start + width])
+                        if len(band) != width or not np.all(np.isfinite(band)):
+                            problems.append(f"Vrr {label}缺少完整有限值稳定带")
+                            continue
+                        p05, p95 = np.percentile(band, [5, 95])
+                        if (
+                            p95 - p05 > 0.10 * span
+                            or abs(0.5 * (p05 + p95) - level) > 0.05 * span
+                            or abs(np.median(band[:width//2]) - np.median(band[width//2:])) > 0.03 * span
+                        ):
+                            problems.append(f"Vrr {label}周围电压带仍有振荡或偏离稳定平台")
+                    if b_idx >= result.segments.pulse2_off:
+                        problems.append("Vrr B越过下一次关断")
+            if stable_context is not None:
+                expected_a_us = float(t[int(stable_context[0])] * 1e6)
+                expected_b_us = float(t[int(stable_context[1])] * 1e6)
+                if not _short_values_close(ta, expected_a_us, floor=1e-9):
+                    problems.append(
+                        f"{name} A={ta:.9f}us≠稳定平台点{expected_a_us:.9f}us"
+                    )
+                if not _short_values_close(tb, expected_b_us, floor=1e-9):
+                    problems.append(
+                        f"{name} B={tb:.9f}us≠稳定平台点{expected_b_us:.9f}us"
+                    )
+            if default_peak_point is not None:
+                expected_peak_us = float(t[int(default_peak_point[0])] * 1e6)
+                if not ta <= expected_peak_us <= tb:
+                    problems.append(f"{name} 权威最大值不在稳定平台 A/B 范围内")
+            if section == "开通" and name == "Vce_on_max" and stable_context is not None:
+                a_idx, b_idx, base_v, top_v = stable_context
+                span = max(abs(float(top_v) - float(base_v)), 1.0)
+                if default_peak_point is not None:
+                    peak_idx = int(default_peak_point[0])
+                    if not a_idx < peak_idx < b_idx:
+                        problems.append("Vce_on_max A必须在权威最大值左侧，B必须在其右侧")
+                    if float(t[peak_idx] - t[a_idx]) > 200e-9 + 2.0 * bundle.dt:
+                        problems.append("Vce_on_max A仍远离峰值左侧相邻平台")
+                if b_idx >= result.segments.pulse2_off:
+                    problems.append("Vce_on_max B越过下一次关断")
+                # Inspect raw samples as well as matching the context's
+                # timestamps: an isolated Base crossing must not pass as B.
+                width = max(16, int(round(200e-9 / max(bundle.dt, 1e-15))))
+                band = chan["vce"][max(0, b_idx - width // 2) : b_idx + width // 2]
+                if len(band) >= width - 1:
+                    p05, p95 = np.percentile(band, [5, 95])
+                    if (
+                        float(p95 - p05) > 0.10 * span
+                        or abs(float((p05 + p95) * 0.5) - base_v) > 0.04 * span
+                    ):
+                        problems.append("Vce_on_max B周围完整电压带仍有振荡或偏离Base")
+            if section == "关断过程" and name == "Ic_off_max":
+                context = mw._turn_off_ic_off_max_cursor_context()
+                if context is None:
+                    problems.append("Ic_off_max 稳定 Base 光标上下文不可用")
+                else:
+                    expected_a_idx, expected_b_idx, expected_ic_base = context
+                    expected_a_us = float(t[expected_a_idx] * 1e6)
+                    expected_b_us = float(t[expected_b_idx] * 1e6)
+                    if not _short_values_close(ta, expected_a_us, floor=1e-9):
+                        problems.append(
+                            f"Ic_off_max A={ta:.9f}us≠Vce Base稳定段"
+                            f"{expected_a_us:.9f}us"
+                        )
+                    if not _short_values_close(tb, expected_b_us, floor=1e-9):
+                        problems.append(
+                            f"Ic_off_max B={tb:.9f}us≠Ic Base稳定段"
+                            f"{expected_b_us:.9f}us"
+                        )
+                    vce_base, vce_top = turn_off_dvdt_base_top_levels(
+                        t,
+                        chan["vce"],
+                        result.segments.turn_off[0],
+                        result.segments.turn_off[1],
+                    )
+                    vce_span = max(abs(float(vce_top) - float(vce_base)), 1.0)
+                    if abs(float(chan["vce"][expected_a_idx]) - float(vce_base)) > max(
+                        1.0, 0.04 * vce_span
+                    ):
+                        problems.append("Ic_off_max A未落在Vce抬升前Base稳定带")
+                    ic_span = max(
+                        abs(float(result.turn_off.ic_off_max) - float(expected_ic_base)),
+                        1.0,
+                    )
+                    if abs(float(cursor_ic[expected_b_idx]) - float(expected_ic_base)) > max(
+                        1.0, 0.04 * ic_span
+                    ):
+                        problems.append("Ic_off_max B未落在抬升前Base稳定带")
+                    if min_y is None or not _short_values_close(
+                        float(min_y), float(expected_ic_base), floor=1e-8
+                    ):
+                        problems.append("Ic_off_max Hb未绑定Ic Base稳定值")
+                    if peak_y is None or not _short_values_close(
+                        abs(float(peak_y)),
+                        float(result.turn_off.ic_off_max),
+                        floor=1e-8,
+                    ):
+                        problems.append("Ic_off_max Ha未绑定提取结果最大值")
+                    fall_window = turn_off_ic_fall_window(
+                        t,
+                        chan["vge"],
+                        result.segments.turn_off[0],
+                        result.segments.turn_off[1],
+                        result.segments.pulse1_on,
+                        result.segments.pulse1_off,
+                        result.segments.pulse2_on,
+                        bundle.dt,
+                        mw.cfg,
+                    )
+                    fall0, fall1 = (
+                        fall_window
+                        if fall_window is not None
+                        else result.segments.turn_off
+                    )
+                    authoritative_peak_idx = int(fall0) + int(
+                        np.argmax(np.abs(chan["ic"][int(fall0) : int(fall1) + 1]))
+                    )
+                    authoritative_signed_peak = float(
+                        np.copysign(
+                            float(result.turn_off.ic_off_max),
+                            float(cursor_ic[authoritative_peak_idx]) or 1.0,
+                        )
+                    )
+                    actual_ha = (
+                        None
+                        if mw.wave_plot._h_cursor_a is None
+                        else float(
+                            mw.wave_plot._from_disp(
+                                "ic", float(mw.wave_plot._h_cursor_a.value())
+                            )
+                        )
+                    )
+                    actual_hb = (
+                        None
+                        if mw.wave_plot._h_cursor_b is None
+                        else float(
+                            mw.wave_plot._from_disp(
+                                "ic", float(mw.wave_plot._h_cursor_b.value())
+                            )
+                        )
+                    )
+                    if actual_ha is None or not _short_values_close(
+                        actual_ha, authoritative_signed_peak, floor=1e-8
+                    ):
+                        problems.append("Ic_off_max 真实Ha未落在提取峰值电平")
+                    if actual_hb is None or not _short_values_close(
+                        actual_hb, float(expected_ic_base), floor=1e-8
+                    ):
+                        problems.append("Ic_off_max 真实Hb未落在Ic Base电平")
+                    expected_peak_t_us = float(t[authoritative_peak_idx] * 1e6)
+                    if (
+                        mw.wave_plot._cursor_aux_t_us is None
+                        or not _short_values_close(
+                            float(mw.wave_plot._cursor_aux_t_us),
+                            expected_peak_t_us,
+                            floor=1e-9,
+                        )
+                    ):
+                        problems.append("Ic_off_max 峰值标记未落在原提取峰值时刻")
+            if section == "开通" and name == "Ic_on_max":
+                context = mw._turn_on_ic_on_max_cursor_context()
+                if context is None:
+                    problems.append("Ic_on_max Base/Top 稳定光标上下文不可用")
+                else:
+                    expected_a_idx, expected_b_idx, expected_ic_base = context
+                    hb_window, ha_window = turn_on_current_hb_ha_window_indices(
+                        t,
+                        cursor_ic,
+                        result.segments.turn_on[0],
+                        result.segments.turn_on[1],
+                        bundle.dt,
+                        event_end_idx=result.segments.pulse2_off,
+                    )
+                    hb0, hb1 = hb_window
+                    ha0, ha1 = ha_window
+                    if ha0 < 0 or ha1 < ha0:
+                        problems.append("Ic_on_max 电流Top稳定带不可用")
+                    else:
+                        if default_peak_point is not None and int(default_peak_point[0]) <= hb0:
+                            dt_s = max(float(bundle.dt), 1e-15)
+                            hb1 = max(0, int(default_peak_point[0]) - max(1, int(round(30e-9 / dt_s))))
+                            hb0 = max(0, hb1 - max(8, int(round(200e-9 / dt_s))))
+                        if not hb0 <= expected_a_idx <= hb1:
+                            problems.append("Ic_on_max A未落在Ic抬升前Base稳定带")
+                        if expected_b_idx >= result.segments.pulse2_off:
+                            problems.append("Ic_on_max B越过本次开通的下一关断事件")
+                        hb_mid = _plateau_mid_without_isolated_spikes(
+                            cursor_ic[hb0 : hb1 + 1]
+                        )
+                        ha_mid = _plateau_mid_without_isolated_spikes(
+                            cursor_ic[ha0 : ha1 + 1]
+                        )
+                        ic_span = max(
+                            abs(float(result.turn_on.ic_on_max) - float(expected_ic_base)),
+                            1.0,
+                        )
+                        if abs(float(cursor_ic[expected_a_idx]) - float(hb_mid)) > max(
+                            1.0, 0.04 * ic_span
+                        ):
+                            problems.append("Ic_on_max A未落在Ic抬升前Base稳定带")
+                        if abs(float(cursor_ic[expected_b_idx]) - float(ha_mid)) > max(
+                            1.0, 0.04 * ic_span
+                        ):
+                            problems.append("Ic_on_max B未落在电流震荡后Top稳定带")
+                        # B may precede or follow the amplitude-reference
+                        # window; independently inspect the complete band
+                        # around the chosen time, not just a level crossing.
+                        width = max(16, int(round(200e-9 / max(float(bundle.dt), 1e-15))))
+                        band_lo = expected_b_idx - width // 2
+                        band = cursor_ic[band_lo : band_lo + width]
+                        top_band = cursor_ic[ha0 : ha1 + 1]
+                        event_span = max(abs(float(ha_mid) - float(hb_mid)), 1.0)
+                        noise = min(
+                            float(np.percentile(top_band, 95) - np.percentile(top_band, 5)),
+                            0.10 * event_span,
+                        )
+                        width_limit = max(1.35 * noise, 0.075 * event_span)
+                        if len(band) == width and not ha0 <= expected_b_idx <= ha1:
+                            p05, p95 = np.percentile(band, [5, 95])
+                            if (
+                                float(p95 - p05) > width_limit + 1e-9
+                                or float(np.std(band)) > 0.5 * width_limit + 1e-9
+                                or abs(float((p05 + p95) * 0.5) - float(ha_mid))
+                                > max(0.5 * noise, 0.04 * event_span) + 1e-9
+                            ):
+                                problems.append("Ic_on_max B周围完整电流带仍有明显振荡或偏离Top")
+                        if min_y is None or not _short_values_close(
+                            float(min_y), float(expected_ic_base), floor=1e-8
+                        ):
+                            problems.append("Ic_on_max Hb未绑定Ic Base稳定值")
+                        if peak_y is None or not _short_values_close(
+                            abs(float(peak_y)),
+                            float(result.turn_on.ic_on_max),
+                            floor=1e-8,
+                        ):
+                            problems.append("Ic_on_max Ha未绑定提取结果最大值")
             peak_txt = "missing" if peak_y is None else f"{float(peak_y):.1f}"
             min_txt = "missing" if min_y is None else f"{float(min_y):.1f}"
             detail = (
@@ -4111,6 +5660,136 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                             f"≠期望{expected_channel}"
                         )
 
+        captured_focus = _captured_parameter_focus(calls)
+        if focus_only:
+            # Everything above this point audits the parameter's extraction and
+            # measurement semantics.  Keep those diagnostics in the normal
+            # corpus run, but isolate this display-only mode to the requested
+            # X-window composition and visual bindings.  Recheck every display
+            # invariant explicitly after clearing semantic-only diagnostics so
+            # a missing focus/A/B/binding cannot become a false OK.
+            problems.clear()
+            if name == "串扰电压":
+                # This is a display-endpoint contract, not a calculation
+                # diagnostic; focus-only audits must not discard it.
+                problems.extend(crosstalk_display_problems)
+            if mw.result is not result:
+                problems.append("参数点击替换了 result 对象")
+            if (
+                result_before_focus is not None
+                and _audit_state_snapshot(mw.result) != result_before_focus
+            ):
+                problems.append("参数点击改变了 result 内容")
+            if captured_focus is None:
+                problems.append("参数卡未调用 focus_parameter_window_us")
+
+            cursor_a_item = mw.wave_plot._cursor_a
+            cursor_b_item = mw.wave_plot._cursor_b
+            if cursor_a_item is None or cursor_b_item is None:
+                problems.append("参数取景缺少真实 A/B 光标")
+            else:
+                if not cursor_a_item.isVisible():
+                    problems.append("参数取景真实 A 光标不可见")
+                if not cursor_b_item.isVisible():
+                    problems.append("参数取景真实 B 光标不可见")
+                expected_a = expected_binding.get("a_us")
+                expected_b = expected_binding.get("b_us")
+                if expected_a is None or expected_b is None:
+                    problems.append("参数取景调用未声明真实 A/B")
+                else:
+                    if not _short_values_close(
+                        float(cursor_a_item.value()), float(expected_a), floor=1e-7
+                    ):
+                        problems.append("参数取景真实 A 与交互调用不一致")
+                    if not _short_values_close(
+                        float(cursor_b_item.value()), float(expected_b), floor=1e-7
+                    ):
+                        problems.append("参数取景真实 B 与交互调用不一致")
+
+            if expected_endpoint_channels is None:
+                problems.append("参数取景缺少 A/B 通道审计矩阵")
+            else:
+                for role, expected_channel in zip(
+                    ("a", "b"), expected_endpoint_channels, strict=True
+                ):
+                    actual_channel = mw.wave_plot._cursor_endpoint_channel(role)
+                    if actual_channel is None:
+                        problems.append(f"参数取景 {role.upper()} 未绑定波形")
+                    elif actual_channel != expected_channel:
+                        problems.append(
+                            f"参数取景 {role.upper()} 通道={actual_channel}"
+                            f"≠期望{expected_channel}"
+                        )
+                problems.extend(
+                    _audit_waveform_marker_bindings(
+                        mw.wave_plot,
+                        (
+                            str(expected_endpoint_channels[0]),
+                            str(expected_endpoint_channels[1]),
+                        ),
+                    )
+                )
+
+            if expected_horizontal_bindings is None:
+                problems.append("参数取景缺少 Ha/Hb 通道审计矩阵")
+            else:
+                for role, expected_horizontal in zip(
+                    ("ha", "hb"), expected_horizontal_bindings, strict=True
+                ):
+                    expected_channel, expected_valid = expected_horizontal
+                    actual_channel, actual_valid = (
+                        mw.wave_plot._horizontal_cursor_binding(role)
+                    )
+                    if bool(actual_valid) != bool(expected_valid):
+                        problems.append(
+                            f"参数取景 {role.upper()} 有效性={actual_valid}"
+                            f"≠期望{expected_valid}"
+                        )
+                    elif expected_valid and actual_channel != expected_channel:
+                        problems.append(
+                            f"参数取景 {role.upper()} 通道={actual_channel}"
+                            f"≠期望{expected_channel}"
+                        )
+
+        if (section, name) == ("关断过程", "Ic_off_max"):
+            didt_context = result.didt_contexts.get(("关断过程", "di/dt"))
+            base_window = getattr(didt_context, "base_window", None)
+            actual_b_item = mw.wave_plot._cursor_b
+            if base_window is not None and actual_b_item is not None:
+                b0, b1 = (int(base_window[0]), int(base_window[1]))
+                b0 = max(0, min(b0, len(cursor_ic) - 1))
+                b1 = max(b0, min(b1, len(cursor_ic) - 1))
+                signed_base = float(
+                    _plateau_mid_without_isolated_spikes(cursor_ic[b0 : b1 + 1])
+                )
+                actual_b_us = float(actual_b_item.value())
+                actual_b_idx = int(
+                    np.searchsorted(t, actual_b_us * 1e-6, side="left")
+                )
+                actual_b_idx = max(0, min(actual_b_idx, len(t) - 1))
+                # 用户 2026-10-16 拍板「② 关断 B 落点 = 甲 · 稳定抬升前 Base」：
+                # 独立判据改为「B 必须落在 Vce/Ic 主抬升前的稳定 Base 窗内，
+                # 且该处 Ic 电平等于本卡发布的 Base 稳定值」，不再要求 B 位于
+                # Ic 主下降后的首个稳定带。旧的「下降后首个完整 Base 稳定窗」
+                # 不可满足情形（历史 15 条 FAIL）随之不再计为 FAIL。
+                span = max(
+                    abs(float(result.turn_off.ic_off_max) - signed_base), 1.0
+                )
+                if not b0 <= actual_b_idx <= b1:
+                    problems.append(
+                        "Ic_off_max B未落在抬升前Base稳定窗: "
+                        f"实际={actual_b_us:.6f}us "
+                        f"窗=[{float(t[b0]) * 1e6:.6f},{float(t[b1]) * 1e6:.6f}]us"
+                    )
+                elif abs(float(cursor_ic[actual_b_idx]) - signed_base) > max(
+                    1.0, 0.04 * span
+                ):
+                    problems.append(
+                        "Ic_off_max B处Ic偏离抬升前Base稳定值: "
+                        f"{float(cursor_ic[actual_b_idx]):.3f}A "
+                        f"vs {signed_base:.3f}A"
+                    )
+
         # Real-operation guard: users single/double-click other channels to
         # raise or highlight traces while inspecting a parameter.  That visual
         # gesture must not steal A/B/Ha/Hb from the parameter's logical source.
@@ -4140,8 +5819,11 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             None,
         )
         if unrelated_trace is not None:
-            mw.wave_plot._raise_trace(unrelated_trace)
-            mw.wave_plot._highlight_trace(unrelated_trace)
+            try:
+                mw.wave_plot._raise_trace(unrelated_trace)
+                mw.wave_plot._highlight_trace(unrelated_trace)
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"异通道高亮异常: {exc!r}")
             after_a_channel = mw.wave_plot._cursor_endpoint_channel("a")
             after_b_channel = mw.wave_plot._cursor_endpoint_channel("b")
             after_ha_binding = mw.wave_plot._horizontal_cursor_binding("ha")
@@ -4169,10 +5851,17 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 problems.append(
                     f"异通道高亮后活动源={after_active_channel}≠原{before_active_channel}"
                 )
+        if (
+            focus_only
+            and result_before_focus is not None
+            and _audit_state_snapshot(mw.result) != result_before_focus
+        ):
+            problems.append("异通道高亮后改变了 result 内容")
+        if focus_only and mw.result is not result:
+            problems.append("异通道高亮后替换了 result 对象")
 
         xr = mw.wave_plot.current_x_range_us()
         full_x = mw.wave_plot._full_x_range
-        captured_focus = _captured_parameter_focus(calls)
         if xr is None or full_x is None:
             problems.append("参数局部视窗不可用")
         else:
@@ -4188,7 +5877,14 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             if span < min(2.0, full_span) - 0.02:
                 problems.append(f"局部视窗过窄: {span:.3f}us")
             if captured_focus is not None:
-                anchor_us, required_times_us, expected_fraction = captured_focus
+                (
+                    anchor_us,
+                    required_times_us,
+                    expected_fraction,
+                    prefer_right_room,
+                    _composition_anchor_us,
+                    _composition_balance_fraction,
+                ) = _normalize_captured_parameter_focus(captured_focus)
                 for required_us in required_times_us:
                     if required_us < x0 - 1e-6 or required_us > x1 + 1e-6:
                         problems.append(
@@ -4199,13 +5895,55 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     (x0, x1),
                     (full_x0, full_x1),
                     captured_focus,
+                    minimum_span_us=_captured_parameter_minimum_span_us(calls),
+                    parameter_key=(section, name),
                 )
                 if geometry_problem is not None:
                     problems.append(geometry_problem)
+                focus_cursor_a = (
+                    None
+                    if mw.wave_plot._cursor_a is None
+                    else float(mw.wave_plot._cursor_a.value())
+                )
+                focus_cursor_b = (
+                    None
+                    if mw.wave_plot._cursor_b is None
+                    else float(mw.wave_plot._cursor_b.value())
+                )
+                primary_event_us = _authoritative_primary_event_us(
+                    mw,
+                    section,
+                    name,
+                    t,
+                    chan,
+                    result,
+                    focus_cursor_a,
+                    focus_cursor_b,
+                )
+                primary_problem = _parameter_primary_event_geometry_problem(
+                    (x0, x1),
+                    (full_x0, full_x1),
+                    captured_focus,
+                    primary_event_us,
+                )
+                if primary_problem is not None:
+                    problems.append(primary_problem)
                 detail += (
                     f" focus_anchor={anchor_us:.3f}"
                     f" required={required_times_us}"
+                    f" right_priority={prefer_right_room}"
                 )
+                if primary_event_us is not None and np.isfinite(
+                    float(primary_event_us)
+                ):
+                    detail += f" primary_raw={float(primary_event_us):.3f}"
+                auxiliary_event_us = getattr(
+                    mw.wave_plot, "_cursor_aux_t_us", None
+                )
+                if auxiliary_event_us is not None and np.isfinite(
+                    float(auxiliary_event_us)
+                ):
+                    detail += f" primary_marker={float(auxiliary_event_us):.3f}"
             cursor_a = None
             cursor_b = None
             has_real_slope_ab = turn_off_slope_crossing_full is not False
@@ -4316,7 +6054,11 @@ def run_all() -> list[tuple]:
             QSettings.Format.IniFormat,
         )
         try:
-            for path in _selected_sample_waveforms(ROOT):
+            sample_root_text = os.environ.get("DPT_VALIDATE_SAMPLE_ROOT", "").strip()
+            sample_root = Path(sample_root_text) if sample_root_text else ROOT
+            if not sample_root.is_dir():
+                raise FileNotFoundError(f"TSS 语料根目录不存在: {sample_root}")
+            for path in _selected_sample_waveforms(sample_root):
                 if _is_short_circuit_sample(path):
                     if os.environ.get("DPT_VALIDATE_CURSOR_METRIC", "").strip():
                         continue
