@@ -256,6 +256,14 @@ class TestGuiCursorBinding(unittest.TestCase):
   Qt 在 unittest 同进程内不易干净退出，故用最多 4 个 TSS 的独立子进程
   分批运行审计脚本。既隔离 Qt 事件循环和累计资源，又能在脚本非零退出时
   给出对应批次的失败矩阵。
+
+  语料根显式钉到仓库内真实语料目录 ``示例文件``（2026-10-16 修复）：审计脚本
+  缺省以**仓库根**为语料根，会对整仓 ``rglob`` 并逐个 zip 嗅探 ``.tss``。本机
+  实测缺省根发现 1464 个 ``.tss``（其中 976 个是 ``.tmp`` 下的语料副本）耗时
+  ``169.8s``，钉根后为 488 个真实语料、``0.6s``。该固定开销此前把每批 180s
+  超时吃满（历史实测 172.4 / 176.6 / 180.9 / 181.4s），并会把 ``.tmp`` 副本
+  当作审计对象（实测 13 个代表样例全部命中 ``.tmp`` 副本）。钉根只改变“去哪
+  里找语料”，不改变审计项、超时阈值、参数数值与光标落点。
   """
 
   def test_all_parameter_cursors_bind_correct_waveform(self) -> None:
@@ -273,11 +281,15 @@ class TestGuiCursorBinding(unittest.TestCase):
       from scripts.validate_gui_cursors import DEFAULT_SAMPLE_FRAGMENTS
 
       script = ROOT / "scripts" / "validate_gui_cursors.py"
+      sample_root = ROOT / "示例文件"
       batch_size = 4
       batch_outputs: list[str] = []
       for offset in range(0, len(DEFAULT_SAMPLE_FRAGMENTS), batch_size):
           env = dict(os.environ)
           env.setdefault("QT_QPA_PLATFORM", "offscreen")
+          if sample_root.is_dir():
+              # 见类文档：避免整仓遍历与 .tmp 语料副本被当作审计对象。
+              env["DPT_VALIDATE_SAMPLE_ROOT"] = str(sample_root)
           env["DPT_VALIDATE_CURSOR_OFFSET"] = str(offset)
           env["DPT_VALIDATE_CURSOR_LIMIT"] = str(batch_size)
           env["DPT_VALIDATE_CURSOR_SUMMARY_ONLY"] = "1"
