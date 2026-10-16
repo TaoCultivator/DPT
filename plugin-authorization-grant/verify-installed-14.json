@@ -1,0 +1,64 @@
+{
+  "root": "C:/Users/songzhenxi/.dsh/profiles/desktop/node_modules/dsh-task-board",
+  "modules": 8,
+  "files": [
+    {
+      "module": "lib/index.js",
+      "liveSha256": "a2de72980a5c",
+      "manifestMatches": true,
+      "candidateMatches": true
+    },
+    {
+      "module": "lib/client.js",
+      "liveSha256": "a549429ea681",
+      "manifestMatches": true,
+      "candidateMatches": true
+    },
+    {
+      "module": "lib/scheduler-core.mjs",
+      "liveSha256": "ce9aee55cda3",
+      "manifestMatches": true,
+      "candidateMatches": true
+    },
+    {
+      "module": "lib/host-adapter.mjs",
+      "liveSha256": "8ea53217208c",
+      "manifestMatches": true,
+      "candidateMatches": true
+    },
+    {
+      "module": "lib/failure-resolution.mjs",
+      "liveSha256": "6f4ec07f2038",
+      "manifestMatches": true,
+      "candidateMatches": true
+    },
+    {
+      "module": "lib/bounded-write.mjs",
+      "liveSha256": "f15b2c3e51de",
+      "manifestMatches": true,
+      "candidateMatches": true
+    },
+    {
+      "module": "lib/review-interruption.mjs",
+      "liveSha256": "8a3a262d9f02",
+      "manifestMatches": true,
+      "candidateMatches": true
+    },
+    {
+      "module": "lib/restart-recovery.mjs",
+      "liveSha256": "8d5d659b0887",
+      "manifestMatches": true,
+      "candidateMatches": true
+    }
+  ],
+  "allHashesMatch": true,
+  "changedModules": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/failure-resolution.mjs"
+  ],
+  "liveSuitePassed": true,
+  "liveSuitePassedCount": 14,
+  "verifiedAt": "2026-10-16T03:54:48.537Z",
+  "restartRequired": true
+}

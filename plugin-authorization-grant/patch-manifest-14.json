@@ -1,0 +1,46 @@
+{
+  "purpose": "授权类挂起新增“用户授权确认”通道（grantAuthorization：界面人工点击专用 + 同一失败指纹只放行一次；详情页与受阻列表的解锁入口改为调出确认）",
+  "baseline": [
+    {
+      "relative": "lib/index.js",
+      "originalSha256": "2c1523a4ff49a236c7aeed1c133bb887214ed243c98edacb5accc782b4995303",
+      "candidateSha256": "a2de72980a5cca646a2cc4327e5341516f1976a708390ede43aedec0f9ee38f4"
+    },
+    {
+      "relative": "lib/client.js",
+      "originalSha256": "e5e94801e08e791a73a9ab02496b36417bbf79e4622939e88f78cbec6d4b7777",
+      "candidateSha256": "a549429ea6810dfa490c9a2d56779fe5c9781372ef7d64bfcbf439a30a21f0ad"
+    },
+    {
+      "relative": "lib/scheduler-core.mjs",
+      "originalSha256": "ce9aee55cda361ab6c2dfa3b68658b13b4ff43378cb01ca1113ebda5d5d5af29",
+      "candidateSha256": "ce9aee55cda361ab6c2dfa3b68658b13b4ff43378cb01ca1113ebda5d5d5af29"
+    },
+    {
+      "relative": "lib/host-adapter.mjs",
+      "originalSha256": "8ea53217208ccfbbac25075ded4f6716cf98950d0bf90abd120d6d9c59868a85",
+      "candidateSha256": "8ea53217208ccfbbac25075ded4f6716cf98950d0bf90abd120d6d9c59868a85"
+    },
+    {
+      "relative": "lib/failure-resolution.mjs",
+      "originalSha256": "ca70295c8262d99246c2ec16f11696a8e4b58793a882ed398a811618e9656ad5",
+      "candidateSha256": "6f4ec07f2038d4289576e9bf0b4ded35e3e30ba0a47123be1c78cdb4c1581336"
+    },
+    {
+      "relative": "lib/bounded-write.mjs",
+      "originalSha256": "f15b2c3e51de57b1fec07d979c0de5f0dff0a391fb191989739adef2b5cd091b",
+      "candidateSha256": "f15b2c3e51de57b1fec07d979c0de5f0dff0a391fb191989739adef2b5cd091b"
+    },
+    {
+      "relative": "lib/review-interruption.mjs",
+      "originalSha256": "8a3a262d9f029168e50e293965ad4a6302450917aa667f48f5b35e112786e601",
+      "candidateSha256": "8a3a262d9f029168e50e293965ad4a6302450917aa667f48f5b35e112786e601"
+    },
+    {
+      "relative": "lib/restart-recovery.mjs",
+      "originalSha256": "8d5d659b08872f202fe901d62c3c5a46b9d8dd2868ab58abf03ee108ee1ccb9a",
+      "candidateSha256": "8d5d659b08872f202fe901d62c3c5a46b9d8dd2868ab58abf03ee108ee1ccb9a"
+    }
+  ],
+  "createdAt": "2026-10-16T03:54:06.537Z"
+}

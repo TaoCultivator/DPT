@@ -1,0 +1,123 @@
+{
+  "candidate": "candidate-14",
+  "suite": "test14.mjs",
+  "mutants": 8,
+  "results": [
+    {
+      "mutant": "去掉来源校验（agent 也能解锁授权类挂起）",
+      "mustNotPass": "① 端到端：无交互标记的调用被来源校验拒绝",
+      "caught": true,
+      "exitCode": 1,
+      "passedTests": [
+        "①-纯规则：grantAuthorization 只认授权类挂起，放行一次并留下授权记账",
+        "②-纯规则：令牌/确认/说明/依赖缺一不可，且不得成为其他失败类别的后门",
+        "③-纯规则：同一 failureToken 只放行一次，换新指纹可以再次授权",
+        "① 端到端：agent 没有调用入口（动态工具里不存在授权解锁）"
+      ],
+      "firstUnpassed": "① 端到端：无交互标记的调用被来源校验拒绝；缺人工确认标记的调用也被拒；状态不被改写",
+      "detail": "AssertionError [ERR_ASSERTION]: agent 直连（无交互标记）必须被拒\r"
+    },
+    {
+      "mutant": "给 agent 补一个授权解锁工具（等于把通道开放给 agent）",
+      "mustNotPass": "① 端到端：agent 没有调用入口",
+      "caught": true,
+      "exitCode": 1,
+      "passedTests": [
+        "①-纯规则：grantAuthorization 只认授权类挂起，放行一次并留下授权记账",
+        "②-纯规则：令牌/确认/说明/依赖缺一不可，且不得成为其他失败类别的后门",
+        "③-纯规则：同一 failureToken 只放行一次，换新指纹可以再次授权"
+      ],
+      "firstUnpassed": "① 端到端：agent 没有调用入口（动态工具里不存在授权解锁）",
+      "detail": "AssertionError [ERR_ASSERTION]: 不得给 agent 注册授权解锁工具：kanban_list_issues、kanban_create_issue、kanban_update_issue、kanban_move_issue、kanban_start_batch、kanban_accept"
+    },
+    {
+      "mutant": "不校验 failureToken（过期授权可以反复套用）",
+      "mustNotPass": "③ 端到端：failureToken 不匹配被拒",
+      "caught": true,
+      "exitCode": 1,
+      "passedTests": [
+        "①-纯规则：grantAuthorization 只认授权类挂起，放行一次并留下授权记账"
+      ],
+      "firstUnpassed": "②-纯规则：令牌/确认/说明/依赖缺一不可，且不得成为其他失败类别的后门",
+      "detail": "AssertionError [ERR_ASSERTION]: Missing expected exception.\r"
+    },
+    {
+      "mutant": "不要求人工确认标记（程序化调用也能放行）",
+      "mustNotPass": "① 端到端：无交互标记的调用被来源校验拒绝",
+      "caught": true,
+      "exitCode": 1,
+      "passedTests": [
+        "①-纯规则：grantAuthorization 只认授权类挂起，放行一次并留下授权记账"
+      ],
+      "firstUnpassed": "②-纯规则：令牌/确认/说明/依赖缺一不可，且不得成为其他失败类别的后门",
+      "detail": "AssertionError [ERR_ASSERTION]: Missing expected exception.\r"
+    },
+    {
+      "mutant": "去掉一次性限制（点一次永久放行）",
+      "mustNotPass": "④ 端到端：同一 failureToken 第二次确认被拒",
+      "caught": true,
+      "exitCode": 1,
+      "passedTests": [
+        "①-纯规则：grantAuthorization 只认授权类挂起，放行一次并留下授权记账",
+        "②-纯规则：令牌/确认/说明/依赖缺一不可，且不得成为其他失败类别的后门"
+      ],
+      "firstUnpassed": "③-纯规则：同一 failureToken 只放行一次，换新指纹可以再次授权",
+      "detail": "AssertionError [ERR_ASSERTION]: Missing expected exception.\r"
+    },
+    {
+      "mutant": "只改状态不解除 hold（回到 todo 也调不动）",
+      "mustNotPass": "② 端到端：放回队列后能被调度器正常领取",
+      "caught": true,
+      "exitCode": 1,
+      "passedTests": [],
+      "firstUnpassed": "①-纯规则：grantAuthorization 只认授权类挂起，放行一次并留下授权记账",
+      "detail": "AssertionError [ERR_ASSERTION]: 必须解除 hold，否则调度器仍然不认（eligible 会排除 hold）\r"
+    },
+    {
+      "mutant": "界面「解除阻塞」继续复用 moveIssue（事故现场：必被 retryGuard 拦下）",
+      "mustNotPass": "⑥-界面：受阻列表的「解除阻塞」对授权类不再走 moveIssue",
+      "caught": true,
+      "exitCode": 1,
+      "passedTests": [
+        "①-纯规则：grantAuthorization 只认授权类挂起，放行一次并留下授权记账",
+        "②-纯规则：令牌/确认/说明/依赖缺一不可，且不得成为其他失败类别的后门",
+        "③-纯规则：同一 failureToken 只放行一次，换新指纹可以再次授权",
+        "① 端到端：agent 没有调用入口（动态工具里不存在授权解锁）",
+        "① 端到端：无交互标记的调用被来源校验拒绝；缺人工确认标记的调用也被拒；状态不被改写",
+        "⑤ 端到端：授权类挂起的既有防线不变（moveIssue / retryIssue / resolveFailure 全部仍被拒）",
+        "③ 端到端：failureToken 不匹配被拒（拒绝过期授权）",
+        "② 端到端：界面确认后任务回到待执行队列，评论/活动流/授权记账/落盘齐全",
+        "② 端到端：放回队列后能被调度器正常领取（不是只改状态）",
+        "④ 端到端：同一 failureToken 第二次确认被拒；新的失败指纹可以再次获得授权",
+        "全程无宿主错误日志",
+        "⑥-界面：client.js 语法通过，且交互标记与授权确认组件已接线",
+        "⑥-界面：确认面板的渲染与提交契约（未勾选不可提交，勾选后带 confirmed 提交）"
+      ],
+      "firstUnpassed": "⑥-界面：受阻列表的「解除阻塞」对授权类不再走 moveIssue，改为调出确认面板",
+      "detail": "AssertionError [ERR_ASSERTION]: 授权类的解锁按钮不得再调用 moveIssue（一定会被 retryGuard 拦下）\r"
+    },
+    {
+      "mutant": "界面不再携带交互标记（服务端来源校验会拒掉所有界面授权）",
+      "mustNotPass": "⑥-界面：client.js 语法通过",
+      "caught": true,
+      "exitCode": 1,
+      "passedTests": [
+        "①-纯规则：grantAuthorization 只认授权类挂起，放行一次并留下授权记账",
+        "②-纯规则：令牌/确认/说明/依赖缺一不可，且不得成为其他失败类别的后门",
+        "③-纯规则：同一 failureToken 只放行一次，换新指纹可以再次授权",
+        "① 端到端：agent 没有调用入口（动态工具里不存在授权解锁）",
+        "① 端到端：无交互标记的调用被来源校验拒绝；缺人工确认标记的调用也被拒；状态不被改写",
+        "⑤ 端到端：授权类挂起的既有防线不变（moveIssue / retryIssue / resolveFailure 全部仍被拒）",
+        "③ 端到端：failureToken 不匹配被拒（拒绝过期授权）",
+        "② 端到端：界面确认后任务回到待执行队列，评论/活动流/授权记账/落盘齐全",
+        "② 端到端：放回队列后能被调度器正常领取（不是只改状态）",
+        "④ 端到端：同一 failureToken 第二次确认被拒；新的失败指纹可以再次获得授权",
+        "全程无宿主错误日志"
+      ],
+      "firstUnpassed": "⑥-界面：client.js 语法通过，且交互标记与授权确认组件已接线",
+      "detail": "AssertionError [ERR_ASSERTION]: 每次 RPC 必须携带界面交互标记（grantAuthorization 的来源校验依赖它）\r"
+    }
+  ],
+  "allCaught": true,
+  "note": "把候选改回本轮事故的错误实现/去掉来源校验与一次性限制/界面复用 moveIssue，要求对应用例必须判负；仍然全绿即视为用例无效"
+}
