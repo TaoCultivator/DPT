@@ -44,7 +44,7 @@ validation:
   - `docs/REGRESSION_BASELINES.md:790`（2026-10-16 现行边界）与 `main_window.py:10483-10489` 代码注释互为佐证：乙口径已被用户拍板否决；该处同时把 `B=11.644us` 锚点降级为历史追溯
   - **对齐后复跑（2026-10-16 第二轮）**：同一命令 `1 passed in 4.05s`（日志 `.tmp/dg90/pytest_after.log`），对齐前基线 `.tmp/dg90/pytest_before.log` 为 `1 failed in 4.38s`
   - **甲口径落点只读探针**（`.tmp/dg90/probe_ic_off_max.py` / `.log`）：`a_us=10.868160`、`b_us=13.083520`、`peak_us=11.210400`、`signed_base=3.15234375`、`|signed_peak|=50.90625`、`base_window=[12.990240,13.190160]us`（B 在窗内且 `ic[b]=3.15625A` ≈ Base 电平）、`x_range=[10.848160,13.348160]us`（`A 8.0%`、`B 89.4%`）；发布值 `turn_off.ic_off_max=50.90625` 未变
-  - 全量 pytest 复跑（对齐后，主工作树）：见 `.tmp/dg90/pytest_full.log`
+  - 全量 pytest **本轮未跑完**（如实声明）：授权后曾启动一次全量，实测速率约 `10%/13min`（>2h 不可完成），按本议题执行须知第 6 条「只跑相关测试文件，不要重复跑全量」中止，日志 `.tmp/dg90/pytest_full_ABORTED.log`（**不得当作全量基线**）；改以定向作用域替代——同文件同测试类 `test_gui_smoke.py::TestWaveformPlotSmoke`：`45 passed, 3 skipped, 14 subtests passed in 615.38s`（exit 0，`.tmp/dg90/pytest_class_scope.log`），同文件 `-k ic_off_max`：`5 passed, 210 deselected in 37.42s`（`.tmp/dg90/pytest_ic_off_max_scope.log`）。上一次可信全量基线仍为同日 `1 failed, 909 passed`（唯一红项即本用例）
 reinforcement:
   subject: 已拍板口径与只存在于未提交工作树的回归期望冲突时，先取证并向用户取当次拍板；拿到当次授权后按已拍板口径对齐过期期望，不为转绿改动生产数值
   reward_level: R2
@@ -117,7 +117,7 @@ AssertionError: 13.083520000018307 != 11.641 within 0.03 delta (1.44252000001830
   2. 新增甲口径**语义**断言：`b_us` 必须落在 `result.didt_contexts[("关断过程","di/dt")].base_window` 的时间区间内（落点语义，不只锚数字）；
   3. 随乙口径失效的构图断言 `(a−x0)/span≈0.20`、`(b−x0)/span≈0.50` 更新为甲口径实测 `0.008`/`0.894`（±0.01），并加 `a_us ≥ x0`、`b_us ≤ x1` 的包含性断言；
   4. `a_us≈10.884`、`a<peak<b`、`|signed_peak|`、`signed_base`、纵向 Ha/Hb 绑定与「结果对象未被改写」等断言**原样保留**。
-- 验证：对齐前 `1 failed in 4.38s` → 对齐后 `1 passed in 4.05s`（`.tmp/dg90/pytest_before.log` / `pytest_after.log`）；甲口径全量重建见 `.tmp/dg90/probe_ic_off_max.log`。
+- 验证：对齐前 `1 failed in 4.38s` → 对齐后 `1 passed in 4.05s`（`.tmp/dg90/pytest_before.log` / `pytest_after.log`）；同文件同测试类 `TestWaveformPlotSmoke` 复跑 `45 passed, 3 skipped, 14 subtests passed`（`.tmp/dg90/pytest_class_scope.log`，exit 0）；甲口径全量重建见 `.tmp/dg90/probe_ic_off_max.log`。**全量 pytest 本轮未跑完**（速率 `≈10%/13min`，按执行须知第 6 条中止，日志标 `_ABORTED`，不得当基线）。
 - 仍未做（交发布迭代）：该文件的**提交**（提交范围 ③ 未定案，本条禁止单独提交该文件）；全量 pytest 与全语料光标审计的发布门槛见 `docs/REGRESSION_BASELINES.md`「2026-10-16 诊断处置」节。
 
 ```text
