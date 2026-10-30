@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -92,6 +93,40 @@ SONG_SMC_HT_20260717_UH_1048 = (
     / "HT"
     / "UH_750V_1048A_000.tss"
 )
+SONG_SMC_RT_20260717_UH_806 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260717"
+    / "SMC"
+    / "RT"
+    / "UH_750V_806A_000.tss"
+)
+SONG_SMC_RT_20260717_UH_1048 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260717"
+    / "SMC"
+    / "RT"
+    / "UH_750V_1048A_000.tss"
+)
+ZHONGBAN_RT_WH_400_50 = Path(
+    os.environ.get(
+        "DPT_ZHONGBAN_POINT_SAMPLE",
+        r"F:\JinMai\双脉冲数据处理\songzhenxi\MCU25T8\SMC\zhongban\RT\WH_400V_50A_Rgon4_Rgoff9_000.tss",
+    )
+)
+SONG_20260819_GOLDEN_REPORT = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260717"
+    / "MCU25S2_20260819_功率模块动态测试规范及数据记录.xlsx"
+)
 OTHER_360A = ROOT / "示例文件" / "其他数据" / "360A.tss"
 SONG_DCU_RT_WL_480_1000 = (
     ROOT
@@ -114,6 +149,24 @@ SONG_DCU_LT_WH_450_800 = (
     / "LT"
     / "tss"
     / "WH_450V_800A_000.tss"
+)
+SONG_DCU_LT_WH_480_50 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2506"
+    / "DCU"
+    / "SMC"
+    / "LT"
+    / "tss"
+    / "WH_480V_50A_000.tss"
+)
+LIYAWEI_AP_UL_880_35_ERR = (
+    ROOT
+    / "示例文件"
+    / "liyawei"
+    / "PCU2682"
+    / "AP_UL_880V_35A_RT_ERR_000.tss"
 )
 SONG_DCU_LT_WH_530_800 = (
     ROOT
@@ -742,11 +795,11 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 ("关断过程", "Toff"): ("vge", "ic"),
                 ("关断过程", "Td_off"): ("vge", "ic"),
                 ("关断过程", "Tf"): ("ic", "ic"),
-                ("关断过程", "Ic_off_max"): ("vge", "vge"),
+                ("关断过程", "Ic_off_max"): ("vce", "ic"),
                 ("关断过程", "Vce_off_max"): ("vce", "vce"),
-                ("开通", "Vce_on_max"): ("vge", "vce"),
+                ("开通", "Vce_on_max"): ("vce", "vce"),
                 ("反向恢复", "Vrr"): ("v_diode", "v_diode"),
-                ("开通", "Ic_on_max"): ("ic", "vce"),
+                ("开通", "Ic_on_max"): ("ic", "ic"),
                 ("短路过程", "应力Vpeak_本管"): ("vge", "vge"),
                 ("短路过程", "应力Vpeak_对管"): ("vge", "vge"),
             }
@@ -3579,7 +3632,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
                 )
         win.close()
 
-    def test_parameter_window_solver_is_bounded_and_reserves_post_event_room(self):
+    def test_parameter_window_solver_prefers_200ns_and_expands_only_for_content(self):
         from dpt_extractor.gui.waveform_plot import (
             PARAM_FOCUS_ANCHOR_FRACTION,
             _solve_parameter_x_window,
@@ -3614,8 +3667,9 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             PARAM_FOCUS_ANCHOR_FRACTION,
         )
 
-        # A required point before the preferred 12% anchor must shift the
-        # composition right instead of inflating a valid 200 ns/div window.
+        # A stable-platform/cursor envelope that still fits the 2 us baseline
+        # shifts the composition instead of widening just to reserve blank
+        # post-event space.
         conflict0, conflict1 = _solve_parameter_x_window(
             (0.0, 30.0),
             14.451282777854443,
@@ -3630,6 +3684,71 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             (14.451282777854443 - conflict0) / (conflict1 - conflict0),
             PARAM_FOCUS_ANCHOR_FRACTION,
         )
+
+        # A later real cursor may use more of the 200 ns/div view.  That is
+        # preferable to changing the timebase when the event anchor and cursor
+        # already fit together.
+        delayed0, delayed1 = _solve_parameter_x_window(
+            (0.0, 25.0),
+            10.0,
+            (11.272, 11.316),
+            base_span_us=2.0,
+            guard_us=0.02,
+        )
+        delayed_span = delayed1 - delayed0
+        self.assertAlmostEqual(delayed_span, 2.0, places=9)
+        self.assertAlmostEqual(
+            (10.0 - delayed0) / delayed_span,
+            PARAM_FOCUS_ANCHOR_FRACTION,
+            places=9,
+        )
+        self.assertGreaterEqual(delayed1, 11.316 + 0.02)
+
+        # Non-gate right-priority focus allocates a fraction of the *remaining*
+        # room, never a fixed 0.4 us prefix.  A wider real physical envelope
+        # automatically consumes more of the left side while the timebase
+        # stays at 200 ns/div.
+        short_stage0, short_stage1 = _solve_parameter_x_window(
+            (0.0, 20.0),
+            5.085,
+            (5.0, 5.17),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        long_stage0, long_stage1 = _solve_parameter_x_window(
+            (0.0, 20.0),
+            5.36,
+            (5.0, 5.72),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        self.assertAlmostEqual(short_stage1 - short_stage0, 2.0, places=9)
+        self.assertAlmostEqual(long_stage1 - long_stage0, 2.0, places=9)
+        short_left_room = 5.0 - short_stage0
+        long_left_room = 5.0 - long_stage0
+        self.assertGreater(short_left_room, long_left_room)
+        self.assertLessEqual((5.17 - short_stage0) / 2.0, 0.50 + 1e-9)
+        self.assertLessEqual((5.72 - long_stage0) / 2.0, 0.50 + 1e-9)
+        self.assertGreater(short_stage1 - 5.17, short_left_room)
+        self.assertGreater(long_stage1 - 5.72, long_left_room)
+
+        # If the hard envelope itself occupies more than half of the 2 us
+        # baseline, keep that timebase and compress the prefix to the earliest
+        # guard instead of widening merely to satisfy the composition target.
+        wide_stage0, wide_stage1 = _solve_parameter_x_window(
+            (0.0, 20.0),
+            5.65,
+            (5.0, 6.30),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        self.assertAlmostEqual(wide_stage1 - wide_stage0, 2.0, places=9)
+        self.assertAlmostEqual(5.0 - wide_stage0, 0.02, places=9)
+        self.assertGreater((6.30 - wide_stage0) / 2.0, 0.50)
+        self.assertGreaterEqual(wide_stage1, 6.30 + 0.02)
 
         far_left0, far_left1 = _solve_parameter_x_window(
             (0.0, 10.0),
@@ -3670,6 +3789,86 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         )
         self.assertAlmostEqual(short0, 2.0, places=9)
         self.assertAlmostEqual(short1, 3.5, places=9)
+
+    def test_parameter_window_solver_right_priority_handles_boundaries_and_hard_content(self):
+        from dpt_extractor.gui.waveform_plot import _solve_parameter_x_window
+
+        # Near either data boundary, keep the same 200 ns/div span and relax
+        # the preferred spare-room split instead of clipping hard points.
+        left0, left1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            0.35,
+            (0.0, 0.70),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        self.assertAlmostEqual(left0, 0.0, places=9)
+        self.assertAlmostEqual(left1, 2.0, places=9)
+
+        right0, right1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            9.60,
+            (9.20, 10.0),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        self.assertAlmostEqual(right0, 8.0, places=9)
+        self.assertAlmostEqual(right1, 10.0, places=9)
+
+        # A complete waveform shorter than the baseline is the only valid
+        # view; right-priority composition must not manufacture extra range.
+        short0, short1 = _solve_parameter_x_window(
+            (2.0, 3.5),
+            2.75,
+            (2.1, 3.4),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        self.assertAlmostEqual(short0, 2.0, places=9)
+        self.assertAlmostEqual(short1, 3.5, places=9)
+
+        # Empty/NaN hard points fall back to the finite anchor and remain
+        # bounded.  Out-of-range hard points are clipped to the actual data
+        # bounds, which makes the full range the only feasible solution.
+        empty0, empty1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            5.0,
+            (float("nan"),),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        self.assertGreaterEqual(empty0, 0.0)
+        self.assertLessEqual(empty1, 10.0)
+        self.assertAlmostEqual(empty1 - empty0, 2.0, places=9)
+
+        clipped0, clipped1 = _solve_parameter_x_window(
+            (0.0, 10.0),
+            float("nan"),
+            (-5.0, float("nan"), 15.0),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        self.assertAlmostEqual(clipped0, 0.0, places=9)
+        self.assertAlmostEqual(clipped1, 10.0, places=9)
+
+        # Only the hard envelope may expand the 200 ns/div baseline.  The
+        # 2.25 us guarded envelope rounds upward to the next 50 ns/div step.
+        wide0, wide1 = _solve_parameter_x_window(
+            (0.0, 20.0),
+            6.105,
+            (5.0, 7.21),
+            base_span_us=2.0,
+            guard_us=0.02,
+            prefer_right_room=True,
+        )
+        self.assertAlmostEqual(wide1 - wide0, 2.5, places=9)
+        self.assertLessEqual(wide0, 4.98 + 1e-9)
+        self.assertGreaterEqual(wide1, 7.23 - 1e-9)
 
     def test_short_report_skips_desat_screenshot_without_value_or_channel(self):
         from dpt_extractor.export.report_template import SHORT_REPORT_IMAGE_PARAMS
@@ -4531,7 +4730,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         self.assertNotIn("CH1", win.bundle.meta.channel_unit_overrides)
         win.close()
 
-    def test_parameter_max_default_intervals_use_algorithm_windows(self):
+    def test_parameter_max_default_intervals_use_stable_platform_ranges(self):
         import numpy as np
 
         os.environ["LOCALAPPDATA"] = str(ROOT / ".tmp" / "localappdata")
@@ -4607,29 +4806,38 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
         on_ic = win._parameter_max_interval_indices(on, "Ic_on_max")
         on_vce = win._parameter_max_interval_indices(on, "Vce_on_max")
         rr_irr = win._parameter_max_interval_indices(rr, "Irr")
+        rr_vrr = win._parameter_max_interval_indices(rr, "Vrr")
 
         self.assertIsNotNone(off_ic)
         self.assertIsNotNone(off_vce)
         self.assertIsNotNone(on_ic)
         self.assertIsNotNone(on_vce)
         self.assertIsNotNone(rr_irr)
-        assert off_ic is not None and off_vce is not None and on_ic is not None and on_vce is not None and rr_irr is not None
+        self.assertIsNotNone(rr_vrr)
+        assert off_ic is not None and off_vce is not None
+        assert on_ic is not None and on_vce is not None
+        assert rr_irr is not None and rr_vrr is not None
 
-        self.assertLess(off_ic[1], segs.turn_off[1])
-        self.assertGreater(off_vce[0], segs.turn_off[0])
-        self.assertLess(off_vce[1], segs.turn_off[1])
-        self.assertLess(
-            off_vce[1] - off_vce[0],
-            segs.turn_off[1] - segs.turn_off[0],
-        )
-        self.assertLessEqual(off_vce[0], int(np.argmax(vce)))
-        self.assertGreaterEqual(off_vce[1], int(np.argmax(vce)))
-        self.assertGreater(on_ic[0], segs.turn_on[0])
-        self.assertLess(on_vce[1], segs.turn_on[1])
-        self.assertEqual(
-            rr_irr,
-            (max(segs.reverse_recovery[0], segs.pulse2_on), segs.turn_on[1] - 1),
-        )
+        off_vce_context = win._turn_off_vce_stable_cursor_context()
+        on_ic_context = win._turn_on_ic_on_max_cursor_context()
+        on_vce_context = win._turn_on_vce_on_max_cursor_context()
+        rr_irr_context = win._rr_irr_cursor_context()
+        rr_vrr_context = win._rr_vrr_cursor_context()
+        self.assertIsNotNone(off_vce_context)
+        self.assertIsNotNone(on_ic_context)
+        self.assertIsNotNone(on_vce_context)
+        self.assertIsNotNone(rr_irr_context)
+        self.assertIsNotNone(rr_vrr_context)
+        assert off_vce_context is not None and on_ic_context is not None
+        assert on_vce_context is not None and rr_irr_context is not None
+        assert rr_vrr_context is not None
+        self.assertEqual(off_vce, off_vce_context[:2])
+        self.assertEqual(on_ic, on_ic_context[:2])
+        self.assertEqual(on_vce, on_vce_context[:2])
+        self.assertEqual(rr_irr, rr_irr_context[:2])
+        self.assertEqual(rr_vrr, rr_vrr_context[:2])
+        for interval in (off_ic, off_vce, on_ic, on_vce, rr_irr, rr_vrr):
+            self.assertLess(interval[0], interval[1])
 
         for section, name, idx in (
             (off, "Ic_off_max", off_ic),
@@ -4637,6 +4845,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             (on, "Ic_on_max", on_ic),
             (on, "Vce_on_max", on_vce),
             (rr, "Irr", rr_irr),
+            (rr, "Vrr", rr_vrr),
         ):
             iv = win._parameter_interval_us(section, name)
             self.assertIsNotNone(iv)
@@ -6398,11 +6607,64 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         self.assertAlmostEqual(td_iv[1], tr_iv[0], places=3)
         self.assertAlmostEqual(ton_iv[1], tr_iv[1], places=3)
 
+    @unittest.skipUnless(UH.exists(), "UH sample missing")
+    def test_turn_on_timing_cards_share_ton_local_view(self):
+        from dpt_extractor.config.loader import load_config
+        from dpt_extractor.gui.main_window import MainWindow
+        from PyQt6.QtWidgets import QApplication
+
+        plot, bundle, profile, result = self._load_and_plot(UH)
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+        try:
+            windows: dict[str, tuple[float, float]] = {}
+            for name in ("Ton", "Td_on", "Tr"):
+                win._on_result_value_clicked("开通", name)
+                QApplication.processEvents()
+                current = plot.current_local_x_window_us()
+                self.assertIsNotNone(current)
+                assert current is not None
+                windows[name] = current
+                interval = win._parameter_interval_us("开通", name)
+                self.assertIsNotNone(interval)
+                assert interval is not None
+                self.assertTrue(plot.current_local_x_window_contains_us(*interval))
+
+            for name in ("Td_on", "Tr"):
+                self.assertEqual(windows[name], windows["Ton"])
+
+            ton_window = windows["Ton"]
+            shifted = (ton_window[0] + 0.08, ton_window[1] + 0.08)
+            self.assertTrue(plot.restore_local_x_window_us(shifted))
+            QApplication.processEvents()
+            win._on_result_value_clicked("开通", "Td_on")
+            QApplication.processEvents()
+            self.assertEqual(plot.current_local_x_window_us(), shifted)
+            win._on_result_value_clicked("开通", "Tr")
+            QApplication.processEvents()
+            self.assertEqual(plot.current_local_x_window_us(), shifted)
+            self.assertEqual(
+                win._parameter_local_views[("开通", "Ton")], shifted
+            )
+            self.assertEqual(
+                win._parameter_local_views[("开通", "Td_on")], shifted
+            )
+            self.assertEqual(
+                win._parameter_local_views[("开通", "Tr")], shifted
+            )
+        finally:
+            win.close()
+
     @unittest.skipUnless(
         LIKANG_UH_930_REVERSED_TD_ON.exists(),
         "likangkang reversed Td_on sample missing",
     )
-    def test_reversed_tdon_keeps_vge_a_and_ic_b_semantics(self):
+    def test_reversed_tdon_is_marked_unavailable(self):
         from PyQt6.QtWidgets import QApplication
 
         from dpt_extractor.gui.main_window import MainWindow
@@ -6413,23 +6675,23 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             QApplication.processEvents()
             inst = win._turn_on_timing_instants()
             self.assertIsNotNone(inst.t_v10_s)
-            self.assertIsNotNone(inst.t_i10_s)
-            assert inst.t_v10_s is not None and inst.t_i10_s is not None
-            self.assertGreater(inst.t_v10_s, inst.t_i10_s)
+            self.assertIsNone(inst.t_i10_s)
+            self.assertIsNone(inst.t_i90_s)
+            self.assertTrue(win.result.is_metric_unavailable("开通", "Ton"))
+            self.assertTrue(win.result.is_metric_unavailable("开通", "Td_on"))
+            self.assertTrue(win.result.is_metric_unavailable("开通", "Tr"))
+            self.assertIsNone(win._parameter_interval_us("开通", "Ton"))
+            self.assertIsNone(win._parameter_interval_us("开通", "Td_on"))
+            self.assertIsNone(win._parameter_interval_us("开通", "Tr"))
 
+            win.wave_plot.clear_parameter_cursor_context()
             win._on_value_clicked("开通", "Td_on")
             QApplication.processEvents()
-            assert win.wave_plot._cursor_a is not None
-            assert win.wave_plot._cursor_b is not None
-            self.assertEqual(win.wave_plot._interactive_mode, "semantic_interval")
-            self.assertAlmostEqual(
-                float(win.wave_plot._cursor_a.value()), inst.t_v10_s * 1e6, places=6
-            )
-            self.assertAlmostEqual(
-                float(win.wave_plot._cursor_b.value()), inst.t_i10_s * 1e6, places=6
-            )
-            self.assertEqual(win.wave_plot._cursor_endpoint_channel("a"), "vge")
-            self.assertEqual(win.wave_plot._cursor_endpoint_channel("b"), "ic")
+            self.assertIsNotNone(win.wave_plot._cursor_a)
+            self.assertIsNotNone(win.wave_plot._cursor_b)
+            self.assertFalse(win.wave_plot._cursor_a.isVisible())
+            self.assertFalse(win.wave_plot._cursor_b.isVisible())
+            self.assertEqual(win.wave_plot._interactive_mode, "unavailable")
         finally:
             win.close()
 
@@ -6524,11 +6786,12 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         tb_us2 = float(plot._cursor_b.value())
         self.assertNotAlmostEqual(tb_us, tb_us2, places=3)
 
-    def test_crosstalk_on_locks_hlines_to_plot_minmax(self):
+    def test_crosstalk_cursors_use_opposite_gate_extrema_for_both_edges(self):
+        from copy import deepcopy
+
         import numpy as np
 
         from dpt_extractor.gui.main_window import MainWindow
-        from dpt_extractor.metrics.derived import crosstalk_extrema
 
         if not UH.exists():
             self.skipTest("UH sample missing")
@@ -6542,21 +6805,45 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         ).load_config()
         win.wave_plot = plot
         win.result_table.set_result(result)
-        win._on_value_clicked("开通", "串扰电压")
-        self.assertEqual(plot._interactive_mode, "crosstalk")
-        self.assertFalse(plot._h_cursor_a.movable)
-        self.assertFalse(plot._h_cursor_b.movable)
-        t0 = float(plot._cursor_a.value())
-        t1 = float(plot._cursor_b.value())
         vgo = bundle.get(profile.vge_other)
-        i0 = int(np.searchsorted(bundle.t, min(t0, t1) * 1e-6))
-        i1 = int(np.searchsorted(bundle.t, max(t0, t1) * 1e-6))
-        plot_hi = plot._peak_plot_y_in_window("vge_other", t0, t1)
-        plot_lo = plot._min_plot_y_in_window("vge_other", t0, t1)
-        self.assertIsNotNone(plot_hi)
-        self.assertIsNotNone(plot_lo)
-        self.assertAlmostEqual(float(plot._h_cursor_a.value()), plot_hi, places=2)
-        self.assertAlmostEqual(float(plot._h_cursor_b.value()), plot_lo, places=2)
+        before = deepcopy(result)
+        try:
+            for section, state, indices in (
+                ("关断过程", result.turn_off, result.segments.turn_off),
+                ("开通", result.turn_on, result.segments.turn_on),
+            ):
+                with self.subTest(section=section):
+                    win._on_value_clicked(section, "串扰电压")
+                    self.assertEqual(result, before)
+                    self.assertNotIn((section, "串扰电压"), win._manual_intervals)
+                    self.assertEqual(plot._interactive_mode, "crosstalk")
+                    self.assertFalse(plot._h_cursor_a.movable)
+                    self.assertFalse(plot._h_cursor_b.movable)
+                    ta, tb = float(plot._cursor_a.value()), float(plot._cursor_b.value())
+                    i0, i1 = indices
+                    segment = vgo[i0:i1]
+                    high_times = bundle.t[i0 + np.flatnonzero(segment == np.max(segment))] * 1e6
+                    low_times = bundle.t[i0 + np.flatnonzero(segment == np.min(segment))] * 1e6
+                    self.assertTrue(
+                        (ta in high_times and tb in low_times)
+                        or (ta in low_times and tb in high_times)
+                    )
+                    closest = min(float(np.min(np.abs(low_times - high))) for high in high_times)
+                    self.assertAlmostEqual(tb - ta, closest, places=9)
+                    for which, cursor, value in (
+                        ("ha", plot._h_cursor_a, state.crosstalk_vmax),
+                        ("hb", plot._h_cursor_b, state.crosstalk_vmin),
+                    ):
+                        self.assertEqual(plot._horizontal_cursor_binding(which), ("vge_other", True))
+                        self.assertAlmostEqual(
+                            plot._from_disp("vge_other", float(cursor.value())), value, places=9
+                        )
+                    self.assertEqual(state.crosstalk_vmax, float(np.max(segment)))
+                    self.assertEqual(state.crosstalk_vmin, float(np.min(segment)))
+        finally:
+            win.close()
+            plot.close()
+
     def test_ls_on_uses_synchronized_interval_and_delta_calibration(self):
         from dpt_extractor.gui.main_window import MainWindow
 
@@ -6629,8 +6916,13 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         win._on_value_clicked("关断过程", "ΔVce")
         self.assertEqual(plot._interactive_mode, "delta_vce")
         ha_disp = float(plot._h_cursor_a.value())
-        plot._h_cursor_a.setPos(ha_disp + 5.0)
-        plot._on_horizontal_cursor_moved()
+        with patch.object(
+            win,
+            "_sync_ls_off",
+            side_effect=AssertionError("DeltaVce drag must not rebuild the full Ls context"),
+        ):
+            plot._h_cursor_a.setPos(ha_disp + 5.0)
+            plot._on_horizontal_cursor_moved()
 
         delta_after = float(result.turn_off.delta_vce)
         ls_after = float(result.turn_off.ls_off)
@@ -6642,13 +6934,658 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        SONG_DCU_LT_WH_450_800.exists(),
-        "songzhenxi LT WH 450V/800A sample missing",
+        SONG_SMC_RT_20260717_UH_806.exists(),
+        "songzhenxi 20260717 RT UH 750V/806A sample missing",
     )
-    def test_turn_off_delta_vce_b_uses_blocking_platform_raw_crossing(self):
+    def test_turn_off_delta_vce_drag_stays_responsive_on_806a_sample(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        plot, bundle, profile, result = self._load_and_plot(
+            SONG_SMC_RT_20260717_UH_806
+        )
+        win = MainWindow()
+        win.bundle = bundle
+        win.profile = profile
+        win.result = result
+        win.cfg = __import__(
+            "dpt_extractor.config.loader", fromlist=["load_config"]
+        ).load_config()
+        win.wave_plot = plot
+        win.result_table.set_result(result)
+        delta_before = float(result.turn_off.delta_vce)
+        ls_before = float(result.turn_off.ls_off)
+
+        win._on_value_clicked("关断过程", "ΔVce")
+        ha_display = float(plot._h_cursor_a.value())
+        started = time.perf_counter()
+        for offset in (1.0, 2.0, 3.0, 4.0):
+            plot._h_cursor_a.setPos(ha_display + offset)
+        elapsed = time.perf_counter() - started
+
+        delta_after = float(result.turn_off.delta_vce)
+        self.assertLess(elapsed, 1.0)
+        self.assertAlmostEqual(
+            float(result.turn_off.ls_off),
+            ls_before * delta_after / delta_before,
+            places=6,
+        )
+
+    @unittest.skipUnless(
+        SONG_SMC_RT_20260717_UH_806.exists(),
+        "songzhenxi 20260717 RT UH 750V/806A sample missing",
+    )
+    def test_ic_off_max_default_range_spans_vce_base_to_ic_base(self):
         import numpy as np
 
         from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.metrics.plateau_level import (
+            turn_off_dvdt_base_top_levels,
+        )
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        win = MainWindow()
+        try:
+            win._load_file(str(SONG_SMC_RT_20260717_UH_806))
+            self.assertIsNotNone(win.bundle)
+            self.assertIsNotNone(win.result)
+            assert win.bundle is not None and win.result is not None
+            segs = win.result.segments
+            self.assertIsNotNone(segs)
+            assert segs is not None
+
+            context = win._turn_off_ic_off_max_cursor_context()
+            self.assertIsNotNone(context)
+            assert context is not None
+            expected_a_idx, expected_b_idx, expected_ic_base = context
+            interval = win._parameter_interval_us("关断过程", "Ic_off_max")
+            self.assertIsNotNone(interval)
+            assert interval is not None
+            expected_a_us = float(win.bundle.t[expected_a_idx] * 1e6)
+            expected_b_us = float(win.bundle.t[expected_b_idx] * 1e6)
+            self.assertAlmostEqual(interval[0], expected_a_us, places=9)
+            self.assertAlmostEqual(interval[1], expected_b_us, places=9)
+
+            ic = bundle_total_current(win.bundle, win.profile)
+            vce = win.bundle.get(win.profile.vce)
+            vce_base, vce_top = turn_off_dvdt_base_top_levels(
+                win.bundle.t,
+                vce,
+                segs.turn_off[0],
+                segs.turn_off[1],
+            )
+            vce_span = max(abs(vce_top - vce_base), 1.0)
+            self.assertAlmostEqual(
+                float(vce[expected_a_idx]),
+                float(vce_base),
+                delta=max(1.0, 0.04 * vce_span),
+            )
+            ic_span = max(
+                abs(float(win.result.turn_off.ic_off_max) - expected_ic_base),
+                1.0,
+            )
+            self.assertAlmostEqual(
+                float(ic[expected_b_idx]),
+                float(expected_ic_base),
+                delta=max(1.0, 0.04 * ic_span),
+            )
+            i0 = int(
+                np.searchsorted(win.bundle.t, interval[0] * 1e-6, side="left")
+            )
+            i1 = int(
+                np.searchsorted(win.bundle.t, interval[1] * 1e-6, side="right")
+            )
+            peak_rel = int(np.argmax(np.abs(ic[i0:i1])))
+            peak_idx = i0 + peak_rel
+            expected_peak_signed = float(ic[peak_idx])
+            expected_peak = abs(expected_peak_signed)
+            value_before = float(win.result.turn_off.ic_off_max)
+            self.assertAlmostEqual(expected_peak, value_before, places=9)
+            self.assertLess(interval[0], float(win.bundle.t[peak_idx] * 1e6))
+            self.assertLess(float(win.bundle.t[peak_idx] * 1e6), interval[1])
+
+            win._on_value_clicked("关断过程", "Ic_off_max")
+            self.app.processEvents()
+            self.assertEqual(win.wave_plot._cursor_endpoint_channel("a"), "vce")
+            self.assertEqual(win.wave_plot._cursor_endpoint_channel("b"), "ic")
+            self.assertAlmostEqual(
+                float(win.wave_plot._cursor_a.value()), interval[0], places=9
+            )
+            self.assertAlmostEqual(
+                float(win.wave_plot._cursor_b.value()), interval[1], places=9
+            )
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_a.value())
+                ),
+                expected_peak_signed,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_b.value())
+                ),
+                expected_ic_base,
+                places=9,
+            )
+            current_range = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(current_range)
+            assert current_range is not None
+            current_span = current_range[1] - current_range[0]
+            self.assertAlmostEqual(current_span, 2.5, delta=0.02)
+            self.assertLessEqual(current_range[0], interval[0])
+            self.assertGreaterEqual(
+                current_range[1] - interval[1],
+                -1e-6,
+            )
+            self.assertAlmostEqual(
+                float(win.result.turn_off.ic_off_max), value_before, places=9
+            )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        ZHONGBAN_RT_WH_400_50.exists(),
+        "zhongban RT WH 400V/50A point sample missing",
+    )
+    def test_ic_off_max_matches_manual_stable_cursor_and_focus_ratio(self):
+        from copy import deepcopy
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._load_file(str(ZHONGBAN_RT_WH_400_50))
+            self.assertIsNotNone(win.bundle)
+            self.assertIsNotNone(win.result)
+            assert win.bundle is not None and win.result is not None
+            result = win.result
+            result_before = deepcopy(result)
+            value_before = float(result.turn_off.ic_off_max)
+            didt_context = result.didt_contexts[("关断过程", "di/dt")]
+
+            context = win._turn_off_ic_off_max_cursor_context()
+            peak_point = win._turn_off_ic_off_max_default_peak_point()
+            self.assertIsNotNone(context)
+            self.assertIsNotNone(peak_point)
+            assert context is not None and peak_point is not None
+            a_idx, b_idx, signed_base = context
+            peak_idx, signed_peak = peak_point
+            a_us = float(win.bundle.t[a_idx] * 1e6)
+            b_us = float(win.bundle.t[b_idx] * 1e6)
+            peak_us = float(win.bundle.t[peak_idx] * 1e6)
+
+            # 2026-10-16 用户拍板「② 关断 Ic_off_max 的 B 落点 = 甲 · 稳定抬升前 Base」：
+            # B 取 di/dt 上下文 `base_window`（Ic 主抬升前的稳定 Base 窗）内最接近该
+            # Base 电平的代表点。生产实现见
+            # `gui/main_window.py::_turn_off_ic_off_max_cursor_context` 内的同拍板注释。
+            # 旧期望 `11.641us` 属已被用户否决的乙口径（Ic 主下降后首个稳定带中心），
+            # 与 `docs/REGRESSION_BASELINES.md` 中 `B=11.644us` 的真实 GUI 观察锚点同源，
+            # 现只保留为历史追溯，不得再作为当前默认卡值或审计期望
+            # （`docs/REGRESSION_BASELINES.md` 2026-08-31 节「现行边界」）。
+            # 原断言的「A≈20% / B≈50%」人工图二构图同样是乙口径的产物，随口径一并
+            # 更新为下文的甲口径实测比例（2026-10-16 探针复测，见本卡报告）。
+            base_window = tuple(int(value) for value in didt_context.base_window)
+            base_window_a_us = float(win.bundle.t[base_window[0]] * 1e6)
+            base_window_b_us = float(win.bundle.t[base_window[1]] * 1e6)
+
+            self.assertAlmostEqual(a_us, 10.884, delta=0.03)
+            self.assertAlmostEqual(b_us, 13.083520, delta=0.03)
+            self.assertGreaterEqual(b_us, base_window_a_us)
+            self.assertLessEqual(b_us, base_window_b_us)
+            self.assertLess(a_us, peak_us)
+            self.assertLess(peak_us, b_us)
+            self.assertAlmostEqual(abs(signed_peak), 50.90625, places=6)
+            self.assertAlmostEqual(signed_base, 3.15234375, places=6)
+
+            win._on_value_clicked("关断过程", "Ic_off_max")
+            self.app.processEvents()
+            x_range = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(x_range)
+            assert x_range is not None
+            x0, x1 = x_range
+            span = x1 - x0
+            self.assertAlmostEqual(span, 2.5, delta=0.02)
+            self.assertGreaterEqual(a_us, x0)
+            self.assertLessEqual(b_us, x1)
+            self.assertAlmostEqual((a_us - x0) / span, 0.008, delta=0.01)
+            self.assertAlmostEqual((b_us - x0) / span, 0.894, delta=0.01)
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_a.value())
+                ),
+                signed_peak,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_b.value())
+                ),
+                signed_base,
+                places=9,
+            )
+            self.assertIs(win.result, result)
+            self.assertIs(
+                win.result.didt_contexts[("关断过程", "di/dt")],
+                didt_context,
+            )
+            self.assertEqual(win.result, result_before)
+            self.assertAlmostEqual(
+                float(win.result.turn_off.ic_off_max), value_before, places=9
+            )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_SMC_RT_20260717_UH_1048.exists()
+        and SONG_20260819_GOLDEN_REPORT.exists(),
+        "songzhenxi 20260819 Ic_off_max golden report sample missing",
+    )
+    def test_ic_off_max_stable_range_preserves_20260819_golden_value(self):
+        """Changing the default display range must not change the golden peak."""
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        win = MainWindow()
+        try:
+            win._load_file(str(SONG_SMC_RT_20260717_UH_1048))
+            self.assertIsNotNone(win.bundle)
+            self.assertIsNotNone(win.result)
+            assert win.bundle is not None and win.result is not None
+            segs = win.result.segments
+            self.assertIsNotNone(segs)
+            assert segs is not None
+
+            interval = win._parameter_interval_us("关断过程", "Ic_off_max")
+            self.assertIsNotNone(interval)
+            assert interval is not None
+            context = win._turn_off_ic_off_max_cursor_context()
+            self.assertIsNotNone(context)
+            assert context is not None
+            expected_a_idx, expected_b_idx, expected_ic_base = context
+            self.assertAlmostEqual(
+                interval[0], float(win.bundle.t[expected_a_idx] * 1e6), places=9
+            )
+            self.assertAlmostEqual(
+                interval[1], float(win.bundle.t[expected_b_idx] * 1e6), places=9
+            )
+
+            ic = bundle_total_current(win.bundle, win.profile)
+            i0 = int(
+                np.searchsorted(win.bundle.t, interval[0] * 1e-6, side="left")
+            )
+            i1 = int(
+                np.searchsorted(win.bundle.t, interval[1] * 1e-6, side="right")
+            )
+            interval_peak = float(np.max(np.abs(ic[i0:i1])))
+            golden_ic_off_max = 1050.75  # 黄金报告 U相_双脉冲数据!G5
+            self.assertAlmostEqual(interval_peak, golden_ic_off_max, places=9)
+            self.assertAlmostEqual(
+                float(win.result.turn_off.ic_off_max), golden_ic_off_max, places=9
+            )
+
+            win._on_value_clicked("关断过程", "Ic_off_max")
+            self.app.processEvents()
+            self.assertAlmostEqual(
+                float(win.wave_plot._cursor_a.value()), interval[0], places=9
+            )
+            self.assertAlmostEqual(
+                float(win.wave_plot._cursor_b.value()), interval[1], places=9
+            )
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_b.value())
+                ),
+                expected_ic_base,
+                places=9,
+            )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_DCU_LT_WH_480_50.exists(),
+        "songzhenxi LT WH 480V/50A sample missing",
+    )
+    def test_ic_off_max_default_ha_keeps_extracted_peak_in_wider_display_range(
+        self,
+    ):
+        """A wider Base-to-Base view must not replace the stored Vge-window peak."""
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        win = MainWindow()
+        try:
+            win._load_file(str(SONG_DCU_LT_WH_480_50))
+            self.assertIsNotNone(win.bundle)
+            self.assertIsNotNone(win.result)
+            assert win.bundle is not None and win.result is not None
+            interval = win._parameter_interval_us("关断过程", "Ic_off_max")
+            self.assertIsNotNone(interval)
+            assert interval is not None
+            ic = bundle_total_current(win.bundle, win.profile)
+            i0 = int(
+                np.searchsorted(win.bundle.t, interval[0] * 1e-6, side="left")
+            )
+            i1 = int(
+                np.searchsorted(win.bundle.t, interval[1] * 1e-6, side="right")
+            )
+            display_range_peak = float(np.max(np.abs(ic[i0:i1])))
+            extracted_peak = float(win.result.turn_off.ic_off_max)
+            self.assertGreater(display_range_peak, extracted_peak)
+
+            peak_point = win._turn_off_ic_off_max_default_peak_point()
+            self.assertIsNotNone(peak_point)
+            assert peak_point is not None
+            peak_idx, signed_peak = peak_point
+            self.assertAlmostEqual(abs(signed_peak), extracted_peak, places=9)
+
+            win._on_value_clicked("关断过程", "Ic_off_max")
+            self.app.processEvents()
+            actual_ha = win.wave_plot._from_disp(
+                "ic", float(win.wave_plot._h_cursor_a.value())
+            )
+            self.assertAlmostEqual(actual_ha, signed_peak, places=9)
+            self.assertAlmostEqual(
+                float(win.wave_plot._cursor_aux_t_us),
+                float(win.bundle.t[peak_idx] * 1e6),
+                places=9,
+            )
+            self.assertAlmostEqual(
+                float(win.result.turn_off.ic_off_max), extracted_peak, places=9
+            )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(ZHONGBAN_RT_WH_400_50.exists(), "zhongban RT WH 400V/50A missing")
+    def test_ic_on_max_zhongban_base_to_settled_top_keeps_peak_and_horizontal_levels(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._load_file(str(ZHONGBAN_RT_WH_400_50))
+            assert win.bundle is not None and win.result is not None
+            value_before = float(win.result.turn_on.ic_on_max)
+            current = win._turn_off_ic_off_max_cursor_current()
+            context = win._turn_on_ic_on_max_cursor_context()
+            assert current is not None and context is not None
+            a_idx, b_idx, hb = context
+            a_us, b_us = win.bundle.t[[a_idx, b_idx]] * 1e6
+            self.assertTrue(16.0 < a_us < 16.2)
+            self.assertTrue(16.55 < b_us < 16.9)
+            self.assertAlmostEqual(float(current[a_idx]), 3.2578125, places=6)
+            self.assertAlmostEqual(hb, 3.00390625, places=6)
+            width = int(round(200e-9 / win.bundle.dt))
+            block = current[b_idx - width // 2 : b_idx + width // 2]
+            self.assertLess(float(np.percentile(block, 95) - np.percentile(block, 5)), 6.0)
+            self.assertAlmostEqual(float(np.median(block)), 50.0, delta=2.0)
+
+            win._on_value_clicked("开通", "Ic_on_max")
+            self.app.processEvents()
+            for channel in ("vce", "ic"):
+                win.wave_plot._on_legend_double_clicked(
+                    win.wave_plot._display_key_for_channel(channel)
+                )
+                self.app.processEvents()
+                self.assertEqual(win.wave_plot._cursor_endpoint_channel("a"), "ic")
+                self.assertEqual(win.wave_plot._cursor_endpoint_channel("b"), "ic")
+                self.assertAlmostEqual(float(win.wave_plot._cursor_a.value()), a_us, places=8)
+                self.assertAlmostEqual(float(win.wave_plot._cursor_b.value()), b_us, places=8)
+                self.assertAlmostEqual(
+                    win.wave_plot._from_disp("ic", float(win.wave_plot._h_cursor_a.value())),
+                    value_before,
+                    places=8,
+                )
+                self.assertAlmostEqual(
+                    win.wave_plot._from_disp("ic", float(win.wave_plot._h_cursor_b.value())),
+                    hb,
+                    places=8,
+                )
+            self.assertEqual(float(win.result.turn_on.ic_on_max), value_before)
+            self.assertFalse(win._manual_intervals)
+            self.assertFalse(win._manual_extreme_values)
+        finally:
+            win.close()
+
+    def test_ic_on_max_range_follows_current_settling_not_vce_or_fixed_delay(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.bridge_profile import make_profile
+        from dpt_extractor.models.results import ExtractResult, SegmentIndices
+        from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
+
+        dt = 1e-9
+        t = np.arange(2300, dtype=np.float64) * dt
+        win = MainWindow()
+        try:
+            win.profile = make_profile("W", "upper")
+            win.result = ExtractResult(
+                segments=SegmentIndices(
+                    turn_off=(100, 200),
+                    turn_on=(400, 1800),
+                    reverse_recovery=(500, 800),
+                    pulse1_on=0,
+                    pulse1_off=100,
+                    pulse2_on=400,
+                    pulse2_off=2100,
+                )
+            )
+            win.result.turn_on.ic_on_max = 120.0
+            for polarity in (1.0, -1.0):
+                ends = []
+                for ringing_end in (800, 1450):
+                    with self.subTest(polarity=polarity, ringing_end=ringing_end):
+                        current = np.full(len(t), 3.0)
+                        current[500:551] = np.linspace(3.0, 120.0, 51)
+                        current[551:ringing_end] = 50.0 + 20.0 * np.sin(
+                            2.0 * np.pi * np.arange(ringing_end - 551) / 40.0
+                        )
+                        current[ringing_end:] = 50.0
+                        current *= polarity
+                        win.bundle = WaveformBundle(
+                            t=t,
+                            channels={win.profile.ic: current},
+                            meta=TekMetadata(sample_interval=dt),
+                        )
+                        win._default_cursor_context_cache.clear()
+                        with (
+                            patch.object(
+                                win, "_turn_off_ic_off_max_cursor_current",
+                                return_value=current,
+                            ),
+                            patch.object(
+                                win, "_turn_on_ic_max_numeric_window_indices",
+                                return_value=(500, 650),
+                            ),
+                            patch.object(
+                                win, "_turn_on_ic_on_max_default_peak_point",
+                                return_value=(550, polarity * 120.0),
+                            ),
+                            patch.object(
+                                win, "_turn_on_vce_stable_cursor_context",
+                                side_effect=AssertionError("Ic endpoints must not use Vce"),
+                            ),
+                            patch(
+                                "dpt_extractor.gui.main_window.turn_on_current_hb_ha_window_indices",
+                                return_value=((250, 449), (950, 1149)),
+                            ) as windows,
+                        ):
+                            context = win._turn_on_ic_on_max_cursor_context()
+                            self.assertIsNotNone(context)
+                            assert context is not None
+                            a_idx, b_idx, hb = context
+                            self.assertTrue(250 <= a_idx <= 449)
+                            self.assertLess(a_idx, 550)
+                            self.assertGreater(b_idx, ringing_end)
+                            self.assertLess(b_idx, ringing_end + 220)
+                            band = current[b_idx - 100 : b_idx + 100]
+                            self.assertLess(float(np.percentile(band, 95) - np.percentile(band, 5)), 4.0)
+                            self.assertAlmostEqual(float(current[a_idx]), polarity * 3.0)
+                            self.assertAlmostEqual(float(current[b_idx]), polarity * 50.0)
+                            self.assertAlmostEqual(hb, polarity * 3.0)
+                            self.assertEqual(win.result.turn_on.ic_on_max, 120.0)
+                            self.assertEqual(win._manual_intervals, {})
+                            self.assertEqual(win._manual_extreme_values, {})
+                            self.assertEqual(win._turn_on_ic_on_max_cursor_context(), context)
+                            self.assertEqual(windows.call_count, 1)
+                            ends.append(b_idx)
+                self.assertGreater(ends[1] - ends[0], 500)
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        LIYAWEI_AP_UL_880_35_ERR.exists(),
+        "liyawei PCU2682 negative direct-Ic sample missing",
+    )
+    def test_ic_off_max_direct_negative_ic_uses_signed_base_and_peak_lines(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win._load_file(str(LIYAWEI_AP_UL_880_35_ERR))
+            self.assertIsNotNone(win.bundle)
+            self.assertIsNotNone(win.result)
+            assert win.bundle is not None and win.result is not None
+            value_before = float(win.result.turn_off.ic_off_max)
+            context = win._turn_off_ic_off_max_cursor_context()
+            peak_point = win._turn_off_ic_off_max_default_peak_point()
+            cursor_ic = win._turn_off_ic_off_max_cursor_current()
+            self.assertIsNotNone(context)
+            self.assertIsNotNone(peak_point)
+            self.assertIsNotNone(cursor_ic)
+            assert context is not None and peak_point is not None
+            assert cursor_ic is not None
+            _a_idx, b_idx, signed_base = context
+            _peak_idx, signed_peak = peak_point
+            self.assertLess(float(cursor_ic[b_idx]), 0.0)
+            self.assertLess(signed_base, 0.0)
+            self.assertLess(signed_peak, 0.0)
+            self.assertAlmostEqual(abs(signed_peak), value_before, places=9)
+
+            win._on_value_clicked("关断过程", "Ic_off_max")
+            self.app.processEvents()
+            self.assertEqual(win.wave_plot._cursor_endpoint_channel("a"), "vce")
+            self.assertEqual(win.wave_plot._cursor_endpoint_channel("b"), "ic")
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_a.value())
+                ),
+                signed_peak,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_b.value())
+                ),
+                signed_base,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                float(win.result.turn_off.ic_off_max), value_before, places=9
+            )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        LIYAWEI_AP_UL_880_35_ERR.exists(),
+        "liyawei PCU2682 negative direct-Ic sample missing",
+    )
+    def test_ic_on_max_degenerate_rise_keeps_pre_event_base_before_peak(self):
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.metrics.plateau_level import (
+            _plateau_mid_without_isolated_spikes,
+            turn_on_current_hb_ha_window_indices,
+        )
+
+        win = MainWindow()
+        try:
+            win._load_file(str(LIYAWEI_AP_UL_880_35_ERR))
+            self.assertIsNotNone(win.bundle)
+            self.assertIsNotNone(win.result)
+            assert win.bundle is not None and win.result is not None
+            value_before = float(win.result.turn_on.ic_on_max)
+            context = win._turn_on_ic_on_max_cursor_context()
+            peak_point = win._turn_on_ic_on_max_default_peak_point()
+            cursor_ic = win._turn_off_ic_off_max_cursor_current()
+            self.assertIsNotNone(context)
+            self.assertIsNotNone(peak_point)
+            self.assertIsNotNone(cursor_ic)
+            assert context is not None and peak_point is not None
+            assert cursor_ic is not None
+            a_idx, b_idx, signed_base = context
+            peak_idx, signed_peak = peak_point
+            self.assertLess(a_idx, peak_idx)
+            self.assertLess(peak_idx, b_idx)
+            self.assertLess(signed_base, 0.0)
+            self.assertLess(signed_peak, 0.0)
+            self.assertAlmostEqual(abs(signed_peak), value_before, places=9)
+            hb_window, ha_window = turn_on_current_hb_ha_window_indices(
+                win.bundle.t,
+                cursor_ic,
+                *win.result.segments.turn_on,
+                win.bundle.dt,
+                event_end_idx=win.result.segments.pulse2_off,
+            )
+            # A degenerate capture can put the declared turn-on segment on the
+            # same sample as Ha; the implementation then borrows the adjacent
+            # pre-event Ic Base band, which is still the correct physical role.
+            if not hb_window[0] <= a_idx <= hb_window[1]:
+                self.assertAlmostEqual(
+                    float(cursor_ic[a_idx]),
+                    float(signed_base),
+                    delta=max(1.0, 0.04 * abs(float(signed_peak - signed_base))),
+                )
+            self.assertLess(b_idx, win.result.segments.pulse2_off)
+            top_level = _plateau_mid_without_isolated_spikes(
+                cursor_ic[ha_window[0] : ha_window[1] + 1]
+            )
+            self.assertAlmostEqual(
+                float(cursor_ic[b_idx]),
+                float(top_level),
+                delta=max(1.0, 0.04 * abs(float(signed_peak - signed_base))),
+            )
+
+            win._on_value_clicked("开通", "Ic_on_max")
+            self.app.processEvents()
+            self.assertEqual(win.wave_plot._cursor_endpoint_channel("a"), "ic")
+            self.assertEqual(win.wave_plot._cursor_endpoint_channel("b"), "ic")
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_a.value())
+                ),
+                signed_peak,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                win.wave_plot._from_disp(
+                    "ic", float(win.wave_plot._h_cursor_b.value())
+                ),
+                signed_base,
+                places=9,
+            )
+            self.assertAlmostEqual(
+                float(win.result.turn_on.ic_on_max), value_before, places=9
+            )
+        finally:
+            win.close()
+
+    @unittest.skipUnless(
+        SONG_DCU_LT_WH_450_800.exists(),
+        "songzhenxi LT WH 450V/800A sample missing",
+    )
+    def test_turn_off_delta_vce_vertical_range_spans_stable_base_to_top(self):
+        import numpy as np
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.metrics.plateau_level import (
+            turn_off_delta_vce_cursor_range_indices,
+            turn_off_dvdt_base_top_levels,
+        )
 
         plot, bundle, profile, result = self._load_and_plot(SONG_DCU_LT_WH_450_800)
         win = MainWindow()
@@ -6662,14 +7599,69 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         win.result_table.set_result(result)
         win._on_value_clicked("关断过程", "ΔVce")
         self.assertEqual(plot._interactive_mode, "delta_vce")
+        assert result.segments is not None
+        off0, off1 = result.segments.turn_off
+        vce = bundle.get(profile.vce)
+        blocking_end = max(
+            off1,
+            min(
+                len(bundle.t) - 1,
+                int(result.segments.pulse2_on)
+                - max(1, int(200e-9 / bundle.dt)),
+            ),
+        )
+        expected_a, expected_b = turn_off_delta_vce_cursor_range_indices(
+            bundle.t,
+            vce,
+            off0,
+            off1,
+            bundle.dt,
+            result.turn_off.vce_off_max - result.turn_off.delta_vce,
+            search_end=blocking_end,
+        )
+        a_us = float(plot._cursor_a.value())
         b_us = float(plot._cursor_b.value())
+        self.assertAlmostEqual(a_us, float(bundle.t[expected_a] * 1e6), places=9)
+        self.assertAlmostEqual(b_us, float(bundle.t[expected_b] * 1e6), places=9)
+        peak_idx = off0 + int(np.argmax(vce[off0 : off1 + 1]))
+        self.assertLess(a_us, float(bundle.t[peak_idx] * 1e6))
+        self.assertGreater(b_us, float(bundle.t[peak_idx] * 1e6))
+
+        base_v, _top_v = turn_off_dvdt_base_top_levels(
+            bundle.t, vce, off0, off1
+        )
+        ha_v = plot._from_disp("vce", float(plot._h_cursor_a.value()))
         hb_v = plot._from_disp("vce", float(plot._h_cursor_b.value()))
+        event_span = max(abs(hb_v - base_v), 1.0)
+        self.assertAlmostEqual(float(vce[expected_a]), base_v, delta=0.04 * event_span)
+        self.assertAlmostEqual(float(vce[expected_b]), hb_v, delta=0.04 * event_span)
+        self.assertAlmostEqual(ha_v, result.turn_off.vce_off_max, places=6)
         self.assertAlmostEqual(
-            float(np.interp(b_us * 1e-6, bundle.t, bundle.get(profile.vce))),
             hb_v,
+            result.turn_off.vce_off_max - result.turn_off.delta_vce,
             places=6,
         )
-        self.assertGreater(b_us, float(bundle.t[result.segments.turn_off[1]] * 1e6))
+
+        # Non-slope cursor semantics: moving the range must not pull Ha/Hb,
+        # and moving Ha must not pull the already-adjusted A/B range.
+        plot._cursor_a.setPos(a_us + 0.01)
+        self.app.processEvents()
+        self.assertAlmostEqual(
+            plot._from_disp("vce", float(plot._h_cursor_a.value())),
+            ha_v,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            plot._from_disp("vce", float(plot._h_cursor_b.value())),
+            hb_v,
+            places=9,
+        )
+        moved_a_us = float(plot._cursor_a.value())
+        moved_b_us = float(plot._cursor_b.value())
+        plot._h_cursor_a.setPos(float(plot._h_cursor_a.value()) + 0.02)
+        self.app.processEvents()
+        self.assertAlmostEqual(float(plot._cursor_a.value()), moved_a_us, places=9)
+        self.assertAlmostEqual(float(plot._cursor_b.value()), moved_b_us, places=9)
 
     @unittest.skipUnless(
         SONG_DCU_LT_WH_530_800.exists(),
@@ -6681,6 +7673,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.metrics.plateau_level import (
             turn_off_delta_vce_blocking_top,
+            turn_off_delta_vce_cursor_range_indices,
+            turn_off_dvdt_base_top_levels,
         )
 
         plot, bundle, profile, result = self._load_and_plot(SONG_DCU_LT_WH_530_800)
@@ -6708,14 +7702,29 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         win.wave_plot = plot
         win.result_table.set_result(result)
         win._on_value_clicked("关断过程", "ΔVce")
+        a_us = float(plot._cursor_a.value())
         b_us = float(plot._cursor_b.value())
         hb_v = plot._from_disp("vce", float(plot._h_cursor_b.value()))
         self.assertAlmostEqual(hb_v, expected_hb, places=6)
-        self.assertAlmostEqual(
-            float(np.interp(b_us * 1e-6, bundle.t, vce)),
-            hb_v,
-            places=6,
+        expected_a, expected_b = turn_off_delta_vce_cursor_range_indices(
+            bundle.t,
+            vce,
+            off0,
+            off1,
+            bundle.dt,
+            expected_hb,
         )
+        self.assertAlmostEqual(a_us, float(bundle.t[expected_a] * 1e6), places=9)
+        self.assertAlmostEqual(b_us, float(bundle.t[expected_b] * 1e6), places=9)
+        peak_idx = off0 + int(np.argmax(vce[off0 : off1 + 1]))
+        self.assertLess(expected_a, peak_idx)
+        self.assertGreater(expected_b, peak_idx)
+        base_v, _top_v = turn_off_dvdt_base_top_levels(
+            bundle.t, vce, off0, off1
+        )
+        event_span = max(abs(expected_hb - base_v), 1.0)
+        self.assertAlmostEqual(float(vce[expected_a]), base_v, delta=0.04 * event_span)
+        self.assertAlmostEqual(float(vce[expected_b]), expected_hb, delta=0.04 * event_span)
 
     def test_didt_interaction_mode(self):
         from dpt_extractor.gui.main_window import MainWindow
@@ -6938,12 +7947,19 @@ class TestWaveformPlotSmoke(unittest.TestCase):
     @unittest.skipUnless(
         SONG_SMC_HT_WL_1048.exists(), "songzhenxi SMC HT WL 1048A sample missing"
     )
-    def test_switching_parameter_focus_is_bounded_and_reserves_post_event_room(self):
+    def test_switching_parameter_focus_is_bounded_and_keeps_real_cursors_visible(self):
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.gui.waveform_plot import (
             PARAM_FOCUS_ANCHOR_FRACTION,
             PARAM_FOCUS_DEFAULT_US_PER_DIV,
+            PARAM_FOCUS_MAX_ANCHOR_FRACTION,
+            PARAM_FOCUS_REQUIRED_GUARD_US,
+            TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
+            TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
+            TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+            RR_TRR_ANCHOR_FRACTION,
+            TF_FOCUS_MIDPOINT_FRACTION,
         )
 
         plot, bundle, profile, result = self._load_and_plot(SONG_SMC_HT_WL_1048)
@@ -6954,40 +7970,272 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         win.cfg = load_config()
         win.wave_plot = plot
         win.result_table.set_result(result)
+        focus_calls: list[tuple[float, tuple[float, ...], float, bool]] = []
+        original_focus = plot.focus_parameter_window_us
+
+        def _record_focus(
+            anchor_us: float,
+            *required_times_us: float,
+            anchor_fraction: float,
+            prefer_right_room: bool = False,
+            minimum_span_us: float | None = None,
+            composition_anchor_us: float | None = None,
+            composition_balance_fraction: float | None = None,
+        ) -> None:
+            focus_calls.append(
+                (
+                    float(anchor_us),
+                    tuple(float(value) for value in required_times_us),
+                    float(anchor_fraction),
+                    bool(prefer_right_room),
+                )
+            )
+            original_focus(
+                anchor_us,
+                *required_times_us,
+                anchor_fraction=anchor_fraction,
+                prefer_right_room=prefer_right_room,
+                minimum_span_us=minimum_span_us,
+                composition_anchor_us=composition_anchor_us,
+                composition_balance_fraction=composition_balance_fraction,
+            )
+
+        plot.focus_parameter_window_us = _record_focus
 
         def assert_focus(section: str, name: str) -> None:
             interval = win._parameter_interval_us(section, name)
             self.assertIsNotNone(interval)
+            focus_calls.clear()
             win._on_value_clicked(section, name)
+            self.assertTrue(focus_calls)
             xr = plot.current_x_range_us()
             self.assertIsNotNone(xr)
             x0, x1 = xr
-            edge_us = win._switching_focus_anchor_us(section)
-            self.assertIsNotNone(edge_us)
-            assert edge_us is not None
-            if section == "关断过程":
-                ref = win._turn_off_timing_instants().t_v90_s
-            elif section in {"开通", "反向恢复"}:
-                ref = win._turn_on_timing_instants().t_v10_s
+            (
+                anchor_us,
+                required_times,
+                requested_fraction,
+                prefer_right_room,
+            ) = focus_calls[-1]
+            self.assertTrue(required_times)
+            gate_anchored = "vge" in win._cursor_endpoint_channels_for_param(
+                section, name
+            )
+            vge_auxiliary = section in {"开通", "反向恢复"} and not gate_anchored
+            turn_on_current_balanced = (section, name) == ("开通", "开通电流")
+            turn_on_slope_balanced = (
+                section == "开通" and name in {"dv/dt", "di/dt"}
+            )
+            turn_on_ls_balanced = (section, name) == ("开通", "Ls_on")
+            tf_balanced = (section, name) == ("关断过程", "Tf")
+            rr_trr_shifted = (section, name) == ("反向恢复", "Trr")
+            if gate_anchored:
+                self.assertFalse(prefer_right_room)
+                expected_anchor = win._switching_focus_anchor_us(section)
+                self.assertIsNotNone(expected_anchor)
+                assert expected_anchor is not None
+                self.assertAlmostEqual(anchor_us, expected_anchor, places=6)
+                self.assertAlmostEqual(
+                    requested_fraction,
+                    PARAM_FOCUS_ANCHOR_FRACTION,
+                    places=9,
+                )
+            elif vge_auxiliary:
+                self.assertTrue(prefer_right_room)
+                expected_anchor = win._switching_focus_anchor_us(section)
+                self.assertIsNotNone(expected_anchor)
+                assert expected_anchor is not None
+                self.assertAlmostEqual(anchor_us, expected_anchor, places=6)
+                self.assertAlmostEqual(
+                    requested_fraction,
+                    PARAM_FOCUS_ANCHOR_FRACTION,
+                    places=9,
+                )
+            elif turn_on_current_balanced:
+                self.assertFalse(prefer_right_room)
+                self.assertAlmostEqual(
+                    anchor_us,
+                    0.5 * (min(required_times) + max(required_times)),
+                    places=9,
+                )
+                self.assertAlmostEqual(
+                    requested_fraction,
+                    TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
+                    places=9,
+                )
+            elif turn_on_slope_balanced:
+                self.assertFalse(prefer_right_room)
+                self.assertAlmostEqual(
+                    anchor_us,
+                    0.5 * (min(required_times) + max(required_times)),
+                    places=9,
+                )
+                self.assertAlmostEqual(
+                    requested_fraction,
+                    TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+                    places=9,
+                )
+            elif turn_on_ls_balanced:
+                self.assertFalse(prefer_right_room)
+                self.assertAlmostEqual(
+                    anchor_us,
+                    0.5 * (min(required_times) + max(required_times)),
+                    places=9,
+                )
+                self.assertEqual(len(required_times), 2)
+                self.assertAlmostEqual(
+                    requested_fraction,
+                    TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
+                    places=9,
+                )
+            elif tf_balanced:
+                self.assertFalse(prefer_right_room)
+                self.assertAlmostEqual(
+                    anchor_us,
+                    0.5 * (min(required_times) + max(required_times)),
+                    places=9,
+                )
+                self.assertAlmostEqual(
+                    requested_fraction,
+                    TF_FOCUS_MIDPOINT_FRACTION,
+                    places=9,
+                )
+            elif rr_trr_shifted:
+                self.assertFalse(prefer_right_room)
+                self.assertAlmostEqual(
+                    anchor_us,
+                    0.5 * (min(required_times) + max(required_times)),
+                    places=9,
+                )
+                self.assertAlmostEqual(
+                    requested_fraction,
+                    RR_TRR_ANCHOR_FRACTION,
+                    places=9,
+                )
             else:
-                ref = None
-            if ref is not None:
-                ref_us = float(ref * 1e6)
-                self.assertGreaterEqual(ref_us - edge_us, -1e-9)
-                self.assertLessEqual(ref_us - edge_us, 0.250001)
+                self.assertTrue(prefer_right_room)
+                self.assertAlmostEqual(
+                    anchor_us,
+                    0.5 * (min(required_times) + max(required_times)),
+                    places=9,
+                )
             self.assertIsNotNone(plot._full_x_range)
             assert plot._full_x_range is not None
             full_x0, full_x1 = plot._full_x_range
             self.assertGreaterEqual(x0, full_x0 - 1e-6)
             self.assertLessEqual(x1, full_x1 + 1e-6)
-            self.assertAlmostEqual(
-                x1 - x0, PARAM_FOCUS_DEFAULT_US_PER_DIV * 10.0, delta=0.02
+            span = x1 - x0
+            self.assertGreaterEqual(
+                span, PARAM_FOCUS_DEFAULT_US_PER_DIV * 10.0 - 0.02
             )
-            self.assertAlmostEqual(
-                (edge_us - x0) / (x1 - x0),
-                PARAM_FOCUS_ANCHOR_FRACTION,
-                delta=0.02,
-            )
+            primary_position = (anchor_us - x0) / span
+            if gate_anchored:
+                self.assertGreaterEqual(
+                    primary_position,
+                    PARAM_FOCUS_ANCHOR_FRACTION - 0.02,
+                )
+                self.assertLessEqual(
+                    primary_position,
+                    PARAM_FOCUS_MAX_ANCHOR_FRACTION + 0.02,
+                )
+            elif vge_auxiliary:
+                self.assertGreaterEqual(primary_position, -0.02)
+                self.assertLessEqual(primary_position, 0.35)
+                required_lo = min(required_times)
+                required_hi = max(required_times)
+                self.assertGreaterEqual(
+                    x1 - required_hi + 0.025,
+                    required_lo - x0,
+                )
+            elif turn_on_current_balanced:
+                if x0 > full_x0 + 0.025 and x1 < full_x1 - 0.025:
+                    self.assertAlmostEqual(
+                        primary_position,
+                        TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
+                        delta=0.025,
+                    )
+                required_lo = min(required_times)
+                required_hi = max(required_times)
+                self.assertGreaterEqual(
+                    x1 - required_hi + 0.025,
+                    required_lo - x0,
+                )
+            elif turn_on_slope_balanced:
+                required_lo = min(required_times)
+                required_hi = max(required_times)
+                self.assertGreaterEqual(
+                    x1 - required_hi + 0.025,
+                    required_lo - x0,
+                )
+                if x0 > full_x0 + 0.025 and x1 < full_x1 - 0.025:
+                    self.assertAlmostEqual(
+                        primary_position,
+                        TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+                        delta=0.025,
+                    )
+            elif turn_on_ls_balanced:
+                required_lo = min(required_times)
+                required_hi = max(required_times)
+                self.assertGreaterEqual(
+                    x1 - required_hi + 0.025,
+                    required_lo - x0,
+                )
+                if x0 > full_x0 + 0.025 and x1 < full_x1 - 0.025:
+                    self.assertAlmostEqual(
+                        primary_position,
+                        TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
+                        delta=0.025,
+                    )
+            elif tf_balanced:
+                required_lo = min(required_times)
+                required_hi = max(required_times)
+                self.assertGreaterEqual(
+                    x1 - required_hi + 0.025,
+                    required_lo - x0,
+                )
+                if x0 > full_x0 + 0.025 and x1 < full_x1 - 0.025:
+                    self.assertAlmostEqual(
+                        primary_position,
+                        TF_FOCUS_MIDPOINT_FRACTION,
+                        delta=0.025,
+                    )
+                    self.assertLessEqual(
+                        (required_hi - x0) / span,
+                        0.50 + 0.025,
+                    )
+            elif rr_trr_shifted:
+                required_lo = min(required_times)
+                required_hi = max(required_times)
+                self.assertGreaterEqual(
+                    x1 - required_hi + 0.025,
+                    required_lo - x0,
+                )
+                if x0 > full_x0 + 0.025 and x1 < full_x1 - 0.025:
+                    self.assertGreaterEqual(
+                        primary_position,
+                        RR_TRR_ANCHOR_FRACTION - 0.025,
+                    )
+            else:
+                required_lo = min(required_times)
+                required_hi = max(required_times)
+                self.assertGreaterEqual(
+                    x1 - required_hi + 0.025,
+                    required_lo - x0,
+                )
+                hard_width = (
+                    required_hi
+                    - required_lo
+                    + 2.0 * PARAM_FOCUS_REQUIRED_GUARD_US
+                )
+                if (
+                    x0 > full_x0 + 0.025
+                    and x1 < full_x1 - 0.025
+                    and hard_width <= 0.5 * span + 1e-9
+                ):
+                    self.assertLessEqual(
+                        (required_hi - x0) / span,
+                        0.50 + 0.025,
+                    )
             if plot._cursor_a is not None and plot._cursor_b is not None:
                 a = float(plot._cursor_a.value())
                 b = float(plot._cursor_b.value())
@@ -6997,12 +8245,20 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         assert_focus("关断过程", "Eoff")
         assert_focus("开通", "Eon")
         assert_focus("反向恢复", "di/dt")
+        assert_focus("关断过程", "Ic_off_max")
+        assert_focus("关断过程", "Td_off")
+        assert_focus("开通", "开通电流")
+        assert_focus("开通", "dv/dt")
+        assert_focus("开通", "di/dt")
+        assert_focus("关断过程", "Tf")
+        assert_focus("反向恢复", "Trr")
+        assert_focus("开通", "Td_on")
         win.close()
 
     @unittest.skipUnless(
         SONG_SMC_RT_UH_1048.exists(), "songzhenxi SMC RT UH 1048A sample missing"
     )
-    def test_crosstalk_first_and_second_click_both_use_200ns_per_div(self):
+    def test_crosstalk_first_and_second_click_keep_200ns_focus(self):
         from PyQt6.QtWidgets import QApplication
 
         from dpt_extractor.config.loader import load_config
@@ -7023,8 +8279,10 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             first = plot.current_x_range_us()
             self.assertIsNotNone(first)
             assert first is not None
-            self.assertAlmostEqual(first[1] - first[0], 2.0, places=6)
-            self.assertEqual(plot._x_scale_edit.text(), "200 ns/div")
+            first_span = first[1] - first[0]
+            self.assertAlmostEqual(first_span, 2.0, delta=0.02)
+            first_scale_text = plot._x_scale_edit.text()
+            self.assertEqual(first_scale_text, "200 ns/div")
             self.assertNotIn(key, win._manual_intervals)
 
             win._on_value_clicked(*key)
@@ -7032,10 +8290,10 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             second = plot.current_x_range_us()
             self.assertIsNotNone(second)
             assert second is not None
-            self.assertAlmostEqual(second[1] - second[0], 2.0, places=6)
+            self.assertAlmostEqual(second[1] - second[0], first_span, places=6)
             self.assertAlmostEqual(second[0], first[0], places=6)
             self.assertAlmostEqual(second[1], first[1], places=6)
-            self.assertEqual(plot._x_scale_edit.text(), "200 ns/div")
+            self.assertEqual(plot._x_scale_edit.text(), first_scale_text)
             self.assertNotIn(key, win._manual_intervals)
         finally:
             win.close()
@@ -7052,7 +8310,12 @@ class TestWaveformPlotSmoke(unittest.TestCase):
 
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.gui.main_window import MainWindow
-        from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_ANCHOR_FRACTION
+        from dpt_extractor.gui.waveform_plot import (
+            PARAM_FOCUS_ANCHOR_FRACTION,
+            PARAM_FOCUS_REQUIRED_GUARD_US,
+            TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+            TF_FOCUS_MIDPOINT_FRACTION,
+        )
 
         cases = (
             (
@@ -7083,25 +8346,34 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             win.cfg = load_config()
             win.wave_plot = plot
             win.result_table.set_result(result)
-            focus_calls: list[tuple[float, tuple[float, ...], float]] = []
+            focus_calls: list[tuple[float, tuple[float, ...], float, bool]] = []
             original_focus = plot.focus_parameter_window_us
 
             def _record_focus(
                 anchor_us: float,
                 *required_times_us: float,
                 anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
+                prefer_right_room: bool = False,
+                minimum_span_us: float | None = None,
+                composition_anchor_us: float | None = None,
+                composition_balance_fraction: float | None = None,
             ) -> None:
                 focus_calls.append(
                     (
                         float(anchor_us),
                         tuple(float(value) for value in required_times_us),
                         float(anchor_fraction),
+                        bool(prefer_right_room),
                     )
                 )
                 original_focus(
                     anchor_us,
                     *required_times_us,
                     anchor_fraction=anchor_fraction,
+                    prefer_right_room=prefer_right_room,
+                    minimum_span_us=minimum_span_us,
+                    composition_anchor_us=composition_anchor_us,
+                    composition_balance_fraction=composition_balance_fraction,
                 )
 
             plot.focus_parameter_window_us = _record_focus
@@ -7123,7 +8395,12 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                             and plot._cursor_b is not None
                         )
 
-                        anchor_us, required_times, anchor_fraction = focus_calls[-1]
+                        (
+                            anchor_us,
+                            required_times,
+                            anchor_fraction,
+                            prefer_right_room,
+                        ) = focus_calls[-1]
                         self.assertEqual(len(required_times), 2)
                         actual_ab = sorted(
                             (
@@ -7132,6 +8409,35 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                             )
                         )
                         required_ab = sorted(required_times)
+                        turn_on_slope_balanced = (
+                            section == "开通" and name in {"dv/dt", "di/dt"}
+                        )
+                        vge_auxiliary = section in {"开通", "反向恢复"}
+                        if vge_auxiliary:
+                            self.assertTrue(prefer_right_room)
+                            expected_anchor = win._switching_focus_anchor_us(section)
+                            self.assertIsNotNone(expected_anchor)
+                            assert expected_anchor is not None
+                            self.assertAlmostEqual(anchor_us, expected_anchor, places=9)
+                            self.assertAlmostEqual(
+                                anchor_fraction,
+                                PARAM_FOCUS_ANCHOR_FRACTION,
+                                places=9,
+                            )
+                        elif turn_on_slope_balanced:
+                            self.assertFalse(prefer_right_room)
+                            self.assertAlmostEqual(
+                                anchor_us,
+                                0.5 * (required_ab[0] + required_ab[1]),
+                                places=9,
+                            )
+                            self.assertAlmostEqual(
+                                anchor_fraction,
+                                TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+                                places=9,
+                            )
+                        else:
+                            self.assertTrue(prefer_right_room)
                         self.assertAlmostEqual(
                             required_ab[0], actual_ab[0], places=6
                         )
@@ -7145,11 +8451,20 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                         x0, x1 = xr
                         span = x1 - x0
                         self.assertAlmostEqual(span, 2.0, delta=0.02)
-                        self.assertAlmostEqual(
-                            (anchor_us - x0) / span,
-                            anchor_fraction,
-                            delta=0.025,
+                        self.assertGreaterEqual(
+                            x1 - required_ab[1] + 0.025,
+                            required_ab[0] - x0,
                         )
+                        hard_width = (
+                            required_ab[1]
+                            - required_ab[0]
+                            + 2.0 * PARAM_FOCUS_REQUIRED_GUARD_US
+                        )
+                        if hard_width <= 0.5 * span + 1e-9:
+                            self.assertLessEqual(
+                                (required_ab[1] - x0) / span,
+                                0.50 + 0.025,
+                            )
                         self.assertGreaterEqual(actual_ab[0], x0 - 1e-6)
                         self.assertLessEqual(actual_ab[1], x1 + 1e-6)
 
@@ -7179,12 +8494,20 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             anchor_us: float,
             *required_times_us: float,
             anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
+            prefer_right_room: bool = False,
+            minimum_span_us: float | None = None,
+            composition_anchor_us: float | None = None,
+            composition_balance_fraction: float | None = None,
         ) -> None:
             calls.append((float(anchor_us), tuple(map(float, required_times_us))))
             original_focus(
                 anchor_us,
                 *required_times_us,
                 anchor_fraction=anchor_fraction,
+                prefer_right_room=prefer_right_room,
+                minimum_span_us=minimum_span_us,
+                composition_anchor_us=composition_anchor_us,
+                composition_balance_fraction=composition_balance_fraction,
             )
 
         plot.focus_parameter_window_us = _record_focus
@@ -7246,14 +8569,20 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         UH.exists() and WANGLIHUI_UL_400_1070.exists(),
         "upper/lower DPT samples missing",
     )
-    def test_all_dpt_parameter_views_stay_bounded_with_right_side_room(self):
+    def test_all_dpt_parameter_views_stay_bounded_with_real_cursors_visible(self):
         from copy import deepcopy
 
         from PyQt6.QtWidgets import QApplication
 
         from dpt_extractor.config.loader import load_config
         from dpt_extractor.gui.main_window import MainWindow
-        from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_ANCHOR_FRACTION
+        from dpt_extractor.gui.waveform_plot import (
+            PARAM_FOCUS_ANCHOR_FRACTION,
+            PARAM_FOCUS_REQUIRED_GUARD_US,
+            TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
+            TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+            TF_FOCUS_MIDPOINT_FRACTION,
+        )
 
         params = (
             *(
@@ -7307,25 +8636,34 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             win.cfg = load_config()
             win.wave_plot = plot
             win.result_table.set_result(result)
-            focus_calls: list[tuple[float, tuple[float, ...], float]] = []
+            focus_calls: list[tuple[float, tuple[float, ...], float, bool]] = []
             original_focus = plot.focus_parameter_window_us
 
             def _record_focus(
                 anchor_us: float,
                 *required_times_us: float,
                 anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
+                prefer_right_room: bool = False,
+                minimum_span_us: float | None = None,
+                composition_anchor_us: float | None = None,
+                composition_balance_fraction: float | None = None,
             ) -> None:
                 focus_calls.append(
                     (
                         float(anchor_us),
                         tuple(float(value) for value in required_times_us),
                         float(anchor_fraction),
+                        bool(prefer_right_room),
                     )
                 )
                 original_focus(
                     anchor_us,
                     *required_times_us,
                     anchor_fraction=anchor_fraction,
+                    prefer_right_room=prefer_right_room,
+                    minimum_span_us=minimum_span_us,
+                    composition_anchor_us=composition_anchor_us,
+                    composition_balance_fraction=composition_balance_fraction,
                 )
 
             plot.focus_parameter_window_us = _record_focus
@@ -7351,17 +8689,178 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     self.assertLessEqual(x1, full_x1 + 1e-6)
                     self.assertGreaterEqual(span, min(2.0, full_span) - 0.02)
 
-                    anchor_us, required_times, anchor_fraction = focus_calls[-1]
-                    if section == "反向恢复":
+                    (
+                        anchor_us,
+                        required_times,
+                        anchor_fraction,
+                        prefer_right_room,
+                    ) = focus_calls[-1]
+                    gate_anchored = "vge" in win._cursor_endpoint_channels_for_param(
+                        section, name
+                    )
+                    vge_auxiliary = section in {"开通", "反向恢复"} and not gate_anchored
+                    turn_on_current_balanced = (section, name) == ("开通", "开通电流")
+                    turn_on_slope_balanced = (
+                        section == "开通" and name in {"dv/dt", "di/dt"}
+                    )
+                    tf_balanced = (section, name) == ("关断过程", "Tf")
+                    rr_trr_shifted = (section, name) == ("反向恢复", "Trr")
+                    if gate_anchored:
+                        self.assertFalse(prefer_right_room)
                         expected_anchor = win._switching_focus_anchor_us(section)
                         self.assertIsNotNone(expected_anchor)
                         assert expected_anchor is not None
                         self.assertAlmostEqual(anchor_us, expected_anchor, places=6)
-                    if x0 > full_x0 + 0.02 and x1 < full_x1 - 0.02:
-                        self.assertGreaterEqual(
-                            (anchor_us - x0) / span,
-                            anchor_fraction - 0.025,
+                        self.assertAlmostEqual(
+                            anchor_fraction,
+                            PARAM_FOCUS_ANCHOR_FRACTION,
+                            places=9,
                         )
+                    elif vge_auxiliary:
+                        self.assertTrue(prefer_right_room)
+                        self.assertTrue(required_times)
+                        expected_anchor = win._switching_focus_anchor_us(section)
+                        self.assertIsNotNone(expected_anchor)
+                        assert expected_anchor is not None
+                        self.assertAlmostEqual(anchor_us, expected_anchor, places=6)
+                        self.assertAlmostEqual(
+                            anchor_fraction,
+                            PARAM_FOCUS_ANCHOR_FRACTION,
+                            places=9,
+                        )
+                    elif turn_on_current_balanced or turn_on_slope_balanced:
+                        self.assertFalse(prefer_right_room)
+                        self.assertTrue(required_times)
+                        self.assertAlmostEqual(
+                            anchor_us,
+                            0.5 * (min(required_times) + max(required_times)),
+                            places=9,
+                        )
+                        self.assertAlmostEqual(
+                            anchor_fraction,
+                            (
+                                TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION
+                                if turn_on_slope_balanced
+                                else TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION
+                            ),
+                            places=9,
+                        )
+                    elif tf_balanced:
+                        self.assertFalse(prefer_right_room)
+                        self.assertTrue(required_times)
+                        self.assertAlmostEqual(
+                            anchor_us,
+                            0.5 * (min(required_times) + max(required_times)),
+                            places=9,
+                        )
+                        self.assertAlmostEqual(
+                            anchor_fraction,
+                            TF_FOCUS_MIDPOINT_FRACTION,
+                            places=9,
+                        )
+                    elif rr_trr_shifted:
+                        self.assertFalse(prefer_right_room)
+                        self.assertTrue(required_times)
+                        self.assertAlmostEqual(
+                            anchor_us,
+                            0.5 * (min(required_times) + max(required_times)),
+                            places=9,
+                        )
+                        self.assertAlmostEqual(
+                            anchor_fraction,
+                            RR_TRR_ANCHOR_FRACTION,
+                            places=9,
+                        )
+                    else:
+                        self.assertTrue(prefer_right_room)
+                        self.assertTrue(required_times)
+                        self.assertAlmostEqual(
+                            anchor_us,
+                            0.5 * (min(required_times) + max(required_times)),
+                            places=9,
+                        )
+                    if x0 > full_x0 + 0.02 and x1 < full_x1 - 0.02:
+                        anchor_position = (anchor_us - x0) / span
+                        if gate_anchored:
+                            self.assertGreaterEqual(
+                                anchor_position,
+                                anchor_fraction - 0.025,
+                            )
+                        elif vge_auxiliary:
+                            self.assertGreaterEqual(
+                                (anchor_us - x0) / span,
+                                -0.02,
+                            )
+                            self.assertLessEqual(
+                                (anchor_us - x0) / span,
+                                0.20,
+                            )
+                            required_lo = min(required_times)
+                            required_hi = max(required_times)
+                            self.assertGreaterEqual(
+                                x1 - required_hi + 0.025,
+                                required_lo - x0,
+                            )
+                        elif turn_on_current_balanced or turn_on_slope_balanced:
+                            self.assertAlmostEqual(
+                                anchor_position,
+                                (
+                                    TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION
+                                    if turn_on_slope_balanced
+                                    else TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION
+                                ),
+                                delta=0.025,
+                            )
+                            required_lo = min(required_times)
+                            required_hi = max(required_times)
+                            self.assertGreaterEqual(
+                                x1 - required_hi + 0.025,
+                                required_lo - x0,
+                            )
+                        elif rr_trr_shifted:
+                            required_lo = min(required_times)
+                            required_hi = max(required_times)
+                            self.assertGreaterEqual(
+                                anchor_position,
+                                RR_TRR_ANCHOR_FRACTION - 0.025,
+                            )
+                            self.assertGreaterEqual(
+                                x1 - required_hi + 0.025,
+                                required_lo - x0,
+                            )
+                        elif tf_balanced:
+                            required_lo = min(required_times)
+                            required_hi = max(required_times)
+                            self.assertAlmostEqual(
+                                anchor_position,
+                                TF_FOCUS_MIDPOINT_FRACTION,
+                                delta=0.025,
+                            )
+                            self.assertGreaterEqual(
+                                x1 - required_hi + 0.025,
+                                required_lo - x0,
+                            )
+                            self.assertLessEqual(
+                                (required_hi - x0) / span,
+                                0.50 + 0.025,
+                            )
+                        else:
+                            required_lo = min(required_times)
+                            required_hi = max(required_times)
+                            self.assertGreaterEqual(
+                                x1 - required_hi + 0.025,
+                                required_lo - x0,
+                            )
+                            hard_width = (
+                                required_hi
+                                - required_lo
+                                + 2.0 * PARAM_FOCUS_REQUIRED_GUARD_US
+                            )
+                            if hard_width <= 0.5 * span + 1e-9:
+                                self.assertLessEqual(
+                                    (required_hi - x0) / span,
+                                    0.50 + 0.025,
+                                )
                     for required_time in required_times:
                         self.assertGreaterEqual(required_time, x0 - 1e-6)
                         self.assertLessEqual(required_time, x1 + 1e-6)
@@ -7398,76 +8897,6 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                         win._save_report_plot_capture(out, QSize(1280, 960))
         finally:
             win.close()
-
-    def test_full_report_capture_sequence_writes_every_png_without_window_resize(self):
-        import tempfile
-
-        from PyQt6.QtCore import QEvent, QObject
-        from PyQt6.QtGui import QImage
-        from PyQt6.QtWidgets import QApplication
-
-        from dpt_extractor.config.loader import load_config
-        from dpt_extractor.gui.main_window import MainWindow, REPORT_PLOT_CAPTURE_SIZE
-
-        _unused_plot, bundle, profile, result = self._load_and_plot(UH)
-        _unused_plot.close()
-        win = MainWindow()
-        win.bundle = bundle
-        win.profile = profile
-        win.result = result
-        win.cfg = load_config()
-        win.result_table.set_result(result)
-        win.wave_plot.plot_waveforms(bundle, profile, result)
-        win.resize(1100, 760)
-        win.show()
-        QApplication.processEvents()
-
-        class _ResizeCounter(QObject):
-            def __init__(self) -> None:
-                super().__init__()
-                self.resize_count = 0
-                self.move_count = 0
-
-            def eventFilter(self, watched, event) -> bool:  # noqa: N802
-                if event.type() == QEvent.Type.Resize:
-                    self.resize_count += 1
-                elif event.type() == QEvent.Type.Move:
-                    self.move_count += 1
-                return False
-
-        window_events = _ResizeCounter()
-        waveform_events = _ResizeCounter()
-        win.installEventFilter(window_events)
-        win.wave_plot.installEventFilter(waveform_events)
-        before_window_geometry = win.geometry()
-        before_waveform_geometry = win.wave_plot.geometry()
-        before_minimum = win.wave_plot.minimumSize()
-        before_maximum = win.wave_plot.maximumSize()
-        before_x, before_y = win.wave_plot.plot.getPlotItem().getViewBox().viewRange()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            images = win._capture_report_images(Path(tmp))
-            self.assertEqual(len(images), len(win._report_image_params()))
-            for path in images.values():
-                image = QImage(str(path))
-                self.assertFalse(image.isNull(), path.name)
-                self.assertEqual(image.size(), REPORT_PLOT_CAPTURE_SIZE, path.name)
-                self.assertGreater(path.stat().st_size, 0, path.name)
-
-        after_x, after_y = win.wave_plot.plot.getPlotItem().getViewBox().viewRange()
-        self.assertEqual(win.geometry(), before_window_geometry)
-        self.assertEqual(win.wave_plot.geometry(), before_waveform_geometry)
-        self.assertEqual(win.wave_plot.minimumSize(), before_minimum)
-        self.assertEqual(win.wave_plot.maximumSize(), before_maximum)
-        self.assertEqual(window_events.resize_count, 0)
-        self.assertEqual(window_events.move_count, 0)
-        self.assertEqual(waveform_events.resize_count, 0)
-        self.assertEqual(waveform_events.move_count, 0)
-        self.assertAlmostEqual(after_x[0], before_x[0], places=6)
-        self.assertAlmostEqual(after_x[1], before_x[1], places=6)
-        self.assertAlmostEqual(after_y[0], before_y[0], places=6)
-        self.assertAlmostEqual(after_y[1], before_y[1], places=6)
-        win.close()
 
     def test_param_focus_x_scale_memory(self):
         from dpt_extractor.gui.waveform_plot import PARAM_FOCUS_DEFAULT_US_PER_DIV
@@ -8786,7 +10215,10 @@ class TestMainWindowSmoke(unittest.TestCase):
     def test_recalculate_restores_valid_non_slope_card_cursor_semantics(self):
         """The selected card must still own A/B/Ha/Hb after a replot."""
         from dpt_extractor.gui.main_window import MainWindow
-        from dpt_extractor.gui.waveform_plot import _is_power_unit
+        from dpt_extractor.gui.waveform_plot import (
+            PARAMETER_POWER_REFERENCE_CHANNEL,
+            _is_power_unit,
+        )
 
         win = MainWindow()
         try:
@@ -8852,7 +10284,7 @@ class TestMainWindowSmoke(unittest.TestCase):
                     ("反向恢复", "Irr"),
                     "irr_peak",
                     ("irr", "irr"),
-                    (("CH3", False), ("irr", True)),
+                    (("irr", True), ("irr", True)),
                 ),
                 (
                     ("反向恢复", "Trr"),
@@ -8869,7 +10301,7 @@ class TestMainWindowSmoke(unittest.TestCase):
                 (
                     ("开通", "Vce_on_max"),
                     "interval",
-                    ("vge", "vce"),
+                    ("vce", "vce"),
                     (("vce", True), ("vce", True)),
                 ),
             )
@@ -8896,9 +10328,9 @@ class TestMainWindowSmoke(unittest.TestCase):
                     self.assertIsNone(win._active_slope_param)
                     assert_snapshot_equal(before, snapshot())
 
-            # This target has no verified visible W/kW trace for turn-off
-            # power.  Pmax therefore binds A/B to its raw Vce/Ic loss
-            # boundaries and must not show unrelated horizontal lines.
+            # This target has no verified visible Vce*Ic trace.  Pmax keeps
+            # A/B on its raw Vce/Ic loss boundaries and restores a readout-only
+            # raw-power Ha instead of borrowing an unrelated Math waveform.
             key = ("关断过程", "Pmax")
             win._on_value_clicked(*key)
             before = snapshot()
@@ -8907,11 +10339,15 @@ class TestMainWindowSmoke(unittest.TestCase):
             ha_binding = before["horizontal"]["ha"][0]
             hb_binding = before["horizontal"]["hb"][0]
             self.assertEqual((a_channel, b_channel), ("vce", "ic"))
-            self.assertFalse(ha_binding[1])
+            self.assertEqual(
+                ha_binding,
+                (PARAMETER_POWER_REFERENCE_CHANNEL, True),
+            )
             self.assertFalse(hb_binding[1])
-            self.assertFalse(plot._h_cursor_a.isVisible())
+            self.assertTrue(plot._h_cursor_a.isVisible())
             self.assertFalse(plot._h_cursor_b.isVisible())
             self.assertFalse(_is_power_unit(plot._unit_for_channel(a_channel)))
+            self.assertTrue(_is_power_unit(plot._unit_for_channel(ha_binding[0])))
             self.assertTrue(before["readout"])
 
             win._recalculate()
@@ -8922,11 +10358,14 @@ class TestMainWindowSmoke(unittest.TestCase):
         finally:
             win.close()
 
-    def test_pmax_without_a_visible_power_trace_has_no_horizontal_lines(self):
+    def test_pmax_without_visible_power_trace_uses_raw_peak_ha_reference(self):
         import numpy as np
 
         from dpt_extractor.gui.main_window import MainWindow
-        from dpt_extractor.gui.waveform_plot import _is_power_unit
+        from dpt_extractor.gui.waveform_plot import (
+            PARAMETER_POWER_REFERENCE_CHANNEL,
+            _is_power_unit,
+        )
         from dpt_extractor.metrics.energy import peak_power_kw
         from dpt_extractor.metrics.iec_windows import IntegrationWindow
         from dpt_extractor.models.waveform import bundle_total_current
@@ -8940,28 +10379,120 @@ class TestMainWindowSmoke(unittest.TestCase):
                     plot._hidden_channels.add(key)
                     item.hide()
 
-            win._on_value_clicked("关断过程", "Pmax")
-            self.assertEqual(plot._interactive_mode, "power_peak")
-            self.assertFalse(plot._horizontal_cursor_binding("ha")[1])
-            self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
-            self.assertFalse(plot._h_cursor_a.isVisible())
-            self.assertFalse(plot._h_cursor_b.isVisible())
-            self.assertEqual(plot._cursor_endpoint_channel("a"), "vce")
-            self.assertEqual(plot._cursor_endpoint_channel("b"), "ic")
+            for section, endpoints, stored_value in (
+                ("关断过程", ("vce", "ic"), lambda: win.result.turn_off.pmax),
+                ("开通", ("ic", "vce"), lambda: win.result.turn_on.pmax),
+            ):
+                with self.subTest(section=section):
+                    before = (
+                        float(win.result.turn_off.pmax),
+                        float(win.result.turn_on.pmax),
+                    )
+                    interval = win._parameter_interval_us(section, "Pmax")
+                    self.assertIsNotNone(interval)
+                    assert interval is not None
+                    win._on_value_clicked(section, "Pmax")
 
-            assert plot._cursor_a is not None and plot._cursor_b is not None
-            ta = float(plot._cursor_a.value())
-            tb = float(plot._cursor_b.value()) - 0.02
-            plot._interactive_on_change(ta, tb)
-            t = win.bundle.t
-            i0 = int(np.searchsorted(t, min(ta, tb) * 1e-6, side="left"))
-            i1 = int(np.searchsorted(t, max(ta, tb) * 1e-6, side="left"))
-            expected = peak_power_kw(
-                win.bundle.get(win.profile.vce),
-                bundle_total_current(win.bundle, win.profile),
-                IntegrationWindow(i0, i1, float(t[i0]), float(t[i1])),
-            )
-            self.assertAlmostEqual(win.result.turn_off.pmax, expected, places=9)
+                    self.assertEqual(plot._interactive_mode, "power_peak")
+                    self.assertEqual(
+                        plot._horizontal_cursor_binding("ha"),
+                        (PARAMETER_POWER_REFERENCE_CHANNEL, True),
+                    )
+                    self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
+                    self.assertTrue(plot._h_cursor_a.isVisible())
+                    self.assertFalse(plot._h_cursor_b.isVisible())
+                    self.assertEqual(
+                        (
+                            plot._cursor_endpoint_channel("a"),
+                            plot._cursor_endpoint_channel("b"),
+                        ),
+                        endpoints,
+                    )
+
+                    t = win.bundle.t
+                    i0 = int(
+                        np.searchsorted(t, min(interval) * 1e-6, side="left")
+                    )
+                    i1 = int(
+                        np.searchsorted(t, max(interval) * 1e-6, side="left")
+                    )
+                    expected = peak_power_kw(
+                        win.bundle.get(win.profile.vce),
+                        bundle_total_current(win.bundle, win.profile),
+                        IntegrationWindow(i0, i1, float(t[i0]), float(t[i1])),
+                    )
+                    ha_channel, _ha_valid = plot._horizontal_cursor_binding("ha")
+                    ha_w = plot._from_disp(
+                        ha_channel,
+                        float(plot._h_cursor_a.value()),
+                    )
+                    self.assertAlmostEqual(ha_w / 1000.0, expected, places=9)
+                    self.assertAlmostEqual(stored_value(), expected, places=9)
+                    self.assertEqual(
+                        (
+                            float(win.result.turn_off.pmax),
+                            float(win.result.turn_on.pmax),
+                        ),
+                        before,
+                        "点击 Pmax 只能增加 Ha 展示，不能重写参数值",
+                    )
+
+                    # A real manual Ha adjustment is different from merely
+                    # entering the card: it becomes the operator's Pmax value
+                    # and must survive a card switch for report capture.
+                    manual_pos = float(plot._h_cursor_a.value()) + 0.12
+                    plot._h_cursor_a.setValue(manual_pos)
+                    self.app.processEvents()
+                    manual_ha = plot._from_disp(
+                        PARAMETER_POWER_REFERENCE_CHANNEL,
+                        float(plot._h_cursor_a.value()),
+                    )
+                    manual_kw = manual_ha / 1000.0
+                    self.assertAlmostEqual(stored_value(), manual_kw, places=9)
+                    self.assertIn((section, "Pmax"), win._manual_extreme_values)
+                    frozen_manual = win._snapshot_report_manual_state()
+                    frozen_line, frozen_kw = frozen_manual[
+                        "_manual_extreme_values"
+                    ][(section, "Pmax")]
+                    self.assertAlmostEqual(frozen_line, manual_ha, places=9)
+                    self.assertAlmostEqual(frozen_kw, manual_kw, places=9)
+
+                    switch_section = (
+                        "开通" if section == "关断过程" else "关断过程"
+                    )
+                    win._on_value_clicked(switch_section, "ΔVce")
+                    win._on_value_clicked(section, "Pmax")
+                    self.assertAlmostEqual(
+                        float(plot._h_cursor_a.value()), manual_pos, places=9
+                    )
+                    self.assertAlmostEqual(stored_value(), manual_kw, places=9)
+
+                    # The report-boundary guard must also commit a real drag
+                    # whose release signal has not yet been delivered.  Pmax
+                    # has no Hb, so this specifically locks the single-Ha path.
+                    pending_pos = manual_pos + 0.08
+                    plot._h_cursor_a.moving = True
+                    plot._h_cursor_a.setValue(pending_pos)
+                    plot._h_cursor_a.moving = False
+                    self.assertTrue(plot._pending_horizontal_cursor_commit)
+                    self.assertAlmostEqual(stored_value(), manual_kw, places=9)
+                    pending_ha = plot._from_disp(
+                        PARAMETER_POWER_REFERENCE_CHANNEL,
+                        float(plot._h_cursor_a.value()),
+                    )
+                    plot.commit_pending_interaction_for_report()
+                    self.assertFalse(plot._pending_horizontal_cursor_commit)
+                    self.assertAlmostEqual(
+                        stored_value(), pending_ha / 1000.0, places=9
+                    )
+                    frozen_after_commit = win._snapshot_report_manual_state()
+                    self.assertAlmostEqual(
+                        frozen_after_commit["_manual_extreme_values"][
+                            (section, "Pmax")
+                        ][1],
+                        pending_ha / 1000.0,
+                        places=9,
+                    )
         finally:
             win.close()
 
@@ -9043,7 +10574,7 @@ class TestMainWindowSmoke(unittest.TestCase):
                     item.hide()
 
             win._on_value_clicked("反向恢复", "Pdmax")
-            self.assertEqual(plot._cursor_endpoint_channel("a"), "v_diode")
+            self.assertEqual(plot._cursor_endpoint_channel("a"), "irr")
             self.assertEqual(plot._cursor_endpoint_channel("b"), "irr")
             self.assertFalse(plot._horizontal_cursor_binding("ha")[1])
             self.assertFalse(plot._horizontal_cursor_binding("hb")[1])
@@ -9072,6 +10603,7 @@ class TestMainWindowSmoke(unittest.TestCase):
         import numpy as np
 
         from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.models.waveform import bundle_total_current
 
         win = MainWindow()
         win._load_file(str(UH))
@@ -9082,10 +10614,18 @@ class TestMainWindowSmoke(unittest.TestCase):
             11.0,
             42.0,
         )
+        # A cache entry without waveform/pulse-pair ownership is stale test
+        # state, not a real manual submission.  Automatic v71 endpoints must
+        # therefore remain authoritative for this card entry.
+        self.assertFalse(win._manual_cursors_apply_to_current_waveform())
         win._on_value_clicked("关断过程", "Eoff")
         plot = win.wave_plot
         ta = float(plot._cursor_a.value())
         tb = float(plot._cursor_b.value())
+        context = win.result.energy_contexts[("关断过程", "Eoff")]
+        self.assertEqual(context.endpoint_mode, "stable_platforms")
+        self.assertAlmostEqual(ta, float(context.t_start) * 1e6, places=6)
+        self.assertAlmostEqual(tb, float(context.t_end) * 1e6, places=6)
         self.assertGreater(ta, 14.525, f"A too early/noise: {ta}")
         self.assertLess(ta, 14.56, f"A too late/pulse_off: {ta}")
         self.assertGreater(tb, 14.77)
@@ -9096,26 +10636,29 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertEqual([s[0] for s in b_samples], ["vce", "ic"])
         ha_v = plot._from_disp("vce", float(plot._h_cursor_a.value()))
         vce = win.bundle.get(win.profile.vce)
+        ic = bundle_total_current(win.bundle, win.profile)
         vce_at_a = float(np.interp(ta * 1e-6, win.bundle.t, vce))
-        self.assertAlmostEqual(vce_at_a, ha_v, delta=0.5)
+        ic_at_b = float(np.interp(tb * 1e-6, win.bundle.t, ic))
+        self.assertAlmostEqual(ha_v, float(context.ha_v), places=6)
         marker_x, marker_y = plot._cursor_a_wave_marker.getData()
         self.assertEqual(len(marker_x), 1)
         self.assertEqual(len(marker_y), 1)
         self.assertAlmostEqual(float(marker_x[0]), ta, places=6)
         self.assertAlmostEqual(
             plot._from_disp("vce", float(marker_y[0])),
-            ha_v,
-            delta=0.5,
+            vce_at_a,
+            places=6,
         )
         marker_x, marker_y = plot._cursor_b_wave_marker.getData()
         self.assertEqual(len(marker_x), 1)
         self.assertEqual(len(marker_y), 1)
         self.assertAlmostEqual(float(marker_x[0]), tb, places=6)
         hb_a = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+        self.assertAlmostEqual(hb_a, float(context.hb_a), places=6)
         self.assertAlmostEqual(
             plot._from_disp("ic", float(marker_y[0])),
-            hb_a,
-            delta=0.5,
+            ic_at_b,
+            places=6,
         )
         readout = plot._readout_label.text()
         self.assertIn("A[", readout)

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from dpt_extractor.metrics.offset_measurement import scope_top_base
 from dpt_extractor.utils.signal import crossing_index, crossing_time, smooth, threshold_value
 from dpt_extractor.utils.timing_adapt import scope_turn_off_bases, scope_turn_on_bases
+
+if TYPE_CHECKING:
+    from dpt_extractor.metrics.plateau_level import EoffStablePlatformCursorContext
 
 
 @dataclass
@@ -20,7 +24,7 @@ class IntegrationWindow:
 
 @dataclass(frozen=True)
 class EnergyLossMarkers:
-    """Eoff/Eon 卡尺：Ha/Hb 为平台电平，A/B 为与对应波形交点时刻。
+    """Eoff/Eon 卡尺：Ha/Hb 为平台电平，A/B 为权威积分端点。
 
     Eoff: ha_v=Vce 导通平台(V)，hb_a=Ic 回落平台(A)。
     Eon:  ha_v=Ic 抬升前平台(A)；hb_a=Vce 回落后导通平台(V)；v_b 同 hb_a。
@@ -34,6 +38,8 @@ class EnergyLossMarkers:
     i_start: int
     i_end: int
     v_b: float | None = None  # Eon：B 光标用 Vce 导通平台穿越电平
+    endpoint_mode: str = "level_crossings"
+    stable_platform_context: "EoffStablePlatformCursorContext | None" = None
 
     def as_integration_window(self) -> IntegrationWindow:
         return IntegrationWindow(
@@ -184,6 +190,47 @@ def _refine_eoff_vce_base_before_rise(
     return float(current_level)
 
 
+def _eoff_ic_base_refine_segment(
+    ic: np.ndarray,
+    fall_idx: int,
+    w1: int,
+    dt: float,
+) -> np.ndarray:
+    """Return the local post-fall samples used by the Eoff Base refiner."""
+
+    guard = _samples_for_seconds(dt, 20e-9, minimum=2)
+    win = _samples_for_seconds(dt, 220e-9, minimum=16)
+    lo = min(max(0, int(w1) - 8), int(fall_idx) + guard)
+    hi = min(len(ic), int(w1) + 1, lo + win)
+    if hi <= lo + 7:
+        return np.asarray([], dtype=np.float64)
+    return np.asarray(ic[lo:hi], dtype=np.float64)
+
+
+def _eoff_ic_base_refine_quality(
+    ic: np.ndarray,
+    fall_idx: int,
+    w1: int,
+    dt: float,
+) -> tuple[float, float]:
+    """Return robust peak-to-peak width and half-window drift."""
+
+    seg = _eoff_ic_base_refine_segment(ic, fall_idx, w1, dt)
+    finite = seg[np.isfinite(seg)]
+    if len(finite) < 8:
+        return float("inf"), float("inf")
+    p05, p95 = np.nanpercentile(finite, (5.0, 95.0))
+    half = max(1, len(finite) // 2)
+    first = finite[:half]
+    second = finite[half:]
+    drift = (
+        abs(float(np.nanmedian(first)) - float(np.nanmedian(second)))
+        if len(second)
+        else 0.0
+    )
+    return max(0.0, float(p95) - float(p05)), float(drift)
+
+
 def _refine_eoff_ic_base_after_fall(
     ic: np.ndarray,
     fall_idx: int,
@@ -193,13 +240,9 @@ def _refine_eoff_ic_base_after_fall(
     span: float,
 ) -> float:
     """Refine Eoff Hb in the local stable Ic band just after the main fall."""
-    guard = _samples_for_seconds(dt, 20e-9, minimum=2)
-    win = _samples_for_seconds(dt, 220e-9, minimum=16)
-    lo = min(max(0, int(w1) - 8), int(fall_idx) + guard)
-    hi = min(len(ic), int(w1) + 1, lo + win)
-    if hi <= lo + 7:
+    seg = _eoff_ic_base_refine_segment(ic, fall_idx, w1, dt)
+    if len(seg) < 8:
         return float(current_level)
-    seg = np.asarray(ic[lo:hi], dtype=np.float64)
     candidate = _scope_band_center(seg)
     if abs(candidate - float(current_level)) <= max(8.0, 0.035 * max(float(span), 1.0)):
         return float(candidate)
@@ -1284,6 +1327,92 @@ def _legacy_settled_level_crossing_after_main_edge(
     return chosen, float(chosen_t)
 
 
+def _low_current_eoff_envelope_crossing(
+    t_seg: np.ndarray,
+    y_seg: np.ndarray,
+    level: float,
+    crosses: list[int],
+    first_t: float,
+    legacy_t: float,
+    dt: float,
+    span: float,
+    event_end_ix: int,
+) -> tuple[int, float] | None:
+    """Return the first raw Hb crossing after a low-current ringing packet.
+
+    At low load, the last meaningful Eoff oscillation may end well before the
+    generic settling detector's quiet tail.  Detect the packet from its own
+    amplitude envelope, then keep the published B cursor on the first real raw
+    waveform intersection.  A later rebound veto prevents a short calm gap
+    between two packets from being mistaken for the end of switching loss.
+    """
+
+    if span < 180.0 or span >= 600.0 or len(t_seg) < 8:
+        return None
+    tt = np.asarray(t_seg, dtype=np.float64)
+    yy = np.asarray(y_seg, dtype=np.float64)
+    dt_s = max(float(dt), 1e-15)
+    search_start = int(
+        np.searchsorted(tt, float(first_t) + 100e-9, side="left")
+    )
+    search_end = int(
+        np.searchsorted(tt, float(first_t) + 1.0e-6, side="right")
+    )
+    search_start = max(0, min(search_start, event_end_ix))
+    search_end = max(search_start + 1, min(search_end, event_end_ix + 1))
+    if search_end - search_start < 4:
+        return None
+
+    smooth_n = max(3, int(round(4e-9 / dt_s)))
+    smoothed = _edge_smoothed(yy, smooth_n)
+    extrema = _local_extrema_indices(
+        smoothed,
+        search_start,
+        search_end,
+        dt_s,
+        min_gap_ns=5.0,
+    )
+    amplitude_floor = max(10.0, 0.02 * float(span))
+    significant = [
+        int(idx)
+        for idx in extrema
+        if abs(float(smoothed[int(idx)]) - float(level)) >= amplitude_floor
+    ]
+    if len(significant) < 3:
+        return None
+
+    gate_t = float(tt[significant[-1]]) + 10e-9
+    gate_ix = int(np.searchsorted(tt, gate_t, side="left"))
+    candidate = _first_crossing_after_gate(
+        tt,
+        yy,
+        float(level),
+        crosses,
+        gate_ix,
+    )
+    if candidate is None:
+        return None
+    candidate_ix, candidate_t = candidate
+    if candidate_t < float(first_t) or candidate_t > float(tt[event_end_ix]):
+        return None
+    if candidate_t > float(legacy_t) - 70e-9:
+        return None
+
+    # When the proposed cursor is much earlier, require the following 120 ns
+    # to remain free of another material packet.
+    if float(legacy_t) - candidate_t > 100e-9:
+        rebound_end = min(
+            len(yy),
+            candidate_ix + max(2, int(round(120e-9 / dt_s))),
+        )
+        future_dev = float(
+            np.nanmax(np.abs(yy[candidate_ix:rebound_end] - float(level)))
+        )
+        if future_dev > max(18.0, 0.045 * float(span)):
+            return None
+    return int(candidate_ix), float(candidate_t)
+
+
 def _settled_level_crossing_after_main_edge(
     t_seg: np.ndarray,
     y_seg: np.ndarray,
@@ -1364,24 +1493,6 @@ def _settled_level_crossing_after_main_edge(
     )
     if early is not None:
         return early
-
-    if (
-        settle_profile == "current_fall"
-        and event_gate.classification == "smooth"
-        and event_gate.significant_count <= 1
-        and span < 120.0
-    ):
-        late_smooth = _first_crossing_after_time_from_pairs(
-            tt,
-            yy,
-            lvl,
-            crosses,
-            float(first_t) + 120e-9,
-        )
-        if late_smooth is not None:
-            late_ix, late_t = late_smooth
-            if late_t <= float(tt[event_end_ix]) + max(float(dt), 1e-15):
-                return int(late_ix), float(late_t)
 
     if (
         settle_profile == "current_fall"
@@ -1810,6 +1921,55 @@ def _eoff_ic_fall_crossing_at_main_fall(
     )
 
 
+def _eoff_current_fall_event_gate(
+    t_seg: np.ndarray,
+    i_seg: np.ndarray,
+    hb: float,
+    anchor: int,
+    dt: float,
+    i_top: float,
+    settled_t: float,
+) -> _LossCursorEventGate:
+    """Rebuild the same current-fall event gate for endpoint-mode auditing."""
+
+    first_ix, first_t = _main_edge_level_crossing(
+        t_seg,
+        i_seg,
+        hb,
+        i_top,
+        "falling",
+        anchor,
+        dt,
+        min_trigger=15.0,
+        fit_post_ns=300.0,
+        raw_window_ns=400.0,
+    )
+    end_ix = max(first_ix + 1, len(i_seg) - 2)
+    span = max(
+        abs(float(i_top) - float(hb)),
+        float(
+            np.nanpercentile(
+                np.abs(i_seg[first_ix : end_ix + 2] - float(hb)), 95
+            )
+        ),
+        1.0,
+    )
+    dev = np.abs(i_seg[first_ix : end_ix + 2] - float(hb))
+    tail_floor = _robust_tail_floor(dev)
+    return _loss_cursor_event_gate_after_main_edge(
+        t_seg,
+        i_seg,
+        float(hb),
+        int(first_ix),
+        int(end_ix),
+        float(settled_t if np.isfinite(settled_t) else first_t),
+        dt,
+        span,
+        tail_floor,
+        "current_fall",
+    )
+
+
 def _eon_vce_hb_fall_crossing_at_main_fall(
     t_seg: np.ndarray,
     v_seg: np.ndarray,
@@ -1914,6 +2074,120 @@ def _plateau_mean_ic_after_on(
     return float(np.mean(post))
 
 
+def _eoff_half_open_indices_from_times(
+    t: np.ndarray,
+    t_start: float,
+    t_end: float,
+) -> tuple[int, int]:
+    """Map interpolated marker times to the production [start, end) samples."""
+
+    tt = np.asarray(t, dtype=np.float64)
+    n = len(tt)
+    if n < 2:
+        return 0, 0
+    i_start = int(np.searchsorted(tt, float(t_start), side="left"))
+    i_end = int(np.searchsorted(tt, float(t_end), side="left"))
+    i_start = max(0, min(i_start, n - 1))
+    i_end = max(i_start + 1, min(i_end, n))
+    return int(i_start), int(i_end)
+
+
+def _eoff_stable_window_contains_old_signed_power_peak(
+    vce: np.ndarray,
+    ic: np.ndarray,
+    old_start: int,
+    old_end: int,
+    new_start: int,
+    new_end: int,
+) -> bool:
+    """Audit the signed Vce*Ic peak with production half-open semantics."""
+
+    vv = np.asarray(vce, dtype=np.float64)
+    ii = np.asarray(ic, dtype=np.float64)
+    n = min(len(vv), len(ii))
+    if n < 2:
+        return False
+    old_lo = max(0, min(int(old_start), n - 1))
+    old_hi = max(old_lo + 1, min(int(old_end), n))
+    power = np.asarray(vv[old_lo:old_hi] * ii[old_lo:old_hi], dtype=np.float64)
+    finite = np.isfinite(power)
+    if not np.any(finite):
+        return False
+    ranked = np.where(finite, power, -np.inf)
+    peak_idx = old_lo + int(np.argmax(ranked))
+    return int(new_start) <= int(peak_idx) < int(new_end)
+
+
+def _eoff_stable_context_is_publishable(
+    vce: np.ndarray,
+    ic: np.ndarray,
+    context: "EoffStablePlatformCursorContext",
+) -> bool:
+    """Fail closed unless all published stable-endpoint evidence is sound.
+
+    The stable-band locator has its own local candidate thresholds.  Before
+    those candidates become authoritative Eoff endpoints, apply the same
+    independent whole-event checks as the strict corpus validator: the full B
+    evidence band must remain narrow relative to the event current span, and
+    the largest signed ``Vce*Ic`` sample from the main Vce rise through the B
+    confirmation band must lie inside the production half-open ``[A, B)``
+    window.  This gate deliberately contains no file, load-current,
+    temperature, or bridge-arm exception.
+    """
+
+    vv = np.asarray(vce, dtype=np.float64)
+    ii = np.asarray(ic, dtype=np.float64)
+    n = min(len(vv), len(ii))
+    if n < 8:
+        return False
+    try:
+        a_idx = int(context.a_idx)
+        b_idx = int(context.b_idx)
+        a_band_start = int(context.a_band_start_idx)
+        b_band_start = int(context.b_band_start_idx)
+        b_band_end = int(context.b_band_end_idx)
+        v10_idx = int(context.v10_idx)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if not (
+        0 <= a_band_start <= a_idx < b_idx < n
+        and 0 <= v10_idx <= b_band_start <= b_idx <= b_band_end < n
+    ):
+        return False
+
+    event_current = ii[a_band_start : b_band_end + 1]
+    b_band = ii[b_band_start : b_band_end + 1]
+    event_finite = event_current[np.isfinite(event_current)]
+    band_finite = b_band[np.isfinite(b_band)]
+    if len(event_finite) < 8 or len(band_finite) < 8:
+        return False
+    event_p05, event_p95 = np.nanpercentile(event_finite, (5.0, 95.0))
+    band_p05, band_p95 = np.nanpercentile(band_finite, (5.0, 95.0))
+    quality_values = (
+        float(event_p05),
+        float(event_p95),
+        float(band_p05),
+        float(band_p95),
+    )
+    if not np.all(np.isfinite(quality_values)):
+        return False
+    event_span = abs(float(event_p95) - float(event_p05))
+    band_width = abs(float(band_p95) - float(band_p05))
+    if band_width > max(1.0, 0.16 * event_span):
+        return False
+
+    signed_power = np.asarray(
+        vv[v10_idx : b_band_end + 1] * ii[v10_idx : b_band_end + 1],
+        dtype=np.float64,
+    )
+    finite_power = np.isfinite(signed_power)
+    if not np.any(finite_power):
+        return False
+    ranked = np.where(finite_power, signed_power, -np.inf)
+    peak_idx = v10_idx + int(np.argmax(ranked))
+    return int(a_idx) <= int(peak_idx) < int(b_idx)
+
+
 def eoff_energy_markers(
     t: np.ndarray,
     ic: np.ndarray,
@@ -1926,8 +2200,9 @@ def eoff_energy_markers(
     pulse1_on: int | None = None,
 ) -> EnergyLossMarkers:
     """
-    关断损耗卡尺：Ha=Vce 抬升前平台均值；Hb=Ic 回落后平台均值；
-    A=Vce 与 Ha 上升穿越；B=Ic 主振荡包络结束后与 Hb 的第一个真实交点。
+    关断损耗卡尺：Ha=Vce 抬升前平台均值；Hb=Ic 回落后平台均值。
+    平滑无明显振荡事件的 A/B 使用前后稳定平台代表点；其余事件保持
+    Vce/Ha 与 Ic/Hb 的包络后真实交点。两种模式都直接拥有积分窗口。
     """
     _v_base, i_top, i_base, v_top, w0, w1 = scope_turn_off_bases(
         vce, ic, off_idx, i0, i1, dt, pre_ns, pulse1_on=pulse1_on
@@ -2013,10 +2288,18 @@ def eoff_energy_markers(
     i_end_local, t_end = _eoff_ic_fall_crossing_at_main_fall(
         t_sw, i_seg, hb_a, fall_anchor, dt, float(i_top)
     )
+    hb_refine_anchor_local = int(i_end_local)
+    initial_hb_refine_quality = (float("inf"), float("inf"))
     if not _use_legacy_loss_platform_mode():
+        initial_hb_refine_quality = _eoff_ic_base_refine_quality(
+            ic,
+            sw0 + hb_refine_anchor_local,
+            w1,
+            dt,
+        )
         refined_hb = _refine_eoff_ic_base_after_fall(
             ic,
-            sw0 + i_end_local,
+            sw0 + hb_refine_anchor_local,
             w1,
             dt,
             hb_a,
@@ -2041,6 +2324,233 @@ def eoff_energy_markers(
         i_start_local = int(raw_i_start_local)
         t_start = float(raw_t_start)
 
+    event_gate = _eoff_current_fall_event_gate(
+        t_sw,
+        i_seg,
+        float(hb_a),
+        int(fall_anchor),
+        dt,
+        float(i_top),
+        float(t_end),
+    )
+
+    # Low-current turn-off can contain a compact loss-producing ringing packet
+    # followed by a much longer harmless tail.  Re-evaluate only the B cursor
+    # against the packet envelope, using the final Ha/Hb levels and retaining
+    # a raw Ic/Hb intersection.  ``t_end`` remains unchanged unless the packet
+    # evidence is both materially earlier and free of a subsequent rebound.
+    eoff_span = max(abs(float(i_top) - float(hb_a)), 1.0)
+    eoff_crosses = _crossing_pair_indices(
+        i_seg,
+        float(hb_a),
+        max(0, min(int(fall_anchor), len(i_seg) - 2)),
+        len(i_seg) - 2,
+        direction=None,
+    )
+    low_current_end = _low_current_eoff_envelope_crossing(
+        t_sw,
+        i_seg,
+        float(hb_a),
+        eoff_crosses,
+        float(t_start),
+        float(t_end),
+        dt,
+        eoff_span,
+        len(i_seg) - 2,
+    )
+    if low_current_end is not None:
+        i_end_local, t_end = low_current_end
+
+    endpoint_mode = "level_crossings"
+    stable_platform_context = None
+    if (
+        not _use_legacy_loss_cursor_mode()
+        and event_gate.classification == "smooth"
+        and event_gate.significant_count <= 1
+    ):
+        from dpt_extractor.metrics.plateau_level import (
+            turn_off_eoff_stable_platform_cursor_context,
+        )
+
+        stable_end = min(len(t_sw) - 1, int(event_gate.end_idx) + 1)
+        stable_context = turn_off_eoff_stable_platform_cursor_context(
+            t_sw,
+            v_seg,
+            i_seg,
+            0,
+            len(t_sw) - 1,
+            dt,
+            float(v_top),
+            float(ha_v),
+            float(i_top),
+            float(hb_a),
+            search_end=stable_end,
+        )
+        if stable_context is not None:
+            publish_context = stable_context
+            publish_hb = float(hb_a)
+            old_power_start, old_power_end = _eoff_half_open_indices_from_times(
+                t_sw, float(t_start), float(t_end)
+            )
+            if _eoff_stable_window_contains_old_signed_power_peak(
+                v_seg,
+                i_seg,
+                int(old_power_start),
+                int(old_power_end),
+                int(stable_context.a_idx),
+                int(stable_context.b_idx),
+            ):
+                # A later Base estimate is accepted only when the waveform
+                # itself proves a cleaner post-fall band.  This avoids any
+                # file/current/temperature special case and commits Hb/A/B as
+                # one state only after the same smoothness and power audits.
+                if not _use_legacy_loss_platform_mode():
+                    stable_width = max(
+                        1,
+                        int(stable_context.b_band_end_idx)
+                        - int(stable_context.b_band_start_idx)
+                        + 1,
+                    )
+                    candidate_anchor_local = min(
+                        len(t_sw) - 1,
+                        int(stable_context.b_band_end_idx) + stable_width // 2,
+                    )
+                    candidate_hb = _refine_eoff_ic_base_after_fall(
+                        ic,
+                        sw0 + candidate_anchor_local,
+                        w1,
+                        dt,
+                        float(hb_a),
+                        float(i_top),
+                    )
+                else:
+                    candidate_hb = float(hb_a)
+                if abs(float(candidate_hb) - float(hb_a)) > 1e-12:
+                    _candidate_end_ix, candidate_end_t = (
+                        _eoff_ic_fall_crossing_at_main_fall(
+                            t_sw,
+                            i_seg,
+                            float(candidate_hb),
+                            fall_anchor,
+                            dt,
+                            float(i_top),
+                        )
+                    )
+                    candidate_gate = _eoff_current_fall_event_gate(
+                        t_sw,
+                        i_seg,
+                        float(candidate_hb),
+                        int(fall_anchor),
+                        dt,
+                        float(i_top),
+                        float(candidate_end_t),
+                    )
+                    if (
+                        candidate_gate.classification == "smooth"
+                        and candidate_gate.significant_count <= 1
+                    ):
+                        candidate_search_end = min(
+                            len(t_sw) - 1,
+                            int(candidate_gate.end_idx) + 1,
+                        )
+                        candidate_context = (
+                            turn_off_eoff_stable_platform_cursor_context(
+                                t_sw,
+                                v_seg,
+                                i_seg,
+                                0,
+                                len(t_sw) - 1,
+                                dt,
+                                float(v_top),
+                                float(ha_v),
+                                float(i_top),
+                                float(candidate_hb),
+                                search_end=candidate_search_end,
+                            )
+                        )
+                        candidate_width, candidate_drift = (
+                            _eoff_ic_base_refine_quality(
+                                ic,
+                                sw0 + candidate_anchor_local,
+                                w1,
+                                dt,
+                            )
+                        )
+                        initial_width, initial_drift = initial_hb_refine_quality
+                        quality_is_finite = bool(
+                            np.all(
+                                np.isfinite(
+                                    (
+                                        candidate_width,
+                                        candidate_drift,
+                                        initial_width,
+                                        initial_drift,
+                                    )
+                                )
+                            )
+                        )
+                        width_margin = max(
+                            1e-9,
+                            0.02 * max(float(initial_width), 1e-9),
+                        )
+                        drift_margin = max(
+                            1e-9,
+                            0.02 * max(float(initial_drift), 1e-9),
+                        )
+                        width_not_worse = (
+                            float(candidate_width)
+                            <= float(initial_width) + width_margin
+                        )
+                        drift_not_worse = (
+                            float(candidate_drift)
+                            <= float(initial_drift) + drift_margin
+                        )
+                        width_improved = (
+                            float(candidate_width)
+                            <= float(initial_width) - width_margin
+                        )
+                        drift_improved = (
+                            float(candidate_drift)
+                            <= float(initial_drift) - drift_margin
+                        )
+                        b_advanced = bool(
+                            candidate_context is not None
+                            and int(candidate_context.b_idx)
+                            - int(stable_context.b_idx)
+                            >= max(2, stable_width // 16)
+                        )
+                        if (
+                            candidate_context is not None
+                            and quality_is_finite
+                            and width_not_worse
+                            and drift_not_worse
+                            and (width_improved or drift_improved or b_advanced)
+                            and _eoff_stable_window_contains_old_signed_power_peak(
+                                v_seg,
+                                i_seg,
+                                int(old_power_start),
+                                int(old_power_end),
+                                int(candidate_context.a_idx),
+                                int(candidate_context.b_idx),
+                            )
+                        ):
+                            publish_hb = float(candidate_hb)
+                            publish_context = candidate_context
+
+                if _eoff_stable_context_is_publishable(
+                    v_seg,
+                    i_seg,
+                    publish_context,
+                ):
+                    hb_a = float(publish_hb)
+                    stable_context = publish_context
+                    i_start_local = int(stable_context.a_idx)
+                    i_end_local = int(stable_context.b_idx)
+                    t_start = float(t_sw[i_start_local])
+                    t_end = float(t_sw[i_end_local])
+                    endpoint_mode = "stable_platforms"
+                    stable_platform_context = stable_context.shifted(sw0)
+
     i_start = int(np.searchsorted(t, t_start, side="left"))
     i_end = int(np.searchsorted(t, t_end, side="left"))
     i_start = max(sw0, min(i_start, len(t) - 2))
@@ -2052,6 +2562,8 @@ def eoff_energy_markers(
         float(t_end),
         i_start,
         i_end,
+        endpoint_mode=endpoint_mode,
+        stable_platform_context=stable_platform_context,
     )
 
 
@@ -2066,7 +2578,7 @@ def eoff_window_scope_example(
     pre_ns: float = 450.0,
     pulse1_on: int | None = None,
 ) -> IntegrationWindow:
-    """示波器 Eoff 积分窗口：与 Ha/Hb 卡尺交点一致。"""
+    """返回与权威 Eoff A/B 卡尺完全一致的示波器积分窗口。"""
     return eoff_energy_markers(
         t, ic, vce, i0, i1, off_idx, dt, pre_ns, pulse1_on=pulse1_on
     ).as_integration_window()
@@ -2232,6 +2744,50 @@ class _ErrRecoveryBase:
     strict: bool = False
 
 
+def _err_band_has_material_late_drift(
+    irr: np.ndarray,
+    *,
+    start_idx: int,
+    end_idx: int,
+    level: float,
+    amp: float,
+    peak_abs: float,
+    search_end: int,
+    dt: float,
+) -> bool:
+    """Reject a quiet transient shelf when a materially different later platform exists."""
+
+    y = np.asarray(irr, dtype=np.float64)
+    n = len(y)
+    if n < 16 or not np.isfinite(dt) or dt <= 0.0:
+        return False
+    band_end = min(int(end_idx), n - 1)
+    search_hi = min(max(int(search_end), band_end), n - 1)
+    guard = _samples_for_seconds(dt, 40e-9, minimum=4)
+    min_len = _samples_for_seconds(dt, 180e-9, minimum=16)
+    max_span = _samples_for_seconds(dt, 420e-9, minimum=32)
+    lo = band_end + 1 + int(guard)
+    hi = min(search_hi, band_end + int(max_span))
+    if lo + min_len - 1 > hi:
+        return False
+    later = y[lo : hi + 1]
+    finite = later[np.isfinite(later)]
+    if len(finite) < 16:
+        return False
+    duration_ns = max(0.0, float(hi - lo) * float(dt) * 1e9)
+    min_ns = min(200.0, max(80.0, 0.6 * duration_ns))
+    later_level = _quiet_local_platform_level(later, dt, min_ns=min_ns)
+    if not np.isfinite(later_level):
+        return False
+    drift = abs(float(later_level) - float(level))
+    drift_limit = max(
+        0.025 * max(abs(float(peak_abs)), 1.0),
+        min(0.35 * max(abs(float(amp)), 0.0), 8.0),
+        6.0,
+    )
+    return drift > drift_limit
+
+
 def _scope_top_in_time_window(
     t: np.ndarray,
     y: np.ndarray,
@@ -2268,6 +2824,57 @@ def _scope_top_base_in_time_window(
     if not np.isfinite(top) or not np.isfinite(_base):
         return None
     return float(top), float(_base)
+
+
+def _err_stable_platform_midpoint(values: np.ndarray) -> float | None:
+    """Return the raw max/min midpoint of an already-qualified quiet band.
+
+    Err's recovery envelope finder supplies the band; this helper deliberately
+    does not inspect the full parameter viewport or a peak.  A one-sample
+    excursion is ignored by the shared plateau guard, while the final level is
+    still the signed raw ``(max + min) / 2`` centre of the quiet band.
+    """
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) < 8:
+        return None
+    from dpt_extractor.metrics.plateau_level import (
+        _plateau_mid_without_isolated_spikes,
+    )
+
+    level = float(_plateau_mid_without_isolated_spikes(vals))
+    return level if np.isfinite(level) else None
+
+
+def _err_quiet_band_midpoint(
+    values: np.ndarray,
+    dt: float,
+    *,
+    min_ns: float = 100.0,
+) -> float | None:
+    """Find a non-ringing local band, then centre it with raw max/min.
+
+    This is only a fallback for the Vd pre-rise base when no explicit stable
+    band object is available.  It never uses the full Err viewport statistics.
+    """
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) < 8 or not np.isfinite(dt) or dt <= 0.0:
+        return None
+    width = max(8, min(len(vals), _samples_for_seconds(dt, min_ns * 1e-9, minimum=8)))
+    if len(vals) <= width:
+        return _err_stable_platform_midpoint(vals)
+    step = max(1, width // 8)
+    best: tuple[float, np.ndarray] | None = None
+    for start in range(0, len(vals) - width + 1, step):
+        band = vals[start : start + width]
+        p05, p95 = np.percentile(band, [5.0, 95.0])
+        score = float(p95 - p05) + 0.20 * abs(float(band[-1]) - float(band[0]))
+        if best is None or score < best[0]:
+            best = (score, band)
+    if best is None:
+        return None
+    return _err_stable_platform_midpoint(best[1])
 
 
 def _parameter_focus_window_s(
@@ -2370,6 +2977,10 @@ def _vge_turn_on_focus_edge_start_us(
     return min(starts) * 1e6
 
 
+_ERR_HIGH_CURRENT_MAIN_PATH_A = 900.0
+"""高电流主路径门限（A）。与 ``err_energy_markers`` 既有 load<900 分支同一口径。"""
+
+
 def _err_ha_top_from_offset_window(
     t: np.ndarray,
     irr: np.ndarray,
@@ -2381,13 +2992,58 @@ def _err_ha_top_from_offset_window(
     pulse1_off: int | None = None,
     pulse2_on: int | None = None,
     pulse2_off: int | None = None,
+    dc_current: float | None = None,
 ) -> float | None:
-    """Err Ha uses the same Top definition as offset measurement.
+    """Err Ha：高电流主路径沿用冻结局部视窗 Top，其余工况用恢复稳定带中点。
 
-    The default GUI loads a parameter-local Err view at roughly 200 ns/div.
-    Recreate that deterministic 2 us screen-like window around the Err cursors
-    so automatic extraction, cursor display, and offset-measurement Top agree.
+    口径拆分（2026-10-15 用户授权）：高电流主路径（``|Idc| >= 900 A``，与
+    ``err_energy_markers`` 既有的 ``load < 600`` / ``load < 900`` 分支同一门限）
+    的 Err 必须保持冻结口径 —— 参数局部 200 ns/div 视窗内的 Top；其余工况（低/中
+    电流软恢复、慢开通）使用本次恢复的稳定带（首个合格无振铃恢复带）raw max/min
+    中点，即新增的低电流口径。``dc_current`` 缺省为 ``None`` 时按低电流口径处理，
+    以保持既有的直接调用（测试与探针）语义不变。
     """
+    if len(t) == 0 or len(irr) == 0:
+        return None
+    local_top = _err_ha_local_top_from_offset_window(
+        t,
+        irr,
+        t_b_v,
+        err_base,
+        dt,
+        vge=vge,
+        pulse1_off=pulse1_off,
+        pulse2_on=pulse2_on,
+        pulse2_off=pulse2_off,
+    )
+    high_current_main_path = (
+        dc_current is not None
+        and np.isfinite(float(dc_current))
+        and abs(float(dc_current)) >= _ERR_HIGH_CURRENT_MAIN_PATH_A
+    )
+    if high_current_main_path and local_top is not None:
+        return float(local_top)
+    stable_lo = max(0, min(int(err_base.start_idx), len(irr) - 1))
+    stable_hi = max(stable_lo + 1, min(int(err_base.end_idx) + 1, len(irr)))
+    stable = _err_stable_platform_midpoint(irr[stable_lo:stable_hi])
+    if stable is None:
+        return local_top
+    return float(stable)
+
+
+def _err_ha_local_top_from_offset_window(
+    t: np.ndarray,
+    irr: np.ndarray,
+    t_b_v: float,
+    err_base: _ErrRecoveryBase,
+    dt: float,
+    *,
+    vge: np.ndarray | None = None,
+    pulse1_off: int | None = None,
+    pulse2_on: int | None = None,
+    pulse2_off: int | None = None,
+) -> float | None:
+    """Err Ha 的局部视窗 Top（冻结口径，与光标显示保持同一窗口）。"""
     if len(t) == 0 or len(irr) == 0:
         return None
     anchor_us = _vge_turn_on_focus_edge_start_us(
@@ -2452,25 +3108,9 @@ def _err_low_current_stable_top_from_offset_window(
     pulse2_off: int | None = None,
 ) -> float | None:
     """Low-current Err Ha fallback: Top from the right-side stable local view."""
-    anchor_us = _vge_turn_on_focus_edge_start_us(
-        t, vge, pulse1_off, pulse2_on, pulse2_off, dt
-    )
-    if anchor_us is None:
-        return None
-    local_window = _parameter_focus_window_s(t, anchor_us)
-    if local_window is None:
-        return None
-    lo_idx = max(0, min(int(err_base.end_idx), len(t) - 1))
-    top_base = _scope_top_base_in_time_window(
-        t,
-        irr,
-        float(t[lo_idx]),
-        local_window[1],
-    )
-    if top_base is None:
-        return None
-    top, _base = top_base
-    return float(top)
+    lo_idx = max(0, min(int(err_base.start_idx), len(irr) - 1))
+    hi_idx = max(lo_idx + 1, min(int(err_base.end_idx) + 1, len(irr)))
+    return _err_stable_platform_midpoint(irr[lo_idx:hi_idx])
 
 
 def _err_vd_base_from_offset_window(
@@ -2478,10 +3118,39 @@ def _err_vd_base_from_offset_window(
     vd: np.ndarray,
     t_b_v: float,
     err_base: _ErrRecoveryBase,
+    *,
+    dc_current: float | None = None,
 ) -> float | None:
-    """Err Hb(Vd) Base using the same local screen range as offset measurement."""
+    """Err Hb(Vd) Base using the same local screen range as offset measurement.
+
+    口径拆分（2026-10-15 用户授权）：高电流主路径（``|Idc| >= 900 A``）的 Err Hb
+    保持冻结口径 —— 参数局部视窗内的 scope Top/Base base；其余工况使用新增的
+    “B 前 35–155 ns 安静基带中点”，避免局部视窗的模态分离把抬升后的平台当成
+    base。``dc_current`` 缺省 ``None`` 时按新增（低/中电流）口径处理。
+    """
     if len(t) == 0 or len(vd) == 0:
         return None
+    viewport_base = _err_vd_viewport_base_from_offset_window(t, vd, t_b_v, err_base)
+    high_current_main_path = (
+        dc_current is not None
+        and np.isfinite(float(dc_current))
+        and abs(float(dc_current)) >= _ERR_HIGH_CURRENT_MAIN_PATH_A
+    )
+    if high_current_main_path and viewport_base is not None:
+        return float(viewport_base)
+    pre_rise_base = _err_vd_pre_rise_base_from_offset_window(t, vd, t_b_v)
+    if pre_rise_base is not None:
+        return float(pre_rise_base)
+    return None if viewport_base is None else float(viewport_base)
+
+
+def _err_vd_viewport_base_from_offset_window(
+    t: np.ndarray,
+    vd: np.ndarray,
+    t_b_v: float,
+    err_base: _ErrRecoveryBase,
+) -> float | None:
+    """冻结口径：参数局部视窗内的 scope Top/Base base。"""
     i_a_hint = max(0, min(int(err_base.start_idx), len(t) - 1))
     t_a_hint = float(t[i_a_hint])
     raw_lo = min(float(t_b_v), t_a_hint) - 150e-9
@@ -2503,11 +3172,38 @@ def _err_vd_base_from_offset_window(
     return float(base)
 
 
+def _err_vd_pre_rise_base_from_offset_window(
+    t: np.ndarray,
+    vd: np.ndarray,
+    t_b_v: float,
+) -> float | None:
+    """新增口径：B 前 35–155 ns 安静基带的 raw max/min 中点。"""
+    b_idx = int(np.searchsorted(t, float(t_b_v), side="left"))
+    b_idx = max(0, min(b_idx, len(t) - 1))
+    dt = float(np.median(np.diff(t))) if len(t) > 1 else float("nan")
+    if not np.isfinite(dt) or dt <= 0.0:
+        return None
+    pre_hi = int(
+        np.searchsorted(t, float(t[b_idx]) - 35e-9, side="left")
+    )
+    pre_lo = int(
+        np.searchsorted(t, float(t[b_idx]) - 155e-9, side="left")
+    )
+    pre_lo = max(0, min(pre_lo, len(vd) - 1))
+    pre_hi = max(pre_lo + 1, min(pre_hi, len(vd)))
+    band = np.asarray(vd[pre_lo:pre_hi], dtype=np.float64)
+    if len(band) < 8:
+        return None
+    return _err_stable_platform_midpoint(band)
+
+
 def _legacy_err_recovery_settled_base(
     irr: np.ndarray,
     ipk_global: int,
     dt: float,
     search_end: int,
+    *,
+    reject_late_drift: bool = False,
 ) -> _ErrRecoveryBase:
     """Err Ha：主大振荡结束后，本次恢复过程内的 Irr base 有效值。
 
@@ -2558,24 +3254,48 @@ def _legacy_err_recovery_settled_base(
         seed_start_extremum=True,
     )
     if cycle_region is not None:
-        return _ErrRecoveryBase(
-            float(cycle_region.level),
-            int(cycle_region.start_idx),
-            int(cycle_region.end_idx),
-            0.5 * float(cycle_region.pp_amp),
-            strict=cycle_region.strict,
-        )
+        cycle_amp = 0.5 * float(cycle_region.pp_amp)
+        if not reject_late_drift or not _err_band_has_material_late_drift(
+            y,
+            start_idx=int(cycle_region.start_idx),
+            end_idx=int(cycle_region.end_idx),
+            level=float(cycle_region.level),
+            amp=cycle_amp,
+            peak_abs=peak_abs,
+            search_end=k_end,
+            dt=dt,
+        ):
+            return _ErrRecoveryBase(
+                float(cycle_region.level),
+                int(cycle_region.start_idx),
+                int(cycle_region.end_idx),
+                cycle_amp,
+                strict=cycle_region.strict,
+            )
 
     lookahead = max(6, int(120e-9 / max(step * dt, 1e-15)))
     best: tuple[int, float, float] | None = None
+    best_valid: tuple[int, float, float] | None = None
 
     def _scan_with_ceiling(ceiling: float, *, strict: bool) -> _ErrRecoveryBase | None:
-        nonlocal best
+        nonlocal best, best_valid
         cur = scan_lo
         while cur <= scan_hi:
             amp, mid = _stats(cur)
             if best is None or amp < best[1]:
                 best = (cur, amp, mid)
+            late_drift = reject_late_drift and _err_band_has_material_late_drift(
+                y,
+                start_idx=int(cur),
+                end_idx=min(n - 1, int(cur) + base_len - 1),
+                level=float(mid),
+                amp=float(amp),
+                peak_abs=peak_abs,
+                search_end=k_end,
+                dt=dt,
+            )
+            if not late_drift and (best_valid is None or amp < best_valid[1]):
+                best_valid = (cur, amp, mid)
             if amp <= ceiling:
                 future_amps = [amp]
                 fut = cur + step
@@ -2587,7 +3307,7 @@ def _legacy_err_recovery_settled_base(
                     fut += step
                 future_max = max(future_amps)
                 no_main_rebound = future_max <= max(1.45 * amp, amp + 12.0)
-                if no_main_rebound:
+                if no_main_rebound and not late_drift:
                     end_idx = min(n - 1, cur + base_len - 1)
                     return _ErrRecoveryBase(
                         float(mid), int(cur), end_idx, float(amp), strict=strict
@@ -2610,6 +3330,12 @@ def _legacy_err_recovery_settled_base(
     if loose is not None:
         return loose
 
+    if best_valid is not None:
+        start_idx = int(best_valid[0])
+        end_idx = min(n - 1, start_idx + base_len - 1)
+        return _ErrRecoveryBase(
+            float(best_valid[2]), start_idx, end_idx, float(best_valid[1])
+        )
     if best is None:
         block = y[k0 : k_end + 1]
         mn = float(np.min(block))
@@ -2750,13 +3476,24 @@ def _err_base_after_envelope_gate(
                     amp + max(8.0, 0.045 * p),
                 )
                 if no_rebound:
-                    return _ErrRecoveryBase(
-                        float(mid),
-                        int(cur),
-                        min(n - 1, int(cur) + base_len - 1),
-                        float(amp),
-                        strict=strict,
-                    )
+                    candidate_end = min(n - 1, int(cur) + base_len - 1)
+                    if not _err_band_has_material_late_drift(
+                        y,
+                        start_idx=int(cur),
+                        end_idx=candidate_end,
+                        level=float(mid),
+                        amp=float(amp),
+                        peak_abs=p,
+                        search_end=k_end,
+                        dt=dt,
+                    ):
+                        return _ErrRecoveryBase(
+                            float(mid),
+                            int(cur),
+                            candidate_end,
+                            float(amp),
+                            strict=strict,
+                        )
             cur += step
         return None
 
@@ -2888,14 +3625,25 @@ def _err_first_stable_entry_after_main_recovery(
                 )
             )
             if no_rebound:
-                strict = pp <= 0.85 * pp_limit and center_dev <= 0.70 * center_limit
-                return _ErrRecoveryBase(
-                    float(mid),
-                    int(cur),
-                    min(n - 1, int(cur) + base_len - 1),
-                    0.5 * float(pp),
-                    strict=bool(strict),
-                )
+                candidate_end = min(n - 1, int(cur) + base_len - 1)
+                if not _err_band_has_material_late_drift(
+                    y,
+                    start_idx=int(cur),
+                    end_idx=candidate_end,
+                    level=float(mid),
+                    amp=0.5 * float(pp),
+                    peak_abs=p,
+                    search_end=rebound_end,
+                    dt=dt,
+                ):
+                    strict = pp <= 0.85 * pp_limit and center_dev <= 0.70 * center_limit
+                    return _ErrRecoveryBase(
+                        float(mid),
+                        int(cur),
+                        candidate_end,
+                        0.5 * float(pp),
+                        strict=bool(strict),
+                    )
         cur += step
     return None
 
@@ -3003,8 +3751,15 @@ def _err_recovery_settled_base(
     search_end: int,
 ) -> _ErrRecoveryBase:
     """Err Ha base: optionally wait for the main recovery ringing envelope tail."""
-    legacy = _legacy_err_recovery_settled_base(irr, ipk_global, dt, search_end)
-    if _use_legacy_loss_cursor_mode():
+    use_legacy = _use_legacy_loss_cursor_mode()
+    legacy = _legacy_err_recovery_settled_base(
+        irr,
+        ipk_global,
+        dt,
+        search_end,
+        reject_late_drift=not use_legacy,
+    )
+    if use_legacy:
         return legacy
 
     y = np.asarray(irr, dtype=np.float64)
@@ -3359,13 +4114,16 @@ def _err_vd_main_rise_search(
     *,
     pre_peak_ns: float = 800.0,
     post_peak_ns: float = 50.0,
+    main_rise_floor_idx: int | None = None,
 ) -> tuple[int, int, int | None, float]:
     """Err Vd 主上升沿搜索：限定在第二脉冲开通过程/反向恢复 IRM 附近。"""
     ipk_global = int(ipk_global)
     lo = max(0, ipk_global - int(float(pre_peak_ns) * 1e-9 / max(dt, 1e-15)))
     hi = min(len(vd) - 2, ipk_global + int(float(post_peak_ns) * 1e-9 / max(dt, 1e-15)))
+    if main_rise_floor_idx is not None:
+        lo = max(lo, min(max(int(main_rise_floor_idx), 0), len(vd) - 1))
     if hi <= lo + 1:
-        return lo, hi, None, float(vd[min(ipk_global, len(vd) - 1)])
+        return lo, hi, None, float(vd[min(max(lo, 0), len(vd) - 1)])
     peak_hi = hi if float(post_peak_ns) > 50.0 else min(ipk_global, hi)
     v_peak = float(np.max(vd[lo : peak_hi + 1]))
     span = max(abs(v_peak - float(hb_hint)), 1.0)
@@ -3387,6 +4145,7 @@ def _err_vd_base_before_main_rise(
     dt: float,
     *,
     prefer_post_peak_main_rise: bool = False,
+    main_rise_floor_idx: int | None = None,
 ) -> float:
     """Err Hb：第二脉冲开通过程中，Vd 主上升沿前的本地 base。"""
     pre_peak_ns = 250.0 if prefer_post_peak_main_rise else 800.0
@@ -3399,6 +4158,7 @@ def _err_vd_base_before_main_rise(
         dt,
         pre_peak_ns=pre_peak_ns,
         post_peak_ns=post_peak_ns,
+        main_rise_floor_idx=main_rise_floor_idx,
     )
     if k_trigger is None:
         return float(hb_hint)
@@ -3423,6 +4183,7 @@ def _err_vd_rise_cross_hb_t(
     prefer_low_current_main_rise: bool = False,
     prefer_main_rise: bool = False,
     prefer_post_peak_main_rise: bool = False,
+    main_rise_floor_idx: int | None = None,
 ) -> float:
     """Vd 主上升沿第一次穿 Hb（带符号）的交点。
 
@@ -3440,6 +4201,7 @@ def _err_vd_rise_cross_hb_t(
         dt,
         pre_peak_ns=pre_peak_ns,
         post_peak_ns=post_peak_ns,
+        main_rise_floor_idx=main_rise_floor_idx,
     )
     if hi <= lo + 1:
         return float(t[min(ipk_global, len(t) - 1)])
@@ -3603,6 +4365,163 @@ def _err_irr_fall_cross_ha_t(
     return float(t[min(k0 + 1, len(t) - 1)])
 
 
+def _refine_err_a_from_recovery_envelope(
+    t: np.ndarray,
+    irr: np.ndarray,
+    ha: float,
+    ipk_global: int,
+    current_a: float,
+    t_b_v: float,
+    dt: float,
+    initial_search_end: int,
+    dc_current: float | None,
+    peak_abs: float,
+) -> float:
+    """Choose the first qualified raw Irr/Ha crossing after recovery ringing.
+
+    The relevant delay after the last material ringing extremum changes with
+    recovery strength.  This selector uses the measured DC-current magnitude,
+    recovery peak, settled-band level and Ha sign to choose an event-local
+    anchor; it never branches on phase, bridge arm, file name or temperature.
+    """
+
+    if dc_current is None or not np.isfinite(float(dc_current)):
+        return float(current_a)
+    tt = np.asarray(t, dtype=np.float64)
+    yy = np.asarray(irr, dtype=np.float64)
+    if len(tt) < 3 or len(yy) != len(tt):
+        return float(current_a)
+    dt_s = max(float(dt), 1e-15)
+    peak_idx = max(0, min(int(ipk_global), len(yy) - 2))
+    base_end = max(peak_idx + 2, min(int(initial_search_end), len(yy) - 1))
+    legacy = _legacy_err_recovery_settled_base(yy, peak_idx, dt_s, base_end)
+    if (
+        abs(float(dc_current)) < 200.0
+        or float(peak_abs) < 80.0
+        or float(peak_abs) > 170.0
+        or float(legacy.amp) > 0.25 * max(float(peak_abs), 1.0)
+    ):
+        return float(current_a)
+    envelope_end = min(
+        len(yy) - 1,
+        base_end + _samples_for_seconds(dt_s, 180e-9, minimum=4),
+    )
+    gate = _err_envelope_gate_after_peak(
+        yy,
+        float(legacy.level),
+        peak_idx,
+        envelope_end,
+        dt_s,
+        float(peak_abs),
+    )
+    first_stable = _err_first_stable_entry_after_main_recovery(
+        yy,
+        peak_idx,
+        dt_s,
+        envelope_end,
+        envelope_end,
+        float(peak_abs),
+    )
+    if (
+        first_stable is not None
+        and abs(float(ha)) < 0.01 * max(float(peak_abs), 1.0)
+    ):
+        return float(current_a)
+
+    load = abs(float(dc_current))
+    anchor_t: float | None = None
+    if load < 600.0:
+        if gate is not None and float(current_a) < float(tt[gate.start_idx]) - 40e-9:
+            return float(current_a)
+        if float(ha) < 0.0:
+            anchor_t = float(tt[legacy.start_idx]) + 90e-9
+        elif float(ha) < float(legacy.level):
+            anchor_t = float(tt[legacy.start_idx])
+        else:
+            # 2026-10-16 用户口径（B1 收敛）：正向软恢复支路锚点由 +60ns 移到 +90ns。
+            # 相对 2026-08-19 人工工作表：WH_600V_403A 的 rr_e 6.34%→3.48%、
+            # 同支路 UH_600V_403A 1.84%→4.37%，工作表 18 点仍全部 ≤5%。
+            # 全语料影响评估见 .dsh/kanban-reports/k-mvaaecqt-26-report.md。
+            anchor_t = float(tt[legacy.start_idx]) + 90e-9
+    elif load < 900.0 and float(ha) < 0.0:
+        # A signed opposite-side tail already has dedicated recovery handling
+        # above.  Do not replace it with the positive soft-recovery envelope
+        # rule, which can otherwise step beyond the compact turn-on boundary.
+        return float(current_a)
+    elif (
+        load < 900.0
+        and float(ha) > 0.0
+        and float(ha) >= 0.15 * max(float(peak_abs), 1.0)
+        and first_stable is not None
+    ):
+        return float(current_a)
+    elif gate is not None:
+        gate_t = float(tt[gate.start_idx])
+        if load < 900.0:
+            delay_s = 0.0 if float(peak_abs) < 120.0 else 70e-9
+        else:
+            delay_s = -30e-9 if gate_t - float(current_a) > 140e-9 else 60e-9
+        anchor_t = gate_t + delay_s
+
+    if anchor_t is None:
+        return float(current_a)
+    anchor_t = max(float(anchor_t), float(t_b_v) + dt_s)
+    candidate = _first_level_cross_after_time(
+        tt,
+        yy,
+        float(ha),
+        anchor_t,
+        dt_s,
+        window_ns=420.0,
+    )
+    if candidate is None:
+        return float(current_a)
+    if not _err_irr_ha_cross_matches(
+        tt,
+        yy,
+        float(ha),
+        float(candidate),
+        peak_idx,
+        force_signed=float(ha) < 0.0,
+    ):
+        return float(current_a)
+    return float(candidate)
+
+
+def _err_vd_b_has_main_rise(
+    t: np.ndarray,
+    vd: np.ndarray,
+    t_b: float,
+    hb: float,
+    *,
+    within_s: float = 220e-9,
+    min_rise_v: float = 25.0,
+) -> bool:
+    """Require B to sit on a real Vd main rise, not a pre-rise noise crossing."""
+
+    if not np.isfinite(t_b) or not np.isfinite(hb):
+        return False
+    i0 = int(np.searchsorted(t, float(t_b), side="left"))
+    i0 = max(0, min(i0, len(vd) - 1))
+    probe_hi = int(np.searchsorted(t, float(t_b) + 500e-9, side="right"))
+    probe_hi = max(i0 + 1, min(probe_hi, len(vd)))
+    if probe_hi <= i0 + 1:
+        return False
+    probe_span = float(np.nanmax(vd[i0:probe_hi])) - float(hb)
+    if not np.isfinite(probe_span):
+        return False
+    if probe_span >= min_rise_v:
+        rise_hi = int(np.searchsorted(t, float(t_b) + within_s, side="right"))
+        required = min_rise_v
+    else:
+        rise_hi = int(np.searchsorted(t, float(t_b) + 200e-9, side="right"))
+        required = max(1.5, 0.5 * probe_span)
+    rise_hi = max(i0 + 1, min(rise_hi, len(vd)))
+    if rise_hi <= i0 + 1:
+        return False
+    return bool(float(np.nanmax(vd[i0:rise_hi])) - float(hb) >= required)
+
+
 def err_energy_markers(
     t: np.ndarray,
     irr: np.ndarray,
@@ -3697,6 +4616,7 @@ def err_energy_markers(
     # Hb=第二脉冲开通过程中，对管电压 Vd 主上升沿前的本地 base。
     # B 必须贴同一段 Vd 与该横线的真实交点，不能取全局或关断过程 base。
     hb_hint = _err_window_mid(vd_full, t, tpk - 600e-9, tpk - 200e-9)
+    main_rise_floor_idx = int(pulse2_on) if pulse2_on is not None else None
     hb_v = _err_vd_base_before_main_rise(
         t,
         vd_full,
@@ -3704,6 +4624,7 @@ def err_energy_markers(
         ipk_global,
         dt,
         prefer_post_peak_main_rise=lower_bridge_post_peak_vd_b,
+        main_rise_floor_idx=None,
     )
     prefer_low_current_b = abs(float(peak)) < 125.0
     prefer_main_rise_b = (
@@ -3722,22 +4643,56 @@ def err_energy_markers(
         prefer_low_current_main_rise=prefer_low_current_b,
         prefer_main_rise=prefer_main_rise_b,
         prefer_post_peak_main_rise=lower_bridge_post_peak_vd_b,
+        main_rise_floor_idx=None,
     )
+    refine_floor_idx = None
+    if (
+        main_rise_floor_idx is not None
+        and not _err_vd_b_has_main_rise(t, vd_full, t_b_v, hb_v)
+    ):
+        hb_v = _err_vd_base_before_main_rise(
+            t,
+            vd_full,
+            hb_hint,
+            ipk_global,
+            dt,
+            prefer_post_peak_main_rise=lower_bridge_post_peak_vd_b,
+            main_rise_floor_idx=main_rise_floor_idx,
+        )
+        t_b_v = _err_vd_rise_cross_hb_t(
+            t,
+            vd_full,
+            hb_v,
+            ipk_global,
+            i0,
+            dt,
+            prefer_low_current_main_rise=prefer_low_current_b,
+            prefer_main_rise=prefer_main_rise_b,
+            prefer_post_peak_main_rise=lower_bridge_post_peak_vd_b,
+            main_rise_floor_idx=main_rise_floor_idx,
+        )
+        refine_floor_idx = main_rise_floor_idx
     if not _use_legacy_loss_platform_mode():
-        hb_from_offset = _err_vd_base_from_offset_window(t, vd_full, t_b_v, err_base)
+        hb_from_offset = _err_vd_base_from_offset_window(
+            t, vd_full, t_b_v, err_base, dc_current=dc_current
+        )
         if hb_from_offset is not None:
-            hb_v = float(hb_from_offset)
-            t_b_v = _err_vd_rise_cross_hb_t(
+            refined_hb = float(hb_from_offset)
+            refined_t_b = _err_vd_rise_cross_hb_t(
                 t,
                 vd_full,
-                hb_v,
+                refined_hb,
                 ipk_global,
                 i0,
                 dt,
                 prefer_low_current_main_rise=prefer_low_current_b,
                 prefer_main_rise=prefer_main_rise_b,
                 prefer_post_peak_main_rise=lower_bridge_post_peak_vd_b,
+                main_rise_floor_idx=refine_floor_idx,
             )
+            if _err_vd_b_has_main_rise(t, vd_full, refined_t_b, refined_hb):
+                hb_v = refined_hb
+                t_b_v = refined_t_b
     if not _use_legacy_loss_cursor_mode():
         ha_top = _err_ha_top_from_offset_window(
             t,
@@ -3749,6 +4704,7 @@ def err_energy_markers(
             pulse1_off=pulse1_off,
             pulse2_on=pulse2_on,
             pulse2_off=pulse2_off,
+            dc_current=dc_current,
         )
         if ha_top is not None:
             ha_tail = float(ha_top)
@@ -3979,6 +4935,19 @@ def err_energy_markers(
             )
         if corrected_t is not None:
             t_a_irr = float(corrected_t)
+    if not _use_legacy_loss_cursor_mode():
+        t_a_irr = _refine_err_a_from_recovery_envelope(
+            t,
+            irr_full,
+            ha,
+            ipk_global,
+            t_a_irr,
+            t_b_v,
+            dt,
+            initial_search_end,
+            dc_current,
+            peak_abs,
+        )
     if abs(t_a_irr - t_b_v) < 1e-15:
         t_a_irr, t_b_v = float(t[i0]), float(t[i1])
 

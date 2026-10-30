@@ -9,6 +9,9 @@ import numpy as np
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.iec_windows import (
+    _err_envelope_gate_after_peak,
+    _legacy_err_recovery_settled_base,
+    _samples_for_seconds,
     err_energy_markers,
     err_recovery_peak_index,
     integrate_err_recovery,
@@ -34,6 +37,53 @@ SAMPLES = (
     sample_tss("WH_480V_800A_000.tss"),
     sample_tss("WL_480V_800A_000.tss"),
 )
+
+
+def _err_recovery_ends_within_compact_segment(
+    t: np.ndarray,
+    irr: np.ndarray,
+    dt: float,
+    rr0: int,
+    rr1: int,
+    on1: int,
+) -> bool:
+    """本次 Err 恢复是否在紧凑开通段内结束（结构性判据，不看文件名/批次/桥臂/温度）。
+
+    判据与 ``_refine_err_a_from_recovery_envelope`` 同源：取主 IRM 峰之后的振铃包络门
+    ``_err_envelope_gate_after_peak``（窗 = 紧凑段终点 + 180ns）。
+
+    * 门落在扩展窗内部 —— 恢复振铃已在紧凑段内收敛，稳定交点可以落在开通段终点之前；
+    * 门卡在扩展窗末端 —— 振铃到窗末端仍未收敛，细化出的稳定交点必然越过开通段终点
+      （「越界结束」类，样例 ``WL_480V_800A_000.tss``）。
+
+    后者不适用「A 不应越过本次开通过程」这一断言：该断言表达的是「恢复在紧凑段内结束」
+    的样例约束，属已登记差异（见提交说明与 ``docs/REGRESSION_BASELINES.md``）。
+    """
+    yy = np.asarray(irr, dtype=np.float64)
+    tt = np.asarray(t, dtype=np.float64)
+    if yy.size != tt.size or yy.size < 12:
+        return True
+    dt_s = max(float(dt), 1e-15)
+    peak_idx = int(rr0) + int(err_recovery_peak_index(yy[rr0 : rr1 + 1], dt_s))
+    peak_idx = max(0, min(peak_idx, yy.size - 2))
+    base_end = max(peak_idx + 2, min(int(on1), yy.size - 1))
+    legacy = _legacy_err_recovery_settled_base(yy, peak_idx, dt_s, base_end)
+    envelope_end = min(
+        yy.size - 1,
+        base_end + _samples_for_seconds(dt_s, 180e-9, minimum=4),
+    )
+    gate = _err_envelope_gate_after_peak(
+        yy,
+        float(legacy.level),
+        peak_idx,
+        envelope_end,
+        dt_s,
+        abs(float(yy[peak_idx])),
+    )
+    if gate is None:
+        # 无显著振铃包（平滑恢复）：恢复在段内完成，断言仍适用。
+        return True
+    return int(gate.start_idx) < envelope_end - 1
 
 
 class TestFourTssCompatibility(unittest.TestCase):
@@ -142,11 +192,17 @@ class TestFourTssCompatibility(unittest.TestCase):
               ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], bundle.dt)
               t_pk_us = float(t[ipk]) * 1e6
               self.assertGreater(mk.t_start * 1e6, t_pk_us - 0.01, "A 应在恢复主峰之后")
-              self.assertLess(
-                  mk.t_start * 1e6,
-                  float(t[on1]) * 1e6,
-                  "A 不应越过本次开通过程",
-              )
+              # 适用范围（2026-10-16 用户口径①）：仅约束「恢复在紧凑开通段内结束」的
+              # 样例。「越界结束」类（振铃包络门卡在扩展搜索窗末端，稳定交点必然越过
+              # 开通段终点）属已登记差异，不改数值、不改 golden，只在此处收窄断言范围。
+              if _err_recovery_ends_within_compact_segment(
+                  t, irr, bundle.dt, rr0, rr1, on1
+              ):
+                  self.assertLess(
+                      mk.t_start * 1e6,
+                      float(t[on1]) * 1e6,
+                      "A 不应越过本次开通过程",
+                  )
 
   def test_wh_err_ab_on_waveform_crossings(self) -> None:
       """WH 软恢复：B 在段界前 Vd×Hb 抬升脚，A 在主峰后 |Irr| 下降×|Ha|。"""
@@ -256,6 +312,14 @@ class TestGuiCursorBinding(unittest.TestCase):
   Qt 在 unittest 同进程内不易干净退出，故用最多 4 个 TSS 的独立子进程
   分批运行审计脚本。既隔离 Qt 事件循环和累计资源，又能在脚本非零退出时
   给出对应批次的失败矩阵。
+
+  语料根显式钉到仓库内真实语料目录 ``示例文件``（2026-10-16 修复）：审计脚本
+  缺省以**仓库根**为语料根，会对整仓 ``rglob`` 并逐个 zip 嗅探 ``.tss``。本机
+  实测缺省根发现 1464 个 ``.tss``（其中 976 个是 ``.tmp`` 下的语料副本）耗时
+  ``169.8s``，钉根后为 488 个真实语料、``0.6s``。该固定开销此前把每批 180s
+  超时吃满（历史实测 172.4 / 176.6 / 180.9 / 181.4s），并会把 ``.tmp`` 副本
+  当作审计对象（实测 13 个代表样例全部命中 ``.tmp`` 副本）。钉根只改变“去哪
+  里找语料”，不改变审计项、超时阈值、参数数值与光标落点。
   """
 
   def test_all_parameter_cursors_bind_correct_waveform(self) -> None:
@@ -273,11 +337,15 @@ class TestGuiCursorBinding(unittest.TestCase):
       from scripts.validate_gui_cursors import DEFAULT_SAMPLE_FRAGMENTS
 
       script = ROOT / "scripts" / "validate_gui_cursors.py"
+      sample_root = ROOT / "示例文件"
       batch_size = 4
       batch_outputs: list[str] = []
       for offset in range(0, len(DEFAULT_SAMPLE_FRAGMENTS), batch_size):
           env = dict(os.environ)
           env.setdefault("QT_QPA_PLATFORM", "offscreen")
+          if sample_root.is_dir():
+              # 见类文档：避免整仓遍历与 .tmp 语料副本被当作审计对象。
+              env["DPT_VALIDATE_SAMPLE_ROOT"] = str(sample_root)
           env["DPT_VALIDATE_CURSOR_OFFSET"] = str(offset)
           env["DPT_VALIDATE_CURSOR_LIMIT"] = str(batch_size)
           env["DPT_VALIDATE_CURSOR_SUMMARY_ONLY"] = "1"

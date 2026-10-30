@@ -137,7 +137,7 @@ class TestEnergyManualPersist(unittest.TestCase):
                     manual,
                 )
 
-    def test_x_exit_then_reclick_rejects_saved_page_that_hides_cursors(self) -> None:
+    def test_x_exit_then_reclick_keeps_saved_page_and_manual_cursors(self) -> None:
         from PyQt6.QtWidgets import QApplication
 
         section, name = "开通", "Eon"
@@ -170,10 +170,8 @@ class TestEnergyManualPersist(unittest.TestCase):
             restored_view = plot.current_x_range_us()
             self.assertIsNotNone(restored_view)
             assert restored_view is not None
-            self.assertNotAlmostEqual(restored_view[0], expected_view[0], places=6)
-            self.assertTrue(
-                plot.current_local_x_window_contains_us(manual[0], manual[1])
-            )
+            self.assertAlmostEqual(restored_view[0], expected_view[0], places=9)
+            self.assertAlmostEqual(restored_view[1], expected_view[1], places=9)
 
             assert plot._cursor_a is not None and plot._cursor_b is not None
             self.assertAlmostEqual(float(plot._cursor_a.value()), manual[0], places=6)

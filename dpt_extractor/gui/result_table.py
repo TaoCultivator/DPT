@@ -69,6 +69,7 @@ from dpt_extractor.models.slope_range import (
     default_slope_ranges,
     normalize_slope_range,
 )
+from dpt_extractor.utils.temperature import infer_temperature_token_code
 
 
 _TEMP_LABELS = {
@@ -177,6 +178,14 @@ SECTION_ACTIVE_BG = "#22b8cc"
 SECTION_ACTIVE_TEXT = "#061112"
 SECTION_OFFSET = "#24545c"
 PROCESS_SECTIONS = {"关断过程", "开通", "反向恢复", "短路过程", "偏移测量"}
+# Internal section keys stay short/compatible with the calculation and report
+# layers.  The result table renders the three switching phases as parallel
+# process names so the partition column is unambiguous to the user.
+SECTION_DISPLAY_NAMES = {
+    "关断过程": "关断过程",
+    "开通": "开通过程",
+    "反向恢复": "反向恢复过程",
+}
 
 
 def _result_font(family: str, *, bold: bool = False) -> QFont:
@@ -285,12 +294,9 @@ def _infer_temp_code(path: str) -> str:
         for code in _TEMP_LABELS:
             if re.search(rf"(?<![A-Z0-9]){code}(?![A-Z0-9])", stem):
                 return code
-        if re.search(r"(?<!\d)25(?:℃|C|DEG)?(?!\d)", stem):
-            return "RT"
-        if re.search(r"(?<!\d)150(?:℃|C|DEG)?(?!\d)", stem):
-            return "HT"
-        if re.search(r"(?<!\d)-?40(?:℃|C|DEG)?(?!\d)", stem):
-            return "LT"
+        numeric_code = infer_temperature_token_code(stem)
+        if numeric_code is not None:
+            return numeric_code
     return ""
 
 
@@ -309,9 +315,10 @@ def _section_base_color(section: str) -> str:
 
 
 def _section_stack_label(section: str) -> str:
+    display_name = SECTION_DISPLAY_NAMES.get(section, section)
     if section in PROCESS_SECTIONS:
-        return "\n".join(section) if len(section) > 1 else section
-    return section
+        return "\n".join(display_name) if len(display_name) > 1 else display_name
+    return display_name
 
 
 def _offset_source_short_label(key: str) -> str:

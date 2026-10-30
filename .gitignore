@@ -16,3 +16,11 @@ __pycache__/
 ~$*.xlsm
 ~$*.docx
 ~$*.pptx
+.dsh/
+
+# 本机回归/分析产物（与 pyrightconfig.json 的 exclude 列表保持一致）
+analysis_outputs/
+.codex_tmp/
+outputs/
+参考工具/
+.pytest_tmp/

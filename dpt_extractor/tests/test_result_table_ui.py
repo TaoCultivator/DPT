@@ -115,12 +115,14 @@ class TestResultTableUi(unittest.TestCase):
         rr_start, _ = table._section_ranges["反向恢复"]
         self.assertEqual(
             table.table.item(on_start, 0).data(Qt.ItemDataRole.DisplayRole),
-            "开\n通",
+            "开\n通\n过\n程",
         )
+        self.assertEqual(table.table.item(on_start, 0).text(), "开通")
         self.assertEqual(
             table.table.item(rr_start, 0).data(Qt.ItemDataRole.DisplayRole),
-            "反\n向\n恢\n复",
+            "反\n向\n恢\n复\n过\n程",
         )
+        self.assertEqual(table.table.item(rr_start, 0).text(), "反向恢复")
 
         for section, name, expected_bg in (
             ("关断过程", "Eoff", SECTION_OFF),

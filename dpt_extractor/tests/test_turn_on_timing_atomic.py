@@ -72,6 +72,15 @@ class TestTurnOnTimingAtomicPair(unittest.TestCase):
         self.assertAlmostEqual(inst.tr_ns, 160.0)
         self.assertAlmostEqual(inst.ton_ns, 270.0)
 
+    def test_reversed_vge10_and_ic10_is_rejected(self) -> None:
+        inst = self._measure_with_crossings([260e-9, 150e-9, 420e-9])
+        self.assertEqual(inst.t_v10_s, 260e-9)
+        self.assertIsNone(inst.t_i10_s)
+        self.assertIsNone(inst.t_i90_s)
+        self.assertEqual(inst.td_on_ns, 0.0)
+        self.assertEqual(inst.tr_ns, 0.0)
+        self.assertEqual(inst.ton_ns, 0.0)
+
     def test_missing_vge_keeps_tr_but_not_partial_td_or_ton(self) -> None:
         inst = self._measure_with_crossings([None, 260e-9, 420e-9])
         self.assertIsNone(inst.t_v10_s)

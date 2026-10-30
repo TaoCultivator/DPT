@@ -18,7 +18,6 @@ from dpt_extractor.config.loader import load_config
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.iec_windows import (
     _err_recovery_settled_base,
-    eoff_energy_markers,
     eon_energy_markers,
     err_energy_markers,
     err_recovery_peak_index,
@@ -101,6 +100,12 @@ class SampleValidation:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="批量验证示例 TSS 波形兼容性")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT,
+        help="TSS 语料根目录；默认扫描项目目录，也可指定仓库外原始数据",
+    )
     parser.add_argument("--limit", type=int, default=None, help="仅验证前 N 个样本，便于快速冒烟")
     parser.add_argument(
         "--offset",
@@ -263,6 +268,362 @@ def _cursor_on_level(
     return abs(float(np.interp(float(t_cross), t, y)) - float(level)) <= float(tol)
 
 
+def _eoff_endpoint_mode(marker) -> str:  # noqa: ANN001
+    """Read the compatible Eoff endpoint mode from one extraction marker."""
+
+    return str(getattr(marker, "endpoint_mode", "level_crossings"))
+
+
+def _independent_eoff_half_open_mj(
+    t: np.ndarray,
+    vce: np.ndarray,
+    ic: np.ndarray,
+    i_start: int,
+    i_end: int,
+) -> float | None:
+    """Independently integrate raw signed Vce*Ic over ``[A, B)`` in mJ."""
+
+    times = np.asarray(t, dtype=np.float64)
+    voltage = np.asarray(vce, dtype=np.float64)
+    current = np.asarray(ic, dtype=np.float64)
+    n = min(len(times), len(voltage), len(current))
+    i0 = int(i_start)
+    i1 = int(i_end)
+    if n < 3 or i0 < 0 or i1 > n or i1 <= i0 + 1:
+        return None
+    seg_t = times[i0:i1]
+    power = voltage[i0:i1] * current[i0:i1]
+    finite = np.isfinite(seg_t) & np.isfinite(power)
+    if not np.all(finite):
+        return None
+    dt_arr = np.diff(seg_t)
+    if (
+        len(dt_arr) == 0
+        or not np.all(np.isfinite(dt_arr))
+        or np.any(dt_arr <= 0.0)
+    ):
+        return None
+    p_mid = 0.5 * (power[:-1] + power[1:])
+    return float(np.sum(p_mid * dt_arr)) * 1e3
+
+
+def _eoff_stable_band_problem(
+    label: str,
+    values: np.ndarray,
+    band_start: int,
+    band_end: int,
+    cursor_idx: int,
+    target_level: float,
+    event_span: float,
+    *,
+    width_fraction: float,
+    level_fraction: float,
+    drift_fraction: float,
+) -> str | None:
+    """Audit raw stability evidence declared by an Eoff endpoint context."""
+
+    arr = np.asarray(values, dtype=np.float64)
+    lo = int(band_start)
+    hi = int(band_end)
+    idx = int(cursor_idx)
+    if (
+        len(arr) == 0
+        or lo < 0
+        or hi < lo
+        or hi >= len(arr)
+        or not lo <= idx <= hi
+        or not np.isfinite(float(target_level))
+    ):
+        return f"{label}稳定带索引/代表点非法"
+    band = arr[lo : hi + 1]
+    finite = band[np.isfinite(band)]
+    if len(finite) < 8:
+        return f"{label}稳定带有效原始样本不足"
+    p05, p95 = (
+        float(np.nanpercentile(finite, percentile))
+        for percentile in (5.0, 95.0)
+    )
+    center = 0.5 * (p05 + p95)
+    half = max(1, len(finite) // 2)
+    drift = (
+        abs(
+            float(np.nanmedian(finite[:half]))
+            - float(np.nanmedian(finite[half:]))
+        )
+        if len(finite[half:])
+        else 0.0
+    )
+    span = max(abs(float(event_span)), 1.0)
+    width_limit = max(1.0, float(width_fraction) * span)
+    level_limit = max(2.0, float(level_fraction) * span)
+    drift_limit = max(0.75, float(drift_fraction) * span)
+    if p95 - p05 > width_limit:
+        return (
+            f"{label}稳定带峰峰值过大: "
+            f"p95-p05={p95 - p05:.6g}>{width_limit:.6g}"
+        )
+    if abs(center - float(target_level)) > level_limit:
+        return (
+            f"{label}稳定带中心偏离局部平台: "
+            f"center={center:.6g}, level={float(target_level):.6g}"
+        )
+    if drift > drift_limit:
+        return f"{label}稳定带前后漂移过大: {drift:.6g}>{drift_limit:.6g}"
+    return None
+
+
+def _audit_eoff_marker(
+    t: np.ndarray,
+    vce: np.ndarray,
+    ic: np.ndarray,
+    marker,
+    stored_eoff_mj: float,
+) -> list[str]:  # noqa: ANN001
+    """Strictly audit the authoritative Eoff marker for either endpoint mode."""
+
+    if marker is None:
+        return ["Eoff缺少权威积分/光标上下文"]
+
+    problems: list[str] = []
+    times = np.asarray(t, dtype=np.float64)
+    voltage = np.asarray(vce, dtype=np.float64)
+    current = np.asarray(ic, dtype=np.float64)
+    n = min(len(times), len(voltage), len(current))
+    if n < 3:
+        return ["Eoff原始时间/电压/电流样本不足"]
+    mode = _eoff_endpoint_mode(marker)
+
+    try:
+        i_start = int(marker.i_start)
+        i_end = int(marker.i_end)
+        t_start = float(marker.t_start)
+        t_end = float(marker.t_end)
+    except (AttributeError, TypeError, ValueError):
+        return ["Eoff权威积分/光标上下文字段非法"]
+
+    if mode == "stable_platforms":
+        context = getattr(marker, "stable_platform_context", None)
+        required_fields = (
+            "a_idx",
+            "b_idx",
+            "a_band_start_idx",
+            "a_band_end_idx",
+            "b_band_start_idx",
+            "b_band_end_idx",
+            "v10_idx",
+            "v90_idx",
+            "i90_idx",
+            "i10_idx",
+            "search_end_idx",
+        )
+        if context is None or any(
+            not hasattr(context, name) for name in required_fields
+        ):
+            return ["Eoff stable_platforms 缺少全局稳定带证据上下文"]
+        try:
+            indices = {
+                name: int(getattr(context, name)) for name in required_fields
+            }
+        except (TypeError, ValueError):
+            return ["Eoff stable_platforms 全局稳定带证据索引非法"]
+        if n < 3 or any(value < 0 or value >= n for value in indices.values()):
+            return ["Eoff stable_platforms 全局稳定带证据索引越界"]
+
+        expected_a = indices["a_idx"]
+        expected_b = indices["b_idx"]
+        if i_start != expected_a:
+            problems.append(
+                f"Eoff A索引={i_start}≠Vce Base稳定带代表点{expected_a}"
+            )
+        if i_end != expected_b:
+            problems.append(
+                f"Eoff B索引={i_end}≠Ic Base首个稳定带代表点{expected_b}"
+            )
+        time_tol = max(
+            1e-15,
+            0.51
+            * float(np.median(np.diff(times[:n])))
+            if n >= 2
+            else 1e-15,
+        )
+        if (
+            not np.isfinite(t_start)
+            or abs(t_start - float(times[expected_a])) > time_tol
+        ):
+            problems.append("Eoff A时刻未与全局稳定带context闭环")
+        if (
+            not np.isfinite(t_end)
+            or abs(t_end - float(times[expected_b])) > time_tol
+        ):
+            problems.append("Eoff B时刻未与全局稳定带context闭环")
+
+        a0, a1 = indices["a_band_start_idx"], indices["a_band_end_idx"]
+        b0, b1 = indices["b_band_start_idx"], indices["b_band_end_idx"]
+        v10, v90 = indices["v10_idx"], indices["v90_idx"]
+        i90, i10 = indices["i90_idx"], indices["i10_idx"]
+        search_end = indices["search_end_idx"]
+        if not (a0 <= expected_a <= a1 < v10 < v90):
+            problems.append("Eoff A稳定带/主Vce上升沿时序非法")
+        if not (v10 <= i90 < i10 <= b0 <= expected_b <= b1):
+            problems.append("Eoff 主Ic下降沿/B首个稳定带时序非法")
+
+        raw_dt = np.diff(times[:n])
+        finite_dt = raw_dt[np.isfinite(raw_dt) & (raw_dt > 0.0)]
+        if len(finite_dt) == 0:
+            problems.append("Eoff stable_platforms 原始时间步长不可用")
+        else:
+            dt_s = float(np.nanmedian(finite_dt))
+            expected_a_width = max(
+                8,
+                int(
+                    round(
+                        float(
+                            np.clip(
+                                0.5 * float(times[v90] - times[v10]),
+                                80e-9,
+                                200e-9,
+                            )
+                        )
+                        / dt_s
+                    )
+                ),
+            )
+            expected_b_width = max(
+                8,
+                int(
+                    round(
+                        float(
+                            np.clip(
+                                0.5 * float(times[i10] - times[i90]),
+                                80e-9,
+                                200e-9,
+                            )
+                        )
+                        / dt_s
+                    )
+                ),
+            )
+            if a1 - a0 + 1 != expected_a_width:
+                problems.append(
+                    "Eoff A稳定带宽度未与Vce主沿自适应闭环: "
+                    f"actual={a1 - a0 + 1}, expected={expected_a_width}"
+                )
+            if b1 - b0 + 1 != expected_b_width:
+                problems.append(
+                    "Eoff B稳定带宽度未与Ic主沿自适应闭环: "
+                    f"actual={b1 - b0 + 1}, expected={expected_b_width}"
+                )
+            trailing_confirmation = max(
+                0,
+                expected_b_width - 1 - expected_b_width // 2,
+            )
+            if not (
+                expected_b <= search_end
+                and b1 <= min(n - 1, search_end + trailing_confirmation)
+            ):
+                problems.append(
+                    "Eoff B代表点/稳定带越过事件门允许的半带确认范围"
+                )
+
+        v_event = voltage[a0 : b1 + 1]
+        i_event = current[a0 : b1 + 1]
+        v_finite = v_event[np.isfinite(v_event)]
+        i_finite = i_event[np.isfinite(i_event)]
+        v_span = (
+            float(
+                np.nanpercentile(v_finite, 95)
+                - np.nanpercentile(v_finite, 5)
+            )
+            if len(v_finite)
+            else 1.0
+        )
+        i_span = (
+            float(
+                np.nanpercentile(i_finite, 95)
+                - np.nanpercentile(i_finite, 5)
+            )
+            if len(i_finite)
+            else 1.0
+        )
+        for problem in (
+            _eoff_stable_band_problem(
+                "Eoff A/Vce Base",
+                voltage,
+                a0,
+                a1,
+                expected_a,
+                float(marker.ha_v),
+                v_span,
+                width_fraction=0.06,
+                level_fraction=0.08,
+                drift_fraction=0.08,
+            ),
+            _eoff_stable_band_problem(
+                "Eoff B/Ic Base",
+                current,
+                b0,
+                b1,
+                expected_b,
+                float(marker.hb_a),
+                i_span,
+                width_fraction=0.16,
+                level_fraction=0.16,
+                drift_fraction=0.14,
+            ),
+        ):
+            if problem is not None:
+                problems.append(problem)
+
+        peak_lo = max(0, min(v10, n - 1))
+        peak_hi = max(peak_lo, min(b1, n - 1))
+        signed_power = (
+            voltage[peak_lo : peak_hi + 1]
+            * current[peak_lo : peak_hi + 1]
+        )
+        finite_power = np.isfinite(signed_power)
+        if np.any(finite_power):
+            ranked = np.where(finite_power, signed_power, -np.inf)
+            peak_idx = peak_lo + int(np.argmax(ranked))
+            if not i_start <= peak_idx < i_end:
+                problems.append(
+                    "Eoff stable_platforms A/B未包含主有符号Vce*Ic峰"
+                )
+        else:
+            problems.append(
+                "Eoff stable_platforms 主有符号Vce*Ic峰审计无有效样本"
+            )
+    elif mode != "level_crossings":
+        problems.append(f"Eoff endpoint_mode未知={mode!r}")
+
+    if mode != "stable_platforms" and not _cursor_on_level(
+        times[:n], current[:n], t_end, float(marker.hb_a), tol=2.0
+    ):
+        problems.append(f"Eoff B未贴Ic平台={t_end * 1e6:.6f}us")
+
+    independent = _independent_eoff_half_open_mj(
+        times[:n], voltage[:n], current[:n], i_start, i_end
+    )
+    if independent is None:
+        problems.append("Eoff原始[A,B)半开积分不可用")
+    else:
+        if mode == "stable_platforms":
+            tolerance = max(
+                1e-9,
+                2e-8 * max(abs(float(stored_eoff_mj)), abs(independent), 1e-9),
+            )
+        else:
+            tolerance = max(0.02, 0.02 * max(abs(independent), 1e-9))
+        if (
+            not np.isfinite(float(stored_eoff_mj))
+            or abs(float(stored_eoff_mj) - independent) > tolerance
+        ):
+            problems.append(
+                "Eoff校验="
+                f"{float(stored_eoff_mj):.12g}/{independent:.12g}mJ"
+            )
+    return problems
+
+
 def _audit_turn_on_timing_core(
     t: np.ndarray,
     result,
@@ -274,10 +635,10 @@ def _audit_turn_on_timing_core(
     """Fail closed unless all three turn-on timing cards have real endpoints.
 
     ``Ton``, ``Td_on`` and ``Tr`` are required for a double-pulse sample.  The
-    audit intentionally checks each duration against its own authoritative
-    endpoint pair instead of assuming ``Ton == Td_on + Tr``: with absolute
-    duration semantics, a valid Vge 10% crossing can occur after Ic 10% on a
-    marginal trace, so that identity is not generally safe as a validator.
+    The three cards share one ordered IEC chain: ``Vge10 < Ic10 < Ic90``.
+    A reversed or missing crossing is rejected instead of being converted into
+    an absolute duration, because it cannot represent one physical turn-on
+    event and would break ``Ton == Td_on + Tr``.
     """
 
     problems: list[str] = []
@@ -324,6 +685,13 @@ def _audit_turn_on_timing_core(
                 f"{valid_endpoints['Ic10'] * 1e6:.6f}/"
                 f"{valid_endpoints['Ic90'] * 1e6:.6f}us"
             )
+    if "Vge10" in valid_endpoints and "Ic10" in valid_endpoints:
+        if valid_endpoints["Ic10"] <= valid_endpoints["Vge10"]:
+            problems.append(
+                "开通时序Vge/Ic交点未按主上升沿有序="
+                f"{valid_endpoints['Vge10'] * 1e6:.6f}/"
+                f"{valid_endpoints['Ic10'] * 1e6:.6f}us"
+            )
 
     checks = (
         (
@@ -362,8 +730,8 @@ def _audit_turn_on_timing_core(
         if left_label not in valid_endpoints or right_label not in valid_endpoints:
             continue
         expected_ns = (
-            abs(valid_endpoints[right_label] - valid_endpoints[left_label]) * 1e9
-        )
+            valid_endpoints[right_label] - valid_endpoints[left_label]
+        ) * 1e9
         if expected_ns <= 0.0:
             problems.append(f"{name}真实交点时间差为0")
             continue
@@ -560,6 +928,41 @@ def _audit_rr_didt_context(
     return problems, detail
 
 
+def _mismatched_bridge_arm_problem(
+    *,
+    ioff_a: float,
+    err_ha_v: float,
+    settle_level_a: float,
+    settle_pp_a: float,
+) -> str | None:
+    """独立判据：候选桥臂的 Err 稳定带其实读到的是关断态导通电流。
+
+    错误桥臂（例如把 360A.tss 判成 WH）在新的 Err 窗口口径下读数自洽，
+    ``Err校验`` 不再报错，于是候选被误接受。这里补一条与 Err 积分口径无关的
+    物理判据：对管正确时，Err 的 Ha 平台应是反向恢复后的 Irr 尾电流；若该平台
+    与关断态导通电流 ``Ioff`` 同量级（≥90%），且稳定带几乎没有纹波（≤5% ``Ioff``），
+    说明“恢复尾电流”就是导通电流本身，即通道绑定到了另一只器件。
+    2026-10-15 实测（360A.tss 的 WH 候选）：ha/settle=-358.91A、settle_pp=7.09A、
+    Ioff=358.9A，正落在该判据内；同文件的 WL 候选不落在该判据内。
+    """
+    ioff = abs(float(ioff_a))
+    if not np.isfinite(ioff) or ioff < 100.0:
+        return None
+    level = abs(float(settle_level_a))
+    ha = abs(float(err_ha_v))
+    if not np.isfinite(level) or not np.isfinite(ha):
+        return None
+    if level < 0.9 * ioff or ha < 0.9 * ioff:
+        return None
+    pp = float(settle_pp_a)
+    if not np.isfinite(pp) or pp > 0.05 * ioff:
+        return None
+    return (
+        f"桥臂不匹配=Err稳定带≈关断态电流({level:.1f}/{ioff:.1f}A,"
+        f"pp={pp:.2f}A)"
+    )
+
+
 def _mapping_fallback_result(
     path: Path,
     bundle,
@@ -656,23 +1059,16 @@ def _validate_dpt_sample(
     vce = b.get(prof.vce)
     if r.single_pulse_mode:
         problems: list[str] = []
-        eoff_m = eoff_energy_markers(
-            b.t,
-            ic,
-            vce,
-            segs.turn_off[0],
-            segs.turn_off[1],
-            segs.pulse1_off,
-            b.dt,
-            pre_ns=cfg.energy.eoff_pre_ns,
-            pulse1_on=segs.pulse1_on,
+        eoff_m = r.energy_contexts.get(("关断过程", "Eoff"))
+        problems.extend(
+            _audit_eoff_marker(
+                b.t,
+                vce,
+                ic,
+                eoff_m,
+                r.turn_off.eoff,
+            )
         )
-        eoff_chk = integrate_vi_window(b.t, vce, ic, eoff_m.as_integration_window())
-        eoff_tol = max(0.02, 0.02 * max(abs(eoff_chk), 1e-9))
-        if abs(r.turn_off.eoff - eoff_chk) > eoff_tol:
-            problems.append(f"Eoff校验={r.turn_off.eoff:.3f}/{eoff_chk:.3f}mJ")
-        if not _cursor_on_level(b.t, ic, eoff_m.t_end, eoff_m.hb_a, tol=2.0):
-            problems.append(f"Eoff B未贴Ic平台={eoff_m.t_end * 1e6:.6f}us")
         if r.detected_pulse_count != 1:
             problems.append(f"单脉冲识别数={r.detected_pulse_count}")
         if r.turn_off.ic_off_max <= 0.0:
@@ -752,17 +1148,7 @@ def _validate_dpt_sample(
         )
     )
     rr_context_i1 = rr_s1 if rr_window_completed else rr1
-    eoff_m = eoff_energy_markers(
-        b.t,
-        ic,
-        vce,
-        segs.turn_off[0],
-        segs.turn_off[1],
-        segs.pulse1_off,
-        b.dt,
-        pre_ns=cfg.energy.eoff_pre_ns,
-        pulse1_on=segs.pulse1_on,
-    )
+    eoff_m = r.energy_contexts.get(("关断过程", "Eoff"))
     eon_m = eon_energy_markers(
         b.t,
         ic,
@@ -804,7 +1190,6 @@ def _validate_dpt_sample(
         dc_current=r.idc,
         lower_bridge_irr_from_ic_minus_il=prof.irr_from_ic_minus_il,
     )
-    eoff_chk = integrate_vi_window(b.t, vce, ic, eoff_m.as_integration_window())
     eon_chk = integrate_vi_window(b.t, vce, ic, eon_m.as_integration_window())
     e_chk = integrate_err_recovery(b.t, vd, irr, mk.as_integration_window())
     ipk = rr0 + err_recovery_peak_index(irr[rr0 : rr1 + 1], b.dt)
@@ -916,14 +1301,18 @@ def _validate_dpt_sample(
                     f"{name}自动{AUTO_MAX_SLOPE_SPAN_PERCENT:g}% "
                     f"A/B区间不可用={label!r}"
                 )
-    eoff_tol = max(0.02, 0.02 * max(abs(eoff_chk), 1e-9))
-    if abs(r.turn_off.eoff - eoff_chk) > eoff_tol:
-        problems.append(f"Eoff校验={r.turn_off.eoff:.3f}/{eoff_chk:.3f}mJ")
+    problems.extend(
+        _audit_eoff_marker(
+            b.t,
+            vce,
+            ic,
+            eoff_m,
+            r.turn_off.eoff,
+        )
+    )
     eon_tol = max(0.02, 0.02 * max(abs(eon_chk), 1e-9))
     if abs(r.turn_on.eon - eon_chk) > eon_tol:
         problems.append(f"Eon校验={r.turn_on.eon:.3f}/{eon_chk:.3f}mJ")
-    if not _cursor_on_level(b.t, ic, eoff_m.t_end, eoff_m.hb_a, tol=2.0):
-        problems.append(f"Eoff B未贴Ic平台={eoff_m.t_end * 1e6:.6f}us")
     if not _cursor_on_level(b.t, vce, eon_m.t_end, eon_m.hb_a, tol=2.0):
         problems.append(f"Eon B未贴Vce平台={eon_m.t_end * 1e6:.6f}us")
     if abs(ha - ha_d) >= 1.0:
@@ -947,6 +1336,14 @@ def _validate_dpt_sample(
         ioff=r.turn_off.ic_off_max,
         ion=ha,
     )
+    mismatched_arm = _mismatched_bridge_arm_problem(
+        ioff_a=r.turn_off.ic_off_max,
+        err_ha_v=mk.ha_v,
+        settle_level_a=ha_settle,
+        settle_pp_a=settle_pp,
+    )
+    if mismatched_arm is not None:
+        problems.append(mismatched_arm)
     status = "WARN" if problems else "OK"
     detail = (
         f"profile={prof.code} "
@@ -1114,7 +1511,11 @@ def main() -> None:
     global _VALIDATE_AUTO_SLOPES
     args = _parse_args()
     _VALIDATE_AUTO_SLOPES = bool(args.auto_slopes)
-    samples = discover_sample_waveforms(ROOT)
+    sample_root = Path(args.root)
+    if not sample_root.is_dir():
+        print(f"TSS 语料根目录不存在: {sample_root}")
+        raise SystemExit(1)
+    samples = discover_sample_waveforms(sample_root)
     if args.match:
         match_text = str(args.match).casefold()
         samples = [p for p in samples if match_text in str(p).casefold()]

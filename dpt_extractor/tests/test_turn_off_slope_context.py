@@ -15,6 +15,7 @@ from dpt_extractor.config.loader import AppConfig
 from dpt_extractor.metrics.iec_timings import turn_off_ic_fall_window
 from dpt_extractor.metrics.plateau_level import (
     _plateau_mid_without_isolated_spikes,
+    first_post_edge_stable_band_center_index,
     turn_off_didt_stable_base_window_indices,
 )
 from dpt_extractor.metrics.slopes import (
@@ -48,6 +49,16 @@ SONG_SMC_RT_UH_1048 = (
     / "RT"
     / "tss"
     / "UH_750V_1048A_000.tss"
+)
+SONG_SMC_RT_UH_806 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260717"
+    / "SMC"
+    / "RT"
+    / "UH_750V_806A_000.tss"
 )
 SONG_DCU_LT_WH_480_100 = (
     ROOT
@@ -344,6 +355,102 @@ class TestTurnOffStableBaseWindow(unittest.TestCase):
         )
 
 
+class TestFirstPostEdgeStableBandCenter(unittest.TestCase):
+    def test_returns_center_of_first_complete_200ns_stable_band(self) -> None:
+        dt = 1e-9
+        edge_idx = 500
+        search_end = 1_500
+        values = np.full(2_000, 48.0, dtype=np.float64)
+        values[edge_idx:] = 3.0
+
+        actual = first_post_edge_stable_band_center_index(
+            values,
+            edge_idx,
+            search_end,
+            dt,
+            target_level=3.0,
+            event_span=45.0,
+        )
+
+        # The existing platform convention requires 100 ns of edge guard and
+        # one complete 200 ns band.  B is its stable representative point.
+        self.assertEqual(actual, edge_idx + 100 + 200 // 2)
+
+    def test_sustained_ringing_moves_center_to_first_later_stable_band(self) -> None:
+        dt = 1e-9
+        edge_idx = 500
+        search_end = 1_600
+        values = np.full(2_000, 48.0, dtype=np.float64)
+        values[edge_idx:] = 3.0
+        ring_indices = np.arange(600, 900)
+        values[ring_indices] = 3.0 + np.where(ring_indices % 2 == 0, 100.0, -100.0)
+
+        actual = first_post_edge_stable_band_center_index(
+            values,
+            edge_idx,
+            search_end,
+            dt,
+            target_level=3.0,
+            event_span=45.0,
+        )
+
+        self.assertEqual(actual, 900 + 200 // 2)
+        self.assertGreater(actual, edge_idx + 100 + 200 // 2)
+
+    def test_positive_and_negative_current_mirrors_choose_same_time(self) -> None:
+        dt = 0.4e-9
+        edge_idx = 1_000
+        search_end = 4_500
+        indices = np.arange(5_000)
+        positive = np.full(len(indices), 50.0, dtype=np.float64)
+        positive[edge_idx:] = 3.0 + 0.15 * np.sin(indices[edge_idx:] * 0.17)
+
+        positive_center = first_post_edge_stable_band_center_index(
+            positive,
+            edge_idx,
+            search_end,
+            dt,
+            target_level=3.0,
+            event_span=47.0,
+        )
+        negative_center = first_post_edge_stable_band_center_index(
+            -positive,
+            edge_idx,
+            search_end,
+            dt,
+            target_level=-3.0,
+            event_span=47.0,
+        )
+
+        self.assertEqual(positive_center, negative_center)
+
+    def test_guard_and_band_duration_quantize_within_one_sample(self) -> None:
+        for dt_ns in (0.08, 0.4, 1.0, 2.0, 5.0):
+            with self.subTest(dt_ns=dt_ns):
+                dt = dt_ns * 1e-9
+                edge_idx = int(round(300e-9 / dt))
+                search_end = edge_idx + int(round(800e-9 / dt))
+                values = np.full(search_end + 200, 3.0, dtype=np.float64)
+                values[:edge_idx] = 50.0
+
+                actual = first_post_edge_stable_band_center_index(
+                    values,
+                    edge_idx,
+                    search_end,
+                    dt,
+                    target_level=3.0,
+                    event_span=47.0,
+                )
+
+                guard_n = max(8, int(round(100e-9 / dt)))
+                stable_n = max(16, int(round(200e-9 / dt)))
+                expected = edge_idx + guard_n + stable_n // 2
+                self.assertEqual(actual, expected)
+                assert actual is not None
+                elapsed = (actual - edge_idx) * dt
+                self.assertLessEqual(abs(elapsed - 200e-9), dt + 1e-18)
+
+
 @unittest.skipUnless(
     SONG_DCU_RT_WL_480_1000.exists(),
     "songzhenxi WL_480V_1000A sample is not available",
@@ -476,7 +583,10 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         # an independent peak metric and therefore may be higher.
         self.assertAlmostEqual(result.turn_off.ic_off_max, 1002.15625, places=6)
         self.assertGreater(result.turn_off.ic_off_max, di_context.top_a)
-        self.assertAlmostEqual(result.turn_off.eoff, 57.927060778, places=6)
+        eoff_context = result.energy_contexts[("关断过程", "Eoff")]
+        self.assertEqual(eoff_context.endpoint_mode, "stable_platforms")
+        self.assertIsNotNone(eoff_context.stable_platform_context)
+        self.assertAlmostEqual(result.turn_off.eoff, 57.667073620, places=6)
         self.assertAlmostEqual(result.turn_off.delta_vce, 200.734375, places=6)
 
     @unittest.skipUnless(
@@ -753,6 +863,36 @@ class TestTurnOffSlopeSongzhenxiContext(unittest.TestCase):
         gui_ha, _gui_hb, _zero = state
         self.assertAlmostEqual(gui_ha, context.top_a, places=9)
         self.assertEqual(window.result.turn_off.didt_range, "90%→10%")
+
+    def test_uh_806_rejects_quiet_ramp_point_outside_sustained_top_band(self) -> None:
+        if not SONG_SMC_RT_UH_806.exists():
+            self.skipTest(f"missing {SONG_SMC_RT_UH_806}")
+        from dpt_extractor.gui.main_window import MainWindow
+
+        window = MainWindow()
+        self.addCleanup(window.close)
+        window._load_file(str(SONG_SMC_RT_UH_806))
+        self.assertIsNotNone(window.bundle)
+        self.assertIsNotNone(window.result)
+        assert window.bundle is not None
+        assert window.result is not None
+
+        context = window.result.didt_contexts[("关断过程", "di/dt")]
+        self.assertIsNotNone(context.top_window)
+        assert context.top_window is not None
+        t0, t1 = context.top_window
+        duration_ns = (t1 - t0 + 1) * window.bundle.dt * 1e9
+
+        # Manual scope audit: the real 90%->10% edge is 12.309->12.370 us.
+        # The previous 640 A candidate was a quiet point on the preceding
+        # current ramp, far outside this independently located 200 ns band.
+        self.assertAlmostEqual(duration_ns, 200.0, delta=window.bundle.dt * 1e9)
+        self.assertAlmostEqual(context.base_a, -20.234375, places=9)
+        self.assertAlmostEqual(context.top_a, 796.3125, delta=5.0)
+        self.assertAlmostEqual(context.crossing.t_pct_a_s * 1e6, 12.309, delta=0.001)
+        self.assertAlmostEqual(context.crossing.t_pct_b_s * 1e6, 12.370, delta=0.001)
+        self.assertAlmostEqual(context.crossing.didt, 10.590, delta=0.060)
+        self.assertLess(window.bundle.t[t1], context.crossing.t_pct_a_s)
 
     def test_low_current_turn_off_extends_search_until_both_real_crossings(self) -> None:
         if not SONG_DCU_LT_WH_480_100.exists():

@@ -182,6 +182,32 @@ class ExtractResult:
     short_circuit_mode: bool = False
     #: 缺少关联通道时，仅隐藏受影响参数；键为 (分区, 参数名)。
     unavailable_metrics: set[tuple[str, str]] = field(default_factory=set)
+    #: 提取阶段生成的权威 di/dt 测量上下文。GUI 仅复用当前结果所带的
+    #: 上下文；范围、通道映射或脉冲对变化后重新提取会整体替换本字典。
+    didt_contexts: dict[tuple[str, str], object] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
+    #: 与 di/dt 相同，dv/dt 和损耗卡尺均在提取阶段已经完整计算。
+    #: GUI 默认点击只消费这些上下文；手调光标仍按实时波形重算。
+    dvdt_contexts: dict[tuple[str, str], object] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
+    energy_contexts: dict[tuple[str, str], object] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
+    #: Pdmax owns a current-stable interval independently of Err.  Defaults
+    #: are extracted once so opening its card cannot change the report value.
+    power_contexts: dict[tuple[str, str], object] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     def is_metric_unavailable(self, section: str, name: str) -> bool:
         normalized = normalize_power_metric_name(section, name)

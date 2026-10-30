@@ -32,6 +32,7 @@ configure_numba_cache_dir()
 from PyQt6.QtWidgets import QApplication
 
 from dpt_extractor.gui.main_window import MainWindow
+from dpt_extractor.io.tek_scope import shutdown_tektronix_backend
 
 
 def main() -> int:
@@ -39,8 +40,14 @@ def main() -> int:
     app.setApplicationName("DPT Extractor")
     app.setStyle("Fusion")
     win = MainWindow()
-    win.show()
-    return app.exec()
+    win.showMaximized()
+    try:
+        return app.exec()
+    finally:
+        # Covers programmatic quit and startup/teardown paths that do not pass
+        # through MainWindow.closeEvent().  The function is idempotent.
+        win.shutdown_background_work()
+        shutdown_tektronix_backend()
 
 
 if __name__ == "__main__":

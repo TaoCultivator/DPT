@@ -1,4 +1,4 @@
-"""Regression coverage for the RR slope-cursor mouse-move hot path."""
+"""Regression coverage for release-only parameter-cursor calculations."""
 
 from __future__ import annotations
 
@@ -35,20 +35,48 @@ class TestRrCursorMovePerformance(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
     def setUp(self) -> None:
+        from PyQt6.QtTest import QTest
         from dpt_extractor.gui.main_window import MainWindow
 
         self.win = MainWindow()
         self.win.resize(1600, 1000)
         self.win.show()
+        self.win.raise_()
+        self.win.activateWindow()
         self.app.processEvents()
         self.win._load_file(str(TARGET))
         self.win._on_value_clicked("反向恢复", "di/dt")
+        self.win.wave_plot.plot.viewport().setFocus()
+        QTest.qWait(40)
         for _ in range(3):
             self.app.processEvents()
 
     def tearDown(self) -> None:
         self.win.close()
         self.app.processEvents()
+
+    def _cursor_viewport_point(self, line):
+        from PyQt6.QtCore import QPointF
+
+        plot = self.win.wave_plot.plot
+        view_box = plot.getPlotItem().getViewBox()
+        x_range, y_range = view_box.viewRange()
+        if line.angle % 180 == 0:
+            scene_point = view_box.mapViewToScene(
+                QPointF(
+                    x_range[0] + 0.67 * (x_range[1] - x_range[0]),
+                    float(line.value()),
+                )
+            )
+        else:
+            scene_point = view_box.mapViewToScene(
+                QPointF(
+                    float(line.value()),
+                    y_range[0] + 0.72 * (y_range[1] - y_range[0]),
+                )
+            )
+        plot_point = plot.mapFromScene(scene_point)
+        return plot.viewport().mapFrom(plot, plot_point)
 
     def test_cached_logical_irr_is_read_only_and_fails_closed_when_stale(self) -> None:
         from dpt_extractor.models.waveform import channel_reference_base_name
@@ -101,7 +129,129 @@ class TestRrCursorMovePerformance(unittest.TestCase):
             self.assertEqual(compute.call_count, 0)
             self.assertEqual(readout.call_count, 0)
 
-    def test_rr_slope_burst_computes_and_reads_exactly_once_per_event(self) -> None:
+    def test_real_rr_slope_drag_commits_latest_position_once_on_release(self) -> None:
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtTest import QTest
+
+        plot = self.win.wave_plot
+        result = self.win.result
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(plot._h_cursor_b)
+        assert result is not None and plot._h_cursor_b is not None
+
+        line = plot._h_cursor_b
+        viewport = plot.plot.viewport()
+        press = self._cursor_viewport_point(line)
+        steps = (8, 16, 24, 32, 40, 48)
+        release = press + QPoint(0, -steps[-1])
+        before_result = float(result.reverse_recovery.didt_irr)
+
+        with (
+            patch.object(plot, "_update_readout", wraps=plot._update_readout) as readout,
+            patch.object(
+                self.win,
+                "_compute_didt_base_top",
+                wraps=self.win._compute_didt_base_top,
+            ) as compute,
+        ):
+            QTest.mouseMove(viewport, QPoint(1, 1))
+            QTest.mouseMove(viewport, press, delay=20)
+            QTest.qWait(40)
+            self.app.processEvents()
+
+            QTest.mousePress(
+                viewport,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                press,
+            )
+            for offset in steps:
+                QTest.mouseMove(viewport, press + QPoint(0, -offset), delay=8)
+                self.app.processEvents()
+                self.assertTrue(line.moving)
+                self.assertEqual(compute.call_count, 0)
+                self.assertEqual(
+                    float(result.reverse_recovery.didt_irr), before_result
+                )
+
+            self.assertGreaterEqual(readout.call_count, 1)
+            QTest.mouseRelease(
+                viewport,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                release,
+            )
+            self.app.processEvents()
+
+            self.assertEqual(compute.call_count, 1)
+            final_hb = plot._from_disp("irr", float(line.value()))
+            self.assertAlmostEqual(
+                float(compute.call_args.args[4]), float(final_hb), places=9
+            )
+            saved = self.win._manual_didt[("反向恢复", "di/dt")]
+            self.assertAlmostEqual(float(saved[3]), float(final_hb), places=9)
+
+    def test_real_energy_cursor_drag_integrates_once_on_release(self) -> None:
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtTest import QTest
+        import dpt_extractor.gui.main_window as main_window_module
+
+        self.win._on_value_clicked("开通", "Eon")
+        self.win.raise_()
+        self.win.activateWindow()
+        self.win.wave_plot.plot.viewport().setFocus()
+        QTest.qWait(40)
+        self.app.processEvents()
+        plot = self.win.wave_plot
+        result = self.win.result
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(plot._cursor_a)
+        assert result is not None and plot._cursor_a is not None
+
+        line = plot._cursor_a
+        viewport = plot.plot.viewport()
+        press = self._cursor_viewport_point(line)
+        steps = (8, 16, 24, 32, 40, 48)
+        release = press + QPoint(steps[-1], 0)
+        before_result = float(result.turn_on.eon)
+
+        with patch.object(
+            main_window_module,
+            "integrate_vi_window",
+            wraps=main_window_module.integrate_vi_window,
+        ) as integrate:
+            QTest.mouseMove(viewport, QPoint(1, 1))
+            QTest.mouseMove(viewport, press, delay=20)
+            QTest.qWait(40)
+            self.app.processEvents()
+
+            QTest.mousePress(
+                viewport,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                press,
+            )
+            for offset in steps:
+                QTest.mouseMove(viewport, press + QPoint(offset, 0), delay=8)
+                self.app.processEvents()
+                self.assertTrue(line.moving)
+                self.assertEqual(integrate.call_count, 0)
+                self.assertEqual(float(result.turn_on.eon), before_result)
+
+            QTest.mouseRelease(
+                viewport,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                release,
+            )
+            self.app.processEvents()
+
+            self.assertEqual(integrate.call_count, 1)
+            final_a_us = float(line.value())
+            saved = self.win._manual_energy[("开通", "Eon")]
+            self.assertAlmostEqual(float(saved[0]), final_a_us, places=9)
+
+    def test_programmatic_rr_slope_updates_remain_immediate(self) -> None:
         from PyQt6.QtCore import QPointF
 
         plot = self.win.wave_plot

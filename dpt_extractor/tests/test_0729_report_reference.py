@@ -80,12 +80,19 @@ UNCHANGED_ERR_MJ = {
     ("HT", "VL"): 19.19821183908417,
     ("HT", "WH"): 12.09336839009178,
     ("HT", "WL"): 19.902304197834884,
-    ("RT", "UH"): 6.74651066446076,
-    ("RT", "UL"): 9.293883724971456,
-    ("RT", "VH"): 6.45866352055415,
-    ("RT", "VL"): 10.96827992884032,
-    ("RT", "WH"): 6.3178850247336396,
-    ("RT", "WL"): 13.038302468178658,
+}
+
+# The 2026-08-19 manually re-snapped workbook supersedes the older 07-29 RT
+# Err cursor positions for this same raw batch.  HT has no replacement sheet
+# and therefore remains bit-for-bit frozen above; RT is checked against the
+# revised manual energy with a cursor-extraction tolerance.
+REVISED_RT_ERR_MJ = {
+    "UH": 9.388,
+    "UL": 12.817,
+    "VH": 7.686,
+    "VL": 14.972,
+    "WH": 7.914,
+    "WL": 18.932,
 }
 
 
@@ -164,8 +171,8 @@ class Test0729ReportReference(unittest.TestCase):
                     ),
                 )
 
-    def test_ht_and_rt_err_values_do_not_drift(self) -> None:
-        """The LT tail repair must not change already-aligned HT/RT extraction."""
+    def test_ht_err_values_do_not_drift_and_rt_tracks_revised_golden(self) -> None:
+        """Freeze HT and follow the newer manually re-snapped RT workbook."""
         for (temperature, code), expected in UNCHANGED_ERR_MJ.items():
             with self.subTest(temperature=temperature, code=code):
                 _bundle, _profile, result = self._load_case(temperature, code)
@@ -173,6 +180,14 @@ class Test0729ReportReference(unittest.TestCase):
                     result.reverse_recovery.err,
                     expected,
                     places=9,
+                )
+        for code, expected in REVISED_RT_ERR_MJ.items():
+            with self.subTest(temperature="RT", code=code):
+                _bundle, _profile, result = self._load_case("RT", code)
+                self.assertAlmostEqual(
+                    result.reverse_recovery.err,
+                    expected,
+                    delta=max(0.10, 0.05 * expected),
                 )
 
     def test_lt_rr_dvdt_rejects_ringing_peak_as_the_voltage_top(self) -> None:

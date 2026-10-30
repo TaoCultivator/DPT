@@ -2,6 +2,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('discover', 'acquire', 'sync')]
     [string]$Operation,
+    [ValidateSet('', 'TekVISA', 'NI-VISA')]
+    [string]$Provider = '',
     [string]$Resource = '',
     [string]$OutputPath = '',
     [string]$StatePath = ''
@@ -32,10 +34,14 @@ function Open-TekVisaManager {
     if (-not (Test-Path -LiteralPath $TekVisaAdapterPath)) {
         throw 'TekVISA adapter source was not found'
     }
+    Write-ProgressLine 1 100 'Loading TekVISA adapter...'
     if ($null -eq ('Dpt.ScopeIo.TekVisaResourceManager' -as [type])) {
         Add-Type -Path $TekVisaAdapterPath
     }
-    return New-Object Dpt.ScopeIo.TekVisaResourceManager
+    Write-ProgressLine 2 100 'Opening TekVISA resource manager...'
+    $manager = New-Object Dpt.ScopeIo.TekVisaResourceManager
+    Write-ProgressLine 2 100 'TekVISA resource manager ready'
+    return $manager
 }
 
 function Open-NiVisaManager {
@@ -153,6 +159,7 @@ function Read-IeeeBinaryBlock(
 function Find-TekScope([object]$Manager) {
     foreach ($candidate in $Manager.Find('USB?*INSTR')) {
         if ($candidate -notmatch '::0x0699::') { continue }
+        Write-ProgressLine 3 100 "Opening scope $candidate..."
         $session = $null
         try {
             $session = Open-Scope $Manager $candidate
@@ -178,6 +185,7 @@ function Resolve-ScopeIdentity([object]$Manager, [string]$RequestedResource) {
     }
     $session = $null
     try {
+        Write-ProgressLine 3 100 "Opening scope $RequestedResource..."
         $session = Open-Scope $Manager $RequestedResource
         $idn = Invoke-Query $session '*IDN?'
         if (-not $idn.StartsWith('TEKTRONIX,', [StringComparison]::OrdinalIgnoreCase)) {
@@ -190,19 +198,31 @@ function Resolve-ScopeIdentity([object]$Manager, [string]$RequestedResource) {
     }
 }
 
-function Open-PreferredVisaContext([string]$RequestedResource) {
+function Open-PreferredVisaContext(
+    [string]$RequestedResource,
+    [string]$RequestedProvider = ''
+) {
     $failures = [System.Collections.Generic.List[string]]::new()
     $scopeNotFound = $false
-    foreach ($provider in @('TekVISA', 'NI-VISA')) {
+    $providers = if ([string]::IsNullOrWhiteSpace($RequestedProvider)) {
+        @('TekVISA', 'NI-VISA')
+    }
+    else {
+        @($RequestedProvider)
+    }
+    foreach ($provider in $providers) {
         $manager = $null
         try {
+            Write-ProgressLine 1 100 "Initializing $provider..."
             $manager = if ($provider -eq 'TekVISA') {
                 Open-TekVisaManager
             }
             else {
                 Open-NiVisaManager
             }
+            Write-ProgressLine 2 100 "Searching scope via $provider..."
             $resolved = Resolve-ScopeIdentity $manager $RequestedResource
+            Write-ProgressLine 5 100 "Connected scope via $provider..."
             $identity = [pscustomobject]@{
                 resource = [string]$resolved.resource
                 idn = [string]$resolved.idn
@@ -296,6 +316,7 @@ function Read-ScopeWaveforms([object]$Manager, [object]$Identity, [string]$Desti
     $session = Open-Scope $Manager $Identity.resource
     $resumeAcquisition = $false
     try {
+        Write-ProgressLine 6 100 'Preparing scope waveform transfer...'
         # A scope in Normal trigger mode commonly remains armed after the last
         # completed acquisition. The displayed record is still valid and must
         # be readable without asking the operator to press Stop. Freeze the
@@ -339,7 +360,8 @@ function Read-ScopeWaveforms([object]$Manager, [object]$Identity, [string]$Desti
             Write-Command $session 'DATA:RESAMPLE 1'
             for ($index = 0; $index -lt $sources.Count; $index++) {
                 $source = $sources[$index]
-                Write-ProgressLine $index $sources.Count "Reading scope $source..."
+                $channelProgress = 10 + [int][Math]::Floor(80.0 * $index / $sources.Count)
+                Write-ProgressLine $channelProgress 100 "Reading scope $source..."
                 Write-Command $session "DATA:SOURCE $source"
                 if ($source.StartsWith('MATH')) {
                     # 4/5/6 Series MATH records are always four-byte floating
@@ -405,8 +427,10 @@ function Read-ScopeWaveforms([object]$Manager, [object]$Identity, [string]$Desti
                 }
                 [IO.File]::WriteAllBytes((Join-Path $Destination $item.file), $waveform)
                 $items.Add([pscustomobject]$item)
+                $channelDone = 10 + [int][Math]::Floor(80.0 * ($index + 1) / $sources.Count)
+                Write-ProgressLine $channelDone 100 "Read scope $source"
             }
-            Write-ProgressLine $sources.Count $sources.Count 'Scope waveform transfer complete'
+            Write-ProgressLine 95 100 'Scope waveform transfer complete'
         }
         finally {
             Restore-DataSettings $session $saved
@@ -521,7 +545,7 @@ function Sync-Scope([object]$Manager, [object]$Identity, [string]$JsonPath) {
 
 $context = $null
 try {
-    $context = Open-PreferredVisaContext $Resource
+    $context = Open-PreferredVisaContext $Resource $Provider
     $manager = $context.manager
     $identity = $context.identity
     switch ($Operation) {

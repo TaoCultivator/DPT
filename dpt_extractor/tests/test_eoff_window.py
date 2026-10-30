@@ -3,17 +3,24 @@ from __future__ import annotations
 import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dpt_extractor.config.loader import load_config
 from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.metrics.iec_windows import (
+    _eoff_half_open_indices_from_times,
+    _eoff_ic_base_refine_quality,
+    _eoff_stable_context_is_publishable,
+    _eoff_stable_window_contains_old_signed_power_peak,
     _loss_cursor_event_gate_after_main_edge,
     _err_ha_top_from_offset_window,
     _err_recovery_settled_base,
+    _err_stable_platform_midpoint,
     _err_true_irr_ha_cross_t,
     _err_vd_base_from_offset_window,
     _first_sustained_rise_crossing,
     _quiet_local_platform_level,
+    _refine_eoff_ic_base_after_fall,
     eoff_energy_markers,
     eoff_window_scope_example,
     eon_energy_markers,
@@ -22,6 +29,7 @@ from dpt_extractor.metrics.iec_windows import (
     integrate_err_recovery,
     integrate_vi_window,
 )
+from dpt_extractor.metrics.energy import peak_power_kw
 from dpt_extractor.metrics.iec_timings import turn_on_timing_instants
 from dpt_extractor.models.waveform import bundle_reverse_recovery_current
 from dpt_extractor.models.bridge_profile import UPPER_BRIDGE, guess_profile_from_path
@@ -31,8 +39,11 @@ from dpt_extractor.models.channel_mapping import (
 )
 from dpt_extractor.models.waveform import bundle_total_current
 from dpt_extractor.metrics.plateau_level import (
+    EoffStablePlatformCursorContext,
     _plateau_mid_without_isolated_spikes,
+    _robust_band_stats,
     dvdt_rr_vd_base_top,
+    turn_off_eoff_stable_platform_cursor_context,
     turn_on_current_hb_ha_window_indices,
     turn_on_current_cursor_hb_a_us,
     turn_on_ic_a_cross_hb_us,
@@ -285,6 +296,11 @@ WANGLIHUI_UH_400_1070 = (
     / "UH_400V_1070A_Rgon1.515R_Rgoff6.346R_000.tss"
 )
 WANGLIHUI_UL_400_1070 = WANGLIHUI_U_DIR / "UL_400V_1070A_Rgon1.1R_Rgof5R_000.tss"
+ZHONGBAN_ROOT = Path(
+    r"F:\JinMai\双脉冲数据处理\songzhenxi\MCU25T8\SMC\zhongban"
+)
+ZHONGBAN_RT_WH_50 = ZHONGBAN_ROOT / "RT" / "WH_400V_50A_Rgon4_Rgoff9_000.tss"
+ZHONGBAN_LT_WH_500 = ZHONGBAN_ROOT / "LT" / "WH_400V_500A_Rgon4_Rgoff9_000.tss"
 
 
 def _assert_crossing(
@@ -347,7 +363,491 @@ def _assert_vd_main_rise_after(
     )
 
 
+def _synthetic_eoff_case(*, ringing: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    dt = 1e-9
+    t = np.arange(2500, dtype=np.float64) * dt
+    vce = np.full(2500, 8.0, dtype=np.float64)
+    ic = np.full(2500, 50.0, dtype=np.float64)
+    vce[900:1001] = np.linspace(8.0, 400.0, 101)
+    vce[1001:] = 400.0
+    ic[950:1051] = np.linspace(50.0, 3.0, 101)
+    k = np.arange(1449, dtype=np.float64)
+    if ringing:
+        ic[1051:] = 3.0 + 22.0 * np.exp(-k / 260.0) * np.sin(
+            2.0 * np.pi * k / 42.0
+        )
+    else:
+        ic[1051:] = 3.0 + 0.35 * np.sin(2.0 * np.pi * k / 47.0)
+    return t, vce, ic
+
+
 class TestEoffWindow(unittest.TestCase):
+    def test_eoff_stable_publishability_rejects_wide_b_band(self):
+        vce = np.ones(20, dtype=np.float64)
+        ic = np.asarray(
+            [10.0] * 8
+            + [-2.0, 2.0, -2.0, 2.0, -2.0, 2.0, -2.0, 2.0]
+            + [0.0] * 4,
+            dtype=np.float64,
+        )
+        context = EoffStablePlatformCursorContext(
+            a_idx=2,
+            b_idx=12,
+            a_band_start_idx=0,
+            a_band_end_idx=3,
+            b_band_start_idx=8,
+            b_band_end_idx=15,
+            v10_idx=5,
+            v90_idx=6,
+            i90_idx=7,
+            i10_idx=8,
+            search_end_idx=12,
+        )
+
+        self.assertFalse(
+            _eoff_stable_context_is_publishable(vce, ic, context),
+            "a noisy B confirmation band must fall back to level crossings",
+        )
+
+    def test_eoff_stable_publishability_rejects_signed_peak_after_b(self):
+        vce = np.ones(20, dtype=np.float64)
+        ic = np.asarray(
+            [0.0, 0.0, 4.0, 6.0, 8.0, 10.0, 8.0, 6.0]
+            + [0.0] * 12,
+            dtype=np.float64,
+        )
+        vce[13] = 20.0
+        ic[13] = 1.0
+        context = EoffStablePlatformCursorContext(
+            a_idx=2,
+            b_idx=12,
+            a_band_start_idx=0,
+            a_band_end_idx=3,
+            b_band_start_idx=8,
+            b_band_end_idx=15,
+            v10_idx=5,
+            v90_idx=6,
+            i90_idx=7,
+            i10_idx=8,
+            search_end_idx=12,
+        )
+
+        self.assertFalse(
+            _eoff_stable_context_is_publishable(vce, ic, context),
+            "the full confirmation range peak must remain inside [A, B)",
+        )
+
+    def test_failed_stable_publishability_keeps_atomic_level_crossings(self):
+        t, vce, ic = _synthetic_eoff_case(ringing=False)
+        real_refiner = _refine_eoff_ic_base_after_fall
+        refine_calls = 0
+        initial_hb = None
+
+        def refine_side_effect(*args, **kwargs):
+            nonlocal refine_calls, initial_hb
+            refine_calls += 1
+            candidate = float(real_refiner(*args, **kwargs))
+            if refine_calls == 1:
+                initial_hb = candidate
+                return candidate
+            return candidate + 0.10
+
+        with (
+            mock.patch(
+                "dpt_extractor.metrics.iec_windows._refine_eoff_ic_base_after_fall",
+                side_effect=refine_side_effect,
+            ),
+            mock.patch(
+                "dpt_extractor.metrics.iec_windows._eoff_stable_context_is_publishable",
+                return_value=False,
+            ),
+        ):
+            markers = eoff_energy_markers(
+                t,
+                ic,
+                vce,
+                400,
+                1800,
+                off_idx=900,
+                dt=1e-9,
+                pulse1_on=100,
+            )
+
+        self.assertEqual(markers.endpoint_mode, "level_crossings")
+        self.assertIsNone(markers.stable_platform_context)
+        self.assertEqual(refine_calls, 2)
+        self.assertIsNotNone(initial_hb)
+        self.assertAlmostEqual(markers.hb_a, float(initial_hb), places=12)
+        self.assertAlmostEqual(
+            float(np.interp(markers.t_end, t, ic)),
+            markers.hb_a,
+            places=9,
+        )
+
+    def test_eoff_stable_power_peak_guard_uses_signed_half_open_window(self):
+        vce = np.ones(4, dtype=np.float64)
+        ic = np.asarray([-100.0, -20.0, 5.0, -10.0], dtype=np.float64)
+
+        self.assertTrue(
+            _eoff_stable_window_contains_old_signed_power_peak(
+                vce, ic, 0, 4, 2, 3
+            )
+        )
+        self.assertFalse(
+            _eoff_stable_window_contains_old_signed_power_peak(
+                vce, ic, 0, 4, 0, 2
+            ),
+            "peak_idx == B must be excluded by the production [A, B) window",
+        )
+
+        # A/B crossings are normally interpolated between raw samples.  The
+        # old authoritative peak audit must start at searchsorted(..., left),
+        # not at the crossing pair's left sample.
+        t = np.arange(4, dtype=np.float64)
+        old_start, old_end = _eoff_half_open_indices_from_times(t, 0.5, 2.5)
+        self.assertEqual((old_start, old_end), (1, 3))
+        self.assertTrue(
+            _eoff_stable_window_contains_old_signed_power_peak(
+                np.ones(4, dtype=np.float64),
+                np.asarray([100.0, 5.0, 1.0, 0.0], dtype=np.float64),
+                old_start,
+                old_end,
+                1,
+                2,
+            )
+        )
+
+    def test_synthetic_smooth_eoff_uses_stable_platform_endpoints(self):
+        t, vce, ic = _synthetic_eoff_case(ringing=False)
+        markers = eoff_energy_markers(
+            t,
+            ic,
+            vce,
+            400,
+            1800,
+            off_idx=900,
+            dt=1e-9,
+            pulse1_on=100,
+        )
+
+        self.assertEqual(markers.endpoint_mode, "stable_platforms")
+        context = markers.stable_platform_context
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(markers.i_start, context.a_idx)
+        self.assertEqual(markers.i_end, context.b_idx)
+        self.assertLess(context.a_idx, context.v10_idx)
+        self.assertLess(context.i90_idx, context.i10_idx)
+        self.assertLess(context.i10_idx, context.b_idx)
+        self.assertAlmostEqual(markers.ha_v, 8.0, places=9)
+        self.assertAlmostEqual(markers.hb_a, 3.0, places=9)
+        self.assertGreater(
+            integrate_vi_window(t, vce, ic, markers.as_integration_window()), 0.0
+        )
+
+    def test_smooth_eoff_stable_evidence_cannot_cross_search_end(self):
+        t, vce, ic = _synthetic_eoff_case(ringing=False)
+        kwargs = dict(
+            i0=0,
+            i1=len(t) - 1,
+            dt=1e-9,
+            blocking_top_v=400.0,
+            vce_base_v=8.0,
+            ic_top_abs=50.0,
+            ic_base_a=3.0,
+        )
+
+        self.assertIsNone(
+            turn_off_eoff_stable_platform_cursor_context(
+                t,
+                vce,
+                ic,
+                search_end=1080,
+                **kwargs,
+            ),
+            "an incomplete Base band before the event gate must not be accepted",
+        )
+        context = turn_off_eoff_stable_platform_cursor_context(
+            t,
+            vce,
+            ic,
+            search_end=1100,
+            **kwargs,
+        )
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertLessEqual(context.b_idx, 1100)
+        self.assertEqual(context.search_end_idx, 1100)
+        band_width = context.b_band_end_idx - context.b_band_start_idx + 1
+        trailing_confirmation = band_width - 1 - band_width // 2
+        self.assertGreater(context.b_band_end_idx, 1100)
+        self.assertLessEqual(
+            context.b_band_end_idx,
+            context.search_end_idx + trailing_confirmation,
+        )
+
+    def test_smooth_eoff_skips_quiet_band_that_has_not_reached_current_base(self):
+        t, vce, ic = _synthetic_eoff_case(ringing=False)
+        ic[1051:1131] = 6.0
+        ic[1131:1151] = np.linspace(6.0, 3.0, 20, endpoint=False)
+        tail = np.arange(len(ic) - 1151, dtype=np.float64)
+        ic[1151:] = 3.0 + 0.10 * np.sin(2.0 * np.pi * tail / 47.0)
+
+        context = turn_off_eoff_stable_platform_cursor_context(
+            t,
+            vce,
+            ic,
+            0,
+            len(t) - 1,
+            1e-9,
+            400.0,
+            8.0,
+            50.0,
+            3.0,
+            search_end=1500,
+        )
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        band_width = context.b_band_end_idx - context.b_band_start_idx + 1
+        stable_fraction = (
+            context.b_band_end_idx - 1151 + 1
+        ) / float(band_width)
+        self.assertGreaterEqual(stable_fraction, 0.75)
+        self.assertGreaterEqual(context.b_idx, 1151 + band_width // 5)
+        self.assertAlmostEqual(float(ic[context.b_idx]), 3.0, delta=0.2)
+        band = ic[context.b_band_start_idx : context.b_band_end_idx + 1]
+        _p05, _p95, center, drift = _robust_band_stats(band)
+        half = len(band) // 2
+        self.assertAlmostEqual(center, 3.0, delta=1.10)
+        self.assertAlmostEqual(float(np.median(band[:half])), 3.0, delta=1.10)
+        self.assertAlmostEqual(float(np.median(band[half:])), 3.0, delta=1.10)
+        self.assertLess(drift, 1.10)
+
+    def test_synthetic_ringing_eoff_keeps_level_crossings(self):
+        t, vce, ic = _synthetic_eoff_case(ringing=True)
+        markers = eoff_energy_markers(
+            t,
+            ic,
+            vce,
+            400,
+            1800,
+            off_idx=900,
+            dt=1e-9,
+            pulse1_on=100,
+        )
+
+        self.assertEqual(markers.endpoint_mode, "level_crossings")
+        self.assertIsNone(markers.stable_platform_context)
+
+    def test_synthetic_legacy_mode_keeps_level_crossings(self):
+        t, vce, ic = _synthetic_eoff_case(ringing=False)
+        old_mode = os.environ.get("DPT_LOSS_CURSOR_MODE")
+        os.environ["DPT_LOSS_CURSOR_MODE"] = "legacy"
+        try:
+            markers = eoff_energy_markers(
+                t,
+                ic,
+                vce,
+                400,
+                1800,
+                off_idx=900,
+                dt=1e-9,
+                pulse1_on=100,
+            )
+        finally:
+            if old_mode is None:
+                os.environ.pop("DPT_LOSS_CURSOR_MODE", None)
+            else:
+                os.environ["DPT_LOSS_CURSOR_MODE"] = old_mode
+
+        self.assertEqual(markers.endpoint_mode, "level_crossings")
+        self.assertIsNone(markers.stable_platform_context)
+
+    def test_failed_low_current_late_base_candidate_is_not_partially_committed(self):
+        from dpt_extractor.metrics import plateau_level as plateau_level_module
+
+        t, vce, ic = _synthetic_eoff_case(ringing=False)
+        real_context = (
+            plateau_level_module.turn_off_eoff_stable_platform_cursor_context
+        )
+        context_calls = 0
+        refine_calls = 0
+        initial_hb = None
+
+        def context_side_effect(*args, **kwargs):
+            nonlocal context_calls
+            context_calls += 1
+            if context_calls == 1:
+                return real_context(*args, **kwargs)
+            return None
+
+        def refine_side_effect(_ic, _fall_idx, _w1, _dt, current_level, _span):
+            nonlocal refine_calls, initial_hb
+            refine_calls += 1
+            if refine_calls == 1:
+                initial_hb = float(current_level)
+                return float(current_level)
+            return float(current_level) + 0.10
+
+        with (
+            mock.patch(
+                "dpt_extractor.metrics.iec_windows._refine_eoff_ic_base_after_fall",
+                side_effect=refine_side_effect,
+            ),
+            mock.patch(
+                "dpt_extractor.metrics.plateau_level.turn_off_eoff_stable_platform_cursor_context",
+                side_effect=context_side_effect,
+            ),
+        ):
+            markers = eoff_energy_markers(
+                t,
+                ic,
+                vce,
+                400,
+                1800,
+                off_idx=900,
+                dt=1e-9,
+                pulse1_on=100,
+            )
+
+        self.assertEqual(refine_calls, 2)
+        self.assertEqual(context_calls, 2)
+        self.assertEqual(markers.endpoint_mode, "stable_platforms")
+        self.assertIsNotNone(initial_hb)
+        self.assertAlmostEqual(markers.hb_a, float(initial_hb), places=12)
+        self.assertIsNotNone(markers.stable_platform_context)
+
+    def test_late_base_candidate_requires_finite_pareto_quality(self):
+        t, vce, ic = _synthetic_eoff_case(ringing=False)
+        for candidate_quality in (
+            (float("inf"), 0.0),
+            (10.0, 0.0),
+            (0.0, 10.0),
+        ):
+            with self.subTest(candidate_quality=candidate_quality):
+                refine_calls = 0
+                initial_hb = None
+
+                def refine_side_effect(
+                    _ic, _fall_idx, _w1, _dt, current_level, _span
+                ):
+                    nonlocal refine_calls, initial_hb
+                    refine_calls += 1
+                    if refine_calls == 1:
+                        initial_hb = float(current_level)
+                        return float(current_level)
+                    return float(current_level) + 0.10
+
+                with (
+                    mock.patch(
+                        "dpt_extractor.metrics.iec_windows._refine_eoff_ic_base_after_fall",
+                        side_effect=refine_side_effect,
+                    ),
+                    mock.patch(
+                        "dpt_extractor.metrics.iec_windows._eoff_ic_base_refine_quality",
+                        side_effect=((1.0, 1.0), candidate_quality),
+                    ) as quality_mock,
+                ):
+                    markers = eoff_energy_markers(
+                        t,
+                        ic,
+                        vce,
+                        400,
+                        1800,
+                        off_idx=900,
+                        dt=1e-9,
+                        pulse1_on=100,
+                    )
+
+                self.assertEqual(refine_calls, 2)
+                self.assertEqual(quality_mock.call_count, 2)
+                self.assertIsNotNone(initial_hb)
+                self.assertAlmostEqual(
+                    markers.hb_a, float(initial_hb), places=12
+                )
+
+    def test_platform_legacy_mode_does_not_run_late_base_refinement(self):
+        t, vce, ic = _synthetic_eoff_case(ringing=False)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DPT_LOSS_PLATFORM_MODE": "legacy",
+                    "DPT_LOSS_CURSOR_MODE": "",
+                },
+            ),
+            mock.patch(
+                "dpt_extractor.metrics.iec_windows._refine_eoff_ic_base_after_fall",
+                wraps=_refine_eoff_ic_base_after_fall,
+            ) as refine_mock,
+            mock.patch(
+                "dpt_extractor.metrics.iec_windows._eoff_ic_base_refine_quality",
+                wraps=_eoff_ic_base_refine_quality,
+            ) as quality_mock,
+        ):
+            markers = eoff_energy_markers(
+                t,
+                ic,
+                vce,
+                400,
+                1800,
+                off_idx=900,
+                dt=1e-9,
+                pulse1_on=100,
+            )
+
+        self.assertEqual(markers.endpoint_mode, "stable_platforms")
+        refine_mock.assert_not_called()
+        quality_mock.assert_not_called()
+
+    @unittest.skipUnless(ZHONGBAN_RT_WH_50.exists(), "zhongban RT 50A sample missing")
+    def test_zhongban_rt_50a_eoff_stable_platforms_drive_energy_and_pmax(self):
+        bundle = load_waveform(ZHONGBAN_RT_WH_50)
+        profile = guess_profile_from_path(str(ZHONGBAN_RT_WH_50))
+        result = extract_all(bundle, profile, load_config())
+        markers = result.energy_contexts[("关断过程", "Eoff")]
+        self.assertIsNotNone(markers)
+        assert markers is not None
+        ic = bundle_total_current(bundle, profile)
+        vce = bundle.get(profile.vce)
+
+        self.assertEqual(markers.endpoint_mode, "stable_platforms")
+        context = markers.stable_platform_context
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(markers.i_start, context.a_idx)
+        self.assertEqual(markers.i_end, context.b_idx)
+        self.assertAlmostEqual(markers.t_start * 1e6, 10.868160, delta=0.003)
+        self.assertAlmostEqual(markers.t_end * 1e6, 11.395680, delta=0.003)
+        self.assertAlmostEqual(markers.ha_v, 7.957756503, delta=0.001)
+        self.assertAlmostEqual(markers.hb_a, 2.937204851, delta=0.002)
+        self.assertAlmostEqual(
+            integrate_vi_window(
+                bundle.t, vce, ic, markers.as_integration_window()
+            ),
+            result.turn_off.eoff,
+            places=9,
+        )
+        self.assertAlmostEqual(result.turn_off.eoff, 2.351668691, delta=0.005)
+        self.assertAlmostEqual(
+            peak_power_kw(vce, ic, markers.as_integration_window()),
+            result.turn_off.pmax,
+            places=9,
+        )
+        self.assertAlmostEqual(result.turn_off.pmax, 16.589324707, delta=1e-6)
+
+    @unittest.skipUnless(ZHONGBAN_LT_WH_500.exists(), "zhongban damped sample missing")
+    def test_zhongban_damped_eoff_keeps_level_crossings(self):
+        bundle = load_waveform(ZHONGBAN_LT_WH_500)
+        profile = guess_profile_from_path(str(ZHONGBAN_LT_WH_500))
+        result = extract_all(bundle, profile, load_config())
+        markers = result.energy_contexts[("关断过程", "Eoff")]
+        self.assertIsNotNone(markers)
+        assert markers is not None
+        self.assertEqual(markers.endpoint_mode, "level_crossings")
+        self.assertIsNone(markers.stable_platform_context)
+
     def test_loss_cursor_event_gate_uses_200ns_base_and_upper_cap(self):
         dt = 1e-9
         t = np.arange(1600, dtype=np.float64) * dt
@@ -789,7 +1289,7 @@ class TestEoffWindow(unittest.TestCase):
         e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
         self.assertGreater(e, 0.2)
 
-    def _assert_err_ha_uses_local_offset_top(self, path: Path) -> None:
+    def _assert_err_ha_uses_stable_band_midpoint(self, path: Path) -> None:
         bundle = load_waveform(path)
         profile = guess_profile_from_path(str(path))
         result = extract_all(bundle, profile, load_config())
@@ -829,6 +1329,11 @@ class TestEoffWindow(unittest.TestCase):
         )
         self.assertIsNotNone(local_top)
         assert local_top is not None
+        stable_band = irr[base.start_idx : base.end_idx + 1]
+        expected_midpoint = 0.5 * (
+            float(np.max(stable_band)) + float(np.min(stable_band))
+        )
+        self.assertAlmostEqual(local_top, expected_midpoint, delta=1e-9)
         self.assertAlmostEqual(mk.ha_v, local_top, delta=1e-6)
         self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.02)
 
@@ -909,8 +1414,8 @@ class TestEoffWindow(unittest.TestCase):
         )
 
     @unittest.skipUnless(GCU_LT_UH_500.exists(), "GCU LT UH 500A sample missing")
-    def test_gcu_lt_uh_500_err_ha_uses_local_offset_top_not_mid(self):
-        self._assert_err_ha_uses_local_offset_top(GCU_LT_UH_500)
+    def test_gcu_lt_uh_500_err_ha_uses_stable_band_midpoint(self):
+        self._assert_err_ha_uses_stable_band_midpoint(GCU_LT_UH_500)
 
     @unittest.skipUnless(SOFT_ERR_WH.exists(), "soft Err WH sample missing")
     def test_wh_err_current_fall_uses_display_ha_magnitude(self):
@@ -1100,22 +1605,25 @@ class TestEoffWindow(unittest.TestCase):
 
     def test_song_ht_loss_cursors_match_manual_workbook_regressions(self):
         cases = [
-            ("WH_750V_1050A_000.tss", "eoff", 14.546, 14.874, 90.553, 0.020),
+            ("WH_750V_1050A_000.tss", "eoff", 14.483, 14.914, 92.329, 0.020),
             ("WH_750V_1050A_000.tss", "err", 19.475, 18.442, 57.612, 0.020),
             ("WH_750V_805A_000.tss", "err", 15.813, 14.827, 53.001, 0.025),
             ("VH_750V_50A_000.tss", "err", 9.889, 9.508, 1.699, 0.040),
-            ("UL_750V_50A_000.tss", "eoff", 6.621, 6.934, 1.073, 0.030),
+            ("UL_750V_50A_000.tss", "eoff", 6.592, 6.885, 1.107, 0.030),
             ("UL_750V_50A_000.tss", "eon", 10.389, 10.528, 3.285, 0.030),
             ("UL_750V_50A_000.tss", "err", 10.875, 10.413, 3.325, 0.040),
             ("WH_750V_50A_000.tss", "err", 10.355, 10.001, 1.485, 0.040),
             ("VL_750V_805A_000.tss", "eon", 15.476, 15.890, 40.892, 0.020),
             ("VL_750V_1050A_000.tss", "eon", 19.395, 19.854, 55.293, 0.020),
             ("WH_600V_285A_000.tss", "eoff", 4.582, 4.963, 13.031, 0.030),
-            ("WH_600V_285A_000.tss", "err", 8.626, 8.380, 2.986, 0.030),
-            ("VL_600V_285A_000.tss", "err", 9.073, 8.739, 4.825, 0.020),
+            # Err Hb now uses the pre-rise no-ringing Vd band midpoint; these
+            # three B/energy values intentionally supersede the old viewport
+            # Top/Base snapshot.
+            ("WH_600V_285A_000.tss", "err", 8.624, 8.279, 3.037, 0.030),
+            ("VL_600V_285A_000.tss", "err", 9.078, 8.662, 4.938, 0.020),
             ("WL_750V_1050A_000.tss", "err", 20.390, 19.679, 39.519, 0.030),
             ("VL_750V_1050A_000.tss", "err", 19.932, 19.436, 19.969, 0.030),
-            ("VL_750V_805A_000.tss", "err", 15.990, 15.514, 17.179, 0.030),
+            ("VL_750V_805A_000.tss", "err", 15.990, 15.591, 16.995, 0.030),
         ]
         cfg = load_config()
         cache = {}
@@ -1185,7 +1693,7 @@ class TestEoffWindow(unittest.TestCase):
         (SONG_KSU2577_SSS_HT / "WH_750V_1050A_000.tss").exists(),
         "songzhenxi SSS HT WH 1050A sample missing",
     )
-    def test_wh_1050_eoff_refined_ha_keeps_main_edge_raw_intersection(self):
+    def test_wh_1050_smooth_eoff_keeps_levels_and_uses_stable_platforms(self):
         path = SONG_KSU2577_SSS_HT / "WH_750V_1050A_000.tss"
         bundle = load_waveform(path)
         profile = guess_profile_from_path(str(path))
@@ -1207,22 +1715,28 @@ class TestEoffWindow(unittest.TestCase):
             pulse1_on=segs.pulse1_on,
         )
 
-        self.assertAlmostEqual(markers.t_start * 1e6, 14.545746667, places=6)
-        self.assertAlmostEqual(markers.t_end * 1e6, 14.874282756, places=6)
+        self.assertEqual(markers.endpoint_mode, "stable_platforms")
+        context = markers.stable_platform_context
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(markers.i_start, context.a_idx)
+        self.assertEqual(markers.i_end, context.b_idx)
+        self.assertAlmostEqual(markers.t_start * 1e6, 14.482640000, places=6)
+        self.assertAlmostEqual(markers.t_end * 1e6, 14.914240000, places=6)
         self.assertAlmostEqual(markers.ha_v, 12.40625, places=6)
         self.assertAlmostEqual(markers.hb_a, 28.064254893, places=6)
-        self.assertAlmostEqual(
-            float(np.interp(markers.t_start, t, vce)),
-            markers.ha_v,
-            delta=1e-6,
+        self.assertLess(context.a_idx, context.v10_idx)
+        self.assertLess(context.i10_idx, context.b_idx)
+        i_a = int(context.a_idx)
+        i_hi = min(
+            len(vce),
+            int(context.v10_idx) + max(8, int(round(100e-9 / bundle.dt))),
         )
-        i_a = int(np.searchsorted(t, markers.t_start, side="left"))
-        i_hi = min(len(vce), i_a + max(8, int(round(100e-9 / bundle.dt))))
         event_top = float(np.max(vce[segs.turn_off[0] : segs.turn_off[1] + 1]))
         self.assertGreater(
             float(np.max(vce[i_a:i_hi])),
             markers.ha_v + 0.15 * (event_top - markers.ha_v),
-            "Eoff A 后必须进入同一 Vce 主上升沿，不能卡到更早的小台阶",
+            "stable A 后必须进入同一 Vce 主上升沿，不能卡到更早的小台阶",
         )
 
     @unittest.skipUnless(
@@ -1357,7 +1871,7 @@ class TestEoffWindow(unittest.TestCase):
         (SONG_KSU2577_SSS_HT / "UL_750V_50A_000.tss").exists(),
         "songzhenxi SSS HT UL 50A sample missing",
     )
-    def test_song_ht_ul_50_err_ha_uses_parameter_local_offset_top(self):
+    def test_song_ht_ul_50_err_ha_uses_stable_band_midpoint(self):
         path = SONG_KSU2577_SSS_HT / "UL_750V_50A_000.tss"
         bundle = load_waveform(path)
         profile = guess_profile_from_path(str(path))
@@ -1406,7 +1920,12 @@ class TestEoffWindow(unittest.TestCase):
         self.assertIsNotNone(local_top)
         assert local_top is not None
         self.assertAlmostEqual(mk.ha_v, local_top, delta=1e-9)
-        self.assertAlmostEqual(mk.ha_v, -1.935, delta=0.08)
+        stable_band = irr[err_base.start_idx : err_base.end_idx + 1]
+        expected_midpoint = 0.5 * (
+            float(np.max(stable_band)) + float(np.min(stable_band))
+        )
+        self.assertAlmostEqual(mk.ha_v, expected_midpoint, delta=1e-9)
+        self.assertAlmostEqual(mk.ha_v, -2.828125, delta=0.08)
         self.assertAlmostEqual(mk.t_start * 1e6, 10.875, delta=0.030)
         _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
 
@@ -1719,7 +2238,16 @@ class TestEoffWindow(unittest.TestCase):
         )
         energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
 
-        self.assertLess(abs(mk.ha_v), 0.1)
+        stable_band = irr[base.start_idx : base.end_idx + 1]
+        expected_midpoint = 0.5 * (
+            float(np.max(stable_band)) + float(np.min(stable_band))
+        )
+        self.assertAlmostEqual(
+            mk.ha_v,
+            expected_midpoint,
+            delta=1e-9,
+            msg="Err Ha must be the signed raw midpoint of the qualified quiet band",
+        )
         self.assertGreaterEqual(mk.t_start, float(t[base.start_idx]) - 2e-9)
         self.assertAlmostEqual(mk.t_start * 1e6, 16.129918, delta=0.010)
         self.assertAlmostEqual(mk.t_end * 1e6, 15.426712, delta=0.010)
@@ -1995,6 +2523,19 @@ class TestEoffWindow(unittest.TestCase):
         level = _quiet_local_platform_level(y, 2e-9)
         self.assertAlmostEqual(level, -11.0, delta=0.30)
         self.assertLess(level, 0.0)
+
+    def test_err_stable_platform_midpoint_ignores_isolated_spikes(self):
+        quiet = np.concatenate(
+            [
+                np.full(40, -4.0, dtype=np.float64),
+                np.array([35.0]),
+                np.full(40, -2.0, dtype=np.float64),
+            ]
+        )
+        level = _err_stable_platform_midpoint(quiet)
+        self.assertIsNotNone(level)
+        assert level is not None
+        self.assertAlmostEqual(level, -3.0, delta=0.05)
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_rr_dvdt_ha_post_ring_plateau(self):

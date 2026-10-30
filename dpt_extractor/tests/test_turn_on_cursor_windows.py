@@ -216,16 +216,16 @@ class TestTurnOnCursorWindows(unittest.TestCase):
 
         a0 = float(plot._cursor_a.value())
         b0 = float(plot._cursor_b.value())
-        i0 = int(np.searchsorted(bundle.t, min(a0, b0) * 1e-6, side="left"))
-        i1 = int(np.searchsorted(bundle.t, max(a0, b0) * 1e-6, side="left"))
-        i0 = max(0, min(i0, len(bundle.t) - 1))
-        i1 = max(i0 + 1, min(i1, len(bundle.t) - 1))
-        vce = bundle.get(profile.vce)
-
         ha = plot._from_disp("vce", float(plot._h_cursor_a.value()))
         hb = plot._from_disp("vce", float(plot._h_cursor_b.value()))
-        self.assertAlmostEqual(float(ha), float(np.max(vce[i0 : i1 + 1])), places=6)
-        self.assertAlmostEqual(float(hb), float(np.min(vce[i0 : i1 + 1])), places=6)
+        stable_context = win._turn_on_vce_stable_cursor_context()
+        self.assertIsNotNone(stable_context)
+        assert stable_context is not None
+        expected_a, expected_b, base_v, _top_v = stable_context
+        self.assertAlmostEqual(a0, float(bundle.t[expected_a] * 1e6), places=6)
+        self.assertAlmostEqual(b0, float(bundle.t[expected_b] * 1e6), places=6)
+        self.assertAlmostEqual(float(ha), float(result.turn_on.vce_on_max), places=6)
+        self.assertAlmostEqual(float(hb), float(base_v), places=6)
 
         manual_ha = float(ha) - 12.5
         plot._h_cursor_a.setPos(plot._to_disp("vce", manual_ha))

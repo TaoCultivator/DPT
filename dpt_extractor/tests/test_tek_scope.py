@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import struct
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,11 +16,17 @@ from dpt_extractor.gui.waveform_plot import WaveformPlot
 from dpt_extractor.io.tek_scope import (
     ScopeIdentity,
     ScopeViewState,
+    TekScopeError,
+    _BridgeIdentityError,
     _decode_ieee_block,
+    _bridge_provider_order,
     _parse_scope_label,
+    _run_bridge,
+    _run_bridge_once,
     _waveform_dtype,
     discover_tektronix_scope,
     read_tektronix_scope,
+    shutdown_tektronix_backend,
     sync_tektronix_scope,
 )
 
@@ -28,7 +36,264 @@ def _ieee_block(payload: bytes) -> bytes:
     return b"#" + str(len(size)).encode("ascii") + size + payload + b"\n"
 
 
+class _FakeBridgeProcess:
+    def __init__(
+        self,
+        stdout: io.StringIO,
+        stderr: io.StringIO,
+        *,
+        return_code: int | None = 0,
+        release: threading.Event | None = None,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = return_code
+        self.release = release
+        self.terminated = False
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            raise TimeoutError
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+        if self.release is not None:
+            self.release.set()
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        if self.release is not None:
+            self.release.set()
+
+
+class _BlockingTextStream(io.StringIO):
+    def __init__(self, release: threading.Event) -> None:
+        super().__init__("")
+        self.release = release
+
+    def readline(self, *args, **kwargs) -> str:
+        self.release.wait()
+        return ""
+
+
 class TekScopeIOTests(unittest.TestCase):
+    @patch("dpt_extractor.gui.main_window.shutdown_tektronix_backend")
+    def test_window_shutdown_clears_and_waits_for_owned_pools(self, shutdown_backend) -> None:
+        calls: list[str] = []
+
+        class Pool:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def clear(self) -> None:
+                calls.append(f"clear:{self.name}")
+
+            def waitForDone(self, timeout: int) -> bool:  # noqa: N802
+                calls.append(f"wait:{self.name}:{timeout}")
+                return True
+
+        status = SimpleNamespace(
+            showMessage=lambda _message: None,
+            repaint=lambda: None,
+        )
+        timer = SimpleNamespace(stop=lambda: calls.append("stop:progress"))
+        window = SimpleNamespace(
+            _background_shutdown_complete=False,
+            _load_request_id=1,
+            _scope_sync_request_id=2,
+            _report_request_id=3,
+            _load_pool=Pool("load"),
+            _scope_io_pool=Pool("scope"),
+            _load_tasks={1: object()},
+            _scope_sync_tasks={2: object()},
+            _report_prepare_tasks={3: object()},
+            _report_tasks={3: object()},
+            report_progress=SimpleNamespace(_timer=timer),
+            statusBar=lambda: status,
+        )
+
+        MainWindow.shutdown_background_work(window)
+
+        self.assertEqual(window._load_request_id, 2)
+        self.assertEqual(window._scope_sync_request_id, 3)
+        self.assertEqual(window._report_request_id, 4)
+        self.assertEqual(
+            calls,
+            [
+                "stop:progress",
+                "clear:load",
+                "clear:scope",
+                "wait:scope:-1",
+                "wait:load:-1",
+            ],
+        )
+        shutdown_backend.assert_called_once_with()
+        self.assertTrue(window._background_shutdown_complete)
+        self.assertFalse(window._load_tasks)
+        self.assertFalse(window._scope_sync_tasks)
+        self.assertFalse(window._report_prepare_tasks)
+        self.assertFalse(window._report_tasks)
+
+    @patch("dpt_extractor.io.tek_scope._terminate_hung_tekvisa_resource_managers")
+    def test_shutdown_stops_active_bridge_and_tekvisa_server(self, terminate_tekvisa) -> None:
+        from dpt_extractor.io import tek_scope
+
+        release = threading.Event()
+        process = _FakeBridgeProcess(
+            _BlockingTextStream(release),
+            _BlockingTextStream(release),
+            return_code=None,
+            release=release,
+        )
+        tek_scope._ACTIVE_BRIDGE_PROCESSES.add(process)
+        tek_scope._TEKVISA_USED_BY_PROCESS = True
+
+        shutdown_tektronix_backend()
+
+        self.assertTrue(process.terminated)
+        self.assertNotIn(process, tek_scope._ACTIVE_BRIDGE_PROCESSES)
+        self.assertFalse(tek_scope._TEKVISA_USED_BY_PROCESS)
+        terminate_tekvisa.assert_called_once_with()
+
+    @patch("dpt_extractor.io.tek_scope._bridge_script_path")
+    @patch("dpt_extractor.io.tek_scope._powershell_executable")
+    @patch("dpt_extractor.io.tek_scope.subprocess.Popen")
+    def test_bridge_streams_progress_and_result(
+        self,
+        popen,
+        powershell_executable,
+        bridge_script_path,
+    ) -> None:
+        powershell_executable.return_value = "powershell.exe"
+        bridge_script_path.return_value = Path("tek_scope_bridge.ps1")
+        popen.return_value = _FakeBridgeProcess(
+            io.StringIO(
+                'PROGRESS\t1\t2\tReading scope CH1...\n'
+                'RESULT\t{"resource":"USB::SCOPE"}\n'
+            ),
+            io.StringIO(""),
+        )
+        progress: list[tuple[int, int, str]] = []
+
+        result = _run_bridge("discover", progress_callback=lambda *args: progress.append(args))
+
+        self.assertEqual(result, {"resource": "USB::SCOPE"})
+        self.assertEqual(progress, [(1, 2, "读取示波器 CH1...")])
+
+    @patch("dpt_extractor.io.tek_scope._bridge_script_path")
+    @patch("dpt_extractor.io.tek_scope._powershell_executable")
+    @patch("dpt_extractor.io.tek_scope._bridge_timeouts", return_value=(0.03, 0.1))
+    @patch("dpt_extractor.io.tek_scope._terminate_hung_tekvisa_resource_managers")
+    @patch("dpt_extractor.io.tek_scope.subprocess.Popen")
+    def test_bridge_timeout_terminates_silent_process(
+        self,
+        popen,
+        terminate_tekvisa,
+        _bridge_timeouts,
+        powershell_executable,
+        bridge_script_path,
+    ) -> None:
+        powershell_executable.return_value = "powershell.exe"
+        bridge_script_path.return_value = Path("tek_scope_bridge.ps1")
+        release = threading.Event()
+        process = _FakeBridgeProcess(
+            _BlockingTextStream(release),
+            _BlockingTextStream(release),
+            return_code=None,
+            release=release,
+        )
+        popen.return_value = process
+
+        with self.assertRaisesRegex(TekScopeError, "连续 0.03 秒无响应"):
+            _run_bridge_once("acquire", provider="TekVISA")
+
+        self.assertTrue(process.terminated)
+        self.assertIsNotNone(process.poll())
+        terminate_tekvisa.assert_called_once_with()
+
+    def test_identity_stage_failure_falls_back_to_ni_visa(self) -> None:
+        with (
+            patch(
+                "dpt_extractor.io.tek_scope._bridge_provider_order",
+                return_value=("TekVISA", "NI-VISA"),
+            ),
+            patch("dpt_extractor.io.tek_scope._remember_bridge_provider"),
+            patch("dpt_extractor.io.tek_scope._run_bridge_once") as run_once,
+        ):
+            run_once.side_effect = (
+                _BridgeIdentityError("TekVISA initialization timed out"),
+                {"resource": "USB::SCOPE", "visa_backend": "NI-VISA"},
+            )
+            progress: list[tuple[int, int, str]] = []
+
+            result = _run_bridge(
+                "acquire",
+                progress_callback=lambda *args: progress.append(args),
+            )
+
+        self.assertEqual(result["visa_backend"], "NI-VISA")
+        self.assertEqual(
+            [call.kwargs["provider"] for call in run_once.call_args_list],
+            ["TekVISA", "NI-VISA"],
+        )
+        self.assertIn("正在尝试 NI-VISA", progress[-1][2])
+
+    def test_provider_fallback_progress_never_rewinds(self) -> None:
+        def run_once(_operation: str, **kwargs):
+            callback = kwargs["progress_callback"]
+            provider = kwargs["provider"]
+            if provider == "TekVISA":
+                callback(1, 100, "Initializing TekVISA")
+                callback(2, 100, "Opening TekVISA resource manager")
+                raise _BridgeIdentityError("TekVISA initialization failed")
+            callback(1, 100, "Initializing NI-VISA")
+            callback(5, 100, "NI-VISA scope ready")
+            return {"resource": "USB::SCOPE", "visa_backend": "NI-VISA"}
+
+        with (
+            patch(
+                "dpt_extractor.io.tek_scope._bridge_provider_order",
+                return_value=("TekVISA", "NI-VISA"),
+            ),
+            patch("dpt_extractor.io.tek_scope._remember_bridge_provider"),
+            patch(
+                "dpt_extractor.io.tek_scope._run_bridge_once",
+                side_effect=run_once,
+            ),
+        ):
+            progress: list[tuple[int, int, str]] = []
+            _run_bridge(
+                "discover",
+                progress_callback=lambda *args: progress.append(args),
+            )
+
+        fractions = [done / total for done, total, _label in progress]
+        self.assertEqual(fractions, sorted(fractions))
+        self.assertEqual(fractions, [0.01, 0.02, 0.02, 0.02, 0.05])
+
+    def test_last_working_provider_is_reused_first(self) -> None:
+        with patch(
+            "dpt_extractor.io.tek_scope._LAST_WORKING_BRIDGE_PROVIDER",
+            "NI-VISA",
+        ):
+            self.assertEqual(_bridge_provider_order(), ("NI-VISA", "TekVISA"))
+
+    @patch("dpt_extractor.io.tek_scope._run_bridge_once")
+    def test_transfer_stage_failure_does_not_switch_provider(self, run_once) -> None:
+        run_once.side_effect = TekScopeError("waveform transfer failed")
+
+        with self.assertRaisesRegex(TekScopeError, "waveform transfer failed"):
+            _run_bridge("acquire")
+
+        self.assertEqual(run_once.call_count, 1)
+
     def test_bridge_prefers_tekvisa_and_limits_ni_fallback_to_provider_selection(self) -> None:
         root = Path(__file__).parents[2]
         bridge = (root / "dpt_extractor" / "io" / "tek_scope_bridge.ps1").read_text(
@@ -37,7 +302,9 @@ class TekScopeIOTests(unittest.TestCase):
         selection_start = bridge.index("function Open-PreferredVisaContext")
         selection_end = bridge.index("function Optional-Query", selection_start)
         selection = bridge[selection_start:selection_end]
-        self.assertIn("foreach ($provider in @('TekVISA', 'NI-VISA'))", selection)
+        self.assertIn("@('TekVISA', 'NI-VISA')", selection)
+        self.assertIn("foreach ($provider in $providers)", selection)
+        self.assertIn("@($RequestedProvider)", selection)
         self.assertLess(
             selection.index("Open-TekVisaManager"),
             selection.index("Open-NiVisaManager"),
@@ -430,6 +697,12 @@ class ScopeInteractionTests(unittest.TestCase):
 
         class FakeWindow:
             _start_scope_sync_from_plot = object()
+            _parameter_local_views: dict[tuple[str, str], tuple[float, float]] = {}
+
+            class wave_plot:
+                @staticmethod
+                def current_local_x_window_us():
+                    return None
 
             @staticmethod
             def _on_value_clicked(section: str, name: str) -> None:
