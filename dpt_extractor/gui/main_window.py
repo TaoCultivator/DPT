@@ -12982,10 +12982,32 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "导出成功", f"已保存:\n{path}{suffix}")
         except Exception as e:
             QMessageBox.critical(self, "导出失败", str(e))
-    def start_api_server(self,port=8765):
-        from dpt_extractor.api import gui_host
-        gui_host.ensure_running(port=port)
-        return gui_host.current_url()
+    def start_api_server(
+        self, port: int = 8765, token: str | None = None
+    ) -> str | None:
+        """启动内嵌 API 服务，返回可访问的 base_url；失败返回 ``None``。
+
+        早期实现把 ``ensure_running`` 吞掉的异常连同 ``None`` 一起返回，
+        用户在界面上得不到任何反馈，只能看到「点了没反应」。这里把失败
+        显性化：端口占用等原因会写进状态栏，不再静默。
+        """
+        try:
+            from dpt_extractor.api import gui_host
+        except Exception as exc:  # pragma: no cover - 可选依赖缺失
+            self.statusBar().showMessage(f"API 服务不可用：{exc}", 10000)
+            return None
+        handle = gui_host.ensure_running(port=port, token=token)
+        if handle is None:
+            reason = gui_host.last_error() or "未知原因"
+            self.statusBar().showMessage(f"API 服务启动失败：{reason}", 15000)
+            return None
+        url = gui_host.current_url()
+        active = gui_host.current_token() or ""
+        hint = f"{active[:8]}…" if active else "无"
+        self.statusBar().showMessage(
+            f"API 服务已就绪：{url}（令牌 {hint}）", 15000
+        )
+        return url
 
     def stop_api_server(self):
         try:
