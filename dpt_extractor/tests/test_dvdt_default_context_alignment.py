@@ -32,6 +32,16 @@ NDE36_RT_UH2 = (
     / "RT"
     / "UH2_915V_400A_000.tss"
 )
+RR_LOCAL_VIEW_TARGET = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2577"
+    / "07CF2C1000 20260717"
+    / "SMC"
+    / "RT"
+    / "UH_600V_403A_000.tss"
+)
 WANGLIHUI_HT_TARGETS = (
     (
         ROOT
@@ -287,6 +297,438 @@ class TestNde36DvdtRegression(unittest.TestCase):
     def _events(cls) -> None:
         for _ in range(3):
             cls.app.processEvents()
+
+    @unittest.skipUnless(
+        RR_LOCAL_VIEW_TARGET.exists(),
+        "songzhenxi 20260717 RT 403A RR local-view sample missing",
+    )
+    def test_rr_dvdt_reclick_keeps_user_panned_local_view(self) -> None:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QAbstractItemView
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win.resize(1600, 1000)
+            win.show()
+            self._events()
+            win._load_file(str(RR_LOCAL_VIEW_TARGET))
+            self._events()
+
+            table = win.result_table.table
+            row = next(
+                index
+                for index, meta in enumerate(win.result_table._row_meta)
+                if meta == ("反向恢复", "dv/dt")
+            )
+            cell = table.model().index(row, 4)
+
+            def click_metric() -> None:
+                table.scrollTo(
+                    cell,
+                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                )
+                self._events()
+                QTest.mouseClick(
+                    table.viewport(),
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    table.visualRect(cell).center(),
+                )
+                self._events()
+
+            click_metric()
+            initial = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(initial)
+            assert initial is not None
+            span = initial[1] - initial[0]
+            panned = (initial[0] + 0.12 * span, initial[1] + 0.12 * span)
+            self.assertTrue(win.wave_plot.restore_local_x_window_us(panned))
+            self._events()
+            expected = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(expected)
+            assert expected is not None
+            self.assertNotAlmostEqual(expected[0], initial[0], places=6)
+
+            click_metric()
+            actual = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(actual)
+            assert actual is not None
+            self.assertAlmostEqual(actual[0], expected[0], places=9)
+            self.assertAlmostEqual(actual[1], expected[1], places=9)
+        finally:
+            win.close()
+            self._events()
+
+    @unittest.skipUnless(
+        RR_LOCAL_VIEW_TARGET.exists(),
+        "songzhenxi 20260717 RT 403A parameter local-view sample missing",
+    )
+    def test_all_parameter_local_views_survive_switch_and_return(self) -> None:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QAbstractItemView
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win.resize(1600, 1000)
+            win.show()
+            self._events()
+            win._load_file(str(RR_LOCAL_VIEW_TARGET))
+            self._events()
+
+            table = win.result_table.table
+
+            def click_metric(key: tuple[str, str]) -> None:
+                row = next(
+                    index
+                    for index, meta in enumerate(win.result_table._row_meta)
+                    if meta == key
+                )
+                cell = table.model().index(row, 4)
+                table.scrollTo(
+                    cell,
+                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                )
+                self._events()
+                QTest.mouseClick(
+                    table.viewport(),
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    table.visualRect(cell).center(),
+                )
+                self._events()
+
+            available = tuple(
+                key
+                for key in win.result_table._row_meta
+                if not win.result.is_metric_unavailable(*key)
+            )
+            switch_candidates = (
+                ("关断过程", "ΔVce"),
+                ("开通", "ΔVce"),
+            )
+            self.assertTrue(all(key in available for key in switch_candidates))
+
+            for key in available:
+                with self.subTest(parameter=key):
+                    click_metric(key)
+                    initial = win.wave_plot.current_local_x_window_us()
+                    self.assertIsNotNone(initial)
+                    assert initial is not None
+                    span = initial[1] - initial[0]
+                    requested = (
+                        initial[0] + 0.04 * span,
+                        initial[1] + 0.04 * span,
+                    )
+                    self.assertTrue(
+                        win.wave_plot.restore_local_x_window_us(requested)
+                    )
+                    self._events()
+                    expected = win.wave_plot.current_x_range_us()
+                    self.assertIsNotNone(expected)
+                    assert expected is not None
+
+                    switch_key = next(
+                        candidate
+                        for candidate in switch_candidates
+                        if candidate != key
+                    )
+                    click_metric(switch_key)
+                    click_metric(key)
+                    actual = win.wave_plot.current_x_range_us()
+                    self.assertIsNotNone(actual)
+                    assert actual is not None
+                    self.assertAlmostEqual(actual[0], expected[0], places=9)
+                    self.assertAlmostEqual(actual[1], expected[1], places=9)
+
+            self.assertTrue(set(available).issubset(win._parameter_local_views))
+            last_saved = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(last_saved)
+            win._recalculate(reset_manual=True)
+            self._events()
+            self.assertEqual(win._parameter_local_views, {})
+            recalculated = win.wave_plot.current_x_range_us()
+            self.assertIsNotNone(recalculated)
+            assert last_saved is not None and recalculated is not None
+            self.assertNotAlmostEqual(recalculated[0], last_saved[0], places=6)
+        finally:
+            win.close()
+            self._events()
+
+    @unittest.skipUnless(
+        RR_LOCAL_VIEW_TARGET.exists(),
+        "songzhenxi 20260717 RT 403A compact parameter-view sample missing",
+    )
+    def test_default_platform_cursor_views_stay_at_200ns_when_content_fits(self) -> None:
+        from dpt_extractor.gui.main_window import MainWindow
+
+        keys = (
+            ("关断过程", "串扰电压"),
+            ("开通", "串扰电压"),
+            ("反向恢复", "Irr"),
+            ("反向恢复", "Trr"),
+            ("反向恢复", "Vrr"),
+            ("反向恢复", "Pdmax"),
+            ("反向恢复", "Err"),
+        )
+        win = MainWindow()
+        try:
+            win.resize(1600, 1000)
+            win.show()
+            self._events()
+            win._load_file(str(RR_LOCAL_VIEW_TARGET))
+            self._events()
+            self.assertIsNotNone(win.result)
+            assert win.result is not None
+
+            for key in keys:
+                with self.subTest(parameter=key):
+                    self.assertFalse(win.result.is_metric_unavailable(*key))
+                    win._on_value_clicked(*key)
+                    self._events()
+                    current = win.wave_plot.current_x_range_us()
+                    self.assertIsNotNone(current)
+                    assert current is not None
+                    self.assertAlmostEqual(current[1] - current[0], 2.0, delta=0.02)
+                    self.assertEqual(win.wave_plot._x_scale_edit.text(), "200 ns/div")
+                    if (
+                        win.wave_plot._cursor_a is not None
+                        and win.wave_plot._cursor_b is not None
+                    ):
+                        a_us = float(win.wave_plot._cursor_a.value())
+                        b_us = float(win.wave_plot._cursor_b.value())
+                        self.assertGreaterEqual(min(a_us, b_us), current[0] - 1e-6)
+                        self.assertLessEqual(max(a_us, b_us), current[1] + 1e-6)
+        finally:
+            win.close()
+            self._events()
+
+    @unittest.skipUnless(
+        RR_LOCAL_VIEW_TARGET.exists(),
+        "songzhenxi 20260717 RT 403A manual cursor sample missing",
+    )
+    def test_all_movable_parameter_cursors_survive_switch_and_return(self) -> None:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QAbstractItemView
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win.resize(1600, 1000)
+            win.show()
+            self._events()
+            win._load_file(str(RR_LOCAL_VIEW_TARGET))
+            self._events()
+
+            table = win.result_table.table
+            plot = win.wave_plot
+            cursor_attrs = (
+                "_cursor_a",
+                "_cursor_b",
+                "_h_cursor_a",
+                "_h_cursor_b",
+            )
+
+            def click_metric(key: tuple[str, str]) -> None:
+                row = next(
+                    index
+                    for index, meta in enumerate(win.result_table._row_meta)
+                    if meta == key
+                )
+                cell = table.model().index(row, 4)
+                table.scrollTo(
+                    cell,
+                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                )
+                self._events()
+                QTest.mouseClick(
+                    table.viewport(),
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    table.visualRect(cell).center(),
+                )
+                self._events()
+
+            def visible_cursor_state() -> dict[str, float]:
+                return {
+                    attr: float(line.value())
+                    for attr in cursor_attrs
+                    if (line := getattr(plot, attr)) is not None and line.isVisible()
+                }
+
+            def metric_value_text(key: tuple[str, str]) -> str:
+                row = next(
+                    index
+                    for index, meta in enumerate(win.result_table._row_meta)
+                    if meta == key
+                )
+                item = table.item(row, 4)
+                return "" if item is None else item.text()
+
+            available = tuple(
+                key
+                for key in win.result_table._row_meta
+                if not win.result.is_metric_unavailable(*key)
+            )
+            switch_candidates = (
+                ("关断过程", "ΔVce"),
+                ("开通", "ΔVce"),
+            )
+
+            audited: set[tuple[str, str]] = set()
+            for key in available:
+                with self.subTest(parameter=key):
+                    click_metric(key)
+                    x_range, y_range = plot.plot.getPlotItem().getViewBox().viewRange()
+                    x_delta = 0.012 * (float(x_range[1]) - float(x_range[0]))
+                    y_delta = 0.012 * (float(y_range[1]) - float(y_range[0]))
+                    moved = False
+                    for attr in cursor_attrs:
+                        line = getattr(plot, attr)
+                        if (
+                            line is None
+                            or not line.isVisible()
+                            or not bool(getattr(line, "movable", False))
+                        ):
+                            continue
+                        delta = y_delta if line.angle % 180 == 0 else x_delta
+                        before = float(line.value())
+                        line.setValue(before + delta)
+                        self._events()
+                        moved = moved or not np.isclose(
+                            float(line.value()), before, rtol=0.0, atol=1e-9
+                        )
+                    if not moved:
+                        continue
+                    audited.add(key)
+                    expected = visible_cursor_state()
+                    expected_value = metric_value_text(key)
+
+                    switch_key = next(
+                        candidate
+                        for candidate in switch_candidates
+                        if candidate != key
+                    )
+                    click_metric(switch_key)
+                    click_metric(key)
+                    actual = visible_cursor_state()
+                    self.assertEqual(actual.keys(), expected.keys())
+                    for attr, value in expected.items():
+                        self.assertAlmostEqual(actual[attr], value, places=6)
+                    self.assertEqual(metric_value_text(key), expected_value)
+
+            self.assertGreaterEqual(len(audited), 24)
+        finally:
+            win.close()
+            self._events()
+
+    @unittest.skipUnless(
+        RR_LOCAL_VIEW_TARGET.exists(),
+        "songzhenxi 20260717 RT 403A real RR drag sample missing",
+    )
+    def test_rr_dvdt_real_horizontal_drag_survives_parameter_switch(self) -> None:
+        from PyQt6.QtCore import QPoint, QPointF, Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QAbstractItemView
+
+        from dpt_extractor.gui.main_window import MainWindow
+
+        win = MainWindow()
+        try:
+            win.resize(1600, 1000)
+            win.show()
+            self._events()
+            win._load_file(str(RR_LOCAL_VIEW_TARGET))
+            self._events()
+            table = win.result_table.table
+
+            def click_metric(key: tuple[str, str]) -> None:
+                row = next(
+                    index
+                    for index, meta in enumerate(win.result_table._row_meta)
+                    if meta == key
+                )
+                cell = table.model().index(row, 4)
+                table.scrollTo(
+                    cell,
+                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                )
+                self._events()
+                QTest.mouseClick(
+                    table.viewport(),
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    table.visualRect(cell).center(),
+                )
+                self._events()
+
+            rr_key = ("反向恢复", "dv/dt")
+            click_metric(rr_key)
+            plot = win.wave_plot
+            line = plot._h_cursor_a
+            self.assertIsNotNone(line)
+            assert line is not None
+            self.assertTrue(line.isVisible())
+            self.assertTrue(bool(getattr(line, "movable", False)))
+
+            view_box = plot.plot.getPlotItem().getViewBox()
+            x_range, _y_range = view_box.viewRange()
+            scene = view_box.mapViewToScene(
+                QPointF(
+                    float(x_range[0])
+                    + 0.73 * (float(x_range[1]) - float(x_range[0])),
+                    float(line.value()),
+                )
+            )
+            plot_point = plot.plot.mapFromScene(scene)
+            press = plot.plot.viewport().mapFrom(plot.plot, plot_point)
+            release = press + QPoint(0, -32)
+            before = float(line.value())
+
+            QTest.mouseMove(plot.plot.viewport(), QPoint(1, 1))
+            QTest.qWait(20)
+            QTest.mouseMove(plot.plot.viewport(), press)
+            QTest.qWait(40)
+            QTest.mousePress(
+                plot.plot.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                press,
+            )
+            QTest.mouseMove(plot.plot.viewport(), release, delay=40)
+            QTest.mouseRelease(
+                plot.plot.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                release,
+            )
+            QTest.qWait(40)
+            self._events()
+            dragged = float(line.value())
+            self.assertNotAlmostEqual(dragged, before, places=6)
+            saved_value = float(win.result.reverse_recovery.dvdt_max)
+            saved_view = plot.current_x_range_us()
+
+            click_metric(("开通", "Eon"))
+            click_metric(rr_key)
+            assert plot._h_cursor_a is not None
+            self.assertAlmostEqual(float(plot._h_cursor_a.value()), dragged, places=6)
+            self.assertAlmostEqual(
+                float(win.result.reverse_recovery.dvdt_max),
+                saved_value,
+                places=9,
+            )
+            self.assertEqual(plot.current_x_range_us(), saved_view)
+        finally:
+            win.close()
+            self._events()
 
     def test_three_dvdt_defaults_use_stable_platforms_not_peak_values(self) -> None:
         from dpt_extractor.gui.main_window import MainWindow

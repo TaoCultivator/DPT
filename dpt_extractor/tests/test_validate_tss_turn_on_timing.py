@@ -56,25 +56,21 @@ class TestValidateTssTurnOnTimingCore(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertIn("on_instants=", detail)
 
-    def test_reversed_td_order_uses_each_endpoint_pair_not_sum_identity(self) -> None:
-        # Vge10 can trail Ic10 on a marginal trace.  Absolute duration semantics
-        # then give Ton != Td_on + Tr even though all three endpoint pairs exist.
+    def test_reversed_vge_and_ic_order_fails_closed(self) -> None:
         instants = TurnOnTimingInstants(
             t_v10_s=1200e-9,
             t_i10_s=1100e-9,
             t_i90_s=1400e-9,
-            td_on_ns=100.0,
+            td_on_ns=0.0,
             tr_ns=300.0,
-            ton_ns=200.0,
-        )
-        self.assertNotAlmostEqual(
-            instants.ton_ns,
-            instants.td_on_ns + instants.tr_ns,
+            ton_ns=0.0,
         )
 
         problems, _ = self._audit(self._result(instants), instants)
 
-        self.assertEqual(problems, [])
+        self.assertTrue(
+            any("Vge/Ic交点未按主上升沿有序" in item for item in problems)
+        )
 
     def test_unavailable_nonfinite_and_missing_instants_fail_closed(self) -> None:
         instants = TurnOnTimingInstants(

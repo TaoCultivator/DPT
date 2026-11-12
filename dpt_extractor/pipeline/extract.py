@@ -16,15 +16,15 @@ from dpt_extractor.metrics.iec_timings import (
     ic_stats_in_window,
     reverse_recovery_trr,
     turn_off_ic_fall_window,
+    turn_off_timing_instants,
     turn_on_ic_top,
     turn_on_vce_top_from_ic_rise,
-    turn_off_timings,
     turn_on_ic_rise_window,
     turn_on_timing_instants,
 )
 from dpt_extractor.metrics.iec_windows import (
-    eoff_window_scope_example,
-    eon_window_scope_example,
+    eoff_energy_markers,
+    eon_energy_markers,
     err_energy_markers,
     energy_window_power,
     integrate_err_recovery,
@@ -33,6 +33,7 @@ from dpt_extractor.metrics.iec_windows import (
     rr_slope_window_indices,
 )
 from dpt_extractor.metrics.energy import peak_power_kw
+from dpt_extractor.metrics.recovery_power import recovery_power_context
 from dpt_extractor.metrics.irr_measure import irr_parameter_peak_value
 from dpt_extractor.metrics.commutation_inductance import (
     turn_off_commutation_inductance,
@@ -78,6 +79,11 @@ _TURN_ON_TIMING_METRICS: set[MetricKey] = {
     ("开通", "Td_on"),
     ("开通", "Tr"),
 }
+_TURN_OFF_TIMING_METRICS: set[MetricKey] = {
+    ("关断过程", "Toff"),
+    ("关断过程", "Td_off"),
+    ("关断过程", "Tf"),
+}
 
 
 def _optional_channel(bundle: WaveformBundle, col: str) -> np.ndarray | None:
@@ -101,6 +107,111 @@ def _smooth_edge_padded(y: np.ndarray, window: int) -> np.ndarray:
     pad = k // 2
     ker = np.ones(k, dtype=np.float64) / float(k)
     return np.convolve(np.pad(y.astype(np.float64), (pad, pad), mode="edge"), ker, mode="valid")
+
+
+def _turn_on_two_slope_knee(
+    seg_s: np.ndarray,
+    dv_state: np.ndarray,
+    j0: int,
+    j1: int,
+    dt: float,
+    vce_top: float,
+) -> tuple[int, float] | None:
+    """Fit the gentle and main Vce falls, then return their intersection.
+
+    This is deliberately a fallback for a clean two-slope edge.  Short
+    plateaus and three-slope edges are handled first by
+    ``_turn_on_delta_vce_knee_point``.  Using the fitted intersection avoids
+    the old fixed 45%-of-peak slope gate, which lands well inside the main
+    fall when the first Vce decline is long and gentle.
+    """
+    count = min(len(dv_state), max(0, len(seg_s) - 1))
+    if count < 12:
+        return None
+    lo = max(0, min(int(j0), count - 2))
+    hi = max(lo + 1, min(int(j1), count - 1))
+    drop = float(vce_top) - np.asarray(seg_s[:count], dtype=np.float64)
+    indices = np.arange(count, dtype=np.float64)
+    in_event = np.zeros(count, dtype=bool)
+    in_event[lo : hi + 1] = True
+    state_peak = float(np.max(dv_state[lo : hi + 1]))
+    if not np.isfinite(state_peak) or state_peak <= 1e-12:
+        return None
+
+    min_points = max(8, int(4e-9 / max(float(dt), 1e-15)))
+
+    def _line_fit(mask: np.ndarray) -> tuple[float, float] | None:
+        picked = np.flatnonzero(mask)
+        if len(picked) < min_points:
+            return None
+        x = indices[picked]
+        x0 = float(x[0])
+        design = np.column_stack((x - x0, np.ones(len(x))))
+        coef, *_ = np.linalg.lstsq(design, seg_s[picked], rcond=None)
+        slope = float(coef[0])
+        intercept = float(coef[1] - slope * x0)
+        if not (np.isfinite(slope) and np.isfinite(intercept)):
+            return None
+        return slope, intercept
+
+    def _candidate(
+        pre_lo_frac: float,
+        pre_hi_frac: float,
+        main_slope_frac: float,
+    ) -> tuple[int, float, float] | None:
+        pre_mask = (
+            in_event
+            & (drop >= pre_lo_frac * vce_top)
+            & (drop <= pre_hi_frac * vce_top)
+        )
+        main_mask = (
+            in_event
+            & (dv_state[:count] >= main_slope_frac * state_peak)
+            & (drop >= pre_hi_frac * vce_top)
+            & (drop <= 0.75 * vce_top)
+        )
+        pre_fit = _line_fit(pre_mask)
+        main_fit = _line_fit(main_mask)
+        if pre_fit is None or main_fit is None:
+            return None
+        pre_slope, pre_intercept = pre_fit
+        main_slope, main_intercept = main_fit
+        if pre_slope >= -1e-12 or main_slope >= -1e-12:
+            return None
+        slope_ratio = abs(main_slope / pre_slope)
+        if slope_ratio < 4.0 or abs(main_slope - pre_slope) <= 1e-12:
+            return None
+        intersection = (pre_intercept - main_intercept) / (main_slope - pre_slope)
+        if not np.isfinite(intersection):
+            return None
+        index = int(np.clip(round(intersection), lo, hi))
+        level = float(pre_slope * intersection + pre_intercept)
+        knee_drop = float(vce_top - level)
+        if not (
+            max(0.06 * vce_top, 45.0)
+            <= knee_drop
+            <= 0.30 * vce_top
+        ):
+            return None
+        # Reject an algebraic line intersection that is not close to the
+        # actual smoothed transition.  The returned level may be interpolated,
+        # but its vertical cursor must still meet the local raw edge.
+        if abs(float(seg_s[index]) - level) > max(0.035 * vce_top, 24.0):
+            return None
+        return index, level, slope_ratio
+
+    coarse = _candidate(0.06, 0.14, 0.55)
+    if coarse is None:
+        return None
+    # A moderate slope ratio means the first descent itself is substantial;
+    # fit slightly later portions of both segments so their intersection is
+    # not biased toward the early shoulder.  Very sharp two-slope edges keep
+    # the earlier fit, which is more stable for their short pre-fall section.
+    if coarse[2] < 15.0:
+        later = _candidate(0.08, 0.16, 0.60)
+        if later is not None:
+            return int(later[0]), float(later[1])
+    return int(coarse[0]), float(coarse[1])
 
 
 def _turn_on_delta_vce_knee_point(
@@ -292,15 +403,41 @@ def _turn_on_delta_vce_knee_point(
     # 优先找“第二段主下降”的起点：速度进入主下降状态，且 Vce 已离开 Top 足够远。
     min_main_drop = max(0.25 * vce_top, 80.0)
     main_th = max(0.45 * dv_peak, float(np.percentile(win_dv, 85)))
+    legacy_candidate: tuple[int, float] | None = None
     for jj in range(j0, j_peak + 1):
         if dv_fall[jj] >= main_th and (vce_top - seg_s[jj]) >= min_main_drop:
-            return i0 + jj, float(seg_s[jj])
+            legacy_candidate = (jj, float(seg_s[jj]))
+            break
 
     # 拐点不明显时，放宽门槛找第二次明显下降的起点。
-    loose_th = max(0.35 * dv_peak, float(np.percentile(win_dv, 75)))
-    for jj in range(j0, j_peak + 1):
-        if dv_fall[jj] >= loose_th and (vce_top - seg_s[jj]) >= 0.15 * vce_top:
-            return i0 + jj, float(seg_s[jj])
+    if legacy_candidate is None:
+        loose_th = max(0.35 * dv_peak, float(np.percentile(win_dv, 75)))
+        for jj in range(j0, j_peak + 1):
+            if dv_fall[jj] >= loose_th and (vce_top - seg_s[jj]) >= 0.15 * vce_top:
+                legacy_candidate = (jj, float(seg_s[jj]))
+                break
+
+    # A legacy gate that already reaches the main slope before 20% of Top is
+    # an early, well-formed knee (for example NDE36 UH1/25℃); preserve it.
+    # Only replace gates that land deep inside the main fall.
+    if legacy_candidate is not None:
+        legacy_drop = float(vce_top - legacy_candidate[1])
+        if legacy_drop <= 0.20 * vce_top:
+            return i0 + legacy_candidate[0], legacy_candidate[1]
+
+    two_slope = _turn_on_two_slope_knee(
+        seg_s,
+        dv_state,
+        j0,
+        j1,
+        dt,
+        vce_top,
+    )
+    if two_slope is not None:
+        knee_idx, knee_v = two_slope
+        return i0 + knee_idx, knee_v
+    if legacy_candidate is not None:
+        return i0 + legacy_candidate[0], legacy_candidate[1]
 
     return i0 + j_peak, float(seg_s[j_peak])
 
@@ -619,7 +756,7 @@ def extract_all(
     if off_ls_context is None:
         unavailable.add(("关断过程", "Ls_off"))
 
-    td_off, tf, toff = turn_off_timings(
+    off_timing = turn_off_timing_instants(
         t,
         vge,
         ic,
@@ -631,7 +768,16 @@ def extract_all(
         pulse1_on=edges.pulse1_on,
         pulse2_on=edges.pulse2_on,
     )
-    win_off_scope = eoff_window_scope_example(
+    td_off = float(off_timing.td_off_ns)
+    tf = float(off_timing.tf_ns)
+    toff = float(off_timing.toff_ns)
+    if (
+        off_timing.t_v90_s is None
+        or off_timing.t_i90_s is None
+        or off_timing.t_i10_s is None
+    ):
+        unavailable.update(_TURN_OFF_TIMING_METRICS)
+    off_energy_context = eoff_energy_markers(
         t,
         ic,
         vce,
@@ -642,9 +788,11 @@ def extract_all(
         pre_ns=cfg.energy.eoff_pre_ns,
         pulse1_on=edges.pulse1_on,
     )
+    win_off_scope = off_energy_context.as_integration_window()
     eoff_scope = integrate_vi_window(t, vce, ic, win_off_scope)
     pmax_off = peak_power_kw(vce, ic, win_off_scope)
-    # 按用户提供的示波器示例定义：t1=Vce离开base，t2=Ic回落到base。
+    # 平滑 Eoff 使用 Vce 主抬升前 Base 稳定带与 Ic 主下降后首个 Base
+    # 稳定带的代表点；证据不足或有明显振荡时保留既有平台交点窗口。
     eoff = eoff_scope
     eoff_math = 0.0
     eoff_warn = False
@@ -692,6 +840,15 @@ def extract_all(
             turn_on=TurnOnResult(),
             reverse_recovery=ReverseRecoveryResult(),
             segments=segs,
+            didt_contexts={
+                ("关断过程", "di/dt"): off_didt_context,
+            },
+            dvdt_contexts={
+                ("关断过程", "dv/dt"): off_dvdt_context,
+            },
+            energy_contexts={
+                ("关断过程", "Eoff"): off_energy_context,
+            },
             profile_name=profile.name,
             profile_code=profile.code,
             phase=profile.phase,
@@ -826,7 +983,7 @@ def extract_all(
     elif on_timing.t_v10_s is None:
         unavailable.update({("开通", "Ton"), ("开通", "Td_on")})
     # 按用户示波器口径：t1=Ic离开base，t2=Vce回落到base（与关断窗口定义对称）
-    win_on_scope = eon_window_scope_example(
+    on_energy_context = eon_energy_markers(
         t,
         ic,
         vce,
@@ -836,6 +993,7 @@ def extract_all(
         dt,
         pulse1_off=edges.pulse1_off,
     )
+    win_on_scope = on_energy_context.as_integration_window()
     # 开通损耗按用户口径：窗口精确到“电流base刚结束 -> 电压base刚回落”，积分用原始 V*I
     eon = integrate_vi_window(t, vce, ic, win_on_scope)
     pmax_on = peak_power_kw(vce, ic, win_on_scope)
@@ -964,7 +1122,7 @@ def extract_all(
         unavailable.add(("反向恢复", "Trr"))
     # Err 按示波器口径：从反向谷值到电流/电压同时回到 base 的区间积分
     if v_diode is not None:
-        win_rr_scope = err_energy_markers(
+        rr_energy_context = err_energy_markers(
             t,
             irr,
             v_diode,
@@ -978,10 +1136,18 @@ def extract_all(
             pulse2_off=segs.pulse2_off,
             dc_current=idc,
             lower_bridge_irr_from_ic_minus_il=profile.irr_from_ic_minus_il,
-        ).as_integration_window()
+        )
+        win_rr_scope = rr_energy_context.as_integration_window()
         err = integrate_err_recovery(t, v_diode, irr, win_rr_scope)
-        pdmax_rr = peak_power_kw(v_diode, irr, win_rr_scope, absolute=True)
+        rr_power_context = recovery_power_context(
+            t, v_diode, irr, segs, dt, forward_hint=rr_didt_context.forward_a
+        )
+        pdmax_rr = rr_power_context.value_kw if rr_power_context is not None else 0.0
+        if rr_power_context is None:
+            unavailable.add(("反向恢复", "Pdmax"))
     else:
+        rr_energy_context = None
+        rr_power_context = None
         err = 0.0
         pdmax_rr = 0.0
     err_math = 0.0
@@ -1016,6 +1182,22 @@ def extract_all(
         turn_on=turn_on,
         reverse_recovery=reverse_recovery,
         segments=segs,
+        power_contexts={("反向恢复", "Pdmax"): rr_power_context},
+        didt_contexts={
+            ("关断过程", "di/dt"): off_didt_context,
+            ("开通", "di/dt"): on_didt_context,
+            ("反向恢复", "di/dt"): rr_didt_context,
+        },
+        dvdt_contexts={
+            ("关断过程", "dv/dt"): off_dvdt_context,
+            ("开通", "dv/dt"): on_dvdt_context,
+            ("反向恢复", "dv/dt"): rr_dvdt_context,
+        },
+        energy_contexts={
+            ("关断过程", "Eoff"): off_energy_context,
+            ("开通", "Eon"): on_energy_context,
+            ("反向恢复", "Err"): rr_energy_context,
+        },
         profile_name=profile.name,
         profile_code=profile.code,
         phase=profile.phase,

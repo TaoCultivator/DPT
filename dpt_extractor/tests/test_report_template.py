@@ -2286,20 +2286,21 @@ class TestReportTemplateWriter(unittest.TestCase):
                     saved = load_workbook(report)
                     saved_data = saved["U相_双脉冲数据"]
                     saved_wave = saved["U相_双脉冲波形"]
+                    expected_order = sorted(order, key=lambda item: item[0])
                     self.assertEqual(
                         [saved_data.cell(row, COL_VOLTAGE).value for row in (5, 6)],
                         [750, 750],
                     )
                     self.assertEqual(
                         [saved_data.cell(row, COL_CURRENT).value for row in (5, 6)],
-                        [item[0] for item in order],
+                        [item[0] for item in expected_order],
                     )
                     self.assertEqual(len(saved_wave._images), 2)
                     self.assertEqual(
                         sorted(image.anchor._from.row + 1 for image in saved_wave._images),
                         [2, 55],
                     )
-                    for base, (current, condition) in zip((1, 54), order):
+                    for base, (current, condition) in zip((1, 54), expected_order):
                         label = str(saved_wave.cell(base + 17, 1).value)
                         self.assertEqual(label, f"750V_{current}A_{condition}")
 
@@ -2397,14 +2398,15 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved = load_workbook(report)
             saved_data = saved["U相_双脉冲数据"]
             saved_wave = saved["U相_双脉冲波形"]
-            self.assertEqual(anchors, [1, 54, 107, 160])
+            ordered_setpoints = sorted(setpoints)
+            self.assertEqual(anchors, [1, 54, 1, 54])
             self.assertEqual(
                 [saved_data.cell(row, COL_VOLTAGE).value for row in range(5, 9)],
-                [item[0] for item in setpoints],
+                [item[0] for item in ordered_setpoints],
             )
             self.assertEqual(
                 [saved_data.cell(row, COL_CURRENT).value for row in range(5, 9)],
-                [round(item[1], 1) for item in setpoints],
+                [round(item[1], 1) for item in ordered_setpoints],
             )
             self.assertEqual(len(saved_wave._images), 4)
             self.assertEqual(
@@ -2412,10 +2414,10 @@ class TestReportTemplateWriter(unittest.TestCase):
                 [2, 55, 108, 161],
             )
             expected_labels = (
-                "900V_494.9A",
-                "900V_693.37A",
                 "850V_777.7A",
                 "850V_1061A",
+                "900V_494.9A",
+                "900V_693.37A",
             )
             for block_index, expected_label in enumerate(expected_labels):
                 base = 1 + block_index * 53
@@ -2595,9 +2597,9 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved_data = saved["U相_双脉冲数据"]
             saved_wave = saved["U相_双脉冲波形"]
             self.assertEqual(saved_data.cell(5, COL_VOLTAGE).value, 750)
-            self.assertEqual(saved_data.cell(5, COL_CURRENT).value, 1050)
-            self.assertEqual(saved_data.cell(6, COL_CURRENT).value, 805)
-            self.assertEqual(saved_data.cell(9, COL_CURRENT).value, 805)
+            self.assertEqual(saved_data.cell(5, COL_CURRENT).value, 805)
+            self.assertEqual(saved_data.cell(6, COL_CURRENT).value, 1050)
+            self.assertEqual(saved_data.cell(10, COL_CURRENT).value, 805)
             self.assertEqual(
                 [saved_wave.cell(base, 1).value for base in (1, 54, 107)],
                 ["UH_25℃", "UH_25℃", "UL_25℃"],
@@ -2670,10 +2672,10 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved = load_workbook(report)
             saved_data = saved["U相_双脉冲数据"]
             saved_wave = saved["U相_双脉冲波形"]
-            self.assertEqual(saved_data.cell(5, COL_OFF["delta_vce"]).value, 1050)
-            self.assertEqual(saved_data.cell(6, COL_OFF["delta_vce"]).value, 805)
-            self.assertEqual(saved_data.cell(5, 5).value, 1050)
-            self.assertEqual(saved_data.cell(6, 5).value, 805)
+            self.assertEqual(saved_data.cell(5, COL_OFF["delta_vce"]).value, 805)
+            self.assertEqual(saved_data.cell(6, COL_OFF["delta_vce"]).value, 1050)
+            self.assertEqual(saved_data.cell(5, 5).value, 805)
+            self.assertEqual(saved_data.cell(6, 5).value, 1050)
             self.assertIsNone(saved_wave.cell(35, 1).value)
             self.assertIsNone(saved_wave.cell(88, 1).value)
 
@@ -2718,15 +2720,16 @@ class TestReportTemplateWriter(unittest.TestCase):
                 rows.append(summary.data_row)
 
             saved = load_workbook(report)["U相_双脉冲数据"]
-            self.assertEqual(rows, [5, 6, 7])
-            self.assertEqual(saved.cell(5, COL_VOLTAGE).value, 750)
-            self.assertEqual(saved.cell(5, COL_CURRENT).value, 1048)
-            self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 1048)
+            self.assertEqual(rows, [5, 5, 5])
+            self.assertEqual(saved.cell(5, COL_VOLTAGE).value, 600)
+            self.assertEqual(saved.cell(5, COL_CURRENT).value, 403)
+            self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 403)
+            self.assertEqual(saved.cell(6, COL_VOLTAGE).value, 750)
             self.assertEqual(saved.cell(6, COL_CURRENT).value, 806)
             self.assertEqual(saved.cell(6, COL_OFF["delta_vce"]).value, 806)
-            self.assertEqual(saved.cell(7, COL_VOLTAGE).value, 600)
-            self.assertEqual(saved.cell(7, COL_CURRENT).value, 403)
-            self.assertEqual(saved.cell(7, COL_OFF["delta_vce"]).value, 403)
+            self.assertEqual(saved.cell(7, COL_VOLTAGE).value, 750)
+            self.assertEqual(saved.cell(7, COL_CURRENT).value, 1048)
+            self.assertEqual(saved.cell(7, COL_OFF["delta_vce"]).value, 1048)
 
     def test_dpt_filename_setpoints_are_strict_report_keys(self):
         from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_VOLTAGE
@@ -2756,11 +2759,145 @@ class TestReportTemplateWriter(unittest.TestCase):
             )
 
             saved = load_workbook(report)["U相_双脉冲数据"]
-            self.assertEqual(summary.data_row, 6)
-            self.assertIsNone(saved.cell(5, COL_OFF["delta_vce"]).value)
-            self.assertEqual(saved.cell(6, COL_VOLTAGE).value, 750)
-            self.assertEqual(saved.cell(6, COL_CURRENT).value, 1048)
-            self.assertEqual(saved.cell(6, COL_OFF["delta_vce"]).value, 1048)
+            self.assertEqual(summary.data_row, 5)
+            self.assertEqual(saved.cell(5, COL_VOLTAGE).value, 750)
+            self.assertEqual(saved.cell(5, COL_CURRENT).value, 1048)
+            self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 1048)
+            self.assertEqual(saved.cell(6, COL_CURRENT).value, 1050)
+            self.assertIsNone(saved.cell(6, COL_OFF["delta_vce"]).value)
+
+    def test_dpt_new_setpoints_insert_by_voltage_then_current(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CONDITION,
+            COL_CURRENT,
+            COL_OFF,
+            COL_VOLTAGE,
+        )
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "sorted_setpoints.xlsx"
+            image = td_path / "scope_4x3.png"
+            _write_rgb_png(image, (1280, 960))
+
+            wb = Workbook()
+            data = wb.active
+            data.title = "U相_双脉冲数据"
+            for col in (1, 2, COL_CONDITION):
+                data.merge_cells(
+                    start_row=5,
+                    start_column=col,
+                    end_row=8,
+                    end_column=col,
+                )
+            data["A5"] = "UH"
+            data["B5"] = "25℃"
+            data.cell(
+                5,
+                COL_CONDITION,
+                "Rg_on = 4 ohm\nRg_off = 9 ohm",
+            )
+
+            wave = wb.create_sheet("U相_双脉冲波形")
+            for block_index in range(4):
+                base = 1 + block_index * 53
+                wave.merge_cells(
+                    start_row=base,
+                    start_column=1,
+                    end_row=base + 16,
+                    end_column=8,
+                )
+                wave.merge_cells(
+                    start_row=base + 17,
+                    start_column=1,
+                    end_row=base + 33,
+                    end_column=8,
+                )
+                wave.merge_cells(
+                    start_row=base + 34,
+                    start_column=1,
+                    end_row=base + 50,
+                    end_column=8,
+                )
+                wave.merge_cells(
+                    start_row=base,
+                    start_column=10,
+                    end_row=base,
+                    end_column=17,
+                )
+                wave.cell(base, 10, "△Vce（V）")
+                wave.merge_cells(
+                    start_row=base + 1,
+                    start_column=10,
+                    end_row=base + 16,
+                    end_column=17,
+                )
+            wb.save(report)
+
+            writes = (
+                (400, 100, 10.0),
+                (400, 50, 20.0),
+                (200, 300, 30.0),
+                (600, 10, 40.0),
+            )
+            for voltage, current, marker in writes:
+                write_report_template(
+                    ExtractResult(
+                        source_path=str(
+                            Path("samples")
+                            / "RT"
+                            / f"UH_{voltage}V_{current}A_000.tss"
+                        ),
+                        profile_code="UH",
+                        turn_off=TurnOffResult(delta_vce=marker),
+                    ),
+                    report,
+                    images={("关断过程", "ΔVce"): image},
+                )
+
+            repeated = write_report_template(
+                ExtractResult(
+                    source_path=str(
+                        Path("samples") / "RT" / "UH_400V_100A_000.tss"
+                    ),
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=99.0),
+                ),
+                report,
+                images={("关断过程", "ΔVce"): image},
+            )
+
+            saved = load_workbook(report)
+            saved_data = saved["U相_双脉冲数据"]
+            saved_wave = saved["U相_双脉冲波形"]
+            self.assertEqual(
+                [
+                    (
+                        saved_data.cell(row, COL_VOLTAGE).value,
+                        saved_data.cell(row, COL_CURRENT).value,
+                    )
+                    for row in range(5, 9)
+                ],
+                [(200, 300), (400, 50), (400, 100), (600, 10)],
+            )
+            self.assertEqual(
+                [saved_data.cell(row, COL_OFF["delta_vce"]).value for row in range(5, 9)],
+                [30.0, 20.0, 99.0, 40.0],
+            )
+            self.assertEqual(repeated.data_row, 7)
+            self.assertEqual(repeated.waveform_anchor_row, 107)
+            self.assertIn("A5:A10", {str(rng) for rng in saved_data.merged_cells.ranges})
+            self.assertEqual(len(saved_wave._images), 4)
+            self.assertEqual(
+                sorted(item.anchor._from.row + 1 for item in saved_wave._images),
+                [2, 55, 108, 161],
+            )
+            self.assertEqual(
+                [saved_wave.cell(base + 17, 1).value for base in (1, 54, 107, 160)],
+                ["200V_300A", "400V_50A", "400V_100A", "600V_10A"],
+            )
 
     def test_dpt_missing_filename_setpoint_fallback_is_limited_to_ten_units(self):
         from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_VOLTAGE
@@ -2808,9 +2945,11 @@ class TestReportTemplateWriter(unittest.TestCase):
                 report,
             )
             saved = load_workbook(report)["U相_双脉冲数据"]
-            self.assertEqual(summary.data_row, 6)
-            self.assertIsNone(saved.cell(5, COL_OFF["delta_vce"]).value)
-            self.assertEqual(saved.cell(6, COL_CURRENT).value, 1039)
+            self.assertEqual(summary.data_row, 5)
+            self.assertEqual(saved.cell(5, COL_CURRENT).value, 1039)
+            self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 1039)
+            self.assertEqual(saved.cell(6, COL_CURRENT).value, 1050)
+            self.assertIsNone(saved.cell(6, COL_OFF["delta_vce"]).value)
 
     def test_dpt_waveform_blocks_do_not_keep_blank_reserved_rows_between_groups(self):
         from dpt_extractor.export.report_template import write_report_template
@@ -2868,14 +3007,18 @@ class TestReportTemplateWriter(unittest.TestCase):
                 anchors.append(summary.waveform_anchor_row)
 
             saved_wave = load_workbook(report)["U相_双脉冲波形"]
-            self.assertEqual(anchors, [1, 54, 107, 160, 213])
+            self.assertEqual(anchors, [1, 1, 1, 160, 160])
+            self.assertEqual(saved_wave.cell(1, 1).value, "UH_25℃")
+            self.assertEqual(saved_wave.cell(18, 1).value, "600V_403A")
+            self.assertEqual(saved_wave.cell(54, 1).value, "UH_25℃")
+            self.assertEqual(saved_wave.cell(71, 1).value, "750V_806A")
             self.assertEqual(saved_wave.cell(107, 1).value, "UH_25℃")
-            self.assertEqual(saved_wave.cell(124, 1).value, "600V_403A")
+            self.assertEqual(saved_wave.cell(124, 1).value, "750V_1048A")
             self.assertEqual(saved_wave.cell(160, 1).value, "UL_25℃")
-            self.assertEqual(saved_wave.cell(177, 1).value, "750V_1048A")
+            self.assertEqual(saved_wave.cell(177, 1).value, "750V_806A")
             self.assertEqual(saved_wave.cell(194, 1).value, "总概览图")
             self.assertEqual(saved_wave.cell(213, 1).value, "UL_25℃")
-            self.assertEqual(saved_wave.cell(230, 1).value, "750V_806A")
+            self.assertEqual(saved_wave.cell(230, 1).value, "750V_1048A")
             self.assertIsNone(saved_wave.cell(266, 1).value)
             self.assertIsNone(saved_wave.cell(283, 1).value)
             self.assertIsNone(saved_wave.cell(300, 1).value)
@@ -2923,10 +3066,10 @@ class TestReportTemplateWriter(unittest.TestCase):
                     cell.number_format = "0.000"
             for row in range(5, 9):
                 ws.cell(row, COL_VOLTAGE, 750)
-                ws.cell(row, COL_CURRENT, 1000 - (row - 5) * 200)
+                ws.cell(row, COL_CURRENT, 400 + (row - 5) * 200)
 
             wave = wb.create_sheet("U相_双脉冲波形")
-            conditions = ("750V_1000A", "750V_800A", "750V_600A", "750V_400A")
+            conditions = ("750V_400A", "750V_600A", "750V_800A", "750V_1000A")
             for idx, condition in enumerate(conditions):
                 base = 1 + idx * 53
                 wave.merge_cells(start_row=base, start_column=1, end_row=base + 16, end_column=8)
@@ -2946,9 +3089,9 @@ class TestReportTemplateWriter(unittest.TestCase):
 
             summary = write_report_template(
                 ExtractResult(
-                    source_path=str(Path("samples") / "RT" / "UH_750V_200A_000.tss"),
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1200A_000.tss"),
                     profile_code="UH",
-                    turn_off=TurnOffResult(delta_vce=200.0),
+                    turn_off=TurnOffResult(delta_vce=1200.0),
                 ),
                 report,
             )
@@ -2963,8 +3106,8 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertIn("A10:A13", merges)
             self.assertEqual(saved.cell(10, 1).value, "UL")
             self.assertEqual(saved.cell(9, COL_VOLTAGE).value, 750)
-            self.assertEqual(saved.cell(9, COL_CURRENT).value, 200)
-            self.assertEqual(saved.cell(9, COL_OFF["delta_vce"]).value, 200)
+            self.assertEqual(saved.cell(9, COL_CURRENT).value, 1200)
+            self.assertEqual(saved.cell(9, COL_OFF["delta_vce"]).value, 1200)
             self.assertEqual(saved.row_dimensions[9].height, saved.row_dimensions[8].height)
             self.assertEqual(
                 saved.cell(9, COL_OFF["delta_vce"]).fill.fgColor.rgb,
@@ -2980,7 +3123,7 @@ class TestReportTemplateWriter(unittest.TestCase):
             )
             saved_wave = load_workbook(report)["U相_双脉冲波形"]
             self.assertEqual(saved_wave.cell(213, 1).value, "UH_25℃")
-            self.assertEqual(saved_wave.cell(230, 1).value, "750V_200A")
+            self.assertEqual(saved_wave.cell(230, 1).value, "750V_1200A")
             self.assertEqual(saved_wave.cell(266, 1).value, "UL_25℃")
 
     def test_dpt_report_written_values_normalize_font_and_alignment(self):
@@ -3050,12 +3193,12 @@ class TestReportTemplateWriter(unittest.TestCase):
             ws.merge_cells("B5:B8")
             ws["A5"] = "UH"
             ws["B5"] = "25℃"
-            for row, current in zip(range(5, 9), (1000, 800, 600, 400)):
+            for row, current in zip(range(5, 9), (400, 600, 800, 1000)):
                 ws.cell(row, COL_VOLTAGE, 750)
                 ws.cell(row, COL_CURRENT, current)
 
             wave = wb.create_sheet("U相_双脉冲波形")
-            for idx, current in enumerate((1000, 800, 600, 400)):
+            for idx, current in enumerate((400, 600, 800, 1000)):
                 base = 1 + idx * 53
                 wave.merge_cells(start_row=base, start_column=1, end_row=base + 16, end_column=8)
                 wave.cell(base, 1, "UH_RT")
@@ -3069,7 +3212,7 @@ class TestReportTemplateWriter(unittest.TestCase):
 
             summary = write_report_template(
                 ExtractResult(
-                    source_path=str(Path("samples") / "RT" / "UH_750V_200A_000.tss"),
+                    source_path=str(Path("samples") / "RT" / "UH_750V_1200A_000.tss"),
                     profile_code="UH",
                 ),
                 report,
@@ -3078,7 +3221,7 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved_wave = load_workbook(report)["U相_双脉冲波形"]
             self.assertEqual(summary.waveform_anchor_row, 213)
             self.assertEqual(saved_wave.cell(213, 1).value, "UH_25℃")
-            self.assertEqual(saved_wave.cell(230, 1).value, "750V_200A")
+            self.assertEqual(saved_wave.cell(230, 1).value, "750V_1200A")
             self.assertEqual(saved_wave.cell(247, 1).value, "总概览图")
             self.assertIsNone(saved_wave.cell(211, 1).value)
             self.assertIsNone(saved_wave.cell(212, 1).value)
@@ -3136,6 +3279,39 @@ class TestReportTemplateWriter(unittest.TestCase):
             anchors = _drawing_anchor_counts(report)
             self.assertEqual(anchors["twoCellAnchor"], 2)
             self.assertEqual(anchors["oneCellAnchor"], 0)
+
+    def test_dpt_header_scan_uses_sparse_cells_without_expanding_sheet(self):
+        from dpt_extractor.export.report_template import (
+            _all_header_ranges_by_texts,
+            _all_picture_ranges_by_headers,
+        )
+
+        wb = Workbook()
+        ws = wb.active
+        ws.merge_cells("J10:Q10")
+        ws["J10"] = "dv/dt(V/ns)"
+        ws.merge_cells("A20:A21")
+        ws["A20"] = "Eoff(mJ)"
+        ws["Y100000"] = "Eoff(mJ)"
+        ws["XFD200000"] = "unrelated"
+        materialized_cells = set(ws._cells)
+
+        header_ranges = _all_header_ranges_by_texts(ws, {"dv/dt", "Eoff"})
+        picture_ranges = _all_picture_ranges_by_headers(
+            ws,
+            {"dv/dt", "Eoff"},
+            rows=16,
+        )
+
+        self.assertEqual(
+            [str(rng) for rng in header_ranges],
+            ["J10:Q10", "Y100000"],
+        )
+        self.assertEqual(
+            [str(rng) for rng in picture_ranges],
+            ["J11:Q26", "Y100001:Y100016"],
+        )
+        self.assertEqual(set(ws._cells), materialized_cells)
 
     def test_dpt_parameter_images_share_one_display_size_across_conditions(self):
         from dpt_extractor.export.report_template import (

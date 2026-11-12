@@ -17,7 +17,7 @@ from dpt_extractor.io.waveform_loader import load_waveform
 from dpt_extractor.tests.sample_paths import sample_tss
 
 WH = sample_tss("WH_480V_800A_000.tss")
-OTHER_360A = Path("示例文件") / "tss格式" / "其他数据" / "360A.tss"
+OTHER_360A = Path("示例文件") / "其他数据" / "360A.tss"
 
 
 class TestChannelMapping(unittest.TestCase):

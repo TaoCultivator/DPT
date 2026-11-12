@@ -1,6 +1,8 @@
 """无震荡平台段中值：(max + min) / 2。"""
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 # 默认 Ha/Hb 只在跃变附近短窗内搜平台，避免对整段波形 O(n²) 滑动窗
@@ -234,6 +236,23 @@ def turn_off_dvdt_base_top_levels(
     if len(seg) < 4:
         return float(base), float(top)
 
+    # The last few nanoseconds of a blocking plateau can sit on one rail of a
+    # small periodic ripple.  That rail is quiet, but it is not the visible
+    # centre of the horizontal Top band used by an oscilloscope cursor.  Use a
+    # complete event-local ~200 ns band so different ripple periods and sample
+    # rates converge on the same raw-waveform midpoint.
+    dt_s = float(np.nanmedian(np.diff(t[:n])))
+    if np.isfinite(dt_s) and dt_s > 0.0:
+        top_n = max(16, int(round(200e-9 / dt_s)))
+        top_w = seg[-min(len(seg), top_n) :]
+        if len(top_w) >= 4:
+            stable_top = _plateau_mid_without_isolated_spikes(top_w)
+            if abs(float(stable_top) - float(top)) > max(
+                3.0,
+                0.010 * max(abs(float(top)), 1.0),
+            ):
+                top = float(stable_top)
+
     base_anchor_time = float(t[i0])
     base_lo_t = max(float(t[0]), base_anchor_time - 0.5e-6)
     base_hi_t = min(float(t[n - 1]), base_anchor_time - 0.1e-6)
@@ -273,6 +292,1037 @@ def turn_off_delta_vce_blocking_top(
     return float(_plateau_mid_without_isolated_spikes(arr[stable_lo : hi + 1]))
 
 
+def _rolling_stable_level_centers(
+    values: np.ndarray,
+    lo: int,
+    hi: int,
+    *,
+    target: float,
+    event_span: float,
+    window_n: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return candidate window centres and normalized stability scores."""
+
+    arr = np.asarray(values, dtype=np.float64)
+    n = len(arr)
+    if n == 0:
+        return np.asarray([], dtype=np.int64), np.asarray([], dtype=np.float64)
+    lo = max(0, min(int(lo), n - 1))
+    hi = max(lo, min(int(hi), n - 1))
+    width = max(1, min(int(window_n), hi - lo + 1))
+    block = np.asarray(arr[lo : hi + 1], dtype=np.float64)
+    finite = np.isfinite(block)
+    if not np.all(finite):
+        block = block.copy()
+        block[~finite] = float(target)
+
+    prefix = np.concatenate(([0.0], np.cumsum(block, dtype=np.float64)))
+    prefix_sq = np.concatenate(
+        ([0.0], np.cumsum(block * block, dtype=np.float64))
+    )
+    sums = prefix[width:] - prefix[:-width]
+    sums_sq = prefix_sq[width:] - prefix_sq[:-width]
+    means = sums / float(width)
+    variances = np.maximum(sums_sq / float(width) - means * means, 0.0)
+    stds = np.sqrt(variances)
+    scale = max(abs(float(event_span)), 1.0)
+    scores = np.abs(means - float(target)) / scale + stds / scale
+    starts = np.arange(lo, lo + len(scores), dtype=np.int64)
+    centers = starts + width // 2
+    return centers, scores
+
+
+def stable_platform_cursor_range_indices(
+    values: np.ndarray,
+    pre_lo: int,
+    pre_hi: int,
+    post_lo: int,
+    post_hi: int,
+    dt: float,
+    pre_level: float,
+    post_level: float,
+) -> tuple[int, int]:
+    """Place A/B on two declared stable bands without redefining amplitudes.
+
+    The helper is intentionally display-only.  ``pre_level`` and
+    ``post_level`` are canonical Top/Base values supplied by the extraction
+    context; rolling windows only select quiet event-local *times*.  A is the
+    latest acceptable point in the pre-transition band and B is the earliest
+    acceptable point in the post-transition band.  The nearest raw sample in
+    each selected band is returned so a highlighted trace visibly passes
+    through the cursor.
+    """
+
+    arr = np.asarray(values, dtype=np.float64)
+    n = len(arr)
+    if n < 2:
+        return 0, 0
+    pre_lo = max(0, min(int(pre_lo), n - 1))
+    pre_hi = max(pre_lo, min(int(pre_hi), n - 1))
+    post_lo = max(pre_hi + 1, min(int(post_lo), n - 1))
+    post_hi = max(post_lo, min(int(post_hi), n - 1))
+    if post_lo >= n:
+        post_lo = post_hi = n - 1
+
+    dt_s = max(float(dt), 1e-15)
+    stable_n = max(8, int(round(120e-9 / dt_s)))
+    event_span = max(
+        abs(float(post_level) - float(pre_level)),
+        float(np.nanpercentile(arr, 95) - np.nanpercentile(arr, 5)),
+        1.0,
+    )
+
+    def _select(
+        lo: int,
+        hi: int,
+        level: float,
+        *,
+        prefer_latest: bool,
+    ) -> int:
+        centers, scores = _rolling_stable_level_centers(
+            arr,
+            lo,
+            hi,
+            target=float(level),
+            event_span=event_span,
+            window_n=stable_n,
+        )
+        if len(centers):
+            score_limit = 0.05 + max(0.5, 0.025 * event_span) / event_span
+            valid = np.flatnonzero(scores <= score_limit)
+            if len(valid):
+                chosen = int(valid[-1] if prefer_latest else valid[0])
+            else:
+                chosen = int(np.argmin(scores))
+            center = int(centers[chosen])
+        else:
+            center = int((lo + hi) // 2)
+
+        radius = max(1, stable_n // 2)
+        sample_lo = max(int(lo), center - radius)
+        sample_hi = min(int(hi), center + radius)
+        candidates = np.arange(sample_lo, sample_hi + 1, dtype=np.int64)
+        if len(candidates) == 0:
+            return center
+        level_error = np.abs(arr[candidates] - float(level))
+        time_penalty = (
+            1e-6
+            * event_span
+            * np.abs(candidates.astype(np.float64) - float(center))
+            / float(radius)
+        )
+        return int(candidates[int(np.argmin(level_error + time_penalty))])
+
+    a_idx = _select(pre_lo, pre_hi, float(pre_level), prefer_latest=True)
+    b_idx = _select(post_lo, post_hi, float(post_level), prefer_latest=False)
+    return int(a_idx), int(max(a_idx + 1, b_idx))
+
+
+def recovery_stable_cursor_range_indices(
+    values: np.ndarray,
+    search_start: int,
+    peak_idx: int,
+    search_end: int,
+    dt: float,
+    pre_level: float,
+    post_level: float,
+    *,
+    bound_post_noise_to_pre: bool = False,
+) -> tuple[int, int] | None:
+    """Display recovery's adjacent pre-edge and first settled post-ringing bands.
+
+    The caller owns the signed levels and authoritative recovery peak.  This
+    function only selects default A/B times; it does not measure a new peak or
+    change Irr/Vrr/Trr/Err.  In particular, the segment start may already be on the
+    commutation edge and must not truncate the available pre-edge history.
+    Both endpoints require a complete 200 ns band.  A later rebound rejects
+    a temporary quiet gap, and missing evidence never selects a least-bad band.
+    Vrr uses the pre-edge noise bound on the same voltage acquisition range;
+    sustained voltage ringing must not define its own relaxed noise tolerance.
+    The default preserves the existing Irr noise-floor policy.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    if (
+        len(arr) < 3
+        or not np.isfinite(dt)
+        or dt <= 0.0
+        or not np.isfinite(pre_level)
+        or not np.isfinite(post_level)
+    ):
+        return None
+    lo = max(0, int(search_start))
+    hi = min(len(arr) - 1, int(search_end))
+    peak = int(peak_idx)
+    if not lo < peak < hi:
+        return None
+    if not np.isfinite(arr[peak]):
+        return None
+    width = max(8, int(round(200e-9 / dt)))
+    guard = max(2, int(round(30e-9 / dt)))
+    step = max(1, width // 16)
+    span = abs(float(post_level) - float(pre_level))
+    if span <= 1e-12:
+        return None
+    peak_span = max(
+        span,
+        abs(float(arr[peak]) - pre_level),
+        abs(float(arr[peak]) - post_level),
+    )
+    if not np.isfinite(peak_span):
+        return None
+
+    def reference_spread(start: int, level: float) -> float:
+        block = arr[start : start + width]
+        if len(block) != width or not np.all(np.isfinite(block)):
+            return float("inf")
+        p05, p95 = np.percentile(block, [5.0, 95.0])
+        if abs(0.5 * (p05 + p95) - level) > 0.15 * peak_span:
+            return float("inf")
+        # Low-current records have a real ADC/noise floor.  Only a neighbouring
+        # reference band may relax the gate, and ringing cannot relax it
+        # beyond ten percent of the event excursion (not just the small
+        # pre/post difference in a low-current, coarse-range acquisition).
+        return min(float(p95 - p05), 0.10 * peak_span)
+
+    def quiet_reference_noise(first: int, last: int, level: float) -> float:
+        final = last - width + 1
+        if final < first:
+            return 0.0
+        starts = list(range(first, final + 1, width))
+        if starts[-1] != final:
+            starts.append(final)
+        spreads = np.asarray([reference_spread(start, level) for start in starts])
+        finite = spreads[np.isfinite(spreads)]
+        # One unusually quiet ADC block is not the acquisition's noise floor.
+        # Use the lower quartile of local reference bands, still constrained
+        # by the excursion cap, so an isolated narrow block cannot reject
+        # every otherwise settled band in a low-current record.
+        return float(np.percentile(finite, 25.0)) if len(finite) else 0.0
+
+    pre_noise = quiet_reference_noise(lo, peak - guard, float(pre_level))
+    post_noise = quiet_reference_noise(peak + guard, hi, float(post_level))
+    if bound_post_noise_to_pre:
+        post_noise = min(post_noise, pre_noise)
+
+    def quiet(start: int, level: float, noise: float) -> bool:
+        block = arr[start : start + width]
+        if len(block) != width or not np.all(np.isfinite(block)):
+            return False
+        p05, p95 = np.percentile(block, [5.0, 95.0])
+        half = width // 2
+        width_limit = max(0.03 * span, 1.35 * noise)
+        return bool(
+            p95 - p05 <= width_limit
+            and np.std(block) <= 0.5 * width_limit
+            and abs(0.5 * (p05 + p95) - level) <= max(0.04 * span, 0.5 * noise)
+            and abs(np.median(block[:half]) - np.median(block[half:]))
+            <= max(0.015 * span, 0.5 * noise)
+        )
+
+    # Work back from the peak until an entire pre-edge band is proven quiet.
+    # Use the latest qualified band's centre so A itself still has stable
+    # neighbours on both sides, rather than sitting on a tolerated noisy foot.
+    a_idx = None
+    last_pre_start = peak - guard - width + 1
+    if last_pre_start < lo:
+        return None
+    starts = list(range(last_pre_start, lo - 1, -step))
+    if starts[-1] != lo:
+        starts.append(lo)
+    for start in starts:
+        end = start + width - 1
+        if quiet(start, float(pre_level), pre_noise) and abs(
+            arr[end] - pre_level
+        ) <= max(0.02 * span, 0.5 * pre_noise):
+            a_idx = start + width // 2
+            break
+    if a_idx is None:
+        return None
+
+    # Search through this event, not just a fixed peak+700 ns tail.  The next
+    # switching event is an exclusive boundary supplied by the caller.
+    first = peak + guard
+    last = hi - width + 1
+    if last < first:
+        return None
+    starts = list(range(first, last + 1, step))
+    if starts[-1] != last:
+        starts.append(last)
+    for start in starts:
+        if not quiet(start, float(post_level), post_noise):
+            continue
+        future = arr[start + width : min(hi + 1, start + 2 * width)]
+        if len(future) and (
+            not np.all(np.isfinite(future))
+            or np.percentile(np.abs(future - post_level), 95.0)
+            > max(0.06 * span, 1.5 * post_noise)
+        ):
+            continue
+        return int(a_idx), int(start + width // 2)
+    return None
+
+
+def first_post_edge_stable_band_center_index(
+    values: np.ndarray,
+    edge_idx: int,
+    search_end: int,
+    dt: float,
+    target_level: float,
+    event_span: float,
+    reference_spread: float = 0.0,
+) -> int | None:
+    """Return a representative point in the first quiet band after an edge.
+
+    This helper only chooses a display time; it never recalculates the supplied
+    ``target_level``.  A 100 ns edge guard excludes the transition itself and
+    each candidate must provide a complete 200 ns stable band.  The returned
+    centre is a stable-platform representative point, consistent with the
+    other Top/Base cursor cards.  Stronger ringing moves the selected band
+    later instead of relying on a fixed time offset.
+    """
+
+    arr = np.asarray(values, dtype=np.float64)
+    n = len(arr)
+    if n < 2 or not np.isfinite(float(target_level)):
+        return None
+    dt_s = max(float(dt), 1e-15)
+    stable_n = max(16, int(round(200e-9 / dt_s)))
+    guard_n = max(8, int(round(100e-9 / dt_s)))
+    edge = max(0, min(int(edge_idx), n - 1))
+    lo = min(n - 1, edge + guard_n)
+    hi = max(lo, min(int(search_end), n - 1))
+    if hi - lo + 1 < stable_n:
+        return None
+
+    span = max(abs(float(event_span)), 1.0)
+    ref_spread = max(0.0, abs(float(reference_spread)))
+    width_limit = max(1e-12, 1.35 * ref_spread, 0.075 * span)
+    level_limit = max(1e-12, 0.50 * ref_spread, 0.040 * span)
+    drift_limit = max(1e-12, ref_spread, 0.050 * span)
+
+    # About 12.5 ns between candidates at normal sample rates gives a stable
+    # visual representative without performing thousands of percentile scans
+    # on every parameter click.  Always include the final complete band so the
+    # trusted reference platform remains a valid last-resort candidate.
+    step = max(1, stable_n // 16)
+    final_start = hi - stable_n + 1
+    starts = list(range(lo, final_start + 1, step))
+    if not starts or starts[-1] != final_start:
+        starts.append(final_start)
+    for start in starts:
+        block = np.asarray(arr[start : start + stable_n], dtype=np.float64)
+        finite = block[np.isfinite(block)]
+        if len(finite) < max(8, stable_n // 2):
+            continue
+        p05, p95 = (
+            float(np.nanpercentile(finite, percentile))
+            for percentile in (5.0, 95.0)
+        )
+        robust_center = 0.5 * (p05 + p95)
+        half = max(1, len(finite) // 2)
+        half_drift = abs(
+            float(np.nanmedian(finite[:half]))
+            - float(np.nanmedian(finite[half:]))
+        )
+        if (
+            p95 - p05 <= width_limit
+            and float(np.nanstd(finite)) <= 0.50 * width_limit
+            and abs(robust_center - float(target_level)) <= level_limit
+            and half_drift <= drift_limit
+        ):
+            return int(start + stable_n // 2)
+    return None
+
+
+def turn_on_vce_stable_cursor_range_indices(
+    vce: np.ndarray,
+    i0: int,
+    i1: int,
+    dt: float,
+    base_v: float,
+    top_v: float,
+    *,
+    search_end: int | None = None,
+) -> tuple[int, int]:
+    """Return turn-on Vce Top-to-Base stable-platform cursor times.
+
+    A is placed on the high blocking plateau before the sustained Vce fall and
+    B on the first quiet low-voltage plateau after it.  The supplied levels are
+    not recalculated, so using this helper cannot change Delta Vce, dv/dt or a
+    maximum-value result.
+    """
+
+    arr = np.asarray(vce, dtype=np.float64)
+    n = len(arr)
+    if n < 2:
+        return 0, 0
+    lo = max(0, min(int(i0), n - 2))
+    hi = max(lo + 1, min(int(i1), n - 1))
+    end = (
+        hi
+        if search_end is None
+        else max(lo + 1, min(int(search_end), n - 1))
+    )
+    dt_s = max(float(dt), 1e-15)
+    span = max(abs(float(top_v) - float(base_v)), 1.0)
+    threshold = float(base_v) + 0.50 * span
+    falling = np.asarray(arr[lo : hi + 1] <= threshold, dtype=np.int64)
+    sustain_n = max(2, int(round(5e-9 / dt_s)))
+    sustain_n = min(sustain_n, max(1, len(falling)))
+    if len(falling) >= sustain_n:
+        prefix = np.concatenate(([0], np.cumsum(falling, dtype=np.int64)))
+        runs = prefix[sustain_n:] - prefix[:-sustain_n]
+        hits = np.flatnonzero(runs >= sustain_n)
+    else:
+        hits = np.asarray([], dtype=np.int64)
+    if len(hits):
+        edge_idx = lo + int(hits[0])
+    else:
+        dy = np.diff(arr[lo : hi + 1])
+        edge_idx = lo + (int(np.argmin(dy)) if len(dy) else 0)
+
+    guard_n = max(2, int(round(30e-9 / dt_s)))
+    probe_n = max(int(round(500e-9 / dt_s)), int(round(120e-9 / dt_s)))
+    pre_hi = max(lo, edge_idx - guard_n)
+    pre_lo = max(lo, pre_hi - probe_n)
+    post_lo = min(end, edge_idx + guard_n)
+    post_hi = min(end, post_lo + max(probe_n, int(round(1.35e-6 / dt_s))))
+    if post_hi <= post_lo:
+        post_hi = end
+    return stable_platform_cursor_range_indices(
+        arr,
+        pre_lo,
+        pre_hi,
+        post_lo,
+        post_hi,
+        dt_s,
+        float(top_v),
+        float(base_v),
+    )
+
+
+def turn_off_delta_vce_cursor_range_indices(
+    t: np.ndarray,
+    vce: np.ndarray,
+    i0: int,
+    i1: int,
+    dt: float,
+    blocking_top_v: float,
+    *,
+    search_end: int | None = None,
+) -> tuple[int, int]:
+    """Return stable Base/Top time cursors for turn-off Delta Vce.
+
+    This helper deliberately does not calculate the Delta Vce amplitude.  It
+    only places the vertical measurement-range cursors: A in the last quiet
+    Base band before the main Vce rise and B in the first quiet Top band after
+    the overshoot peak.  Ha/Hb remain the independent peak and blocking-Top
+    voltage references used by the extraction result.
+    """
+
+    tt = np.asarray(t, dtype=np.float64)
+    vv = np.asarray(vce, dtype=np.float64)
+    n = min(len(tt), len(vv))
+    if n < 2:
+        return 0, 0
+    lo = max(0, min(int(i0), n - 2))
+    hi = max(lo + 1, min(int(i1), n - 1))
+    end = hi if search_end is None else max(hi, min(int(search_end), n - 1))
+    dt_s = max(float(dt), 1e-15)
+
+    base_v, local_top_v = turn_off_dvdt_base_top_levels(tt, vv, lo, hi)
+    peak_rel = int(np.argmax(vv[lo : hi + 1]))
+    peak_idx = lo + peak_rel
+    event_span = max(
+        abs(float(local_top_v) - float(base_v)),
+        abs(float(blocking_top_v) - float(base_v)),
+        1.0,
+    )
+
+    # Locate the first sustained 10% rise.  A short persistence guard keeps a
+    # narrow pre-edge spike from moving the Base cursor into the transition.
+    rise_threshold = float(base_v) + 0.10 * event_span
+    rise_hi = max(lo, min(peak_idx, hi))
+    rise_values = vv[lo : rise_hi + 1]
+    above = np.asarray(rise_values >= rise_threshold, dtype=np.int64)
+    sustain_n = max(2, int(round(5e-9 / dt_s)))
+    sustain_n = min(sustain_n, max(1, len(above)))
+    if len(above) >= sustain_n:
+        prefix = np.concatenate(([0], np.cumsum(above, dtype=np.int64)))
+        runs = prefix[sustain_n:] - prefix[:-sustain_n]
+        sustained = np.flatnonzero(runs >= sustain_n)
+    else:
+        sustained = np.asarray([], dtype=np.int64)
+    if len(sustained):
+        rise_idx = lo + int(sustained[0])
+    else:
+        dy = np.diff(vv[lo : rise_hi + 1])
+        rise_idx = lo + (int(np.argmax(dy)) if len(dy) else 0)
+
+    stable_n = max(8, int(round(120e-9 / dt_s)))
+    guard_n = max(2, int(round(30e-9 / dt_s)))
+    base_probe_n = max(stable_n, int(round(500e-9 / dt_s)))
+    base_hi = max(lo, rise_idx - guard_n)
+    base_lo = max(lo, base_hi - base_probe_n)
+    base_centers, base_scores = _rolling_stable_level_centers(
+        vv,
+        base_lo,
+        base_hi,
+        target=float(base_v),
+        event_span=event_span,
+        window_n=stable_n,
+    )
+    if len(base_centers):
+        level_tol = max(1.0, 0.04 * event_span)
+        score_limit = 0.04 + max(0.5, 0.025 * event_span) / event_span
+        base_valid = np.flatnonzero(base_scores <= score_limit)
+        if len(base_valid):
+            a_idx = int(base_centers[int(base_valid[-1])])
+        else:
+            a_idx = int(base_centers[int(np.argmin(base_scores))])
+        # A score can be low because of a quiet but offset rail.  Prefer the
+        # middle of the declared Base probe when that candidate is clearly
+        # outside the local Base level tolerance.
+        if abs(float(vv[a_idx]) - float(base_v)) > level_tol:
+            a_idx = int((base_lo + base_hi) // 2)
+    else:
+        a_idx = int((base_lo + base_hi) // 2)
+
+    # B must be after the peak rather than the first ringing crossing of Hb.
+    # Select the earliest 120 ns window whose mean and spread both describe a
+    # stable blocking plateau.  If no window clears the strict gate, retain
+    # the best quiet candidate in the complete event-local search range.
+    top_lo = min(end, max(peak_idx + guard_n, rise_idx + guard_n))
+    top_centers, top_scores = _rolling_stable_level_centers(
+        vv,
+        top_lo,
+        end,
+        target=float(blocking_top_v),
+        event_span=event_span,
+        window_n=stable_n,
+    )
+    if len(top_centers):
+        top_score_limit = 0.05 + max(0.5, 0.025 * event_span) / event_span
+        top_valid = np.flatnonzero(top_scores <= top_score_limit)
+        if len(top_valid):
+            b_idx = int(top_centers[int(top_valid[0])])
+        else:
+            b_idx = int(top_centers[int(np.argmin(top_scores))])
+    else:
+        b_idx = int((top_lo + end) // 2)
+
+    def _nearest_platform_sample(
+        center: int,
+        target: float,
+        range_lo: int,
+        range_hi: int,
+    ) -> int:
+        radius = max(1, stable_n // 2)
+        sample_lo = max(int(range_lo), int(center) - radius)
+        sample_hi = min(int(range_hi), int(center) + radius)
+        candidates = np.arange(sample_lo, sample_hi + 1, dtype=np.int64)
+        if len(candidates) == 0:
+            return int(center)
+        level_error = np.abs(vv[candidates] - float(target))
+        # Break near-equal level ties toward the confirmed stable window's
+        # centre without letting the timing preference overpower voltage.
+        time_penalty = (
+            1e-6
+            * event_span
+            * np.abs(candidates.astype(np.float64) - float(center))
+            / float(radius)
+        )
+        return int(candidates[int(np.argmin(level_error + time_penalty))])
+
+    a_idx = _nearest_platform_sample(a_idx, float(base_v), base_lo, base_hi)
+    b_idx = _nearest_platform_sample(
+        b_idx,
+        float(blocking_top_v),
+        top_lo,
+        end,
+    )
+
+    a_idx = max(lo, min(a_idx, max(lo, peak_idx - 1)))
+    b_idx = max(min(end, peak_idx + 1), min(b_idx, end))
+    return int(a_idx), int(b_idx)
+
+
+@dataclass(frozen=True)
+class EoffStablePlatformCursorContext:
+    """Stable-platform Eoff endpoint candidates and their evidence bands."""
+
+    a_idx: int
+    b_idx: int
+    a_band_start_idx: int
+    a_band_end_idx: int
+    b_band_start_idx: int
+    b_band_end_idx: int
+    v10_idx: int
+    v90_idx: int
+    i90_idx: int
+    i10_idx: int
+    search_end_idx: int
+
+    def shifted(self, offset: int) -> "EoffStablePlatformCursorContext":
+        """Return the same evidence in another array-index coordinate space."""
+
+        delta = int(offset)
+        return EoffStablePlatformCursorContext(
+            self.a_idx + delta,
+            self.b_idx + delta,
+            self.a_band_start_idx + delta,
+            self.a_band_end_idx + delta,
+            self.b_band_start_idx + delta,
+            self.b_band_end_idx + delta,
+            self.v10_idx + delta,
+            self.v90_idx + delta,
+            self.i90_idx + delta,
+            self.i10_idx + delta,
+            self.search_end_idx + delta,
+        )
+
+
+def _first_sustained_threshold_index(
+    values: np.ndarray,
+    lo: int,
+    hi: int,
+    threshold: float,
+    *,
+    rising: bool,
+    sustain_n: int,
+) -> int | None:
+    """Return the first sustained raw-threshold entry in one direction."""
+
+    arr = np.asarray(values, dtype=np.float64)
+    if len(arr) < 2:
+        return None
+    lo = max(0, min(int(lo), len(arr) - 1))
+    hi = max(lo, min(int(hi), len(arr) - 1))
+    count = hi - lo + 1
+    width = max(1, min(int(sustain_n), count))
+    block = arr[lo : hi + 1]
+    condition = block >= float(threshold) if rising else block <= float(threshold)
+    prefix = np.concatenate(([0], np.cumsum(condition, dtype=np.int64)))
+    runs = prefix[width:] - prefix[:-width]
+    hits = np.flatnonzero(runs >= width)
+    if len(hits) == 0:
+        return None
+    return int(lo + int(hits[0]))
+
+
+def _robust_band_stats(values: np.ndarray) -> tuple[float, float, float, float]:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if len(finite) == 0:
+        return float("nan"), float("nan"), float("inf"), float("inf")
+    p05, p95 = (
+        float(np.nanpercentile(finite, percentile))
+        for percentile in (5.0, 95.0)
+    )
+    center = 0.5 * (p05 + p95)
+    half = max(1, len(finite) // 2)
+    first = finite[:half]
+    second = finite[half:]
+    drift = (
+        abs(float(np.nanmedian(first)) - float(np.nanmedian(second)))
+        if len(second)
+        else 0.0
+    )
+    return p05, p95, center, drift
+
+
+def _first_level_crossing_index_after(
+    values: np.ndarray,
+    level: float,
+    lo: int,
+    hi: int,
+) -> int | None:
+    arr = np.asarray(values, dtype=np.float64)
+    if len(arr) < 2:
+        return None
+    lo = max(0, min(int(lo), len(arr) - 2))
+    hi = max(lo, min(int(hi), len(arr) - 2))
+    shifted = arr[lo : hi + 2] - float(level)
+    pairs = shifted[:-1] * shifted[1:] <= 0.0
+    changed = shifted[:-1] != shifted[1:]
+    hits = np.flatnonzero(pairs & changed)
+    if len(hits) == 0:
+        return None
+    return int(lo + int(hits[0]))
+
+
+def turn_off_eoff_stable_platform_cursor_context(
+    t: np.ndarray,
+    vce: np.ndarray,
+    ic: np.ndarray,
+    i0: int,
+    i1: int,
+    dt: float,
+    blocking_top_v: float,
+    vce_base_v: float,
+    ic_top_abs: float,
+    ic_base_a: float,
+    *,
+    search_end: int | None = None,
+) -> EoffStablePlatformCursorContext | None:
+    """Return event-adaptive stable A/B candidates for a smooth Eoff edge.
+
+    The helper selects times only; the caller-supplied Ha/Hb levels remain
+    authoritative.  A reuses the Delta-Vce Base-band locator.  B starts after
+    the fixed physical 90%->10% Ic fall (independent of configurable di/dt
+    percentages) and uses the first complete quiet band near the signed Hb.
+    A caller must still prove that the event is smooth and that the resulting
+    window contains the authoritative loss-producing power peak.  ``search_end``
+    bounds the published B representative point; at most the trailing half of
+    its adaptive stability band may extend beyond that point for confirmation.
+    """
+
+    tt = np.asarray(t, dtype=np.float64)
+    vv = np.asarray(vce, dtype=np.float64)
+    ii = np.asarray(ic, dtype=np.float64)
+    n = min(len(tt), len(vv), len(ii))
+    if n < 16:
+        return None
+    lo = max(0, min(int(i0), n - 2))
+    hi = max(lo + 1, min(int(i1), n - 1))
+    cursor_end = (
+        hi
+        if search_end is None
+        else max(lo + 1, min(int(search_end), hi))
+    )
+    dt_s = max(float(dt), 1e-15)
+
+    local_base_v, local_top_v = turn_off_dvdt_base_top_levels(tt, vv, lo, hi)
+    v_span = max(
+        abs(float(local_top_v) - float(local_base_v)),
+        abs(float(blocking_top_v) - float(vce_base_v)),
+        1.0,
+    )
+    peak_idx = lo + int(np.nanargmax(vv[lo : hi + 1]))
+    sustain_n = max(2, int(round(5e-9 / dt_s)))
+    v10_level = float(local_base_v) + 0.10 * v_span
+    v90_level = float(local_base_v) + 0.90 * v_span
+    v10_idx = _first_sustained_threshold_index(
+        vv, lo, peak_idx, v10_level, rising=True, sustain_n=sustain_n
+    )
+    if v10_idx is None:
+        return None
+    v90_idx = _first_sustained_threshold_index(
+        vv, v10_idx, peak_idx, v90_level, rising=True, sustain_n=sustain_n
+    )
+    if v90_idx is None or v90_idx <= v10_idx:
+        return None
+    a_window_s = float(
+        np.clip(0.5 * float(tt[v90_idx] - tt[v10_idx]), 80e-9, 200e-9)
+    )
+    a_idx, _unused_b = turn_off_delta_vce_cursor_range_indices(
+        tt,
+        vv,
+        lo,
+        hi,
+        dt_s,
+        float(blocking_top_v),
+        search_end=hi,
+    )
+    a_window_n = max(8, int(round(a_window_s / dt_s)))
+    a_band_start = max(lo, int(a_idx) - a_window_n // 2)
+    a_band_end = min(max(lo, v10_idx - 1), a_band_start + a_window_n - 1)
+    if a_band_end - a_band_start + 1 < a_window_n:
+        return None
+    a_band_start = max(lo, a_band_end - a_window_n + 1)
+    a_p05, a_p95, a_center, a_drift = _robust_band_stats(
+        vv[a_band_start : a_band_end + 1]
+    )
+    pre_ref_end = max(lo, a_band_start - 1)
+    pre_ref_start = max(lo, pre_ref_end - a_window_n + 1)
+    pre_p05, pre_p95, _pre_center, _pre_drift = _robust_band_stats(
+        vv[pre_ref_start : pre_ref_end + 1]
+    )
+    pre_noise_pp = max(0.0, float(pre_p95) - float(pre_p05))
+    if (
+        not np.isfinite(a_center)
+        or float(a_p95) - float(a_p05)
+        > max(1.5 * pre_noise_pp, 0.015 * v_span, 1.0)
+        or a_drift > max(pre_noise_pp, 0.010 * v_span, 0.5)
+        or abs(float(a_center) - float(vce_base_v))
+        > max(2.0 * pre_noise_pp, 0.040 * v_span, 2.0)
+    ):
+        return None
+
+    # Recover the signed conducting-current side from the event-local pre-fall
+    # samples; scope_turn_off_bases intentionally publishes only |Ic| Top.
+    current_ref_lo = max(lo, v10_idx - max(a_window_n, int(round(300e-9 / dt_s))))
+    current_ref = ii[current_ref_lo : v10_idx + 1]
+    current_ref = current_ref[np.isfinite(current_ref)]
+    if len(current_ref) < 4:
+        return None
+    signed_center = float(np.nanmedian(current_ref))
+    if abs(signed_center) <= max(1.0, 0.05 * abs(float(ic_top_abs))):
+        local = ii[lo : max(lo + 1, v10_idx + 1)]
+        farthest = int(np.nanargmax(np.abs(local - float(ic_base_a))))
+        signed_center = float(local[farthest])
+    sign = 1.0 if signed_center >= float(ic_base_a) else -1.0
+    signed_top = sign * abs(float(ic_top_abs))
+    i_span = abs(float(signed_top) - float(ic_base_a))
+    if i_span < 1.0:
+        return None
+    i90_level = float(ic_base_a) + 0.90 * (float(signed_top) - float(ic_base_a))
+    i10_level = float(ic_base_a) + 0.10 * (float(signed_top) - float(ic_base_a))
+    falling = float(signed_top) > float(ic_base_a)
+    i90_idx = _first_sustained_threshold_index(
+        ii,
+        v10_idx,
+        cursor_end,
+        i90_level,
+        rising=not falling,
+        sustain_n=sustain_n,
+    )
+    if i90_idx is None:
+        return None
+    i10_idx = _first_sustained_threshold_index(
+        ii,
+        i90_idx,
+        cursor_end,
+        i10_level,
+        rising=not falling,
+        sustain_n=sustain_n,
+    )
+    if i10_idx is None or i10_idx <= i90_idx:
+        return None
+    b_window_s = float(
+        np.clip(0.5 * float(tt[i10_idx] - tt[i90_idx]), 80e-9, 200e-9)
+    )
+    b_window_n = max(8, int(round(b_window_s / dt_s)))
+    trailing_confirmation_n = max(0, b_window_n - 1 - b_window_n // 2)
+    evidence_end = min(hi, cursor_end + trailing_confirmation_n)
+    if evidence_end - i10_idx + 1 < b_window_n:
+        return None
+
+    first_hb_cross = _first_level_crossing_index_after(
+        ii, float(ic_base_a), i10_idx, cursor_end - 1
+    )
+    search_start = max(i10_idx, first_hb_cross or i10_idx)
+    final_start = min(
+        evidence_end - b_window_n + 1,
+        cursor_end - b_window_n // 2,
+    )
+    if final_start < search_start:
+        return None
+    tail_start = max(search_start, evidence_end - b_window_n + 1)
+    tail_p05, tail_p95, _tail_center, _tail_drift = _robust_band_stats(
+        ii[tail_start : evidence_end + 1]
+    )
+    tail_noise_pp = max(0.0, float(tail_p95) - float(tail_p05))
+    width_limit = max(1.5 * tail_noise_pp, 0.12 * i_span, 1.0)
+    drift_limit = max(tail_noise_pp, 0.02 * i_span, 0.50)
+    median_level_limit = max(1.10, 0.020 * i_span)
+
+    def _qualifies(start: int) -> bool:
+        band = ii[int(start) : int(start) + b_window_n]
+        p05, p95, center, drift = _robust_band_stats(band)
+        median = float(np.nanmedian(band))
+        half = max(1, len(band) // 2)
+        first_median = float(np.nanmedian(band[:half]))
+        second_median = float(np.nanmedian(band[half:]))
+        return bool(
+            np.isfinite(center)
+            and np.isfinite(median)
+            and np.isfinite(first_median)
+            and np.isfinite(second_median)
+            and float(p95) - float(p05) <= width_limit
+            and drift <= drift_limit
+            and abs(float(center) - float(ic_base_a)) <= median_level_limit
+            and abs(median - float(ic_base_a)) <= median_level_limit
+            and abs(first_median - float(ic_base_a)) <= median_level_limit
+            and abs(second_median - float(ic_base_a)) <= median_level_limit
+        )
+
+    step = max(1, b_window_n // 32)
+    starts = [search_start]
+    starts.extend(range(search_start + step, final_start + 1, step))
+    if starts[-1] != final_start:
+        starts.append(final_start)
+    chosen_start: int | None = None
+    previous = search_start - 1
+    for candidate_start in starts:
+        if _qualifies(candidate_start):
+            refine_start = max(search_start, previous + 1)
+            chosen_start = int(candidate_start)
+            for exact_start in range(refine_start, int(candidate_start) + 1):
+                if _qualifies(exact_start):
+                    chosen_start = int(exact_start)
+                    break
+            break
+        previous = int(candidate_start)
+    if chosen_start is None:
+        return None
+    b_band_start = int(chosen_start)
+    b_band_end = int(chosen_start + b_window_n - 1)
+    b_idx = int(b_band_start + b_window_n // 2)
+    if not (
+        lo
+        <= a_idx
+        < v10_idx
+        <= i90_idx
+        < i10_idx
+        <= b_idx
+        <= cursor_end
+    ):
+        return None
+    return EoffStablePlatformCursorContext(
+        int(a_idx),
+        int(b_idx),
+        int(a_band_start),
+        int(a_band_end),
+        int(b_band_start),
+        int(b_band_end),
+        int(v10_idx),
+        int(v90_idx),
+        int(i90_idx),
+        int(i10_idx),
+        int(cursor_end),
+    )
+
+
+def turn_off_ic_off_max_cursor_context(
+    t: np.ndarray,
+    vce: np.ndarray,
+    ic: np.ndarray,
+    local_start: int,
+    local_end: int,
+    pulse1_on: int,
+    off_idx: int,
+    fall_start: int,
+    fall_end: int,
+    dt: float,
+    *,
+    next_pulse_on: int | None = None,
+) -> tuple[int, int, float]:
+    """Return Ic_off_max A/B times and its stable current Base reference.
+
+    This is a display context, not the numeric peak calculation.  A is placed
+    in the quiet Vce Base band immediately before the main Vce rise.  B is
+    placed inside the adjacent quiet Ic Base band after the main current fall,
+    and the returned level is the signed, spike-guarded centre of that same
+    current band.  The independent Ha value remains the existing Ic_off_max
+    peak produced by the extraction pipeline.
+    """
+
+    tt = np.asarray(t, dtype=np.float64)
+    vv = np.asarray(vce, dtype=np.float64)
+    ii = np.asarray(ic, dtype=np.float64)
+    n = min(len(tt), len(vv), len(ii))
+    if n < 2:
+        return 0, 0, 0.0
+    lo = max(0, min(int(local_start), n - 2))
+    hi = max(lo + 1, min(int(local_end), n - 1))
+    pulse1_on = max(0, min(int(pulse1_on), n - 2))
+    off_idx = max(lo, min(int(off_idx), n - 1))
+    fall_start = max(lo, min(int(fall_start), n - 2))
+    fall_end = max(fall_start + 1, min(int(fall_end), n - 1))
+    dt_s = max(float(dt), 1e-15)
+
+    # Reuse the already-audited turn-off Vce Base locator used by Delta Vce.
+    # Only its Base-side cursor is relevant here; the Ic Base owns the right
+    # endpoint below.
+    vce_base, vce_top = turn_off_dvdt_base_top_levels(tt, vv, lo, hi)
+    a_idx, _unused_top_idx = turn_off_delta_vce_cursor_range_indices(
+        tt,
+        vv,
+        lo,
+        hi,
+        dt_s,
+        float(vce_top),
+        search_end=hi,
+    )
+
+    # Ic_off_max is calculated in the existing Vge fall window.  On a few
+    # high-current records its peak occurs slightly before the last valid Vce
+    # Base centre selected above.  Keep A on the same stable Vce Base band but
+    # move it to the last complete quiet window ending before that peak, so the
+    # displayed A/B range actually contains the unchanged authoritative max.
+    peak_slice = np.abs(ii[fall_start : fall_end + 1])
+    ic_peak_idx = (
+        fall_start + int(np.argmax(peak_slice))
+        if len(peak_slice)
+        else fall_start
+    )
+    if a_idx >= ic_peak_idx and ic_peak_idx > lo:
+        stable_n = max(8, int(round(120e-9 / dt_s)))
+        base_hi = max(lo, ic_peak_idx - 1)
+        base_lo = max(lo, base_hi - max(stable_n, int(round(500e-9 / dt_s))))
+        centers, scores = _rolling_stable_level_centers(
+            vv,
+            base_lo,
+            base_hi,
+            target=float(vce_base),
+            event_span=max(abs(float(vce_top) - float(vce_base)), 1.0),
+            window_n=stable_n,
+        )
+        if len(centers):
+            span = max(abs(float(vce_top) - float(vce_base)), 1.0)
+            score_limit = 0.04 + max(0.5, 0.025 * span) / span
+            valid = np.flatnonzero(scores <= score_limit)
+            center_idx = int(
+                centers[int(valid[-1])]
+                if len(valid)
+                else centers[int(np.argmin(scores))]
+            )
+            radius = max(1, stable_n // 2)
+            sample_lo = max(base_lo, center_idx - radius)
+            sample_hi = min(base_hi, center_idx + radius)
+        else:
+            sample_lo, sample_hi = base_lo, base_hi
+        candidates = np.arange(sample_lo, sample_hi + 1, dtype=np.int64)
+        if len(candidates):
+            a_idx = int(
+                candidates[
+                    int(np.argmin(np.abs(vv[candidates] - float(vce_base))))
+                ]
+            )
+
+    base_window = turn_off_didt_stable_base_window_indices(
+        ii,
+        hi,
+        off_idx,
+        fall_end,
+        dt_s,
+        next_pulse_on=next_pulse_on,
+    )
+    base_a, _top_a = turn_off_didt_base_top_levels(
+        ii,
+        lo,
+        hi,
+        pulse1_on,
+        off_idx,
+        fall_start,
+        fall_end,
+        dt_s,
+        next_pulse_on=next_pulse_on,
+        base_window=base_window,
+    )
+    if base_window is None:
+        b_idx = max(off_idx, fall_end)
+    else:
+        b0 = max(0, min(int(base_window[0]), n - 1))
+        b1 = max(b0, min(int(base_window[1]), n - 1))
+        candidates = np.arange(b0, b1 + 1, dtype=np.int64)
+        center = 0.5 * (b0 + b1)
+        radius = max(1.0, 0.5 * (b1 - b0 + 1))
+        level_error = np.abs(ii[candidates] - float(base_a))
+        time_penalty = (
+            1e-6
+            * max(abs(float(base_a)), 1.0)
+            * np.abs(candidates.astype(np.float64) - center)
+            / radius
+        )
+        b_idx = int(candidates[int(np.argmin(level_error + time_penalty))])
+
+    a_idx = max(lo, min(int(a_idx), n - 2))
+    b_idx = max(a_idx + 1, min(int(b_idx), n - 1))
+    return int(a_idx), int(b_idx), float(base_a)
+
+
 def dvdt_on_vce_fall_base_top(
     seg: np.ndarray, dt: float = 0.0
 ) -> tuple[float, float]:
@@ -292,10 +1342,23 @@ def dvdt_on_vce_fall_base_top(
         max(12, itrans // 2, int(100e-9 / dt_s)),
     )
     pre_w = seg[: min(max(12, itrans), n_pre)]
+    stable_top: float | None = None
     if len(pre_w) < 3:
         top = float(np.percentile(seg[: max(1, itrans)], 95))
     else:
         top = _quiet_plateau_mid(pre_w, prefer="high")
+        # A quiet-window selector can lock to the upper rail of a visibly
+        # thicker pre-fall band.  Confirm that rail against the centre of the
+        # first ~40 ns stable block, and only move it when the disagreement is
+        # large relative to the measured bus level.  This stays waveform- and
+        # amplitude-adaptive instead of depending on a phase or file name.
+        stable_n = min(
+            max(12, itrans),
+            max(12, int(round(40e-9 / dt_s))),
+        )
+        stable_top = float(
+            _plateau_mid_without_isolated_spikes(seg[:stable_n])
+        )
     skip = max(8, int(40e-9 / dt_s))
     post = tail[skip:] if len(tail) > skip + 5 else tail
     n_avg = min(len(post), max(12, int(120e-9 / dt_s)))
@@ -308,6 +1371,13 @@ def dvdt_on_vce_fall_base_top(
         )
     else:
         hb = _plateau_mid_without_isolated_spikes(post_w)
+    if stable_top is not None:
+        rail_gap = float(top) - float(stable_top)
+        if (
+            abs(float(hb)) >= 10.0
+            and rail_gap > max(3.0, 0.006 * max(abs(float(top)), 1.0))
+        ):
+            top = float(stable_top)
     return hb, top
 
 
@@ -431,10 +1501,11 @@ def turn_on_vce_on_max_window_indices(
     vce_top: float | None = None,
 ) -> tuple[int, int]:
     """
-    开通 Vce_on_max 窗口：A=Vge 低电平开始抬升点，B=本管 Vce 跌到低平台后。
+    开通 Vce_on_max 权威数值窗：从 Vge 低电平离开到本管 Vce 跌入低平台。
 
-    这个窗口用于数值和 GUI 光标，避免旧逻辑只截取跌落前高平台而把 A/B 卡到
-    开通事件左侧。
+    该历史窗口只负责保持提取数值兼容，不再拥有默认 GUI A/B。默认竖向光标
+    另由 ``turn_on_vce_stable_cursor_range_indices()`` 表达 Vce 稳定 Top→Base；
+    两者解耦后，扩大显示阶段不能重新选取 Vce_on_max。
     """
     t_arr = np.asarray(t, dtype=np.float64)
     vge_arr = np.asarray(vge, dtype=np.float64)
@@ -1533,6 +2604,114 @@ def didt_fall_top_base_mid(seg: np.ndarray) -> tuple[float, float]:
     return top, base
 
 
+def turn_off_didt_stable_top_window_indices(
+    ic: np.ndarray,
+    local_start: int,
+    local_end: int,
+    fall_start: int,
+    fall_end: int,
+    dt: float,
+) -> tuple[int, int] | None:
+    """Choose the sustained high-current band immediately before the main fall.
+
+    A Vge fall window can begin several microseconds before Ic actually falls.
+    Searching that whole interval for a handful of unusually quiet samples can
+    therefore select an arbitrary point on the preceding current ramp.  Locate
+    the sustained Ic drop first, then compare complete ~200 ns bands in the
+    parameter-local pre-edge region.  Robust spread/drift only select the band;
+    the caller still publishes the raw spike-guarded ``(max + min) / 2`` level.
+    """
+
+    arr = np.asarray(ic, dtype=np.float64)
+    n = len(arr)
+    if n < 2:
+        return None
+    dt_s = max(float(dt), 1e-15)
+    start = max(0, min(max(int(local_start), int(fall_start)), n - 1))
+    end = max(start, min(int(local_end), int(fall_end), n - 1))
+    if end <= start:
+        return None
+
+    values = np.abs(arr[start : end + 1])
+    if len(values) < 4:
+        return start, end
+
+    # Reject isolated sample noise while retaining a real switching edge.  The
+    # strongest sustained drop over ~12 ns is the main Ic fall; edge padding is
+    # excluded because convolution cannot represent a complete local average.
+    smooth_n = max(3, int(round(4e-9 / dt_s)))
+    smooth_n = min(smooth_n, max(3, len(values) // 8))
+    if smooth_n % 2 == 0:
+        smooth_n += 1
+    kernel = np.full(smooth_n, 1.0 / smooth_n, dtype=np.float64)
+    smoothed = np.convolve(values, kernel, mode="same")
+    drop_n = max(3, int(round(12e-9 / dt_s)))
+    drop_n = min(drop_n, max(3, len(values) // 4))
+    margin = max(smooth_n, 2)
+    drop_stop = len(smoothed) - drop_n - margin
+    if drop_stop <= margin:
+        edge_rel = int(np.argmin(np.diff(smoothed))) + 1
+    else:
+        sustained_drop = (
+            smoothed[margin:drop_stop]
+            - smoothed[margin + drop_n : drop_stop + drop_n]
+        )
+        edge_rel = margin + int(np.argmax(sustained_drop)) + drop_n // 2
+
+    guard_n = max(2, int(round(20e-9 / dt_s)))
+    pre_end = max(0, min(edge_rel - guard_n, len(values) - 1))
+    if pre_end < 3:
+        return start, min(end, start + pre_end)
+
+    win_n = max(16, int(round(200e-9 / dt_s)))
+    available = pre_end + 1
+    if available <= win_n:
+        return start, start + pre_end
+
+    # Stay event-local even when the enclosing parameter range is unusually
+    # wide.  Centre agreement with the band nearest the edge prevents an older
+    # quiet section of an inductor-current ramp from winning on spread alone.
+    search_start = max(0, available - 5 * win_n)
+    tail_ref_block = values[pre_end - win_n + 1 : pre_end + 1]
+    tail_p05, tail_p95 = (
+        float(np.nanpercentile(tail_ref_block, p)) for p in (5.0, 95.0)
+    )
+    tail_ref = 0.5 * (tail_p05 + tail_p95)
+    step = max(1, win_n // 8)
+    starts = list(range(search_start, pre_end - win_n + 2, step))
+    final_start = pre_end - win_n + 1
+    if not starts or starts[-1] != final_start:
+        starts.append(final_start)
+
+    best_start = starts[0]
+    best_score = float("inf")
+    for window_start in starts:
+        block = values[window_start : window_start + win_n]
+        if not np.isfinite(block).any():
+            continue
+        p05, p50, p95 = (
+            float(np.nanpercentile(block, p)) for p in (5.0, 50.0, 95.0)
+        )
+        center = 0.5 * (p05 + p95)
+        half = max(1, len(block) // 2)
+        half_drift = abs(
+            float(np.nanmedian(block[:half]))
+            - float(np.nanmedian(block[half:]))
+        )
+        endpoint_drift = abs(float(block[-1]) - float(block[0]))
+        score = (
+            (p95 - p05)
+            + 0.20 * half_drift
+            + 0.10 * abs(center - tail_ref)
+            + 0.05 * endpoint_drift
+            + 0.02 * abs(p50 - center)
+        )
+        if score < best_score:
+            best_score = score
+            best_start = window_start
+    return start + best_start, start + best_start + win_n - 1
+
+
 def turn_off_didt_stable_base_window_indices(
     ic: np.ndarray,
     local_end: int,
@@ -1624,6 +2803,7 @@ def turn_off_didt_base_top_levels(
     *,
     next_pulse_on: int | None = None,
     base_window: tuple[int, int] | None = None,
+    top_window: tuple[int, int] | None = None,
 ) -> tuple[float, float]:
     """关断 di/dt 的本地稳定电流 Base/Top。
 
@@ -1642,12 +2822,35 @@ def turn_off_didt_base_top_levels(
     fall_start = max(pulse1_on + 1, min(int(fall_start), n - 2))
     fall_end = max(fall_start + 1, min(int(fall_end), n - 1))
 
-    top_seg = ic[fall_start : fall_end + 1]
-    top = (
-        float(_quiet_plateau_mid(np.abs(top_seg), prefer="high"))
-        if len(top_seg)
+    legacy_top_seg = ic[fall_start : fall_end + 1]
+    legacy_top = (
+        float(_quiet_plateau_mid(np.abs(legacy_top_seg), prefer="high"))
+        if len(legacy_top_seg)
         else 0.0
     )
+    if top_window is None:
+        top_window = turn_off_didt_stable_top_window_indices(
+            ic, local_start, local_end, fall_start, fall_end, dt
+        )
+    if top_window is not None:
+        t0 = max(0, min(int(top_window[0]), n - 1))
+        t1 = max(t0, min(int(top_window[1]), n - 1))
+        top_band = np.abs(ic[t0 : t1 + 1])
+        stable_top = _plateau_mid_without_isolated_spikes(top_band)
+        p05, p95 = (
+            float(np.nanpercentile(top_band, p)) for p in (5.0, 95.0)
+        )
+        tolerance = max(1e-9, 0.10 * max(p95 - p05, 0.0))
+        # Preserve an established quiet-band centre when the independently
+        # located sustained platform confirms that it really lies on that
+        # band.  Reject it only with direct waveform evidence that it is off
+        # platform (for example a quiet point on an earlier current ramp).
+        if p05 - tolerance <= legacy_top <= p95 + tolerance:
+            top = legacy_top
+        else:
+            top = stable_top
+    else:
+        top = legacy_top
 
     if base_window is None:
         base_window = turn_off_didt_stable_base_window_indices(

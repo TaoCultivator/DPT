@@ -837,7 +837,16 @@ def _sustained_rise_between_base_top(
     )
     if len(low_crossings) == 0:
         return None
+    # Use the first raw low-threshold crossing that genuinely enters the main
+    # rising episode.  Choosing the last crossing before Ha biases cursor A to
+    # a later ripple cycle even when the waveform has already stayed above Hb.
     low_idx = int(low_crossings[-1])
+    for k_raw in low_crossings:
+        k = int(k_raw)
+        tail = seg_y[k + 1 : min(len(seg_y), k + 1 + hold)]
+        if len(tail) >= 3 and float(np.mean(tail >= th_lo - tolerance)) >= 0.70:
+            low_idx = k
+            break
 
     def _interp(k: int, threshold: float) -> float:
         y0 = float(seg_y[k])
@@ -1470,6 +1479,7 @@ def turn_off_didt_measurement_context(
     from dpt_extractor.metrics.plateau_level import (
         turn_off_didt_base_top_levels,
         turn_off_didt_stable_base_window_indices,
+        turn_off_didt_stable_top_window_indices,
     )
 
     n = min(len(t), len(ic))
@@ -1488,6 +1498,14 @@ def turn_off_didt_measurement_context(
         dt,
         next_pulse_on=next_pulse_on,
     )
+    top_window = turn_off_didt_stable_top_window_indices(
+        ic,
+        i0,
+        i1,
+        fall_start,
+        fall_end,
+        dt,
+    )
     base_a, top_a = turn_off_didt_base_top_levels(
         ic,
         i0,
@@ -1499,6 +1517,7 @@ def turn_off_didt_measurement_context(
         dt,
         next_pulse_on=next_pulse_on,
         base_window=base_window,
+        top_window=top_window,
     )
     if auto_max:
         crossing = auto_didt_between_base_top(
@@ -1517,6 +1536,8 @@ def turn_off_didt_measurement_context(
             crossing,
             crossing.t_pct_a_s is None or crossing.t_pct_b_s is None,
             base_window,
+            top_window,
+            (search0, i1),
         )
     # Turn-off is always the physical falling Ic edge. ``edge`` is retained
     # for saved configuration compatibility; custom percentage order must not
@@ -1559,6 +1580,107 @@ def turn_off_didt_measurement_context(
         )
         if extended.t_pct_a_s is not None and extended.t_pct_b_s is not None:
             crossing = extended
+
+    # Re-check Top in a complete stable band immediately before the raw 90%
+    # intersection.  Wide Vge-derived windows may otherwise select an older
+    # quiet point on the inductor-current ramp.  The second pass is accepted
+    # only when the nearby raw band is materially higher, so already-aligned
+    # operating points retain their established context and crossings.
+    if crossing.t_pct_a_s is not None and crossing.t_pct_b_s is not None:
+        near_lo = int(
+            np.searchsorted(t, float(crossing.t_pct_a_s) - 200e-9, side="left")
+        )
+        near_hi = int(
+            np.searchsorted(t, float(crossing.t_pct_a_s) - 80e-9, side="right")
+        ) - 1
+        near_lo = max(i0, min(near_lo, n - 2))
+        near_hi = max(near_lo + 1, min(near_hi, n - 1))
+        near_band = np.abs(np.asarray(ic[near_lo : near_hi + 1], dtype=np.float64))
+        if len(near_band) >= 4 and np.isfinite(near_band).any():
+            near_top = float(_plateau_mid_without_isolated_spikes(near_band))
+            span = max(abs(float(top_a) - float(base_a)), 1.0)
+            if near_top - float(top_a) >= max(6.0, 0.008 * span):
+                refined = didt_between_base_top(
+                    t,
+                    ic,
+                    search0,
+                    search1,
+                    base_a,
+                    near_top,
+                    fall_pct_a,
+                    fall_pct_b,
+                    "fall",
+                    use_abs=False,
+                )
+                if (
+                    refined.t_pct_a_s is not None
+                    and refined.t_pct_b_s is not None
+                    and refined.didt > 1e-6
+                ):
+                    top_a = near_top
+                    top_window = (near_lo, near_hi)
+                    crossing = refined
+
+    # A broad low-current plateau can contain several repeatable ripple rails.
+    # If a robust upper-rail Top plus the adjacent post-fall Base exposes a
+    # materially earlier *raw* 90% crossing, the previous context had attached
+    # A to a later ripple cycle.  Accept that alternative only with this direct
+    # temporal evidence; ordinary low-current records keep their original
+    # levels even when the candidate rails differ numerically.
+    if (
+        crossing.t_pct_a_s is not None
+        and crossing.t_pct_b_s is not None
+        and abs(float(top_a) - float(base_a)) >= 180.0
+        and abs(float(top_a) - float(base_a)) < 600.0
+    ):
+        current_a = float(crossing.t_pct_a_s)
+        current_b = float(crossing.t_pct_b_s)
+        rail_lo = int(np.searchsorted(t, current_a - 300e-9, side="left"))
+        rail_hi = int(np.searchsorted(t, current_a - 80e-9, side="right"))
+        base_lo = int(np.searchsorted(t, current_b + 40e-9, side="left"))
+        base_hi = int(np.searchsorted(t, current_b + 240e-9, side="right"))
+        rail_lo = max(i0, min(rail_lo, n - 2))
+        rail_hi = max(rail_lo + 2, min(rail_hi, n))
+        base_lo = max(0, min(base_lo, n - 2))
+        base_hi = max(base_lo + 2, min(base_hi, n))
+        rail_band = np.abs(np.asarray(ic[rail_lo:rail_hi], dtype=np.float64))
+        adjacent_base_band = np.asarray(ic[base_lo:base_hi], dtype=np.float64)
+        if (
+            len(rail_band) >= 8
+            and len(adjacent_base_band) >= 8
+            and np.isfinite(rail_band).all()
+            and np.isfinite(adjacent_base_band).all()
+        ):
+            rail_top = float(np.nanpercentile(rail_band, 99.0))
+            adjacent_base = float(
+                _plateau_mid_without_isolated_spikes(adjacent_base_band)
+            )
+            rail_crossing = didt_between_base_top(
+                t,
+                ic,
+                search0,
+                search1,
+                adjacent_base,
+                rail_top,
+                fall_pct_a,
+                fall_pct_b,
+                "fall",
+                use_abs=False,
+            )
+            if (
+                rail_top > float(top_a)
+                and rail_crossing.t_pct_a_s is not None
+                and rail_crossing.t_pct_b_s is not None
+                and rail_crossing.didt > 1e-6
+            ):
+                earlier_by = current_a - float(rail_crossing.t_pct_a_s)
+                main_edge_span = max(current_b - current_a, 1e-15)
+                if earlier_by > max(6e-9, 0.12 * main_edge_span):
+                    base_a = adjacent_base
+                    top_a = rail_top
+                    base_window = (base_lo, base_hi - 1)
+                    top_window = (rail_lo, rail_hi - 1)
+                    crossing = rail_crossing
     used_fallback = crossing.didt < 1e-6
     if used_fallback and not auto_max:
         fallback = didt_max(t, ic, search0, search1 + 1, dt, cfg)
@@ -1572,7 +1694,13 @@ def turn_off_didt_measurement_context(
             crossing.irm,
         )
     return DidtMeasurementContext(
-        float(base_a), float(top_a), crossing, used_fallback, base_window
+        float(base_a),
+        float(top_a),
+        crossing,
+        used_fallback,
+        base_window,
+        top_window,
+        (search0, search1),
     )
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """DPT parameter extraction tool entry point."""
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -32,15 +33,48 @@ configure_numba_cache_dir()
 from PyQt6.QtWidgets import QApplication
 
 from dpt_extractor.gui.main_window import MainWindow
+from dpt_extractor.io.tek_scope import shutdown_tektronix_backend
 
 
-def main() -> int:
-    app = QApplication(sys.argv)
+def _parse_cli(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    """解析本程序自有参数，其余原样交给 Qt。"""
+    parser = argparse.ArgumentParser(
+        prog="DPT",
+        description="DPT 双脉冲参数提取工具",
+    )
+    parser.add_argument(
+        "--api",
+        action="store_true",
+        help="启动时开启内嵌 API 服务（默认关闭，避免测试与多开实例抢端口）",
+    )
+    parser.add_argument(
+        "--api-port",
+        type=int,
+        default=8765,
+        help="内嵌 API 监听端口（默认 8765，0 表示由系统分配）",
+    )
+    args, remaining = parser.parse_known_args(argv)
+    return args, remaining
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args, qt_argv = _parse_cli(raw_argv)
+    app = QApplication([sys.argv[0], *qt_argv])
     app.setApplicationName("DPT Extractor")
     app.setStyle("Fusion")
     win = MainWindow()
-    win.show()
-    return app.exec()
+    win.showMaximized()
+    # 显式请求才点火：GUI 启动本身不占用任何端口。
+    if args.api:
+        win.start_api_server(port=args.api_port)
+    try:
+        return app.exec()
+    finally:
+        # Covers programmatic quit and startup/teardown paths that do not pass
+        # through MainWindow.closeEvent().  The function is idempotent.
+        win.shutdown_background_work()
+        shutdown_tektronix_backend()
 
 
 if __name__ == "__main__":

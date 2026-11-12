@@ -10,11 +10,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from dpt_extractor.tests.sample_paths import SAMPLE_ROOT
 
-DL_UH = SAMPLE_ROOT / "tss格式" / "KSU2506" / "DCU" / "DL" / "LT" / "UH_480V_000.tss"
-DL_UL = SAMPLE_ROOT / "tss格式" / "KSU2506" / "DCU" / "DL" / "LT" / "UL_480V_000.tss"
+DL_UH = SAMPLE_ROOT / "songzhenxi" / "KSU2506" / "DCU" / "DL" / "LT" / "UH_480V_000.tss"
+DL_UL = SAMPLE_ROOT / "songzhenxi" / "KSU2506" / "DCU" / "DL" / "LT" / "UL_480V_000.tss"
 DDD_UH = (
     SAMPLE_ROOT
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
     / "DDD"
@@ -30,7 +30,7 @@ NED34_SHORT_VH_750 = (
 )
 DDD_RT_VH = (
     SAMPLE_ROOT
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
     / "DDD"

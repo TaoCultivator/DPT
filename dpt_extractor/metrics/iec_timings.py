@@ -166,8 +166,9 @@ def turn_off_timing_instants(
                 t_i90 = local_i90
                 t_i10 = local_i10
     if t_i10 is None:
-        td_off = max(0.0, (t_i90 - t_v90) * 1e9)
-        return TurnOffTimingInstants(t_v90, t_i90, None, td_off, 0.0, td_off)
+        # Without the 10% Ic crossing there is no complete Tf/Toff interval.
+        # Do not expose Td_off as a fabricated total off time.
+        return TurnOffTimingInstants(t_v90, t_i90, None, 0.0, 0.0, 0.0)
 
     td_off = max(0.0, (t_i90 - t_v90) * 1e9)
     tf = max(0.0, (t_i10 - t_i90) * 1e9)
@@ -703,19 +704,26 @@ def turn_on_timing_instants(
         t_i10 = None
         t_i90 = None
 
+    # Vge10 starts the IEC Ton chain and must precede Ic10.  A reversed pair
+    # is ambiguous or belongs to another event; fail closed rather than using
+    # absolute durations that would violate Ton = Td_on + Tr.
+    if t_v10 is not None and t_i10 is not None and t_v10 >= t_i10:
+        t_i10 = None
+        t_i90 = None
+
     # IEC60747-9 / ZF：Td_on=10%Vge→10%Icm，Tr=10%Icm→90%Icm，Ton=10%Vge→90%Icm ⇒ Ton=Td_on+Tr
     td_on = (
-        abs(t_i10 - t_v10) * 1e9
+        (t_i10 - t_v10) * 1e9
         if t_v10 is not None and t_i10 is not None
         else 0.0
     )
     tr = (
-        abs(t_i90 - t_i10) * 1e9
+        (t_i90 - t_i10) * 1e9
         if t_i10 is not None and t_i90 is not None
         else 0.0
     )
     ton = (
-        abs(t_i90 - t_v10) * 1e9
+        (t_i90 - t_v10) * 1e9
         if t_v10 is not None and t_i90 is not None
         else 0.0
     )

@@ -25,7 +25,7 @@ UL = sample_tss("UL_750V_1050A_000.tss")
 VH = sample_tss("VH_750V_1050A_000.tss")
 WL_450_SMC_LT = (
     SAMPLE_ROOT
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2506"
     / "DCU"
     / "SMC"

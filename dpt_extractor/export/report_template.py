@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 import re
 from typing import Callable, Mapping
@@ -38,6 +39,7 @@ from dpt_extractor.export.mcu2506_layout import (
 )
 from dpt_extractor.models.results import ExtractResult, power_metric_name
 from dpt_extractor.utils.filename import parse_setpoints_from_filename
+from dpt_extractor.utils.temperature import infer_temperature_token_code
 
 
 PHASE_CODES = ("UH", "UL", "VH", "VL", "WH", "WL")
@@ -63,12 +65,19 @@ class _TemperatureIdentityLabels(dict[str, str | int | float]):
         *,
         previous: Mapping[str, object] | None = None,
     ) -> None:
-        super().__init__(current or {})
         self.previous = {
             str(code).strip().upper(): value
             for code, value in (previous or {}).items()
             if str(code).strip().upper() in TEMP_LABELS
         }
+        current_values = {
+            str(code).strip().upper(): value
+            for code, value in (current or {}).items()
+            if str(code).strip().upper() in TEMP_LABELS
+        }
+        merged = dict(self.previous)
+        merged.update(current_values)
+        super().__init__(merged)
 
 DPT_OVERVIEW_IMAGE_PARAM = ("总概览图", "全局")
 DPT_DATA_GROUP_TEMPLATE_ROWS = 4
@@ -701,12 +710,9 @@ def _infer_temp_code(path: str) -> str:
         for code in TEMP_LABELS:
             if re.search(rf"(?<![A-Z0-9]){code}(?![A-Z0-9])", stem):
                 return code
-        if re.search(r"(?<!\d)25(?:℃|C|DEG)?(?!\d)", stem):
-            return "RT"
-        if re.search(r"(?<!\d)150(?:℃|C|DEG)?(?!\d)", stem):
-            return "HT"
-        if re.search(r"(?<!\d)-?40(?:℃|C|DEG)?(?!\d)", stem):
-            return "LT"
+        numeric_code = infer_temperature_token_code(stem)
+        if numeric_code is not None:
+            return numeric_code
     return "RT"
 
 
@@ -1107,6 +1113,21 @@ def _data_row_setpoints(ws: Worksheet, row: int) -> tuple[float | None, float | 
     )
 
 
+def _dpt_setpoint_order_key(
+    voltage_v: float | None,
+    current_a: float | None,
+) -> tuple[float, float] | None:
+    """Return the report row order: voltage first, then current."""
+
+    if voltage_v is None or current_a is None:
+        return None
+    voltage = float(voltage_v)
+    current = float(current_a)
+    if not isfinite(voltage) or not isfinite(current):
+        return None
+    return voltage, current
+
+
 def _data_row_matches_setpoints(
     ws: Worksheet,
     row: int,
@@ -1184,7 +1205,11 @@ def _shift_merged_range_for_insert(
 ) -> CellRange:
     min_row = rng.min_row
     max_row = rng.max_row
-    if rng.min_row == group_start_row and rng.max_row == insert_row - 1 and rng.min_col <= 3:
+    if (
+        rng.min_row == group_start_row
+        and rng.min_col <= COL_CONDITION
+        and rng.min_row <= insert_row <= rng.max_row + 1
+    ):
         max_row += 1
     elif rng.min_row >= insert_row:
         min_row += 1
@@ -1201,14 +1226,27 @@ def _shift_merged_range_for_insert(
 
 def _insert_dpt_data_row(data_ws: Worksheet, group_start_row: int, insert_row: int) -> int:
     source_row = max(group_start_row, insert_row - 1)
+    group_header_values = {
+        col: copy(_merged_value(data_ws, group_start_row, col))
+        for col in range(1, COL_CONDITION + 1)
+    }
+    max_row_before = data_ws.max_row
     merged_ranges = [CellRange(str(rng)) for rng in data_ws.merged_cells.ranges]
     for rng in list(data_ws.merged_cells.ranges):
         data_ws.unmerge_cells(str(rng))
 
-    if insert_row <= data_ws.max_row:
+    if insert_row <= max_row_before:
         data_ws.insert_rows(insert_row)
         _shift_row_dimensions_for_insert(data_ws, insert_row, 1)
-    _copy_row_style(data_ws, source_row, insert_row)
+    copied_source_row = (
+        source_row + 1
+        if insert_row <= max_row_before and insert_row <= source_row
+        else source_row
+    )
+    _copy_row_style(data_ws, copied_source_row, insert_row)
+    if insert_row == group_start_row:
+        for col, value in group_header_values.items():
+            data_ws.cell(insert_row, col).value = value
 
     for rng in merged_ranges:
         shifted = _shift_merged_range_for_insert(
@@ -1539,6 +1577,22 @@ def _next_dpt_data_row(
     for row in range(start_row, end_row_exclusive):
         if _data_row_matches_setpoints(data_ws, row, setpoints):
             return row, False
+
+    requested_key = _dpt_setpoint_order_key(setpoints.vdc, setpoints.idc)
+    if requested_key is not None:
+        empty_row_before_larger: int | None = None
+        for row in range(start_row, end_row_exclusive):
+            if not _data_row_has_payload(data_ws, row):
+                if empty_row_before_larger is None:
+                    empty_row_before_larger = row
+                continue
+            row_key = _dpt_setpoint_order_key(*_data_row_setpoints(data_ws, row))
+            if row_key is None or row_key <= requested_key:
+                continue
+            if empty_row_before_larger is not None:
+                return empty_row_before_larger, False
+            return _insert_dpt_data_row(data_ws, start_row, row), True
+
     for row in range(start_row, end_row_exclusive):
         if not _data_row_has_payload(data_ws, row):
             return row, False
@@ -2221,10 +2275,12 @@ def _sync_dpt_waveform_insertions(
             target.group_start_row,
             target.row,
         )
-        _insert_dpt_waveform_block(
-            ws,
-            group_base + row_index * DPT_WAVEFORM_BLOCK_STRIDE,
-        )
+        insert_row = group_base + row_index * DPT_WAVEFORM_BLOCK_STRIDE
+        _insert_dpt_waveform_block(ws, insert_row)
+        # The new block is cloned from its neighbour for layout and styles.
+        # Clear cloned condition labels so an insertion at a group boundary
+        # cannot be mistaken for a live block from the preceding phase.
+        _clear_dpt_waveform_block_payload(ws, insert_row)
 
 
 def _set_value(ws: Worksheet, row: int, col: int, value) -> None:
@@ -2691,25 +2747,44 @@ def _all_header_ranges_by_texts(ws: Worksheet, header_texts) -> list[CellRange]:
     def matches(value: object) -> bool:
         return any(_header_matches(value, needle) for needle in needles)
 
+    # A populated report can contain thousands of rows and merged image slots.
+    # Iterating the full rectangular worksheet and then scanning every merged
+    # range for every cell makes report writes grow roughly as
+    # rows * columns * merged-ranges.  Header cells are sparse, so index only
+    # materialized cells and merged-range anchors instead.
+    merged_anchors: set[tuple[int, int]] = set()
     for header_rng in ws.merged_cells.ranges:
+        merged_anchors.add((header_rng.min_row, header_rng.min_col))
         if header_rng.min_row != header_rng.max_row:
             continue
         if not matches(ws.cell(header_rng.min_row, header_rng.min_col).value):
             continue
         _add_unique_range(ranges, seen, header_rng)
 
-    for row in range(1, ws.max_row + 1):
-        for col in range(1, ws.max_column + 1):
-            if _cell_in_merged_range(ws, row, col):
-                continue
-            if not matches(ws.cell(row, col).value):
-                continue
-            _add_unique_range(
-                ranges,
-                seen,
-                CellRange(min_col=col, max_col=col, min_row=row, max_row=row),
-            )
-    return ranges
+    cells = sorted(
+        getattr(ws, "_cells", {}).values(),
+        key=lambda cell: (cell.row, cell.column),
+    )
+    for cell in cells:
+        if isinstance(cell, MergedCell):
+            continue
+        coord = (cell.row, cell.column)
+        if coord in merged_anchors or not matches(cell.value):
+            continue
+        _add_unique_range(
+            ranges,
+            seen,
+            CellRange(
+                min_col=cell.column,
+                max_col=cell.column,
+                min_row=cell.row,
+                max_row=cell.row,
+            ),
+        )
+    return sorted(
+        ranges,
+        key=lambda rng: (rng.min_row, rng.min_col, rng.max_row, rng.max_col),
+    )
 
 
 def _normalize_dpt_waveform_text(
@@ -2889,13 +2964,6 @@ def _prepare_uniform_image_slots(
     return REPORT_IMAGE_DISPLAY_SIZE_PX
 
 
-def _cell_in_merged_range(ws: Worksheet, row: int, col: int) -> bool:
-    for rng in ws.merged_cells.ranges:
-        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
-            return True
-    return False
-
-
 def _add_unique_range(
     ranges: list[CellRange],
     seen: set[tuple[int, int, int, int]],
@@ -2914,39 +2982,14 @@ def _all_picture_ranges_by_headers(
     *,
     rows: int,
 ) -> list[CellRange]:
-    needles = [_normalized(text) for text in header_texts if _normalized(text)]
     ranges: list[CellRange] = []
     seen: set[tuple[int, int, int, int]] = set()
-
-    def matches(value: object) -> bool:
-        return any(_header_matches(value, needle) for needle in needles)
-
-    for header_rng in ws.merged_cells.ranges:
-        if header_rng.min_row != header_rng.max_row:
-            continue
-        if not matches(ws.cell(header_rng.min_row, header_rng.min_col).value):
-            continue
+    for header_rng in _all_header_ranges_by_texts(ws, header_texts):
         _add_unique_range(
             ranges,
             seen,
             _picture_range_below(ws, header_rng, rows=rows),
         )
-
-    for row in range(1, ws.max_row + 1):
-        for col in range(1, ws.max_column + 1):
-            if _cell_in_merged_range(ws, row, col):
-                continue
-            if not matches(ws.cell(row, col).value):
-                continue
-            _add_unique_range(
-                ranges,
-                seen,
-                _picture_range_below(
-                    ws,
-                    CellRange(min_col=col, max_col=col, min_row=row, max_row=row),
-                    rows=rows,
-                ),
-            )
     return ranges
 
 

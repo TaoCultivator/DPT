@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import atexit
 from dataclasses import dataclass
 import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import subprocess
 import tempfile
-from typing import Callable
+import threading
+import time
+from typing import Callable, TextIO
 
 import numpy as np
 
@@ -18,6 +22,30 @@ from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
 _ANALOG_OR_MATH_SOURCE = re.compile(r"^(?:CH\d+|MATH\d+)$", re.IGNORECASE)
 _PROGRESS_PREFIX = "PROGRESS\t"
 _RESULT_PREFIX = "RESULT\t"
+_BRIDGE_IDLE_TIMEOUT_SECONDS = {
+    "discover": 30.0,
+    "acquire": 75.0,
+    "sync": 30.0,
+}
+_BRIDGE_TOTAL_TIMEOUT_SECONDS = {
+    "discover": 45.0,
+    "acquire": 600.0,
+    "sync": 60.0,
+}
+_BRIDGE_OPERATION_LABELS = {
+    "discover": "发现",
+    "acquire": "波形读取",
+    "sync": "光标同步",
+}
+_BRIDGE_TERMINATE_GRACE_SECONDS = 2.0
+_ACTIVE_BRIDGE_PROCESSES: set[subprocess.Popen[str]] = set()
+_ACTIVE_BRIDGE_LOCK = threading.Lock()
+_BRIDGE_PROVIDER_LOCK = threading.Lock()
+_LAST_WORKING_BRIDGE_PROVIDER: str | None = None
+_TEKVISA_USED_BY_PROCESS = False
+_TEKVISA_RESOURCE_MANAGER_PATH = (
+    r"C:\Program Files\IVI Foundation\VISA\Win64\TekVISA\Bin\TekVisaRM.exe"
+)
 
 
 class TekScopeError(RuntimeError):
@@ -26,6 +54,14 @@ class TekScopeError(RuntimeError):
 
 class ScopeNotFoundError(TekScopeError):
     pass
+
+
+class _BridgeIdentityError(TekScopeError):
+    """A provider failed before waveform transfer or synchronization began."""
+
+    def __init__(self, message: str, *, scope_not_found: bool = False) -> None:
+        super().__init__(message)
+        self.scope_not_found = scope_not_found
 
 
 @dataclass(frozen=True)
@@ -112,14 +148,172 @@ def _powershell_executable() -> str:
     return str(executable)
 
 
-def _run_bridge(
+def _bridge_timeouts(operation: str) -> tuple[float, float]:
+    return (
+        _BRIDGE_IDLE_TIMEOUT_SECONDS.get(operation, 30.0),
+        _BRIDGE_TOTAL_TIMEOUT_SECONDS.get(operation, 60.0),
+    )
+
+
+def _bridge_provider_order() -> tuple[str, str]:
+    with _BRIDGE_PROVIDER_LOCK:
+        preferred = _LAST_WORKING_BRIDGE_PROVIDER
+    if preferred == "NI-VISA":
+        return "NI-VISA", "TekVISA"
+    return "TekVISA", "NI-VISA"
+
+
+def _remember_bridge_provider(provider: str) -> None:
+    if provider not in {"TekVISA", "NI-VISA"}:
+        return
+    global _LAST_WORKING_BRIDGE_PROVIDER
+    with _BRIDGE_PROVIDER_LOCK:
+        _LAST_WORKING_BRIDGE_PROVIDER = provider
+
+
+def _bridge_progress_label(label: str) -> str:
+    if label.startswith("Initializing "):
+        return f"正在初始化 {label.removeprefix('Initializing ')}"
+    if label == "Loading TekVISA adapter...":
+        return "正在加载 TekVISA 适配器..."
+    if label == "Opening TekVISA resource manager...":
+        return "正在创建 TekVISA 资源管理器..."
+    if label == "TekVISA resource manager ready":
+        return "TekVISA 资源管理器已就绪"
+    if label.startswith("Searching scope via "):
+        provider = label.removeprefix("Searching scope via ").removesuffix("...")
+        return f"正在通过 {provider} 搜索示波器..."
+    if label.startswith("Opening scope "):
+        return "正在打开 USB 示波器..."
+    if label.startswith("Connected scope via "):
+        provider = label.removeprefix("Connected scope via ").removesuffix("...")
+        return f"已通过 {provider} 连接示波器"
+    if label == "Preparing scope waveform transfer...":
+        return "正在准备示波器波形读取..."
+    if label.startswith("Reading scope "):
+        return f"读取示波器 {label.removeprefix('Reading scope ')}"
+    if label.startswith("Read scope "):
+        return f"已读取示波器 {label.removeprefix('Read scope ')}"
+    if label == "Scope waveform transfer complete":
+        return "示波器波形读取完成"
+    return label
+
+
+def _register_bridge_process(process: subprocess.Popen[str]) -> None:
+    with _ACTIVE_BRIDGE_LOCK:
+        _ACTIVE_BRIDGE_PROCESSES.add(process)
+
+
+def _unregister_bridge_process(process: subprocess.Popen[str]) -> None:
+    with _ACTIVE_BRIDGE_LOCK:
+        _ACTIVE_BRIDGE_PROCESSES.discard(process)
+
+
+def _terminate_bridge_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=_BRIDGE_TERMINATE_GRACE_SECONDS)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=_BRIDGE_TERMINATE_GRACE_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _terminate_active_bridge_processes() -> None:
+    with _ACTIVE_BRIDGE_LOCK:
+        processes = tuple(_ACTIVE_BRIDGE_PROCESSES)
+        _ACTIVE_BRIDGE_PROCESSES.clear()
+    for process in processes:
+        _terminate_bridge_process(process)
+
+
+def _terminate_hung_tekvisa_resource_managers() -> None:
+    """Best-effort cleanup of the out-of-process TekVISA server after init fails.
+
+    TekVISA starts ``TekVisaRM.exe`` outside the bridge process.  Terminating a
+    timed-out bridge therefore does not terminate that server, and the orphan
+    can keep the USBTMC device locked so the NI-VISA identity fallback also
+    fails.  Limit cleanup to the exact official executable path and only call
+    it after TekVISA has failed before data transfer begins.
+    """
+
+    script = (
+        f"$expected = '{_TEKVISA_RESOURCE_MANAGER_PATH}'; "
+        "Get-Process -Name 'TekVisaRM' -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Path -eq $expected } | "
+        "Stop-Process -Force -ErrorAction SilentlyContinue"
+    )
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.run(
+            [
+                _powershell_executable(),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5.0,
+            creationflags=creation_flags,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _read_bridge_stream(
+    stream_name: str,
+    stream: TextIO,
+    output_queue: queue.Queue[tuple[str, str | None]],
+) -> None:
+    try:
+        while True:
+            line = stream.readline()
+            if line == "":
+                break
+            output_queue.put((stream_name, line))
+    finally:
+        output_queue.put((stream_name, None))
+
+
+def shutdown_tektronix_backend() -> None:
+    """Stop every external VISA helper process started by this application."""
+
+    global _TEKVISA_USED_BY_PROCESS
+    _terminate_active_bridge_processes()
+    if _TEKVISA_USED_BY_PROCESS:
+        # TekVISA hosts its resource manager outside the PowerShell bridge, so
+        # terminating only the bridge can leave TekVisaRM.exe alive after the
+        # GUI exits.  The helper already limits termination to Tektronix's exact
+        # official executable path.
+        _terminate_hung_tekvisa_resource_managers()
+        _TEKVISA_USED_BY_PROCESS = False
+
+
+atexit.register(shutdown_tektronix_backend)
+
+
+def _run_bridge_once(
     operation: str,
     *,
+    provider: str,
     resource: str = "",
     output_path: str = "",
     state_path: str = "",
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, object]:
+    global _TEKVISA_USED_BY_PROCESS
+    if provider == "TekVISA":
+        _TEKVISA_USED_BY_PROCESS = True
     command = [
         _powershell_executable(),
         "-NoLogo",
@@ -131,6 +325,8 @@ def _run_bridge(
         str(_bridge_script_path()),
         "-Operation",
         operation,
+        "-Provider",
+        provider,
     ]
     if resource:
         command.extend(("-Resource", resource))
@@ -148,31 +344,192 @@ def _run_bridge(
         errors="replace",
         creationflags=creation_flags,
     )
+    _register_bridge_process(process)
     result: dict[str, object] | None = None
+    stderr_lines: list[str] = []
     assert process.stdout is not None
-    for raw_line in process.stdout:
-        line = raw_line.rstrip("\r\n")
-        if line.startswith(_PROGRESS_PREFIX):
-            fields = line.split("\t", 3)
-            if progress_callback is not None and len(fields) == 4:
-                label = fields[3]
-                if label.startswith("Reading scope "):
-                    label = f"读取示波器 {label.removeprefix('Reading scope ')}"
-                elif label == "Scope waveform transfer complete":
-                    label = "示波器波形读取完成"
-                progress_callback(int(fields[1]), int(fields[2]), label)
-        elif line.startswith(_RESULT_PREFIX):
-            result = json.loads(line[len(_RESULT_PREFIX) :])
-    stderr = process.stderr.read().strip() if process.stderr is not None else ""
-    return_code = process.wait()
+    assert process.stderr is not None
+    output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    readers = (
+        threading.Thread(
+            target=_read_bridge_stream,
+            args=("stdout", process.stdout, output_queue),
+            name=f"tek-scope-{operation}-stdout",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_read_bridge_stream,
+            args=("stderr", process.stderr, output_queue),
+            name=f"tek-scope-{operation}-stderr",
+            daemon=True,
+        ),
+    )
+    for reader in readers:
+        reader.start()
+
+    idle_timeout, total_timeout = _bridge_timeouts(operation)
+    started_at = time.monotonic()
+    last_output_at = started_at
+    open_streams = {"stdout", "stderr"}
+    timeout_message = ""
+    max_progress = 0
+    try:
+        while open_streams or process.poll() is None:
+            now = time.monotonic()
+            idle_elapsed = now - last_output_at
+            total_elapsed = now - started_at
+            if total_elapsed >= total_timeout:
+                operation_label = _BRIDGE_OPERATION_LABELS.get(operation, operation)
+                timeout_message = (
+                    f"示波器{operation_label}操作超过 {total_timeout:g} 秒，"
+                    "已终止无响应的 VISA 桥接进程"
+                )
+                break
+            if max_progress <= 2:
+                current_idle_timeout = min(idle_timeout, 15.0)
+            elif max_progress < 6:
+                current_idle_timeout = min(idle_timeout, 30.0)
+            else:
+                current_idle_timeout = idle_timeout
+            if idle_elapsed >= current_idle_timeout:
+                operation_label = _BRIDGE_OPERATION_LABELS.get(operation, operation)
+                timeout_message = (
+                    f"{provider} 示波器{operation_label}操作连续 "
+                    f"{current_idle_timeout:g} 秒无响应，"
+                    "已终止 VISA 桥接进程，请检查 USB 连接和 VISA 驱动后重试"
+                )
+                break
+            wait_seconds = max(
+                0.01,
+                min(
+                    0.1,
+                    current_idle_timeout - idle_elapsed,
+                    total_timeout - total_elapsed,
+                ),
+            )
+            try:
+                stream_name, raw_line = output_queue.get(timeout=wait_seconds)
+            except queue.Empty:
+                continue
+            if raw_line is None:
+                open_streams.discard(stream_name)
+                continue
+            last_output_at = time.monotonic()
+            line = raw_line.rstrip("\r\n")
+            if stream_name == "stderr":
+                stderr_lines.append(line)
+                continue
+            if line.startswith(_PROGRESS_PREFIX):
+                fields = line.split("\t", 3)
+                if len(fields) == 4:
+                    done = int(fields[1])
+                    total = int(fields[2])
+                    if total > 0:
+                        max_progress = max(
+                            max_progress,
+                            int(round(100 * max(0, min(done, total)) / total)),
+                        )
+                    label = _bridge_progress_label(fields[3])
+                    if progress_callback is not None:
+                        progress_callback(done, total, label)
+            elif line.startswith(_RESULT_PREFIX):
+                result = json.loads(line[len(_RESULT_PREFIX) :])
+
+        if timeout_message:
+            _terminate_bridge_process(process)
+            if max_progress < 6:
+                if provider == "TekVISA":
+                    _terminate_hung_tekvisa_resource_managers()
+                raise _BridgeIdentityError(timeout_message)
+            raise TekScopeError(timeout_message)
+        return_code = process.wait(timeout=_BRIDGE_TERMINATE_GRACE_SECONDS)
+    except Exception:
+        _terminate_bridge_process(process)
+        raise
+    finally:
+        _unregister_bridge_process(process)
+        for reader in readers:
+            reader.join(timeout=0.5)
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    stderr = "\n".join(stderr_lines).strip()
     if return_code != 0:
         message = stderr.splitlines()[-1].strip() if stderr else "VISA 桥接进程失败"
-        if "SCOPE_NOT_FOUND" in message:
-            raise ScopeNotFoundError("未找到通过 USB 连接的 Tektronix 示波器")
+        if max_progress < 6:
+            if provider == "TekVISA":
+                _terminate_hung_tekvisa_resource_managers()
+            scope_not_found = "SCOPE_NOT_FOUND" in message
+            if scope_not_found:
+                message = "未找到通过 USB 连接的 Tektronix 示波器"
+            raise _BridgeIdentityError(message, scope_not_found=scope_not_found)
         raise TekScopeError(message)
     if result is None:
-        raise TekScopeError("VISA 桥接进程未返回结果")
+        message = "VISA 桥接进程未返回结果"
+        if max_progress < 6:
+            if provider == "TekVISA":
+                _terminate_hung_tekvisa_resource_managers()
+            raise _BridgeIdentityError(message)
+        raise TekScopeError(message)
     return result
+
+
+def _run_bridge(
+    operation: str,
+    *,
+    resource: str = "",
+    output_path: str = "",
+    state_path: str = "",
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict[str, object]:
+    identity_errors: list[str] = []
+    scope_not_found_count = 0
+    providers = _bridge_provider_order()
+    max_progress_fraction = 0.0
+
+    def emit_progress(done: int, total: int, label: str) -> None:
+        """Forward bridge progress without allowing provider fallback to rewind it."""
+
+        nonlocal max_progress_fraction
+        safe_total = max(1, int(total))
+        requested = max(0, min(int(done), safe_total)) / safe_total
+        max_progress_fraction = max(max_progress_fraction, requested)
+        if progress_callback is not None:
+            progress_callback(
+                int(math.ceil(max_progress_fraction * safe_total - 1e-12)),
+                safe_total,
+                label,
+            )
+
+    for index, provider in enumerate(providers):
+        if index > 0:
+            emit_progress(
+                1,
+                100,
+                f"{providers[0]} 身份连接失败，正在尝试 {provider}...",
+            )
+        try:
+            result = _run_bridge_once(
+                operation,
+                provider=provider,
+                resource=resource,
+                output_path=output_path,
+                state_path=state_path,
+                progress_callback=emit_progress,
+            )
+            _remember_bridge_provider(_clean_text(result.get("visa_backend")) or provider)
+            return result
+        except _BridgeIdentityError as exc:
+            identity_errors.append(f"{provider}: {exc}")
+            if exc.scope_not_found:
+                scope_not_found_count += 1
+    if scope_not_found_count == len(providers):
+        raise ScopeNotFoundError("未找到通过 USB 连接的 Tektronix 示波器")
+    detail = "; ".join(identity_errors)
+    raise TekScopeError(f"无法连接 Tektronix 示波器：{detail}")
 
 
 def discover_tektronix_scope() -> ScopeIdentity:

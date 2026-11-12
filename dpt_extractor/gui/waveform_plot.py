@@ -724,8 +724,17 @@ HORIZONTAL_DIV_COUNT = 10.0  # 横向整格数（与 _update_x_ticks 一致）
 X_NS_PER_DIV = 50  # 水平标度 ns/格 步进（滚轮与显示量化）
 PARAM_FOCUS_DEFAULT_US_PER_DIV = 0.2  # 点击参数局部放大默认 200 ns/div
 PARAM_FOCUS_ANCHOR_FRACTION = 0.12  # 左留约 1.2 格保住前态/切换起点，其余尽量展示右侧振铃
-PARAM_FOCUS_MAX_ANCHOR_FRACTION = 0.65  # 必需早时刻冲突时仍至少给右侧保留约 3.5 格
+PARAM_FOCUS_MAX_ANCHOR_FRACTION = 0.65  # 构图偏好：无硬内容冲突时事件锚点不晚于约 6.5 格
 PARAM_FOCUS_REQUIRED_GUARD_US = 0.02  # A/B 等必要内容离视窗边缘至少约 20ns
+PARAM_FOCUS_RIGHT_PRIORITY_LEFT_SLACK_FRACTION = 0.30  # 非门极参数保留约三成余量给前态、七成给右侧震荡
+PARAM_FOCUS_RIGHT_PRIORITY_LATEST_FRACTION = 0.50  # 可行时让物理阶段后端不晚于窗口中线
+TF_FOCUS_MIDPOINT_FRACTION = 0.43  # Tf 是 Toff 尾段；A/B 中点略偏左但不贴边，兼顾前序 Td_off 与右侧余量
+TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION = 0.43  # 开通电流 A/B 区间较宽时避免 A 贴左边，保持右侧平台观察区
+TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION = 0.43  # 开通 dv/dt、di/dt 同时观察 Base/Top 平台，平衡两侧余量
+TURN_ON_LS_FOCUS_MIDPOINT_FRACTION = 0.43  # Ls_on 与开通 di/dt 共用积分 A/B，保持同一平衡取景比例
+RR_POWER_FOCUS_MIDPOINT_FRACTION = 0.43  # Pdmax 稳定电流 A/B 中点，功率主瓣不再挤向左边缘
+RR_ERR_FOCUS_MIDPOINT_FRACTION = 0.43  # Err 真实 A/B 中点，保留右侧恢复振铃观察区
+RR_TRR_ANCHOR_FRACTION = 0.12  # Trr 保留必要尾段，同时把 A/B 从左边缘向右移一点
 VERT_VIEW_MARGIN = 0.10  # 纵向上下各留 10% 空白
 PLOT_AXIS_LABEL_EDGE_INSET = 0.0
 PLOT_AXIS_LABEL_END_GUARD = 0.008
@@ -738,6 +747,7 @@ CURRENT_VDIV_DEFAULT = 200.0  # 电流通道默认刻度（A/格）
 CURRENT_VDIV_MAX = 300.0  # 电流通道可选上限（含 250、300）
 POWER_VDIV_DEFAULT = 500_000.0  # 功率通道默认刻度：500 kW/格
 RR_POWER_VDIV_DEFAULT = 200_000.0  # 反向恢复功率默认刻度：200 kW/格
+PARAMETER_POWER_REFERENCE_CHANNEL = "PARAM_POWER_REFERENCE"
 _NICE_STEPS = (1.0, 2.0, 2.5, 5.0)
 
 # 参考示波器默认垂直刻度（Ch1 5V/格, Ch2 200V/格, Ch3/4 200A/格, Ch5 200V/格, Ch6 5V/格）
@@ -1030,8 +1040,17 @@ def _solve_parameter_x_window(
     base_span_us: float = PARAM_FOCUS_DEFAULT_US_PER_DIV * HORIZONTAL_DIV_COUNT,
     anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
     guard_us: float = PARAM_FOCUS_REQUIRED_GUARD_US,
+    prefer_right_room: bool = False,
+    composition_anchor_us: float | None = None,
+    composition_balance_fraction: float | None = None,
 ) -> tuple[float, float]:
-    """求解有界参数局部视窗；优先保证完整数据范围与必要时刻可见。"""
+    """求解有界参数局部视窗；优先保证完整数据范围与必要时刻可见。
+
+    ``anchor_us`` historically doubled as both the composition anchor and a
+    hard visibility point.  Some turn-on/recovery cards use the Vge edge only
+    as a visual reference; ``composition_anchor_us`` separates that role from
+    the physical A/B or stable-platform times which must remain hard bounds.
+    """
     bounds: tuple[float, float] | None = None
     if full_range is not None:
         f0, f1 = (float(full_range[0]), float(full_range[1]))
@@ -1040,6 +1059,11 @@ def _solve_parameter_x_window(
 
     required = [float(value) for value in required_times_us if np.isfinite(value)]
     anchor = float(anchor_us)
+    composition_anchor = (
+        float(composition_anchor_us)
+        if composition_anchor_us is not None
+        else anchor
+    )
     if not np.isfinite(anchor):
         if required:
             anchor = 0.5 * (min(required) + max(required))
@@ -1047,12 +1071,21 @@ def _solve_parameter_x_window(
             anchor = 0.5 * (bounds[0] + bounds[1])
         else:
             anchor = 0.0
+    if not np.isfinite(composition_anchor):
+        composition_anchor = anchor
 
     if bounds is not None:
         f0, f1 = bounds
         anchor = float(np.clip(anchor, f0, f1))
+        composition_anchor = float(np.clip(composition_anchor, f0, f1))
         required = [float(np.clip(value, f0, f1)) for value in required]
-    required.append(anchor)
+    # A composition-only anchor must not widen the physical envelope or force
+    # a late event into the right edge of the viewport.  Preserve the legacy
+    # hard-anchor behavior when the optional argument is omitted.
+    if composition_anchor_us is None:
+        required.append(anchor)
+    elif not required:
+        required.append(anchor)
 
     fraction = float(np.clip(anchor_fraction, 0.05, 0.95))
     guard = max(0.0, float(guard_us))
@@ -1065,21 +1098,20 @@ def _solve_parameter_x_window(
         guarded_hi = min(bounds[1], guarded_hi)
 
     # ``anchor_fraction`` is the preferred composition, not a reason to widen
-    # an otherwise valid 200 ns/div view.  First size the window only from the
-    # requested baseline and the hard required-time envelope; if the preferred
-    # anchor position conflicts with A/B visibility, shift the window instead.
+    # an otherwise valid 200 ns/div view.  Stable-platform cursor times and the
+    # event anchor are hard visibility requirements; spare post-event room is
+    # soft.  Size from the baseline and the real required-time envelope first,
+    # then shift the window when the preferred anchor position conflicts.
     span = max(
         MIN_X_SPAN_US,
         abs(float(base_span_us)),
         max(0.0, guarded_hi - guarded_lo),
-        max(0.0, guarded_hi - anchor) / (1.0 - fraction),
-        max(0.0, anchor - guarded_lo) / PARAM_FOCUS_MAX_ANCHOR_FRACTION,
     )
     span = _ceil_x_us_per_div(span / HORIZONTAL_DIV_COUNT) * HORIZONTAL_DIV_COUNT
     if bounds is not None:
         span = min(span, bounds[1] - bounds[0])
 
-    ideal_x0 = anchor - fraction * span
+    ideal_x0 = composition_anchor - fraction * span
     if bounds is None:
         domain_lo, domain_hi = -np.inf, np.inf
     else:
@@ -1087,10 +1119,77 @@ def _solve_parameter_x_window(
         domain_hi = bounds[1] - span
 
     # x0 必须同时满足完整波形边界和 [guarded_lo, guarded_hi] 可见。
+    # 不再仅为固定右侧空白比例扩大已经能容纳真实光标的 2 us 基准窗。
     feasible_lo = max(domain_lo, guarded_hi - span)
     feasible_hi = min(domain_hi, guarded_lo)
+    if composition_anchor_us is not None:
+        # Keep the Vge reference just inside the left edge when possible, but
+        # do not add it to the physical required envelope.  This gives delayed
+        # recovery tails room on the right without losing the visual event
+        # reference.
+        composition_guard = min(guard, 0.10 * span)
+        feasible_lo = max(
+            feasible_lo,
+            composition_anchor + composition_guard - span,
+        )
+        feasible_hi = min(
+            feasible_hi,
+            composition_anchor - composition_guard,
+        )
     if feasible_lo <= feasible_hi + 1e-12:
-        x0 = float(np.clip(ideal_x0, feasible_lo, feasible_hi))
+        if prefer_right_room:
+            # Non-gate parameter cards own a real physical A/B (or equivalent
+            # stable/integration) envelope.  Split only the *remaining* room,
+            # not a fixed number of microseconds: keep a small adaptive prefix
+            # for the pre-event plateau and give most of the spare width to
+            # post-event ringing/settling.  If the latest required point can
+            # be brought into the left half without clipping the earliest one
+            # or widening the timebase, do so.  Hard visibility and waveform
+            # bounds still win when those goals conflict.
+            required_width = max(0.0, guarded_hi - guarded_lo)
+            slack = max(0.0, span - required_width)
+            right_priority_x0 = guarded_lo - (
+                PARAM_FOCUS_RIGHT_PRIORITY_LEFT_SLACK_FRACTION * slack
+            )
+            latest_left_half_x0 = req_hi - (
+                PARAM_FOCUS_RIGHT_PRIORITY_LATEST_FRACTION * span
+            )
+            right_priority_x0 = max(right_priority_x0, latest_left_half_x0)
+            if (
+                composition_anchor_us is not None
+                and composition_balance_fraction is not None
+                and np.isfinite(float(composition_balance_fraction))
+            ):
+                event_fraction = float(
+                    np.clip(float(composition_balance_fraction), 0.05, 0.95)
+                )
+                balanced_event_x0 = (
+                    0.5 * (guarded_lo + guarded_hi)
+                    - event_fraction * span
+                )
+                # When the physical envelope already fits, use the explicit
+                # event-centred composition target.  The old ``max``-only rule
+                # could leave a narrow A/B pair at ~35% despite the requested
+                # balanced 43% view.  Feasible bounds still clamp this target
+                # for short records or a genuinely late event.
+                right_priority_x0 = float(
+                    np.clip(balanced_event_x0, feasible_lo, feasible_hi)
+                )
+            x0 = float(np.clip(right_priority_x0, feasible_lo, feasible_hi))
+        else:
+            # Preserve the usual 12%~65% anchor composition whenever it fits
+            # the already selected timebase.  If stable-platform cursor
+            # visibility conflicts, relax the composition and shift the same-
+            # size window.
+            preferred_lo = max(
+                feasible_lo,
+                composition_anchor - PARAM_FOCUS_MAX_ANCHOR_FRACTION * span,
+            )
+            preferred_hi = min(feasible_hi, composition_anchor - fraction * span)
+            if preferred_lo <= preferred_hi + 1e-12:
+                x0 = float(np.clip(ideal_x0, preferred_lo, preferred_hi))
+            else:
+                x0 = float(np.clip(ideal_x0, feasible_lo, feasible_hi))
     else:
         # 完整波形比所需保护区还窄时退化为全范围；绝不越过数据边界。
         x0 = float(np.clip(ideal_x0, domain_lo, domain_hi))
@@ -1546,7 +1645,7 @@ class WaveformPlot(QWidget):
       - "global"   : 默认。A/B 拖动只更新读数 + 通知 MainWindow（用于无激活参数的测量）
       - "interval" : 某参数被点击后绑定到 A/B；拖动 A/B 实时重算该参数
       - "semantic_interval": A/B 保留跨通道语义顺序，允许 B 物理上位于 A 左侧
-      - "delta_vce": ΔVce 专用——A/B + Ha/Hb 联动
+      - "delta_vce": ΔVce 专用——A/B 时间范围与 Ha/Hb 电平独立
       - "dvdt"/"didt": Ha=Top、Hb=Base；A/B 卡在两者之间百分比穿越时刻（随 Ha/Hb 联动）
     """
 
@@ -2066,6 +2165,14 @@ class WaveformPlot(QWidget):
         self._interactive_search_t0_us: float | None = None
         self._interactive_search_t1_us: float | None = None
         self._interactive_syncing = False
+        # A real mouse drag is normally committed by
+        # ``sigPositionChangeFinished``.  Keep a tiny pending marker as a final
+        # report-boundary guard: if Qt delivers the report-button click before
+        # the release callback, the exact visible cursor position must still be
+        # materialized once before the report snapshot is taken.
+        self._pending_vertical_cursor_commit = False
+        self._pending_horizontal_cursor_commit = False
+        self._pending_horizontal_cursor_name: str | None = None
         self._parameter_cursor_context_suppressed = False
         self._slope_ab_valid = True
         self._interval_max_hline_enabled = False
@@ -2311,6 +2418,9 @@ class WaveformPlot(QWidget):
         self._interactive_on_horizontal_change = None
         self._interactive_search_t0_us = None
         self._interactive_search_t1_us = None
+        self._pending_vertical_cursor_commit = False
+        self._pending_horizontal_cursor_commit = False
+        self._pending_horizontal_cursor_name = None
         self._reset_interval_horizontal_bindings(valid=True)
         self._h_cursor_a_locked = False
         self.clear_cursor_auxiliary_guides()
@@ -6076,6 +6186,60 @@ class WaveformPlot(QWidget):
             float(self._trace_t_us[peak_idx]),
         )
 
+    def parameter_power_reference_channel(
+        self,
+        raw_power_w: np.ndarray,
+        *,
+        legend: str = "Pmax",
+    ) -> str:
+        """Prepare a readout-only W coordinate for a raw V*I peak cursor.
+
+        The channel deliberately has no PlotDataItem and therefore cannot
+        masquerade as a user Math waveform.  It only gives Ha an honest power
+        unit/scale when the loaded file has no visible Vce*Ic trace.  A visible
+        W/kW trace still supplies the familiar power-axis transform so the
+        reference line uses the same on-screen scale.
+        """
+
+        key = normalize_channel_reference(PARAMETER_POWER_REFERENCE_CHANNEL)
+        values = np.asarray(raw_power_w, dtype=np.float64)
+        self._trace_units[key] = "W"
+        self._trace_legend[key] = str(legend)
+        self._trace_style[key] = (CURSOR_PEN_A, 1.0)
+
+        visible_power_key = next(
+            (
+                candidate
+                for candidate in self._trace_items
+                if candidate not in self._hidden_channels
+                and _is_power_unit(self._unit_for_channel(candidate))
+            ),
+            None,
+        )
+        if visible_power_key is not None:
+            source_unit = self._unit_for_channel(visible_power_key)
+            self._disp_scale[key] = max(
+                1e-12,
+                float(self._disp_scale.get(visible_power_key, 1.0))
+                * _power_unit_to_w_factor(source_unit),
+            )
+            self._disp_offset[key] = float(
+                self._disp_offset.get(visible_power_key, 0.0)
+            )
+        else:
+            finite = values[np.isfinite(values)]
+            peak_w = float(np.max(np.abs(finite))) if finite.size else 0.0
+            self._disp_scale[key] = _nice_per_div(peak_w, target_div=4.0)
+            self._disp_offset[key] = 0.0
+        return key
+
+    def power_value_w_for_channel(self, channel: str, value: float) -> float:
+        """Convert one power-cursor value in ``channel`` units to watts."""
+
+        return float(value) * _power_unit_to_w_factor(
+            self._unit_for_channel(str(channel))
+        )
+
     def _clear_highlight(self) -> None:
         self._highlighted_key = None
         self._apply_trace_selection_style()
@@ -6158,6 +6322,9 @@ class WaveformPlot(QWidget):
             self._cursor_a = _mk_vline(a_us, CURSOR_PEN_A, "A")
             self.plot.addItem(self._cursor_a)
             self._cursor_a.sigPositionChanged.connect(self._on_any_cursor_moved)
+            self._cursor_a.sigPositionChangeFinished.connect(
+                self._on_any_cursor_drag_finished
+            )
         else:
             self._cursor_a.setPos(a_us)
             self._cursor_a.setMovable(True)
@@ -6166,6 +6333,9 @@ class WaveformPlot(QWidget):
             self._cursor_b = _mk_vline(b_us, CURSOR_PEN_B, "B")
             self.plot.addItem(self._cursor_b)
             self._cursor_b.sigPositionChanged.connect(self._on_any_cursor_moved)
+            self._cursor_b.sigPositionChangeFinished.connect(
+                self._on_any_cursor_drag_finished
+            )
         else:
             self._cursor_b.setPos(b_us)
             self._cursor_b.setMovable(True)
@@ -6178,6 +6348,9 @@ class WaveformPlot(QWidget):
             self._h_cursor_a = _mk_hline(ha_y, CURSOR_PEN_A, "Ha")
             self.plot.addItem(self._h_cursor_a)
             self._h_cursor_a.sigPositionChanged.connect(self._on_horizontal_cursor_moved)
+            self._h_cursor_a.sigPositionChangeFinished.connect(
+                self._on_horizontal_cursor_drag_finished
+            )
         else:
             self._h_cursor_a.setPos(ha_y)
             self._h_cursor_a.setPen(pg.mkPen(CURSOR_PEN_A, width=H_CURSOR_WIDTH))
@@ -6187,6 +6360,9 @@ class WaveformPlot(QWidget):
             self._h_cursor_b = _mk_hline(hb_y, CURSOR_PEN_B, "Hb")
             self.plot.addItem(self._h_cursor_b)
             self._h_cursor_b.sigPositionChanged.connect(self._on_horizontal_cursor_moved)
+            self._h_cursor_b.sigPositionChangeFinished.connect(
+                self._on_horizontal_cursor_drag_finished
+            )
         else:
             self._h_cursor_b.setPos(hb_y)
             self._h_cursor_b.setMovable(True)
@@ -7980,7 +8156,7 @@ class WaveformPlot(QWidget):
 
         self._interactive_syncing = True
         try:
-            # A、B 两根纵向光标都可拖动；各自与 Ha/Hb 横向光标联动
+            # A/B 时间范围与 Ha/Hb 电平独立；四根光标都可单独拖动。
             self._cursor_a.setPos(fixed_t_us)
             self._cursor_a.setMovable(True)
             self._cursor_b.setPos(move_t_us)
@@ -8105,6 +8281,9 @@ class WaveformPlot(QWidget):
             )
             self.plot.addItem(line)
             line.sigPositionChanged.connect(self._on_horizontal_cursor_moved)
+            line.sigPositionChangeFinished.connect(
+                self._on_horizontal_cursor_drag_finished
+            )
             line.contextRequested.connect(self._show_cursor_context_menu)
             self._h_cursor_zero = line
         else:
@@ -8401,7 +8580,8 @@ class WaveformPlot(QWidget):
         lower_bridge_irr_from_ic_minus_il: bool = False,
     ) -> None:
         """
-        Eoff：Ha/Vce，A=Vce 与 Ha 穿越。
+        Eoff：Ha/Vce、Hb/Ic；自动 A/B 可为平滑事件的前后稳定带代表点，
+        振荡回退模式仍使用对应平台交点。
         Eon：Ha/Ic 抬升前平台 + A 交点；Hb/Vce 回落后平台 + B 交点。
         Err：Ha/Irr，Hb/V_二极管，A/B 为对应交点。
         """
@@ -9065,13 +9245,15 @@ class WaveformPlot(QWidget):
         peak_channel: str | None = None,
         peak_value: float | None = None,
         peak_t_us: float | None = None,
+        peak_owns_vertical: bool = True,
     ) -> None:
         """Atomically bind one power card to a verified trace or raw V/I.
 
         A verified W/kW trace owns A, B and Ha together.  If no trace is
-        eligible, A/B return to the loss boundary waves and both horizontal
-        lines become invalid.  Updating every binding before the single final
-        refresh prevents a dragged window from exposing mixed old/new sources.
+        eligible, a readout-only raw V*I reference may own Ha while A/B remain
+        on the loss boundary waves.  Updating every binding before the single
+        final refresh prevents a dragged window from exposing mixed old/new
+        sources.
         """
 
         if self._interactive_mode != "power_peak":
@@ -9093,10 +9275,16 @@ class WaveformPlot(QWidget):
             self._interval_max_hline_enabled = matched
             if matched:
                 channel = str(peak_channel)
-                self._interval_a_channel = channel
-                self._interval_b_channel = channel
-                self._interval_ab_channel = channel
-                self._active_channel = channel
+                if peak_owns_vertical:
+                    self._interval_a_channel = channel
+                    self._interval_b_channel = channel
+                    self._interval_ab_channel = channel
+                    self._active_channel = channel
+                else:
+                    self._interval_a_channel = boundary_a
+                    self._interval_b_channel = boundary_b
+                    self._interval_ab_channel = boundary_a
+                    self._active_channel = boundary_a
                 self.set_interval_peak_horizontal(
                     float(peak_value),
                     channel=channel,
@@ -9166,6 +9354,29 @@ class WaveformPlot(QWidget):
         try:
             self._h_cursor_b.setPos(y_disp)
             self._h_cursor_b.setMovable(False)
+        finally:
+            self._interactive_syncing = False
+        self._update_readout()
+        self._apply_cursor_visibility()
+
+    def set_irr_base_on_ha(self, y: float, channel: str = "irr") -> None:
+        """Irr mode: place Ha on the recovered stable Base reference."""
+
+        if (
+            not self._interval_max_hline_enabled
+            or not self._interval_peak_on_hb
+            or self._h_cursor_a is None
+        ):
+            return
+        if self._interval_ab_channel is None:
+            self._interval_ab_channel = str(channel)
+            self._active_channel = str(channel)
+        self._set_interval_horizontal_binding("ha", channel)
+        self._interactive_syncing = True
+        try:
+            self._h_cursor_a.setPos(self._to_disp(channel, float(y)))
+            self._h_cursor_a.setMovable(True)
+            self._h_cursor_a_locked = False
         finally:
             self._interactive_syncing = False
         self._update_readout()
@@ -9730,13 +9941,24 @@ class WaveformPlot(QWidget):
         elif sender is self._h_cursor_b:
             which = "hb"
         else:
-            which = ""
+            # A report-boundary fallback runs outside the original Qt signal,
+            # so preserve which horizontal line the real drag moved.
+            which = self._pending_horizontal_cursor_name or ""
         ha_ch, ha_valid = self._horizontal_cursor_binding("ha")
         hb_ch, hb_valid = self._horizontal_cursor_binding("hb")
-        if not (ha_valid and hb_valid):
+        if not ha_valid:
             return False
         ha = self._from_disp(ha_ch, float(self._h_cursor_a.value()))
-        hb = self._from_disp(hb_ch, float(self._h_cursor_b.value()))
+        if hb_valid:
+            hb = self._from_disp(hb_ch, float(self._h_cursor_b.value()))
+        elif self._interactive_mode == "power_peak" and which == "ha":
+            # Power cards intentionally expose only the maximum reference Ha.
+            # Let its release callback persist the manual line even though Hb
+            # remains invalid and hidden; every other interval mode still
+            # requires a real two-line pair.
+            hb = float("nan")
+        else:
+            return False
         t0 = float(self._cursor_a.value())
         t1 = float(self._cursor_b.value())
         self._interactive_on_horizontal_change(
@@ -9764,9 +9986,35 @@ class WaveformPlot(QWidget):
         self._horizontal_callback(float(ha), float(hb))
 
     # ------------------------------------------------------------------ 信号回调 ----
+    def _cursor_sender_is_dragging(self) -> bool:
+        """Return whether the current cursor signal belongs to a real drag."""
+
+        sender = self.sender()
+        return isinstance(sender, ScopeCursorLine) and bool(
+            getattr(sender, "moving", False)
+        )
+
     def _on_any_cursor_moved(self) -> None:
         if self._interactive_syncing:
             return
+        if self._cursor_sender_is_dragging():
+            # Keep mouse-move work to visual feedback only.  Parameter
+            # integration, extrema searches and table/result updates are
+            # committed once by sigPositionChangeFinished on mouse release.
+            self._pending_vertical_cursor_commit = True
+            self._update_readout(update_axis=False)
+            return
+        self._commit_any_cursor_moved()
+
+    def _on_any_cursor_drag_finished(self) -> None:
+        if self._interactive_syncing:
+            return
+        try:
+            self._commit_any_cursor_moved()
+        finally:
+            self._pending_vertical_cursor_commit = False
+
+    def _commit_any_cursor_moved(self) -> None:
         self._update_readout()
         if not self._interactive_enabled or self._cursor_a is None or self._cursor_b is None:
             return
@@ -9888,6 +10136,59 @@ class WaveformPlot(QWidget):
     def _on_horizontal_cursor_moved(self) -> None:
         if self._interactive_syncing:
             return
+        if self._cursor_sender_is_dragging():
+            # Ha/Hb/H0 may feed full slope searches or loss recomputation.
+            # During a real drag only refresh labels/guides; release commits
+            # the latest physical cursor position exactly once.
+            self._pending_horizontal_cursor_commit = True
+            sender = self.sender()
+            if sender is self._h_cursor_a:
+                self._pending_horizontal_cursor_name = "ha"
+            elif sender is self._h_cursor_b:
+                self._pending_horizontal_cursor_name = "hb"
+            self._update_readout(update_axis=False)
+            return
+        self._commit_horizontal_cursor_moved()
+
+    def _on_horizontal_cursor_drag_finished(self) -> None:
+        if self._interactive_syncing:
+            return
+        if self._pending_horizontal_cursor_name is None:
+            sender = self.sender()
+            if sender is self._h_cursor_a:
+                self._pending_horizontal_cursor_name = "ha"
+            elif sender is self._h_cursor_b:
+                self._pending_horizontal_cursor_name = "hb"
+        try:
+            self._commit_horizontal_cursor_moved()
+        finally:
+            self._pending_horizontal_cursor_commit = False
+            self._pending_horizontal_cursor_name = None
+
+    def commit_pending_interaction_for_report(self) -> None:
+        """Commit an interrupted real drag exactly once before report freeze.
+
+        Normal mouse releases clear both flags, so the common path is a cheap
+        no-op.  This method intentionally does not recalculate every visible
+        parameter: it only closes the narrow event-ordering gap where a cursor
+        has moved on screen but its release callback has not yet run.
+        """
+
+        if self._interactive_syncing:
+            return
+        if self._pending_vertical_cursor_commit:
+            try:
+                self._commit_any_cursor_moved()
+            finally:
+                self._pending_vertical_cursor_commit = False
+        if self._pending_horizontal_cursor_commit:
+            try:
+                self._commit_horizontal_cursor_moved()
+            finally:
+                self._pending_horizontal_cursor_commit = False
+                self._pending_horizontal_cursor_name = None
+
+    def _commit_horizontal_cursor_moved(self) -> None:
         if self._interactive_mode in self._BASE_TOP_SLOPE_MODES:
             # Recalculation may also reposition A/B.  Publish only the final
             # state once; cursor-only motion never changes the active Y axis.
@@ -9926,9 +10227,16 @@ class WaveformPlot(QWidget):
         if self._interactive_mode == "delta_vce":
             # 拖动的那根横向光标 → 沿波形吸附其对应纵向光标（Ha↔A, Hb↔B）
             sender = self.sender()
-            if sender is self._h_cursor_a and self._cursor_a is not None:
+            pending_name = self._pending_horizontal_cursor_name
+            if (
+                (sender is self._h_cursor_a or (sender is None and pending_name == "ha"))
+                and self._cursor_a is not None
+            ):
                 hcur, vcur = self._h_cursor_a, self._cursor_a
-            elif sender is self._h_cursor_b and self._cursor_b is not None:
+            elif (
+                (sender is self._h_cursor_b or (sender is None and pending_name == "hb"))
+                and self._cursor_b is not None
+            ):
                 hcur, vcur = self._h_cursor_b, self._cursor_b
             elif self._h_cursor_b is not None and self._cursor_b is not None:
                 hcur, vcur = self._h_cursor_b, self._cursor_b
@@ -10026,15 +10334,29 @@ class WaveformPlot(QWidget):
         anchor_us: float,
         *required_times_us: float,
         anchor_fraction: float = PARAM_FOCUS_ANCHOR_FRACTION,
+        prefer_right_room: bool = False,
+        minimum_span_us: float | None = None,
+        composition_anchor_us: float | None = None,
+        composition_balance_fraction: float | None = None,
     ) -> None:
-        """按事件锚点构造参数视窗；保住左侧前态/切换起点后尽量展示右侧振铃。"""
+        """构造参数视窗；可按真实硬包络自适应优先展示右侧振铃。
+
+        ``composition_anchor_us`` is display-only.  When supplied, the
+        positional anchor remains available to callers for compatibility, but
+        only the required times determine the hard visibility envelope.
+        """
         base_span = self._param_focus_x_scale_us() * HORIZONTAL_DIV_COUNT
+        if minimum_span_us is not None and np.isfinite(float(minimum_span_us)):
+            base_span = max(base_span, float(minimum_span_us))
         x0, x1 = _solve_parameter_x_window(
             self._full_x_range,
             float(anchor_us),
             tuple(float(value) for value in required_times_us),
             base_span_us=base_span,
             anchor_fraction=anchor_fraction,
+            prefer_right_room=prefer_right_room,
+            composition_anchor_us=composition_anchor_us,
+            composition_balance_fraction=composition_balance_fraction,
         )
         scale_us = _exact_x_us_per_div(x1 - x0)
         self._x_target_us_per_div = scale_us

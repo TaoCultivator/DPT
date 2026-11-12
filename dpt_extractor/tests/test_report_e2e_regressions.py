@@ -58,6 +58,13 @@ SONGZHENXI_20260717_UH = (
     / "HT"
     / "UH_750V_1048A_000.tss"
 )
+ZHONGBAN_RT_WH_400_50 = Path(
+    os.environ.get(
+        "ZHONGBAN_RT_WH_400_50",
+        r"F:\JinMai\双脉冲数据处理\songzhenxi\MCU25T8\SMC\zhongban\RT"
+        r"\WH_400V_50A_Rgon4_Rgoff9_000.tss",
+    )
+)
 
 
 class _GeometryEventCounter(QObject):
@@ -556,6 +563,553 @@ class TestReportEndToEndRegressions(unittest.TestCase):
                 )
         finally:
             win._report_prepare_tasks.clear()
+            win._load_pool = original_pool
+            win.close()
+
+    @unittest.skipUnless(
+        ZHONGBAN_RT_WH_400_50.is_file(),
+        "zhongban RT WH 400V/50A sample missing",
+    )
+    def test_stable_platform_eoff_manual_submission_overrides_default_everywhere(
+        self,
+    ) -> None:
+        """One Eoff release must own the table, capture, and existing Excel row."""
+
+        import numpy as np
+        from openpyxl import load_workbook
+
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CURRENT,
+            COL_OFF,
+            COL_VOLTAGE,
+            DATA_ROW,
+            build_mcu2506_workbook,
+            fill_data_row,
+        )
+        from dpt_extractor.export.report_template import (
+            DptReportConditions,
+            write_report_template,
+        )
+        from dpt_extractor.metrics.energy import peak_power_kw
+        from dpt_extractor.metrics.iec_windows import (
+            IntegrationWindow,
+            integrate_vi_window,
+        )
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        cfg = load_config()
+        bundle = load_waveform(ZHONGBAN_RT_WH_400_50)
+        guessed = guess_profile_from_path(ZHONGBAN_RT_WH_400_50.name)
+        profile = make_profile(guessed.phase, guessed.bridge)
+        inferred = infer_mapping_from_bundle(bundle, guessed.bridge)
+        if inferred is not None:
+            profile = apply_mapping(profile, inferred)
+        result = extract_all(bundle, profile, cfg)
+        automatic_result = deepcopy(result)
+        context = result.energy_contexts[("关断过程", "Eoff")]
+        self.assertEqual(context.endpoint_mode, "stable_platforms")
+
+        win = MainWindow()
+        pool = _RecordingPool()
+        original_pool = win._load_pool
+        bridged: dict[str, object] = {}
+        captured: list[
+            tuple[float, float, float, float, tuple[float, float] | None]
+        ] = []
+        capture_tempdir: tempfile.TemporaryDirectory | None = None
+        try:
+            win.bundle = bundle
+            win.profile = profile
+            win.cfg = cfg
+            win.result = result
+            win._set_profile_combos(profile)
+            win._set_temperature_code("RT")
+            win.result_table.set_result(result)
+            win.wave_plot.plot_waveforms(bundle, profile, result)
+            win.resize(1600, 1000)
+            win.showMaximized()
+            self.app.processEvents()
+
+            key = ("关断过程", "Eoff")
+            win._on_value_clicked(*key)
+            self.app.processEvents()
+            plot = win.wave_plot
+            assert plot._cursor_a is not None and plot._cursor_b is not None
+            assert plot._h_cursor_a is not None and plot._h_cursor_b is not None
+            self.assertAlmostEqual(
+                float(plot._cursor_a.value()),
+                float(context.t_start * 1e6),
+                places=9,
+            )
+            self.assertAlmostEqual(
+                float(plot._cursor_b.value()),
+                float(context.t_end * 1e6),
+                places=9,
+            )
+            self.assertAlmostEqual(
+                plot._from_disp("vce", float(plot._h_cursor_a.value())),
+                float(context.ha_v),
+                places=9,
+            )
+            self.assertAlmostEqual(
+                plot._from_disp("ic", float(plot._h_cursor_b.value())),
+                float(context.hb_a),
+                places=9,
+            )
+
+            manual_a = float(context.t_start * 1e6) + 0.012
+            manual_b = float(context.t_end * 1e6) - 0.016
+            manual_ha = float(context.ha_v) + 0.375
+            manual_hb = float(context.hb_a) + 0.625
+            plot._cursor_a.setPos(manual_a)
+            plot._cursor_b.setPos(manual_b)
+            plot._h_cursor_a.setPos(plot._to_disp("vce", manual_ha))
+            plot._h_cursor_b.setPos(plot._to_disp("ic", manual_hb))
+            self.app.processEvents()
+
+            i0 = int(np.searchsorted(bundle.t, manual_a * 1e-6, side="left"))
+            i1 = int(np.searchsorted(bundle.t, manual_b * 1e-6, side="left"))
+            window = IntegrationWindow(i0, i1, float(bundle.t[i0]), float(bundle.t[i1]))
+            ic = bundle_total_current(bundle, profile)
+            vce = bundle.get(profile.vce)
+            expected_eoff = float(integrate_vi_window(bundle.t, vce, ic, window))
+            expected_pmax = float(peak_power_kw(vce, ic, window))
+            self.assertAlmostEqual(result.turn_off.eoff, expected_eoff, places=12)
+            self.assertAlmostEqual(result.turn_off.pmax, expected_pmax, places=12)
+            for actual, expected in zip(
+                win._manual_energy[key],
+                (manual_a, manual_b, manual_ha, manual_hb),
+            ):
+                self.assertAlmostEqual(actual, expected, places=9)
+
+            table_values = {
+                meta: win.result_table.table.item(row, 4).text()
+                for row, meta in enumerate(win.result_table._row_meta)
+                if meta in {key, ("关断过程", "Pmax")}
+            }
+            self.assertEqual(float(table_values[key]), round(expected_eoff, 3))
+            self.assertEqual(
+                float(table_values[("关断过程", "Pmax")]),
+                round(expected_pmax, 3),
+            )
+
+            requested_x = (manual_a - 0.28, manual_b + 0.92)
+            self.assertTrue(plot.restore_local_x_window_us(requested_x))
+            manual_x = plot.current_local_x_window_us()
+            self.assertIsNotNone(manual_x)
+
+            report_conditions = DptReportConditions(
+                voltage_v=400.0,
+                current_a=50.0,
+                rg_on_ohm=4.0,
+                rg_off_ohm=9.0,
+                cg_nf=10.0,
+            )
+            win._merge_recognized_report_conditions(report_conditions)
+            with tempfile.TemporaryDirectory() as td:
+                report = Path(td) / "existing_default_eoff_report.xlsx"
+                workbook = build_mcu2506_workbook(automatic_result)
+                data_sheet = workbook.active
+                data_sheet.title = "W相_双脉冲数据"
+                fill_data_row(data_sheet, DATA_ROW, automatic_result)
+                for column in (1, 2, 3):
+                    data_sheet.merge_cells(
+                        start_row=DATA_ROW,
+                        start_column=column,
+                        end_row=DATA_ROW + 3,
+                        end_column=column,
+                    )
+                data_sheet.cell(DATA_ROW, 1, "WH")
+                data_sheet.cell(DATA_ROW, 2, "25℃")
+                data_sheet.cell(DATA_ROW, COL_VOLTAGE, 400.0)
+                data_sheet.cell(DATA_ROW, COL_CURRENT, 50.0)
+                data_sheet.cell(
+                    DATA_ROW,
+                    3,
+                    "Rg_on = 4 ohm\nRg_off = 9 ohm\nCg = 10 nf",
+                )
+                workbook.save(report)
+                before = load_workbook(report, data_only=True)[
+                    "W相_双脉冲数据"
+                ]
+                self.assertEqual(
+                    before.cell(DATA_ROW, COL_OFF["eoff"]).value,
+                    round(float(automatic_result.turn_off.eoff), 3),
+                )
+
+                win._report_output_path = report
+                win._load_pool = pool  # type: ignore[assignment]
+                win._ensure_report_output_file = lambda: True  # type: ignore[method-assign]
+                win._write_report_template()
+                self.assertEqual(len(pool.tasks), 1)
+                prepare = pool.tasks[0]
+                self.assertIsInstance(prepare, _ReportPrepareTask)
+                assert isinstance(prepare, _ReportPrepareTask)
+                self.assertAlmostEqual(
+                    prepare.current_result.turn_off.eoff,
+                    expected_eoff,
+                    places=12,
+                )
+                self.assertAlmostEqual(
+                    prepare.current_result.turn_off.pmax,
+                    expected_pmax,
+                    places=12,
+                )
+                for frozen, live in zip(
+                    prepare.manual_state["_manual_energy"][key],
+                    win._manual_energy[key],
+                ):
+                    self.assertAlmostEqual(frozen, live, places=12)
+                self.assertEqual(
+                    prepare.manual_state["_parameter_local_views"][key],
+                    manual_x,
+                )
+
+                original_save = win._save_report_plot_capture
+
+                def observe_capture(path: Path, size) -> None:
+                    assert plot._cursor_a is not None and plot._cursor_b is not None
+                    assert plot._h_cursor_a is not None and plot._h_cursor_b is not None
+                    captured.append(
+                        (
+                            float(plot._cursor_a.value()),
+                            float(plot._cursor_b.value()),
+                            plot._from_disp("vce", float(plot._h_cursor_a.value())),
+                            plot._from_disp("ic", float(plot._h_cursor_b.value())),
+                            plot.current_local_x_window_us(),
+                        )
+                    )
+                    original_save(path, size)
+
+                def bridge_write(tempdir, images, results, **kwargs) -> None:
+                    bridged.update(
+                        tempdir=tempdir,
+                        images=dict(images),
+                        results=list(results),
+                        kwargs=dict(kwargs),
+                    )
+
+                with (
+                    patch.object(win, "_report_image_params", return_value=(key,)),
+                    patch.object(
+                        win,
+                        "_save_report_plot_capture",
+                        side_effect=observe_capture,
+                    ),
+                    patch.object(
+                        win,
+                        "_start_report_write_task",
+                        side_effect=bridge_write,
+                    ),
+                ):
+                    prepare.run()
+                    self._drain_events_until(lambda: bool(bridged))
+
+                self.assertEqual(len(captured), 1)
+                captured_a, captured_b, captured_ha, captured_hb, captured_x = captured[0]
+                self.assertAlmostEqual(captured_a, manual_a, places=9)
+                self.assertAlmostEqual(captured_b, manual_b, places=9)
+                self.assertAlmostEqual(captured_ha, manual_ha, places=9)
+                self.assertAlmostEqual(captured_hb, manual_hb, places=9)
+                assert captured_x is not None and manual_x is not None
+                for actual, expected in zip(captured_x, manual_x):
+                    self.assertAlmostEqual(actual, expected, places=9)
+
+                frozen_results = bridged["results"]
+                frozen_kwargs = bridged["kwargs"]
+                assert isinstance(frozen_results, list)
+                assert isinstance(frozen_kwargs, dict)
+                summary = write_report_template(
+                    frozen_results,
+                    report,
+                    temperature_code=frozen_kwargs["temperature_code"],
+                    temperature_labels=frozen_kwargs["temperature_labels"],
+                    phase_code=frozen_kwargs["phase_code"],
+                    image_result_index=frozen_kwargs["image_result_index"],
+                    report_conditions=frozen_kwargs["report_conditions"],
+                )
+                saved = load_workbook(report, data_only=True)["W相_双脉冲数据"]
+                self.assertEqual(summary.data_row, DATA_ROW)
+                self.assertEqual(
+                    saved.cell(DATA_ROW, COL_OFF["eoff"]).value,
+                    round(expected_eoff, 3),
+                )
+                self.assertEqual(
+                    saved.cell(DATA_ROW, COL_OFF["pmax"]).value,
+                    round(expected_pmax, 3),
+                )
+                capture_tempdir = bridged["tempdir"]
+        finally:
+            if capture_tempdir is not None:
+                capture_tempdir.cleanup()
+            win._report_prepare_tasks.clear()
+            win._report_capture_state = None
+            win._release_report_operation()
+            win._load_pool = original_pool
+            win.close()
+
+    @unittest.skipUnless(
+        ZHONGBAN_RT_WH_400_50.is_file(),
+        "zhongban RT WH 400V/50A sample missing",
+    )
+    def test_manual_ic_off_max_submission_drives_capture_and_existing_report_row(
+        self,
+    ) -> None:
+        """The report boundary must freeze the operator-visible Ic_off_max state."""
+
+        from openpyxl import load_workbook
+
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CURRENT,
+            COL_OFF,
+            COL_VOLTAGE,
+            DATA_ROW,
+            build_mcu2506_workbook,
+            fill_data_row,
+        )
+        from dpt_extractor.export.report_template import (
+            DptReportConditions,
+            write_report_template,
+        )
+
+        cfg = load_config()
+        bundle = load_waveform(ZHONGBAN_RT_WH_400_50)
+        guessed = guess_profile_from_path(ZHONGBAN_RT_WH_400_50.name)
+        profile = make_profile(guessed.phase, guessed.bridge)
+        inferred = infer_mapping_from_bundle(bundle, guessed.bridge)
+        if inferred is not None:
+            profile = apply_mapping(profile, inferred)
+        result = extract_all(bundle, profile, cfg)
+        automatic_result = deepcopy(result)
+
+        win = MainWindow()
+        pool = _RecordingPool()
+        original_pool = win._load_pool
+        captured: list[
+            tuple[float, float, float, float, tuple[float, float] | None]
+        ] = []
+        bridged: dict[str, object] = {}
+        capture_tempdir: tempfile.TemporaryDirectory | None = None
+        try:
+            win.bundle = bundle
+            win.profile = profile
+            win.cfg = cfg
+            win.result = result
+            win._set_profile_combos(profile)
+            win._set_temperature_code("RT")
+            win.result_table.set_result(result)
+            win.wave_plot.plot_waveforms(bundle, profile, result)
+            win.resize(1600, 1000)
+            win.showMaximized()
+            self.app.processEvents()
+
+            key = ("关断过程", "Ic_off_max")
+            win._on_value_clicked(*key)
+            self.app.processEvents()
+            plot = win.wave_plot
+            assert plot._cursor_a is not None and plot._cursor_b is not None
+            assert plot._h_cursor_a is not None and plot._h_cursor_b is not None
+            default_value = float(result.turn_off.ic_off_max)
+            default_a = float(plot._cursor_a.value())
+            default_b = float(plot._cursor_b.value())
+            default_ha = plot._from_disp("ic", float(plot._h_cursor_a.value()))
+            default_hb = plot._from_disp("ic", float(plot._h_cursor_b.value()))
+
+            # A/B and Hb follow the normal release path.  Leave Ha in the narrow
+            # visible-but-not-yet-committed state that the report submission
+            # guard exists to close.
+            manual_a = default_a + 0.016
+            manual_b = default_b - 0.021
+            manual_ha = default_ha + 7.25
+            manual_hb = default_hb + 1.125
+            plot._cursor_a.setPos(manual_a)
+            plot._cursor_b.setPos(manual_b)
+            plot._h_cursor_b.setPos(plot._to_disp("ic", manual_hb))
+
+            requested_x = (manual_a - 0.38, manual_a + 2.12)
+            self.assertTrue(plot.restore_local_x_window_us(requested_x))
+            manual_x = plot.current_local_x_window_us()
+            self.assertIsNotNone(manual_x)
+
+            plot._h_cursor_a.moving = True
+            plot._h_cursor_a.setPos(plot._to_disp("ic", manual_ha))
+            plot._h_cursor_a.moving = False
+            self.assertTrue(plot._pending_horizontal_cursor_commit)
+            self.assertNotAlmostEqual(
+                float(result.turn_off.ic_off_max),
+                manual_ha,
+                places=6,
+            )
+
+            report_conditions = DptReportConditions(
+                voltage_v=400.0,
+                current_a=50.0,
+                rg_on_ohm=4.0,
+                rg_off_ohm=9.0,
+                cg_nf=10.0,
+            )
+            win._merge_recognized_report_conditions(report_conditions)
+            with tempfile.TemporaryDirectory() as td:
+                report = Path(td) / "existing_default_report.xlsx"
+                workbook = build_mcu2506_workbook(automatic_result)
+                data_sheet = workbook.active
+                data_sheet.title = "W相_双脉冲数据"
+                fill_data_row(data_sheet, DATA_ROW, automatic_result)
+                data_sheet.merge_cells(
+                    start_row=DATA_ROW,
+                    start_column=1,
+                    end_row=DATA_ROW + 3,
+                    end_column=1,
+                )
+                data_sheet.merge_cells(
+                    start_row=DATA_ROW,
+                    start_column=2,
+                    end_row=DATA_ROW + 3,
+                    end_column=2,
+                )
+                data_sheet.merge_cells(
+                    start_row=DATA_ROW,
+                    start_column=3,
+                    end_row=DATA_ROW + 3,
+                    end_column=3,
+                )
+                data_sheet.cell(DATA_ROW, 1, "WH")
+                data_sheet.cell(DATA_ROW, 2, "25℃")
+                data_sheet.cell(DATA_ROW, COL_VOLTAGE, 400.0)
+                data_sheet.cell(DATA_ROW, COL_CURRENT, 50.0)
+                data_sheet.cell(
+                    DATA_ROW,
+                    3,
+                    "Rg_on = 4 ohm\nRg_off = 9 ohm\nCg = 10 nf",
+                )
+                workbook.save(report)
+                before = load_workbook(report, data_only=True)[
+                    "W相_双脉冲数据"
+                ].cell(DATA_ROW, COL_OFF["ic_off_max"]).value
+                self.assertAlmostEqual(float(before), default_value, places=3)
+
+                win._report_output_path = report
+                win._load_pool = pool  # type: ignore[assignment]
+                win._ensure_report_output_file = lambda: True  # type: ignore[method-assign]
+                win._write_report_template()
+                self.assertEqual(len(pool.tasks), 1)
+                prepare = pool.tasks[0]
+                self.assertIsInstance(prepare, _ReportPrepareTask)
+                assert isinstance(prepare, _ReportPrepareTask)
+
+                # The report click itself commits the last visible Ha and owns
+                # the active card's manually panned local page.
+                self.assertFalse(plot._pending_horizontal_cursor_commit)
+                self.assertAlmostEqual(
+                    float(prepare.current_result.turn_off.ic_off_max),
+                    manual_ha,
+                    places=9,
+                )
+                self.assertEqual(
+                    prepare.manual_state["_manual_intervals"][key],
+                    (manual_a, manual_b),
+                )
+                frozen_ha, frozen_hb = prepare.manual_state[
+                    "_manual_extreme_references"
+                ][key]
+                self.assertAlmostEqual(frozen_ha, manual_ha, places=9)
+                self.assertAlmostEqual(frozen_hb, manual_hb, places=9)
+                self.assertEqual(
+                    prepare.manual_state["_parameter_local_views"][key],
+                    manual_x,
+                )
+
+                original_save = win._save_report_plot_capture
+
+                def observe_capture(path: Path, size) -> None:
+                    assert plot._cursor_a is not None and plot._cursor_b is not None
+                    assert plot._h_cursor_a is not None and plot._h_cursor_b is not None
+                    captured.append(
+                        (
+                            float(plot._cursor_a.value()),
+                            float(plot._cursor_b.value()),
+                            plot._from_disp("ic", float(plot._h_cursor_a.value())),
+                            plot._from_disp("ic", float(plot._h_cursor_b.value())),
+                            plot.current_local_x_window_us(),
+                        )
+                    )
+                    original_save(path, size)
+
+                def bridge_write(tempdir, images, results, **kwargs) -> None:
+                    bridged.update(
+                        tempdir=tempdir,
+                        images=dict(images),
+                        results=list(results),
+                        kwargs=dict(kwargs),
+                    )
+
+                with (
+                    patch.object(win, "_report_image_params", return_value=(key,)),
+                    patch.object(
+                        win,
+                        "_save_report_plot_capture",
+                        side_effect=observe_capture,
+                    ),
+                    patch.object(
+                        win,
+                        "_start_report_write_task",
+                        side_effect=bridge_write,
+                    ),
+                ):
+                    prepare.run()
+                    self._drain_events_until(lambda: bool(bridged))
+
+                self.assertEqual(len(captured), 1)
+                captured_a, captured_b, captured_ha, captured_hb, captured_x = captured[0]
+                self.assertAlmostEqual(captured_a, manual_a, places=9)
+                self.assertAlmostEqual(captured_b, manual_b, places=9)
+                self.assertAlmostEqual(captured_ha, manual_ha, places=9)
+                self.assertAlmostEqual(captured_hb, manual_hb, places=9)
+                self.assertIsNotNone(captured_x)
+                assert captured_x is not None and manual_x is not None
+                for actual, expected in zip(captured_x, manual_x):
+                    self.assertAlmostEqual(actual, expected, places=9)
+                images = bridged["images"]
+                self.assertIsInstance(images, dict)
+                assert isinstance(images, dict)
+                capture_path = Path(images[key])
+                self.assertTrue(capture_path.is_file())
+                self.assertGreater(capture_path.stat().st_size, 0)
+
+                frozen_results = bridged["results"]
+                frozen_kwargs = bridged["kwargs"]
+                self.assertIsInstance(frozen_results, list)
+                self.assertIsInstance(frozen_kwargs, dict)
+                assert isinstance(frozen_results, list)
+                assert isinstance(frozen_kwargs, dict)
+                self.assertAlmostEqual(
+                    float(frozen_results[0].turn_off.ic_off_max),
+                    manual_ha,
+                    places=9,
+                )
+                summary = write_report_template(
+                    frozen_results,
+                    report,
+                    temperature_code=frozen_kwargs["temperature_code"],
+                    temperature_labels=frozen_kwargs["temperature_labels"],
+                    phase_code=frozen_kwargs["phase_code"],
+                    image_result_index=frozen_kwargs["image_result_index"],
+                    report_conditions=frozen_kwargs["report_conditions"],
+                )
+                saved = load_workbook(report, data_only=True)["W相_双脉冲数据"]
+                self.assertEqual(summary.data_row, DATA_ROW)
+                self.assertAlmostEqual(
+                    float(saved.cell(DATA_ROW, COL_OFF["ic_off_max"]).value),
+                    manual_ha,
+                    places=3,
+                )
+                capture_tempdir = bridged["tempdir"]
+        finally:
+            if capture_tempdir is not None:
+                capture_tempdir.cleanup()
+            win._report_prepare_tasks.clear()
+            win._report_capture_state = None
+            win._release_report_operation()
             win._load_pool = original_pool
             win.close()
 

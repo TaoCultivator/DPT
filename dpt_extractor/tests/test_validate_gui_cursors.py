@@ -17,15 +17,23 @@ from scripts.validate_gui_cursors import (
     IEC_TIMING_ENDPOINT_CHANNELS,
     INTERACTIVE_PARAMS,
     _capture_error_details,
+    _audit_state_snapshot,
     _audit_waveform_marker_bindings,
+    _authoritative_primary_event_us,
     _captured_parameter_focus,
+    _captured_parameter_minimum_span_us,
     _captured_cursor_bindings,
+    _crosstalk_cursor_display_problems,
     _ensure_wanglihui_u_ch3_ui_inversion,
+    _energy_endpoint_mode,
+    _eoff_stable_platform_audit_problems,
     _err_a_settled_gate_check,
     _err_a_signed_intersection_check,
     _group_rows_by_sample,
+    _independent_ic_off_max_stable_center_index,
     _level_on_channel,
     _parameter_focus_geometry_problem,
+    _parameter_primary_event_geometry_problem,
     _sample_trace_id,
     _selected_sample_waveforms,
     _short_exact_vi_energy,
@@ -35,6 +43,7 @@ from scripts.validate_gui_cursors import (
     _err_signed_cursor_text_problems,
     _audit_turn_off_slope_context_consistency,
     _unnecessary_ab_focus_expansion,
+    _visible_eoff_energy_mj,
     audit_file,
     audit_short_circuit_file,
     SHORT_CIRCUIT_PARAMS,
@@ -48,6 +57,7 @@ _CAPTURE_METHODS = (
     "enable_energy_loss_interaction",
     "enable_irr_peak_interaction",
     "set_interval_peak_on_hb",
+    "set_irr_base_on_ha",
     "enable_trr_measure_interaction",
     "enable_turn_on_current_interaction",
     "enable_delta_vce_interaction",
@@ -67,8 +77,11 @@ class _CapturePlot:
         anchor_us: float,
         *required_times_us: float,
         anchor_fraction: float = 0.12,
-    ) -> tuple[float, tuple[float, ...], float]:
-        return anchor_us, required_times_us, anchor_fraction
+        prefer_right_room: bool = False,
+        minimum_span_us: float | None = None,
+    ) -> tuple[float, tuple[float, ...], float, bool]:
+        _ = minimum_span_us
+        return anchor_us, required_times_us, anchor_fraction, prefer_right_room
 
 
 def _ok_method(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
@@ -106,6 +119,44 @@ def _short_capture_method(
 
 
 _CapturePlot.enable_short_current_interaction = _short_capture_method
+
+
+class TestCrosstalkCursorDisplayAudit(unittest.TestCase):
+    def test_only_nearest_in_event_extrema_pass(self):
+        t = np.arange(9) * 1e-6
+        vge = np.asarray([99, -4, -8, -8, -4, -12, -8, -4, -99])
+        self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 4.0, 5.0), [])
+        for pair in ((1.0, 5.0), (0.0, 8.0), (2.0, 5.0), (4.1, 5.0)):
+            with self.subTest(pair=pair):
+                self.assertTrue(_crosstalk_cursor_display_problems(t, vge, (1, 8), *pair))
+
+    def test_flat_event_may_keep_full_window(self):
+        self.assertEqual(
+            _crosstalk_cursor_display_problems(np.arange(4) * 1e-6, np.ones(4), (0, 3), 0.0, 3.0),
+            [],
+        )
+
+    def test_focus_only_keeps_extrema_endpoint_failures(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from dpt_extractor.gui.main_window import MainWindow
+        from dpt_extractor.tests.sample_paths import sample_tss
+
+        path = sample_tss("UH_750V_1050A_000.tss")
+        if not path.is_file():
+            self.skipTest("UH sample missing")
+        app = QApplication.instance() or QApplication([])
+        with (
+            patch.dict(os.environ, {
+                "DPT_VALIDATE_FOCUS_ONLY": "1",
+                "DPT_VALIDATE_CURSOR_METRIC": "开通/串扰电压",
+            }),
+            patch.object(MainWindow, "_crosstalk_extrema_cursor_window", return_value=None),
+        ):
+            rows = audit_file(MainWindow, QApplication, app, path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][3], "FAIL")
+        self.assertIn("串扰A/B未分别覆盖", rows[0][4])
 
 
 class TestTurnOffSlopeContextAudit(unittest.TestCase):
@@ -503,10 +554,14 @@ class TestCursorAuditCapture(unittest.TestCase):
                 for token in ("A", "B", "Ha", "Hb"):
                     self.assertIn(token, roles)
 
-        self.assertIn("Vge", DPT_PARAMETER_CURSOR_ROLES[("关断过程", "Ic_off_max")])
+        ic_off_roles = DPT_PARAMETER_CURSOR_ROLES[("关断过程", "Ic_off_max")]
+        self.assertIn("A=Vce", ic_off_roles)
+        self.assertIn("B=Ic", ic_off_roles)
+        self.assertIn("Base稳定", ic_off_roles)
         self.assertIn("A=Ic", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
-        self.assertIn("B=Vce", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
-        self.assertIn("A=Vge", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
+        self.assertIn("B=Ic", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
+        self.assertIn("Top稳定段", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
+        self.assertIn("A=Vce", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
         self.assertIn("B=Vce", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
 
     def test_dpt_endpoint_and_horizontal_matrices_fail_closed(self) -> None:
@@ -534,10 +589,10 @@ class TestCursorAuditCapture(unittest.TestCase):
         self.assertEqual(
             GENERIC_MAX_ENDPOINT_CHANNELS,
             {
-                ("关断过程", "Ic_off_max"): ("vge", "vge"),
+                ("关断过程", "Ic_off_max"): ("vce", "ic"),
                 ("关断过程", "Vce_off_max"): ("vce", "vce"),
-                ("开通", "Ic_on_max"): ("ic", "vce"),
-                ("开通", "Vce_on_max"): ("vge", "vce"),
+                ("开通", "Ic_on_max"): ("ic", "ic"),
+                ("开通", "Vce_on_max"): ("vce", "vce"),
                 ("反向恢复", "Vrr"): ("v_diode", "v_diode"),
             },
         )
@@ -573,6 +628,223 @@ class TestCursorAuditCapture(unittest.TestCase):
                 "A/Ha", 1.0, 15.0, t, values, floor=1e-6
             )
         )
+
+    @staticmethod
+    def _smooth_eoff_audit_fixture():
+        t = np.arange(1_000, dtype=np.float64) * 1e-9
+        vce = np.full(1_000, 5.2, dtype=np.float64)
+        vce[300:401] = np.linspace(5.2, 400.0, 101)
+        vce[401:] = 400.0
+        ic = np.full(1_000, 50.0, dtype=np.float64)
+        ic[400:501] = np.linspace(50.0, 2.2, 101)
+        ic[501:] = 2.2
+        context = SimpleNamespace(
+            a_idx=200,
+            b_idx=650,
+            a_band_start_idx=160,
+            a_band_end_idx=239,
+            b_band_start_idx=610,
+            b_band_end_idx=689,
+            v10_idx=310,
+            v90_idx=390,
+            i90_idx=410,
+            i10_idx=490,
+            search_end_idx=660,
+        )
+        a_us = float(t[context.a_idx] * 1e6)
+        b_us = float(t[context.b_idx] * 1e6)
+        energy = _visible_eoff_energy_mj(t, vce, ic, a_us, b_us)
+        assert energy is not None
+        return t, vce, ic, context, a_us, b_us, float(energy)
+
+    def test_energy_endpoint_mode_defaults_old_context_to_crossings(self) -> None:
+        self.assertEqual(_energy_endpoint_mode(None), "level_crossings")
+        self.assertEqual(
+            _energy_endpoint_mode(SimpleNamespace()), "level_crossings"
+        )
+        self.assertEqual(
+            _energy_endpoint_mode(SimpleNamespace(endpoint_mode="stable_platforms")),
+            "stable_platforms",
+        )
+
+    def test_smooth_eoff_audit_fails_closed_without_production_evidence(
+        self,
+    ) -> None:
+        t, vce, ic, _context, a_us, b_us, energy = (
+            self._smooth_eoff_audit_fixture()
+        )
+
+        problems, _detail = _eoff_stable_platform_audit_problems(
+            t,
+            vce,
+            ic,
+            a_us=a_us,
+            b_us=b_us,
+            ha_v=5.0,
+            hb_a=2.0,
+            stored_eoff_mj=energy,
+            context=None,
+        )
+
+        self.assertIn("Eoff stable_platforms 缺少稳定带证据上下文", problems)
+
+    def test_smooth_eoff_audit_accepts_stable_ab_without_level_intersections(
+        self,
+    ) -> None:
+        t, vce, ic, context, a_us, b_us, energy = (
+            self._smooth_eoff_audit_fixture()
+        )
+        # The raw stable bands are deliberately offset from the published
+        # Ha/Hb by 0.2, so the old 0.05 crossing assertion would reject them.
+        self.assertIsNotNone(
+            _cursor_level_binding_problem(
+                "A/Ha", a_us, 5.0, t, vce, floor=0.05
+            )
+        )
+        self.assertIsNotNone(
+            _cursor_level_binding_problem(
+                "B/Hb", b_us, 2.0, t, ic, floor=0.05
+            )
+        )
+
+        problems, detail = _eoff_stable_platform_audit_problems(
+            t,
+            vce,
+            ic,
+            a_us=a_us,
+            b_us=b_us,
+            ha_v=5.0,
+            hb_a=2.0,
+            stored_eoff_mj=energy,
+            context=context,
+        )
+
+        self.assertEqual(problems, [])
+        self.assertIn("mode=stable_platforms", detail)
+        self.assertIn("visible_Eoff=", detail)
+
+    def test_smooth_eoff_audit_rejects_unstable_declared_band(self) -> None:
+        t, vce, ic, context, a_us, b_us, energy = (
+            self._smooth_eoff_audit_fixture()
+        )
+        vce[context.a_band_start_idx : context.a_band_end_idx + 1] = np.linspace(
+            -40.0,
+            50.0,
+            context.a_band_end_idx - context.a_band_start_idx + 1,
+        )
+
+        problems, _detail = _eoff_stable_platform_audit_problems(
+            t,
+            vce,
+            ic,
+            a_us=a_us,
+            b_us=b_us,
+            ha_v=5.0,
+            hb_a=2.0,
+            stored_eoff_mj=energy,
+            context=context,
+        )
+
+        self.assertTrue(any("A/Vce Base稳定带" in p for p in problems))
+
+    def test_smooth_eoff_audit_rejects_wrong_width_or_event_bound(self) -> None:
+        t, vce, ic, context, a_us, b_us, energy = (
+            self._smooth_eoff_audit_fixture()
+        )
+        bad_values = dict(vars(context))
+        bad_values["b_band_end_idx"] = context.b_band_end_idx - 1
+        bad_values["search_end_idx"] = context.b_idx - 1
+        bad_context = SimpleNamespace(**bad_values)
+
+        problems, _detail = _eoff_stable_platform_audit_problems(
+            t,
+            vce,
+            ic,
+            a_us=a_us,
+            b_us=b_us,
+            ha_v=5.0,
+            hb_a=2.0,
+            stored_eoff_mj=energy,
+            context=bad_context,
+        )
+
+        self.assertTrue(any("B稳定带宽度未与Ic主沿" in p for p in problems))
+        self.assertIn(
+            "Eoff B代表点/稳定带越过事件门允许的半带确认范围",
+            problems,
+        )
+
+    def test_smooth_eoff_audit_rejects_main_power_peak_outside_visible_ab(
+        self,
+    ) -> None:
+        t, vce, ic, context, a_us, _b_us, _energy = (
+            self._smooth_eoff_audit_fixture()
+        )
+        context.b_idx = 560
+        b_us = float(t[context.b_idx] * 1e6)
+        vce[620] = 2_000.0
+        ic[620] = 100.0
+        energy = _visible_eoff_energy_mj(t, vce, ic, a_us, b_us)
+        assert energy is not None
+
+        problems, _detail = _eoff_stable_platform_audit_problems(
+            t,
+            vce,
+            ic,
+            a_us=a_us,
+            b_us=b_us,
+            ha_v=5.0,
+            hb_a=2.0,
+            stored_eoff_mj=float(energy),
+            context=context,
+        )
+
+        self.assertTrue(any("未包含原始 Vce*Ic 主功率峰" in p for p in problems))
+
+    def test_smooth_eoff_audit_rejects_main_power_peak_exactly_at_b(
+        self,
+    ) -> None:
+        t, vce, ic, context, a_us, _b_us, _energy = (
+            self._smooth_eoff_audit_fixture()
+        )
+        context.b_idx = 620
+        b_us = float(t[context.b_idx] * 1e6)
+        vce[context.b_idx] = 20_000.0
+        energy = _visible_eoff_energy_mj(t, vce, ic, a_us, b_us)
+        assert energy is not None
+
+        problems, _detail = _eoff_stable_platform_audit_problems(
+            t,
+            vce,
+            ic,
+            a_us=a_us,
+            b_us=b_us,
+            ha_v=5.0,
+            hb_a=2.0,
+            stored_eoff_mj=float(energy),
+            context=context,
+        )
+
+        self.assertTrue(any("未包含原始 Vce*Ic 主功率峰" in p for p in problems))
+
+    def test_smooth_eoff_audit_rejects_table_value_not_from_visible_ab(self) -> None:
+        t, vce, ic, context, a_us, b_us, energy = (
+            self._smooth_eoff_audit_fixture()
+        )
+
+        problems, _detail = _eoff_stable_platform_audit_problems(
+            t,
+            vce,
+            ic,
+            a_us=a_us,
+            b_us=b_us,
+            ha_v=5.0,
+            hb_a=2.0,
+            stored_eoff_mj=energy + 0.5,
+            context=context,
+        )
+
+        self.assertTrue(any("积分闭环" in p for p in problems))
 
     def test_short_required_unavailable_metrics_are_fail_closed(self) -> None:
         self.assertEqual(
@@ -773,8 +1045,9 @@ class TestCursorAuditCapture(unittest.TestCase):
             anchor_us: float,
             *required_times_us: float,
             anchor_fraction: float = 0.12,
+            prefer_right_room: bool = False,
         ) -> None:
-            _ = anchor_us, required_times_us, anchor_fraction
+            _ = anchor_us, required_times_us, anchor_fraction, prefer_right_room
             raise RuntimeError("focus exploded")
 
         plot.focus_parameter_window_us = broken_focus  # type: ignore[method-assign]
@@ -798,14 +1071,50 @@ class TestCursorAuditCapture(unittest.TestCase):
             10.5,
             12.75,
             anchor_fraction=0.31,
+            prefer_right_room=True,
         )
 
         self.assertEqual(
             _captured_parameter_focus(capture.calls),
-            (10.25, (10.5, 12.75), 0.31),
+            (10.25, (10.5, 12.75), 0.31, True),
         )
 
-    def test_focus_geometry_accepts_required_time_shift_from_preferred_anchor(self) -> None:
+        plot.focus_parameter_window_us(
+            10.25,
+            10.5,
+            12.75,
+            anchor_fraction=0.31,
+            prefer_right_room=True,
+            minimum_span_us=2.5,
+        )
+        self.assertEqual(_captured_parameter_minimum_span_us(capture.calls), 2.5)
+
+    def test_independent_ic_off_max_audit_prefers_first_stable_base_center(self) -> None:
+        dt = 1e-9
+        t = np.arange(2_000, dtype=np.float64) * dt
+        ic = np.full(2_000, 48.0, dtype=np.float64)
+        ic[500:] = 3.0
+        ring = np.arange(600, 900)
+        ic[ring] = 3.0 + np.where(ring % 2 == 0, 100.0, -100.0)
+        context = SimpleNamespace(
+            crossing=SimpleNamespace(t_pct_b_s=float(t[500])),
+            base_window=(1_200, 1_399),
+            top_a=48.0,
+        )
+
+        center = _independent_ic_off_max_stable_center_index(
+            t,
+            ic,
+            dt,
+            context,
+            signed_base=3.0,
+            peak_idx=499,
+        )
+
+        self.assertEqual(center, 1_000)
+        self.assertNotEqual(center, 1_299)
+
+    def test_focus_geometry_accepts_compact_view_with_required_times_visible(self) -> None:
         problem = _parameter_focus_geometry_problem(
             (13.99272, 15.99272),
             (0.0, 30.0),
@@ -813,10 +1122,27 @@ class TestCursorAuditCapture(unittest.TestCase):
                 14.451282777854443,
                 (14.012719999925231, 15.776319999917897),
                 0.12,
+                False,
             ),
         )
 
         self.assertIsNone(problem)
+
+    def test_focus_geometry_rejects_unnecessary_expansion_for_right_room(self) -> None:
+        problem = _parameter_focus_geometry_problem(
+            (13.99272, 16.99272),
+            (0.0, 30.0),
+            (
+                14.451282777854443,
+                (14.012719999925231, 15.776319999917897),
+                0.12,
+                False,
+            ),
+        )
+
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("构图偏离策略", problem)
 
     def test_focus_geometry_rejects_view_that_ignores_required_time_shift(self) -> None:
         problem = _parameter_focus_geometry_problem(
@@ -826,6 +1152,7 @@ class TestCursorAuditCapture(unittest.TestCase):
                 14.451282777854443,
                 (14.012719999925231, 15.776319999917897),
                 0.12,
+                False,
             ),
         )
 
@@ -833,13 +1160,251 @@ class TestCursorAuditCapture(unittest.TestCase):
         assert problem is not None
         self.assertIn("构图偏离策略", problem)
 
+    def test_focus_geometry_accepts_adaptive_right_priority_without_fixed_prefix(self) -> None:
+        problem = _parameter_focus_geometry_problem(
+            (4.74, 6.74),
+            (0.0, 20.0),
+            (5.36, (5.0, 5.72), 0.12, True),
+        )
+
+        self.assertIsNone(problem)
+
+    def test_focus_geometry_accepts_turn_on_current_balanced_composition(self) -> None:
+        from dpt_extractor.gui.waveform_plot import (
+            TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
+        )
+
+        problem = _parameter_focus_geometry_problem(
+            (4.50, 6.50),
+            (0.0, 20.0),
+            (5.36, (5.0, 5.72), TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION, False),
+            parameter_key=("开通", "开通电流"),
+        )
+
+        self.assertIsNone(problem)
+
+    def test_focus_geometry_accepts_turn_on_slope_balanced_composition(self) -> None:
+        from dpt_extractor.gui.waveform_plot import (
+            TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+        )
+
+        for parameter_key in (("开通", "dv/dt"), ("开通", "di/dt")):
+            with self.subTest(parameter_key=parameter_key):
+                problem = _parameter_focus_geometry_problem(
+                    (4.50, 6.50),
+                    (0.0, 20.0),
+                    (
+                        5.36,
+                        (5.0, 5.72),
+                        TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+                        False,
+                    ),
+                    parameter_key=parameter_key,
+                )
+
+                self.assertIsNone(problem)
+
+    def test_focus_geometry_accepts_turn_on_ls_balanced_composition(self) -> None:
+        from dpt_extractor.gui.waveform_plot import TURN_ON_LS_FOCUS_MIDPOINT_FRACTION
+
+        problem = _parameter_focus_geometry_problem(
+            (4.50, 6.50),
+            (0.0, 20.0),
+            (
+                5.36,
+                (5.0, 5.72),
+                TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
+                False,
+            ),
+            parameter_key=("开通", "Ls_on"),
+        )
+
+        self.assertIsNone(problem)
+
+    def test_focus_geometry_rejects_right_priority_for_turn_on_ls(self) -> None:
+        problem = _parameter_focus_geometry_problem(
+            (4.74, 6.74),
+            (0.0, 20.0),
+            (5.36, (5.0, 5.72), 0.12, True),
+            parameter_key=("开通", "Ls_on"),
+        )
+        self.assertIsNotNone(problem)
+        self.assertIn("Ls_on 不应", problem)
+
+    def test_focus_geometry_rejects_right_priority_for_turn_on_slopes(self) -> None:
+        for name in ("dv/dt", "di/dt"):
+            with self.subTest(parameter=name):
+                problem = _parameter_focus_geometry_problem(
+                    (4.74, 6.74),
+                    (0.0, 20.0),
+                    (5.36, (5.0, 5.72), 0.12, True),
+                    parameter_key=("开通", name),
+                )
+                self.assertIsNotNone(problem)
+                self.assertIn("开通斜率不应", problem)
+
+    def test_focus_geometry_relaxes_slope_ratio_for_wide_ab_and_data_bounds(self) -> None:
+        from dpt_extractor.gui.waveform_plot import (
+            TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+            _solve_parameter_x_window,
+        )
+
+        for name in ("dv/dt", "di/dt"):
+            for required in ((5.0, 6.95), (5.0, 8.2), (0.02, 0.10), (19.9, 19.98)):
+                with self.subTest(parameter=name, required=required):
+                    anchor = sum(required) / 2.0
+                    view = _solve_parameter_x_window(
+                        (0.0, 20.0),
+                        anchor,
+                        required,
+                        anchor_fraction=TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+                    )
+                    problem = _parameter_focus_geometry_problem(
+                        view,
+                        (0.0, 20.0),
+                        (
+                            anchor,
+                            required,
+                            TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
+                            False,
+                        ),
+                        parameter_key=("开通", name),
+                    )
+                    self.assertIsNone(problem)
+                    self.assertLessEqual(view[0], min(required))
+                    self.assertGreaterEqual(view[1], max(required))
+                    self.assertGreaterEqual(view[0], 0.0)
+                    self.assertLessEqual(view[1], 20.0)
+                    if max(required) - min(required) + 0.04 <= 2.0:
+                        self.assertAlmostEqual(view[1] - view[0], 2.0)
+
+    def test_focus_geometry_rejects_gate_anchor_for_turn_on_slopes(self) -> None:
+        from dpt_extractor.gui.waveform_plot import _solve_parameter_x_window
+
+        view = _solve_parameter_x_window(
+            (0.0, 20.0), 4.0, (5.0, 5.72), anchor_fraction=0.43
+        )
+        problem = _parameter_focus_geometry_problem(
+            view,
+            (0.0, 20.0),
+            (4.0, (5.0, 5.72), 0.43, False),
+            parameter_key=("开通", "dv/dt"),
+        )
+        self.assertIsNotNone(problem)
+        self.assertIn("不是实际 A/B 中点", problem)
+
+    def test_focus_geometry_rejects_old_centered_view_for_right_priority(self) -> None:
+        problem = _parameter_focus_geometry_problem(
+            (4.36, 6.36),
+            (0.0, 20.0),
+            (5.36, (5.0, 5.72), 0.12, True),
+        )
+
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("构图偏离策略", problem)
+
+    def test_primary_event_geometry_accepts_left_half_event(self) -> None:
+        problem = _parameter_primary_event_geometry_problem(
+            (4.74, 6.74),
+            (0.0, 20.0),
+            (5.36, (5.0, 5.72), 0.12, True),
+            5.35,
+        )
+
+        self.assertIsNone(problem)
+
+    def test_primary_event_geometry_rejects_feasible_event_right_of_center(self) -> None:
+        problem = _parameter_primary_event_geometry_problem(
+            (4.40, 6.40),
+            (0.0, 20.0),
+            (5.20, (5.0, 5.40), 0.12, True),
+            5.60,
+        )
+
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("主事件在可左置时仍越过中线", problem)
+
+    def test_primary_event_geometry_relaxes_half_at_full_left_boundary(self) -> None:
+        problem = _parameter_primary_event_geometry_problem(
+            (0.0, 2.0),
+            (0.0, 10.0),
+            (0.35, (0.0, 0.70), 0.12, True),
+            1.20,
+        )
+
+        self.assertIsNone(problem)
+
+    def test_primary_event_geometry_rejects_event_outside_view(self) -> None:
+        problem = _parameter_primary_event_geometry_problem(
+            (4.74, 6.74),
+            (0.0, 20.0),
+            (5.36, (5.0, 5.72), 0.12, True),
+            7.10,
+        )
+
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("不在视窗", problem)
+
+    def test_primary_event_geometry_rejects_missing_or_nonfinite_input(self) -> None:
+        focus = (5.36, (5.0, 5.72), 0.12, True)
+        missing = _parameter_primary_event_geometry_problem(
+            (4.74, 6.74), (0.0, 20.0), focus, None
+        )
+        nonfinite = _parameter_primary_event_geometry_problem(
+            (float("nan"), 6.74), (0.0, 20.0), focus, 5.35
+        )
+
+        self.assertIsNotNone(missing)
+        self.assertIsNotNone(nonfinite)
+
+    def test_audit_snapshot_is_nan_safe_and_includes_compare_false_fields(self) -> None:
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class _State:
+            value: float
+            context: dict[str, float] = field(compare=False)
+
+        before = _State(float("nan"), {"hidden": float("nan")})
+        same = _State(float("nan"), {"hidden": float("nan")})
+        changed = _State(float("nan"), {"hidden": 1.0})
+
+        self.assertEqual(_audit_state_snapshot(before), _audit_state_snapshot(same))
+        self.assertNotEqual(
+            _audit_state_snapshot(before), _audit_state_snapshot(changed)
+        )
+
+    def test_authoritative_power_event_comes_from_raw_waveforms(self) -> None:
+        mw = SimpleNamespace(_default_extreme_peak_point=lambda *_args: None)
+        t = np.asarray([0.0, 1.0e-6, 2.0e-6], dtype=np.float64)
+        chan = {
+            "vce": np.asarray([1.0, 5.0, 1.0]),
+            "ic": np.asarray([1.0, 2.0, 1.0]),
+        }
+
+        event_us = _authoritative_primary_event_us(
+            mw,
+            "关断过程",
+            "Pmax",
+            t,
+            chan,
+            SimpleNamespace(segments=None),
+            0.0,
+            2.0,
+        )
+
+        self.assertAlmostEqual(float(event_us), 1.0, places=9)
+
     def test_cursor_a_b_audit_rejects_search_window_overexpansion(self) -> None:
         problem = _unnecessary_ab_focus_expansion(
             "关断过程",
             "Eoff",
             (22.871, 26.871),
             (0.0, 60.0),
-            (23.991, (22.977, 25.015), 0.12),
+            (23.991, (22.977, 25.015), 0.12, False),
             24.190,
             24.560,
         )
@@ -855,7 +1420,7 @@ class TestCursorAuditCapture(unittest.TestCase):
             "di/dt",
             (23.431, 25.431),
             (0.0, 60.0),
-            (23.991, (24.190, 24.560), 0.12),
+            (23.991, (24.190, 24.560), 0.12, False),
             24.190,
             24.560,
         )
@@ -868,7 +1433,7 @@ class TestCursorAuditCapture(unittest.TestCase):
             "Trr",
             (27.0, 31.0),
             (0.0, 60.0),
-            (28.1, (28.1, 30.9), 0.12),
+            (28.1, (28.1, 30.9), 0.12, False),
             28.1,
             28.45,
         )
