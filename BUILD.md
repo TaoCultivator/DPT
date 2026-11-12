@@ -31,6 +31,16 @@ pip install -r requirements-build.txt
 pyinstaller --noconfirm DPT.spec
 ```
 
+## 打包前的 `dist\` 检查（2026-10-15 补充）
+
+- `scripts\build_windows.ps1` 第一步就是 `Remove-Item dist`，**`dist\` 里已有的产物会被无提示删除**。执行打包前先确认现存产物的身份：需要留档的先复制到 `.tmp\` 或登记哈希，别把 `dist\` 当留档目录。
+- **`dist\` 里的 exe 只是本机最近一次打包产物，不代表任何 GitHub Release 资产。** 发布前的一致性/哈希对照只能以远端资产 digest 为准（`gh release view <tag> --json tagName,assets`）。已经踩过的例子：
+  - 本地 `dist\DPT_Windows_v3.0.10.exe` ＝ `134,452,159` bytes / SHA-256 `CEF6567F51BCB5DC320F6374652554756CAF43DAD8576F1B50CF44460D969DA1`（溯源文件自述 “local repaired build”，发布后另修、从未上传）；
+  - GitHub `DPT v3.0.10` 资产 ＝ `134,450,153` bytes / `sha256:03649ad1ceffdd069f299eb124770cddd42c0bfcd162989f9a664c774ceed5fd`。
+  - 两者不是同一个构建，禁止拿本地 `dist\` 当已发布基线做对照。
+- 本目录产物的现场标注见 `dist\NOT-RELEASED-LOCAL-BUILD.md`；完整口径见 `docs\RELEASE_PROCESS.md` 的「`dist/` 本地构建不是已发布基线」节。
+- 打包前的回归验证：pytest 一律带 `--basetemp=<工作区内目录>`（本机 `%TEMP%\pytest-of-songzhenxi` 权限异常），见 `docs\REGRESSION_BASELINES.md`「全量验证红线」。
+
 ## 版本规则
 
 版本号统一使用 `vMAJOR.MINOR.PATCH`：
