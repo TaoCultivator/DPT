@@ -1,0 +1,35 @@
+corpus files: 488  sampled: 9  repeat: 4
+  sample     670.0 KB  UH_486V_50A_Rgon3.33R_Rgoff8.92R_000.tss
+  sample     685.6 KB  UH_486V_250A_Rgon3.33R_Rgoff8.92R_000.tss
+  sample     600.0 KB  750v-vh-short-25c_000.tss
+  sample    1423.4 KB  UH_480V_500A_000.tss
+  sample    1199.0 KB  915v-ul-930a-12.9us-175c_000.tss
+  sample    1462.4 KB  UL_400V_1070A_Rgon2.267R_Rgoff7.5R_000.tss
+  sample    3981.0 KB  AP_UH_880V_35A_RT_ERR_000.tss
+  sample    1576.2 KB  VL_750V_806A_000.tss
+  sample    1674.8 KB  VL_750V_1048A_000.tss
+
+=== TOP 20 本项目热点（按自身耗时 tottime）===
+file:line                                            func                                     tottime   ncalls     占项目
+metrics/plateau_level.py:10                          _quiet_plateau_mid                         4.450      128  35.86%
+detect/pulse_detector.py:42                          detect_all                                 2.428       32  19.57%
+metrics/iec_windows.py:437                           _local_extrema_indices                     1.247      344  10.05%
+metrics/commutation_inductance.py:27                 _finite_series                             0.856       64   6.89%
+metrics/iec_windows.py:814                           _first_sustained_rise_crossing             0.374      176   3.01%
+io/tss_parser.py:197                                 _parse_tss_math_setup                      0.256       36   2.07%
+metrics/iec_windows.py:355                           _crossing_pair_indices                     0.212      352   1.71%
+metrics/plateau_level.py:57                          _plateau_mid_without_isolated_spikes       0.184      320   1.49%
+io/tss_parser.py:425                                 _eval                                      0.141      504   1.14%
+metrics/iec_windows.py:4057                          integrate_err_recovery                     0.110       32   0.89%
+detect/pulse_detector.py:177                         _refine_pulse_off                          0.102       32   0.82%
+io/tss_parser.py:119                                 _sample_interval_from_time                 0.097       36   0.78%
+metrics/plateau_level.py:634                         _turn_on_rise_index                        0.095       64   0.76%
+metrics/rr_tail.py:6                                 reverse_recovery_tail_end_index            0.092       32   0.74%
+metrics/commutation_inductance.py:61                 _window_series                             0.091       64   0.73%
+metrics/iec_windows.py:1464                          _main_edge_level_crossing                  0.080      192   0.64%
+metrics/iec_windows.py:2506                          _legacy_err_recovery_settled_base          0.075       40   0.60%
+models/waveform.py:182                               _finite_percentiles                        0.073       44   0.59%
+io/tss_parser.py:148                                 _strip_setup_value                         0.060    95740   0.48%
+utils/timing_adapt.py:180                            scope_turn_on_bases                        0.058       32   0.47%
+
+raw -> E:\Works\DPT-vk-k-mv89ep9q-2\analysis_outputs\arch_evolution_2026-10-15\raw\hotspots.json

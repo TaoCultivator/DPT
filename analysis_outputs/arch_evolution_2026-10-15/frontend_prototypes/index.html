@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DPT 前端方案对照 · 三个原型</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0b0e14; color: #e8ecf4;
+    font-family: "Inter", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+    padding: 30px 34px 48px 34px; min-height: 100vh; }
+
+  h1 { font-size: 21px; font-weight: 700; letter-spacing: .2px; }
+  .sub { color: #8d9ab0; font-size: 13px; margin-top: 6px; line-height: 1.7; max-width: 1000px; }
+  .sub b { color: #c9d5e6; }
+  .warn { margin-top: 12px; padding: 11px 14px; border-radius: 11px; font-size: 12.5px;
+    background: rgba(255,201,77,.09); border: 1px solid rgba(255,201,77,.28);
+    color: #e6cf9a; line-height: 1.7; max-width: 1000px; }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 26px; }
+
+  .card { background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.09);
+    border-radius: 16px; overflow: hidden; display: flex; flex-direction: column; }
+  .card.pick { border-color: rgba(95,224,168,.42);
+    box-shadow: 0 10px 40px rgba(0,0,0,.45), 0 0 0 1px rgba(95,224,168,.16) inset; }
+  .shot { display: block; width: 100%; aspect-ratio: 1440 / 900; object-fit: cover;
+    object-position: top left; border-bottom: 1px solid rgba(255,255,255,.09); background: #12161e; }
+  .body { padding: 15px 16px 18px 16px; display: flex; flex-direction: column; gap: 11px; flex: 1; }
+
+  .tag { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700;
+    letter-spacing: .5px; padding: 3px 10px; border-radius: 9px; align-self: flex-start; }
+  .tag.a { background: rgba(79,140,255,.17); color: #8fbaff; }
+  .tag.b { background: rgba(95,224,168,.17); color: #5fe0a8; }
+  .tag.c { background: rgba(255,201,77,.15); color: #ffc94d; }
+
+  h2 { font-size: 15px; font-weight: 680; line-height: 1.35; }
+  .desc { font-size: 12.5px; color: #98a6bb; line-height: 1.75; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 2px; }
+  td { padding: 4px 0; vertical-align: top; border-top: 1px solid rgba(255,255,255,.06); }
+  td:first-child { color: #8695aa; width: 78px; }
+  td:last-child { color: #dde5f1; font-weight: 600; }
+  td.num { font-family: "JetBrains Mono", "Cascadia Mono", monospace; }
+
+  .verdict { font-size: 12px; line-height: 1.7; padding: 10px 12px; border-radius: 10px;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07);
+    color: #b9c5d6; margin-top: auto; }
+  .verdict b { color: #e8ecf4; }
+
+  .links { margin-top: 26px; font-size: 13px; line-height: 2; color: #98a6bb; }
+  .links a { color: #7fb0ff; text-decoration: none; }
+  .links a:hover { text-decoration: underline; }
+  code { font-family: "JetBrains Mono", "Cascadia Mono", monospace; font-size: 12px;
+    background: rgba(255,255,255,.07); padding: 1px 6px; border-radius: 5px; color: #d7e2f2; }
+</style>
+</head>
+<body>
+  <h1>DPT 前端方案对照 · 三个可比较原型</h1>
+  <div class="sub">
+    三个原型画的是<b>同一条波形、同一份参数值</b>——共用
+    <code>data.mjs</code> 的数据生成、vdiv/yPosition 换算、min/max 包络降采样与参数表。
+    因此差异<b>只来自技术栈与视觉语言</b>，可直接横向比较审美上限与实现成本。
+  </div>
+  <div class="warn">
+    <b>帧率口径提醒</b>：下表「同步绘制耗时」是在无头 Chrome 中测得的单帧 CPU 成本，
+    <b>不是</b>用户体验帧率。无头模式会限频 <code>requestAnimationFrame</code>，
+    因此原型内只显示 ms/帧、<b>不显示 FPS</b>。真实交互帧率必须在有显示的机器上实测，
+    这是前端决策的<b>未完成验证项</b>。
+  </div>
+
+  <div class="grid">
+    <div class="card pick">
+      <img class="shot" src="shots/proto_a_pyqt6_refined.png" alt="原型 A 截图">
+      <div class="body">
+        <span class="tag a">原型 A · 推荐当前保留</span>
+        <h2>PyQt6 精致化（现状延续）</h2>
+        <div class="desc">
+          桌面专业仪器风：近直角、细描边、高信息密度、克制动效。
+          在现有 pyqtgraph 栈内做视觉与交互打磨，不换技术栈。
+        </div>
+        <table>
+          <tr><td>迁移成本</td><td>零</td></tr>
+          <tr><td>绘制成本</td><td class="num">0.40 ms/帧 · Canvas2D</td></tr>
+          <tr><td>风险</td><td>低</td></tr>
+          <tr><td>前置条件</td><td>先拆分 main_window.py(11 368 行)</td></tr>
+        </table>
+        <div class="verdict">
+          <b>结论</b>：零迁移风险，但圆角/阴影/动效天花板低。
+          建议作为 <b>P0 还债后的默认路线</b>，在 P3 用真实波形实测后再决定是否升级。
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <img class="shot" src="shots/proto_b_tauri_webgl.png" alt="原型 B 截图">
+      <div class="body">
+        <span class="tag b">原型 B · 审美上限最高</span>
+        <h2>Tauri + Web 前端（WebGL 绘波）</h2>
+        <div class="desc">
+          现代设计系统：玻璃拟态、渐变层次、大留白、呼吸动效。
+          波形走 WebGL 顶点批量绘制，十万点级仍可保持高帧率。
+        </div>
+        <table>
+          <tr><td>迁移成本</td><td>最高（重写 25 981 行 GUI）</td></tr>
+          <tr><td>绘制成本</td><td class="num">0.27 ms/帧 · WebGL</td></tr>
+          <tr><td>风险</td><td>高</td></tr>
+          <tr><td>新增依赖</td><td>WebView2 运行时</td></tr>
+        </table>
+        <div class="verdict">
+          <b>结论</b>：审美与交互上限确实最高，但要付 WebView 依赖、打包改造、
+          中文排版与高分屏重新验证的代价。<b>当前不建议立即启动</b>；
+          P0 完成后用真实波形实测帧率与光标手感再决策。
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <img class="shot" src="shots/proto_c_egui_native.png" alt="原型 C 截图">
+      <div class="body">
+        <span class="tag c">原型 C · 备选</span>
+        <h2>egui / iced 原生 Rust</h2>
+        <div class="desc">
+          即时模式外观：小圆角、单色面板、文字按钮、几乎无阴影与动效。
+          单栈、无 WebView、部署最干净，外观也最朴素。
+        </div>
+        <table>
+          <tr><td>迁移成本</td><td>极高（连渲染层重建）</td></tr>
+          <tr><td>绘制成本</td><td class="num">0.10 ms/帧 · 光栅化</td></tr>
+          <tr><td>风险</td><td>高</td></tr>
+          <tr><td>待验证</td><td>中文排版、高分屏</td></tr>
+        </table>
+        <div class="verdict">
+          <b>结论</b>：审美上限明显低于 A/B。<b>当前否决</b>，
+          仅保留为「极端追求单栈/单 exe」时的备选。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="links">
+    <b>原始原型（可交互，直接在浏览器打开）</b><br>
+    <a href="proto_a_pyqt6_refined.html">proto_a_pyqt6_refined.html</a> ·
+    <a href="proto_b_tauri_webgl.html">proto_b_tauri_webgl.html</a> ·
+    <a href="proto_c_egui_native.html">proto_c_egui_native.html</a><br>
+    <b>重建命令</b>：<code>node build.mjs</code>（内联数据层）→ <code>node shoot.mjs</code>（截图）
+  </div>
+</body>
+</html>

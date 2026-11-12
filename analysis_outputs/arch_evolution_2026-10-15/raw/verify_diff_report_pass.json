@@ -1,0 +1,42 @@
+{
+  "golden": "C:\\Users\\SONGZH~1\\AppData\\Local\\Temp\\selftest_golden.json",
+  "candidate": "C:\\Users\\SONGZH~1\\AppData\\Local\\Temp\\selftest_golden.json",
+  "policy": {
+    "default": "位级一致（字符串逐字相等）",
+    "rel_tol": null
+  },
+  "summary": {
+    "files_golden": 8,
+    "files_candidate": 8,
+    "files_compared": 5,
+    "files_identical": 5,
+    "files_with_diff": 0,
+    "files_status_mismatch": 0,
+    "only_in_golden": [],
+    "only_in_candidate": [],
+    "total_field_diffs": 0,
+    "verdict": "PASS"
+  },
+  "per_file": [
+    {
+      "file": "915v-uh-1200a-14us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-1200a-15us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-50a-5.5us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-50a-6us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-930a-10.8us-25c_000.tss",
+      "status": "一致"
+    }
+  ]
+}

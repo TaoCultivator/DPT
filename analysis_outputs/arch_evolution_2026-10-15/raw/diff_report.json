@@ -1,0 +1,406 @@
+{
+  "golden": "analysis_outputs\\arch_evolution_2026-10-15\\raw\\golden_corpus_100.json",
+  "candidate": "analysis_outputs\\arch_evolution_2026-10-15\\raw\\golden_corpus_100.json",
+  "policy": {
+    "default": "位级一致（字符串逐字相等）",
+    "rel_tol": null
+  },
+  "summary": {
+    "files_golden": 100,
+    "files_candidate": 100,
+    "files_compared": 96,
+    "files_identical": 96,
+    "files_with_diff": 0,
+    "files_status_mismatch": 0,
+    "only_in_golden": [],
+    "only_in_candidate": [],
+    "total_field_diffs": 0,
+    "verdict": "PASS"
+  },
+  "per_file": [
+    {
+      "file": "915v-uh-1200a-14us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-1200a-15us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-50a-5.5us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-50a-6us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-930a-10.8us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-uh-930a-11.3us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-ul-1200a-16.8us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-ul-1200a-16.8us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-ul-50a-6us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-ul-50a-6us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-ul-930a-12.9us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-ul-930a-13us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vh-1200a-14.6us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vh-1200a-14.8us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vh-50a-6us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vh-50a-6us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vh-930a-11.1us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vh-930a-11.3us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vl-1200a-16.4us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vl-1200a-16.6us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vl-50a-6us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vl-50a-6us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vl-930a-12.5us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-vl-930a-12.7us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wh-1200a-14.5us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wh-1200a-15.2us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wh-50a-5.5us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wh-50a-5.5us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wh-930a-11.7us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wh-930a-11us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wl-1200a-16.8us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wl-1200a-16.8us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wl-50a-6.2us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wl-50a-6.2us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wl-930a-12.8us-175c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "915v-wl-930a-12.8us-25c_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_UH_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_UH_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_UH_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_UL_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_UL_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_UL_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_VH_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_VH_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_VH_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_VL_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_VL_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_VL_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_WH_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_WH_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_WH_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_WL_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_WL_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "AP_WL_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_UH_880V_35A_RT.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_UH_880V_35A_RT_2_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_UH_880V_35A_RT_Err_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_UH_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_UL_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_UL_880V_35A_RT_Err_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_UL_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_VH_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_VH_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_VH_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_VL_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_VL_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_VL_950V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_WH_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_WH_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_WH_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_WL_880V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_WL_880V_35A_RT_ERR_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "OP_WL_950V_35A_RT_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "Tek000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "UH_480V_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "UL_480V_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "UH_480V_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "UL_480V_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_200V_100A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_450V_800A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_480V_1000A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_480V_100A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_480V_50A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_480V_800A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_530V_800A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WL_200V_100A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WL_450V_800A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WL_480V_1000A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WL_480V_100A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WL_480V_50A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WL_480V_800A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WL_530V_800A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_200V_100A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_450V_800A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_480V_1000A_000.tss",
+      "status": "一致"
+    },
+    {
+      "file": "WH_480V_100A_000.tss",
+      "status": "一致"
+    }
+  ]
+}

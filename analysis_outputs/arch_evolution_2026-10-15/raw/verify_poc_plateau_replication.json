@@ -1,0 +1,35 @@
+{
+  "frozen_production_file": {
+    "path": "E:\\Works\\DPT-vk-k-mv89ep9q-2\\dpt_extractor\\metrics\\plateau_level.py",
+    "sha256": "d54c3c2d7a1ab56f9cae4973e5c1532b5550881838771687ec67843deb991a88"
+  },
+  "fuzz": {
+    "rounds": 3000,
+    "mismatch_count": 0,
+    "examples": []
+  },
+  "corpus_comparison": {
+    "calls": 16,
+    "waves_ge_3_samples": 16,
+    "waves_lt_3_samples": 0,
+    "bitwise_equal": 16,
+    "mismatch_count": 0,
+    "mismatch_examples": [],
+    "note": "所有调用均逐值比对；>=3 采样点的调用才会真正执行窗口搜索"
+  },
+  "speed": {
+    "calls": 16,
+    "mean_band_len": 1948.9,
+    "max_band_len": 12141,
+    "original_total_ms": 1739.539,
+    "vectorized_total_ms": 28.578,
+    "original_per_call_us": 108721.16,
+    "vectorized_per_call_us": 1786.09,
+    "speedup": 60.87
+  },
+  "scope": {
+    "sampled_files": 12,
+    "description": "分层抽样 12 个文件（覆盖小/中/大体积与短路/双脉冲算路）",
+    "note": "每个文件只跑一次提取；调用数即该抽样集下该函数的实际调用总数"
+  }
+}

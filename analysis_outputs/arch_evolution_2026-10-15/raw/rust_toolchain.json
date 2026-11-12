@@ -1,0 +1,68 @@
+{
+  "probes": [
+    {
+      "name": "rustc",
+      "found": false,
+      "path": null,
+      "output": null
+    },
+    {
+      "name": "cargo",
+      "found": false,
+      "path": null,
+      "output": null
+    },
+    {
+      "name": "rustup",
+      "found": false,
+      "path": null,
+      "output": null
+    },
+    {
+      "name": "matu",
+      "found": false,
+      "path": null,
+      "output": null
+    },
+    {
+      "name": "cl",
+      "found": false,
+      "path": null,
+      "output": null
+    },
+    {
+      "name": "link",
+      "found": false,
+      "path": null,
+      "output": null
+    },
+    {
+      "name": "gcc",
+      "found": false,
+      "path": null,
+      "output": null
+    }
+  ],
+  "dirs": {
+    "CARGO_HOME": {
+      "path": "C:\\Users\\songzhenxi\\.cargo",
+      "exists": false
+    },
+    "RUSTUP_HOME": {
+      "path": "C:\\Users\\songzhenxi\\.rustup",
+      "exists": false
+    }
+  },
+  "verdict": {
+    "rust_toolchain_available": false,
+    "msvc_linker_available": false,
+    "gnu_linker_available": false,
+    "blocker": "未安装 rustc/cargo，无法在本机编译任何 Rust 代码"
+  },
+  "install_plan": [
+    "https://win.rustup.rs/x86_64 (rustup-init.exe) 或 winget install Rustlang.Rustup",
+    "rustup default stable-msvc（或 stable-gnu）",
+    "python -m pip install maturin（方案 A 需要）"
+  ],
+  "note": "本脚本只做只读探测；未安装任何组件。"
+}

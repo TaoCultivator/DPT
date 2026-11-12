@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>原型 B · Tauri + Web 前端（WebGL 绘波）</title>
+<style>
+  /* 原型 B：Tauri + Web 前端（React/Vue）+ WebGL 波形。
+     视觉语言刻意走「现代设计系统」：圆角、层次阴影、玻璃拟态、
+     呼吸感动效、留白更大、数字用等宽字体分层。
+     代表「审美/交互上限最高」路线，代价是波形渲染要自研降采样 + WebGL。 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1440px; height: 900px; overflow: hidden;
+    font-family: "Inter", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; }
+
+  /* 背景：柔和渐变 + 光斑，营造层次 */
+  body {
+    background:
+      radial-gradient(1100px 620px at 12% -12%, #1d3a5c 0%, rgba(29,58,92,0) 62%),
+      radial-gradient(900px 520px at 98% 8%, #2a2350 0%, rgba(42,35,80,0) 60%),
+      linear-gradient(168deg, #0d1017 0%, #10141d 52%, #0b0e14 100%);
+    color: #e8ecf4;
+  }
+
+  .shell { display: flex; flex-direction: column; height: 900px; }
+
+  /* ── 顶部：品牌 + 路径胶囊 + 主操作 ── */
+  .topbar { height: 60px; display: flex; align-items: center; gap: 12px;
+    padding: 0 20px; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo { width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, #4f8cff, #8b5cf6);
+    box-shadow: 0 4px 16px rgba(79,140,255,.42);
+    display: grid; place-items: center; font-weight: 800; font-size: 13px; color: #fff; }
+  .brand h1 { font-size: 14.5px; font-weight: 650; letter-spacing: .2px; }
+  .brand span { display: block; font-size: 10.5px; color: #7b8698; font-weight: 500;
+    letter-spacing: .3px; margin-top: 1px; }
+
+  .pathpill { display: flex; align-items: center; gap: 8px; height: 30px;
+    padding: 0 14px; border-radius: 15px; font-size: 12px;
+    background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.09);
+    color: #9fb0c8; backdrop-filter: blur(12px); }
+  .pathpill b { color: #dbe4f2; font-weight: 600; }
+  .pathpill .pill { padding: 1px 8px; border-radius: 8px; font-size: 11px;
+    background: rgba(79,140,255,.18); color: #8fbaff; font-weight: 600; }
+
+  .grow { flex: 1; }
+  .cta { height: 34px; padding: 0 18px; border-radius: 17px; border: none;
+    font-size: 12.5px; font-weight: 650; cursor: default;
+    background: linear-gradient(135deg, #4f8cff, #6b6bff); color: #fff;
+    box-shadow: 0 6px 20px rgba(79,140,255,.36); }
+  .ghost { height: 34px; padding: 0 16px; border-radius: 17px; font-size: 12.5px;
+    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1);
+    color: #c2ccdd; cursor: default; }
+
+  /* ── 主区：左侧指标卡 + 右侧波形玻璃卡 ── */
+  .main { flex: 1; display: flex; gap: 14px; padding: 0 20px 14px 20px; min-height: 0; }
+
+  .rail { width: 296px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+  .glass { background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.085);
+    border-radius: 16px; backdrop-filter: blur(18px);
+    box-shadow: 0 10px 34px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.05); }
+
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; padding: 12px; }
+  .metric { padding: 10px 11px; border-radius: 12px;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.06); }
+  .metric .k { font-size: 10.5px; color: #7b8698; letter-spacing: .4px;
+    text-transform: uppercase; font-weight: 600; }
+  .metric .v { font-size: 19px; font-weight: 680; margin-top: 3px;
+    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    letter-spacing: -.4px; }
+  .metric .u { font-size: 11px; color: #8d9ab0; font-weight: 550; margin-left: 3px; }
+  .metric.accent .v { color: #7fb0ff; }
+  .metric.warm .v { color: #ffc94d; }
+  .metric.cool .v { color: #5fe0a8; }
+
+  .listhead { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px 14px; }
+  .listhead h2 { font-size: 12px; font-weight: 650; letter-spacing: .3px; }
+  .seg { margin-left: auto; display: flex; gap: 3px; padding: 3px; border-radius: 9px;
+    background: rgba(255,255,255,.05); }
+  .seg span { padding: 3px 10px; border-radius: 7px; font-size: 11px; color: #8d9ab0; font-weight: 600; }
+  .seg span.on { background: rgba(79,140,255,.24); color: #a9c8ff; }
+
+  .rows { flex: 1; overflow: hidden; padding: 0 10px 10px 10px; }
+  .row { display: grid; grid-template-columns: 1fr 74px; align-items: center;
+    padding: 6px 9px; border-radius: 9px; font-size: 12px; }
+  .row:nth-child(even) { background: rgba(255,255,255,.022); }
+  .row .nm { color: #c6d0e0; }
+  .row .nm small { color: #6f7c8f; font-size: 10px; margin-left: 5px; }
+  .row .val { text-align: right; font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+    font-weight: 620; color: #eef3fa; }
+  .row.on { background: linear-gradient(90deg, rgba(79,140,255,.26), rgba(79,140,255,.10));
+    box-shadow: inset 2px 0 0 #4f8cff; }
+  .row.on .val { color: #fff; }
+  .row.energy .val { color: #ffc94d; }
+  .sect { padding: 9px 9px 5px 9px; font-size: 10.5px; font-weight: 700;
+    color: #7b8698; letter-spacing: .8px; text-transform: uppercase; }
+
+  /* ── 波形卡 ── */
+  .stage { flex: 1; position: relative; overflow: hidden; }
+  .stage canvas { position: absolute; inset: 0; display: block; }
+
+  .hud { position: absolute; left: 16px; top: 14px; display: flex; gap: 8px; }
+  .chip { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px;
+    border-radius: 14px; font-size: 11.5px; font-weight: 600; color: #d5deec;
+    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1);
+    backdrop-filter: blur(12px); }
+  .chip i { width: 8px; height: 8px; border-radius: 50%; display: block; }
+
+  .readout { position: absolute; right: 16px; top: 14px; padding: 12px 14px;
+    border-radius: 14px; min-width: 214px;
+    background: rgba(14,18,26,.72); border: 1px solid rgba(255,255,255,.1);
+    backdrop-filter: blur(16px); box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+  .readout .h { font-size: 10px; font-weight: 700; color: #7b8698;
+    letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
+  .readout .r { display: flex; justify-content: space-between; font-size: 11.5px;
+    padding: 3px 0; font-family: "JetBrains Mono", "Cascadia Mono", monospace; }
+  .readout .k { color: #8695aa; }
+  .readout .v { color: #eef3fa; font-weight: 600; }
+  .readout .big { margin-top: 8px; padding-top: 8px;
+    border-top: 1px solid rgba(255,255,255,.1); align-items: baseline; }
+  .readout .big .v { font-size: 17px; color: #7fb0ff; font-weight: 700; }
+
+  .footer { position: absolute; left: 16px; right: 16px; bottom: 12px;
+    display: flex; align-items: center; gap: 14px; padding: 9px 14px;
+    border-radius: 13px; font-size: 11.5px; color: #98a6bb;
+    background: rgba(14,18,26,.62); border: 1px solid rgba(255,255,255,.08);
+    backdrop-filter: blur(14px); }
+  .footer b { color: #dde5f1; font-weight: 620; }
+  .footer .fps { margin-left: auto; font-family: "JetBrains Mono", monospace; color: #7fb0ff; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">DP</div>
+      <div><h1>DPT 参数提取</h1><span>双脉冲 / 短路 · 损耗分析工作台</span></div>
+    </div>
+    <div class="pathpill">
+      <b>UH_750V_1050A_000.tss</b>
+      <span class="pill">双脉冲</span>
+      <span class="pill" style="background:rgba(95,224,168,.16);color:#5fe0a8">RT</span>
+    </div>
+    <div class="grow"></div>
+    <button class="ghost">重新提取</button>
+    <button class="ghost">导出报告</button>
+    <button class="cta">打开文件</button>
+  </div>
+
+  <div class="main">
+    <div class="rail">
+      <div class="glass">
+        <div class="cards">
+          <div class="metric accent"><div class="k">Eoff</div><div class="v">148.72<span class="u">mJ</span></div></div>
+          <div class="metric warm"><div class="k">Eon</div><div class="v">92.41<span class="u">mJ</span></div></div>
+          <div class="metric cool"><div class="k">Err</div><div class="v">21.36<span class="u">mJ</span></div></div>
+          <div class="metric"><div class="k">Ic_off_max</div><div class="v">1053<span class="u">A</span></div></div>
+        </div>
+      </div>
+      <div class="glass" style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
+        <div class="listhead">
+          <h2>参数明细</h2>
+          <div class="seg"><span class="on">全部</span><span>关断</span><span>开通</span></div>
+        </div>
+        <div class="rows" id="rows"></div>
+      </div>
+    </div>
+
+    <div class="glass stage">
+      <canvas id="cv"></canvas>
+      <div class="hud">
+        <div class="chip"><i style="background:#3ee07f"></i>Vge</div>
+        <div class="chip"><i style="background:#ffd23f"></i>Ic</div>
+        <div class="chip"><i style="background:#4aa8ff"></i>Vce</div>
+      </div>
+      <div class="readout">
+        <div class="h">区间读数</div>
+        <div class="r"><span class="k">Ha</span><span class="v">1.4200 us</span></div>
+        <div class="r"><span class="k">Hb</span><span class="v">1.8300 us</span></div>
+        <div class="r"><span class="k">Δt</span><span class="v">0.4100 us</span></div>
+        <div class="r big"><span class="k">ΔVce</span><span class="v">402.6 V</span></div>
+      </div>
+      <div class="footer">
+        <span>点数 <b id="npt"></b></span>
+        <span>WebGL 包络 <b id="env"></b></span>
+        <span>识别 <b>双脉冲</b></span>
+        <span class="fps" id="fps">— fps</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ==== 内联数据层（生成自 data.mjs，请勿手改）==== */
+/* 三个前端原型共用的「数据层」。
+ *
+ * 目的：让「同一份波形 + 同一套参数」在三种渲染技术下横向可比，
+ * 差异只来自技术栈与视觉语言，而不是数据不同。
+ *
+ * 由 prototypes/build.mjs 内联进各原型 HTML，因此原型产物是自包含单文件，
+ * 既可以从 file:// 直接打开，也能被 Chrome headless 截图。
+ */
+const N = 62500;              // 采样点数（与 示例文件 双脉冲样例量级一致）
+const T0 = 0.0;               // 视窗起点 (us)
+const T1 = 4.0;               // 视窗终点 (us)
+const DT = (T1 - T0) / (N - 1);
+const DISP_HALF = 4.0;        // 每格半高（pyqtgraph 默认 view 范围口径）
+
+/** 确定性伪随机（mulberry32）：保证三个原型的噪声逐点相同。 */
+function rng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function smoothstep(x, a, b) {
+  if (x <= a) return 0;
+  if (x >= b) return 1;
+  const u = (x - a) / (b - a);
+  return u * u * (3 - 2 * u);
+}
+
+/**
+ * 生成与 DPT 双脉冲工况形状一致的三通道波形。
+ * 关断脉冲在前、开通脉冲在后，开通处带反向恢复电流尖峰与 Vce 过冲。
+ */
+function makeDPT() {
+  const rand = rng(20261015);
+  const vge = new Float64Array(N);
+  const ic = new Float64Array(N);
+  const vce = new Float64Array(N);
+
+  const p1on = 0.10, p1off = 0.26, p2on = 0.50, p2off = 0.76;
+
+  for (let i = 0; i < N; i++) {
+    const p = i / (N - 1);
+    const g1 = smoothstep(p, p1on, p1on + 0.04) * (1 - smoothstep(p, p1off, p1off + 0.03));
+    const g2 = smoothstep(p, p2on, p2on + 0.034) * (1 - smoothstep(p, p2off, p2off + 0.03));
+    const g = Math.max(g1, g2);
+    vge[i] = -6.0 + g * 21.0 + Math.sin(p * 940) * 0.135 + (rand() - 0.5) * 0.085;
+
+    const rr = Math.exp(-Math.pow((p - (p2on + 0.046)) / 0.011, 2)) * 1.55;
+    const tail = (p > p2off ? 1 : 0) * Math.exp(-(p - p2off) / 0.052) * 0.33;
+    const base = Math.exp(-Math.pow((p - (p1on + 0.10)) / 0.16, 2)) * 0.86;
+    ic[i] = (base + g * 0.56 + rr + tail) * (1 + Math.sin(p * 660) * 0.02)
+          + (rand() - 0.5) * 0.011;
+
+    const drop = Math.exp(-Math.pow((p - (p1on + 0.09)) / 0.13, 2)) * 0.92
+               + Math.exp(-Math.pow((p - (p2on + 0.12)) / 0.15, 2)) * 0.54;
+    const spike = Math.exp(-Math.pow((p - p2on) / 0.0085, 2)) * 5.4;
+    vce[i] = 486 * (1 - 0.63 * g1 - 0.69 * g2) + spike - drop * 12 + (rand() - 0.5) * 1.35;
+  }
+  return { vge, ic, vce };
+}
+
+/** 通道 → 显示值，与 DPT ``waveform_plot`` 的 vdiv / yPosition 口径同构。 */
+function toDisplay(arr, vdiv, ypos) {
+  const o = new Float64Array(arr.length);
+  for (let i = 0; i < arr.length; i++) o[i] = arr[i] / vdiv - ypos;
+  return o;
+}
+
+const TRACE_META = [
+  { label: "Vge", color: "#3ee07f", vdiv: 5.0, ypos: 1.15, unit: "V" },
+  { label: "Ic",  color: "#ffd23f", vdiv: 400.0, ypos: 0.0, unit: "A" },
+  { label: "Vce", color: "#4aa8ff", vdiv: 200.0, ypos: -1.55, unit: "V" },
+];
+
+/** 参数表（三原型共用同一份数值，便于横向对照交互） */
+const PARAMS = [
+  { section: "关断过程", name: "ΔVce", unit: "V", value: "402.6", range: "312.0~714.6" },
+  { section: "关断过程", name: "Ic_off_max", unit: "A", value: "1053.2", range: "自动" },
+  { section: "关断过程", name: "Vce_off_max", unit: "V", value: "714.6", range: "自动" },
+  { section: "关断过程", name: "dv/dt", unit: "V/ns", value: "24.18", range: "20.0→80.0%" },
+  { section: "关断过程", name: "di/dt", unit: "A/ns", value: "13.62", range: "20.0→80.0%" },
+  { section: "关断过程", name: "Ls_off", unit: "nH", value: "18.40", range: "自动" },
+  { section: "关断过程", name: "Toff", unit: "us", value: "1.8013", range: "自动" },
+  { section: "关断过程", name: "Td_off", unit: "us", value: "0.8421", range: "自动" },
+  { section: "关断过程", name: "Tf", unit: "us", value: "0.9592", range: "自动" },
+  { section: "关断过程", name: "Eoff", unit: "mJ", value: "148.72", range: "自动", energy: true },
+  { section: "开通", name: "Ic_on_max", unit: "A", value: "1132.5", range: "自动" },
+  { section: "开通", name: "Vce_on_max", unit: "V", value: "8.42", range: "自动" },
+  { section: "开通", name: "Ton", unit: "us", value: "2.1043", range: "自动" },
+  { section: "开通", name: "Td_on", unit: "us", value: "0.5127", range: "自动" },
+  { section: "反向恢复", name: "Vrr", unit: "V", value: "118.40", range: "自动" },
+  { section: "反向恢复", name: "Err", unit: "mJ", value: "21.36", range: "自动", energy: true },
+];
+
+const CURSORS = { a: 1.42, b: 1.83, window: [0.15, 2.35] };
+
+/**
+ * 每像素列 min/max 包络降采样。
+ * 十万点级波形必须做这一步才能保证平移/缩放的帧率；
+ * 三个原型共用同一实现，因此渲染成本差异只来自各技术的绘制路径。
+ */
+function buildEnvelope(disp, t0, t1, cols, plotW) {
+  const per = (t1 - t0) / cols;
+  const edge = Math.max(1, Math.round(cols / plotW));
+  const out = new Float32Array(cols * 2);
+  for (let c = 0; c < cols; c++) {
+    const ta = t0 + c * per;
+    const tb = ta + per;
+    let i0 = Math.floor((ta - T0) / DT);
+    let i1 = Math.ceil((tb - T0) / DT);
+    if (i1 <= i0) i1 = i0 + 1;
+    if (i0 < 0) i0 = 0;
+    if (i1 > N) i1 = N;
+    let mn = Infinity, mx = -Infinity;
+    for (let i = i0; i < i1; i++) {
+      const v = disp[i];
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    if (!(mn <= mx)) { mn = 0; mx = 0; }
+    out[c * 2] = mn;
+    out[c * 2 + 1] = mx;
+  }
+  return { env: out, cols, edge };
+}
+
+</script>
+<script>
+(function () {
+  "use strict";
+  const { vge, ic, vce } = makeDPT();
+  const traces = [
+    { meta: TRACE_META[0], d: toDisplay(vge, TRACE_META[0].vdiv, TRACE_META[0].ypos) },
+    { meta: TRACE_META[1], d: toDisplay(ic,  TRACE_META[1].vdiv, TRACE_META[1].ypos) },
+    { meta: TRACE_META[2], d: toDisplay(vce, TRACE_META[2].vdiv, TRACE_META[2].ypos) },
+  ];
+
+  document.getElementById("npt").textContent = N.toLocaleString();
+
+  // 参数明细
+  const rows = document.getElementById("rows");
+  let html = "", last = null;
+  for (const p of PARAMS) {
+    if (p.section !== last) {
+      html += `<div class="sect">${p.section}</div>`;
+      last = p.section;
+    }
+    const on = p.section === "关断过程" && p.name === "ΔVce" ? " on" : "";
+    html += `<div class="row${on}${p.energy ? " energy" : ""}">`
+          + `<div class="nm">${p.name}<small>${p.unit}</small></div>`
+          + `<div class="val">${p.value}</div></div>`;
+  }
+  rows.innerHTML = html;
+
+  // ── WebGL 渲染：把 min/max 包络作为顶点，用 GPU 批量画线 ──
+  const cv = document.getElementById("cv");
+  const gl = cv.getContext("webgl", { antialias: true, alpha: true, premultipliedAlpha: false });
+  const stage = cv.parentElement;
+
+  let glOK = !!gl;
+  let prog = null, buf = null;
+  let aPos = 0;
+
+  if (glOK) {
+    // 注意：所有顶点坐标在 JS 侧已换算为 NDC，顶点着色器**不得**再做缩放，
+    // 否则会把图形推出裁剪区（第一版原型踩过这个坑）。
+    const vs = `attribute vec2 a_pos; void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+    const fs = `precision mediump float; uniform vec3 u_color; uniform float u_alpha;
+      void main(){ gl_FragColor = vec4(u_color, u_alpha); }`;
+    const mk = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.error("shader:", gl.getShaderInfoLog(s));
+        glOK = false;
+        return null;
+      }
+      return s;
+    };
+    const v = mk(gl.VERTEX_SHADER, vs);
+    const f = mk(gl.FRAGMENT_SHADER, fs);
+    if (glOK && v && f) {
+      prog = gl.createProgram();
+      gl.attachShader(prog, v);
+      gl.attachShader(prog, f);
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error("link:", gl.getProgramInfoLog(prog));
+        glOK = false;
+      } else {
+        gl.useProgram(prog);
+        buf = gl.createBuffer();
+        aPos = gl.getAttribLocation(prog, "a_pos");
+      }
+    } else {
+      glOK = false;
+    }
+  }
+
+  // 无 WebGL 时回退到 2D canvas（两条路径都保留，便于评估可移植性）
+  const c2d = glOK ? null : cv.getContext("2d");
+
+  const PADL = 60, PADR = 22, PADT = 62, PADB = 68;
+  const f0 = CURSORS.window[0], f1 = CURSORS.window[1];
+  let cols = 1180;
+  let envs = traces.map((t) => buildEnvelope(t.d, f0, f1, cols, cols));
+  document.getElementById("env").textContent = cols + " 列";
+
+  const HA = CURSORS.a, HB = CURSORS.b;
+
+  const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
+
+  function resize() {
+    const r = stage.getBoundingClientRect();
+    const d = dpr();
+    cv.width = Math.max(2, Math.floor(r.width * d));
+    cv.height = Math.max(2, Math.floor(r.height * d));
+    cv.style.width = r.width + "px";
+    cv.style.height = r.height + "px";
+  }
+
+  /** 绘图区在 NDC 中的范围（基于画布真实像素，与 gl.viewport 同一坐标空间）。 */
+  function ndcBounds() {
+    const w = cv.width, h = cv.height;
+    const x0 = (PADL / w) * 2 - 1;
+    const x1 = 1 - (PADR / w) * 2;
+    const y0 = 1 - (PADT / h) * 2;
+    const y1 = (PADB / h) * 2 - 1;
+    return { x0, x1, y0, y1 };
+  }
+
+  const hexToRgb = (hex) => [
+    parseInt(hex.slice(1, 3), 16) / 255,
+    parseInt(hex.slice(3, 5), 16) / 255,
+    parseInt(hex.slice(5, 7), 16) / 255,
+  ];
+
+  function drawBatch(pts, rgb, alpha, width) {
+    const arr = new Float32Array(pts);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform3f(gl.getUniformLocation(prog, "u_color"), rgb[0], rgb[1], rgb[2]);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_alpha"), alpha);
+    gl.lineWidth(width);
+    gl.drawArrays(gl.LINES, 0, pts.length / 2);
+  }
+
+  function paintGL() {
+    const { x0, x1, y0, y1 } = ndcBounds();
+    const ySpan = y0 - y1;
+
+    gl.viewport(0, 0, cv.width, cv.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // 网格：8×8，低对比细线
+    const gridPts = [];
+    for (let i = 0; i <= 8; i++) {
+      const gx = x0 + (i / 8) * (x1 - x0);
+      gridPts.push(gx, y0, gx, y1);
+      const gy = y1 + (i / 8) * ySpan;
+      gridPts.push(x0, gy, x1, gy);
+    }
+    const gridRgb = hexToRgb("#ffffff");
+    gl.uniform3f(gl.getUniformLocation(prog, "u_color"), gridRgb[0], gridRgb[1], gridRgb[2]);
+    {
+      const arr = new Float32Array(gridPts);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform1f(gl.getUniformLocation(prog, "u_alpha"), 0.055);
+      gl.drawArrays(gl.LINES, 0, gridPts.length / 2);
+    }
+
+    // 包络：每列一段竖线，一次性提交
+    for (let i = 0; i < traces.length; i++) {
+      const e = envs[i].env;
+      const pts = [];
+      for (let c = 0; c < cols; c++) {
+        const gx = x0 + (c / (cols - 1)) * (x1 - x0);
+        const nHi = Math.max(-1, Math.min(1, e[c * 2 + 1] / DISP_HALF));
+        const nLo = Math.max(-1, Math.min(1, e[c * 2] / DISP_HALF));
+        pts.push(gx, y1 + (nHi + 1) / 2 * ySpan, gx, y1 + (nLo + 1) / 2 * ySpan);
+      }
+      drawBatch(pts, hexToRgb(traces[i].meta.color), 1.0, 1.0);
+    }
+
+    // 光标
+    const cursorPts = [];
+    [HA, HB].forEach((t) => {
+      const gx = x0 + ((t - f0) / (f1 - f0)) * (x1 - x0);
+      cursorPts.push(gx, y0, gx, y1);
+    });
+    drawBatch(cursorPts, [0.92, 0.94, 0.98], 0.9, 1.0);
+  }
+
+  function paint2D() {
+    const w = cv.clientWidth, h = cv.clientHeight;
+    const d = dpr();
+    c2d.setTransform(d, 0, 0, d, 0, 0);
+    c2d.clearRect(0, 0, w, h);
+    const plotW = w - PADL - PADR, plotH = h - PADT - PADB;
+    c2d.strokeStyle = "rgba(255,255,255,.055)";
+    c2d.lineWidth = 1;
+    for (let i = 0; i <= 8; i++) {
+      const x = Math.round(PADL + (i / 8) * plotW) + 0.5;
+      c2d.beginPath(); c2d.moveTo(x, PADT); c2d.lineTo(x, PADT + plotH); c2d.stroke();
+      const y = Math.round(PADT + (i / 8) * plotH) + 0.5;
+      c2d.beginPath(); c2d.moveTo(PADL, y); c2d.lineTo(PADL + plotW, y); c2d.stroke();
+    }
+    const yOf = (v) => PADT + plotH / 2 - (v / (DISP_HALF * 2)) * plotH;
+    for (let i = 0; i < traces.length; i++) {
+      const e = envs[i].env;
+      c2d.strokeStyle = traces[i].meta.color;
+      c2d.lineWidth = 1.2;
+      c2d.beginPath();
+      for (let c = 0; c < cols; c++) {
+        const x = PADL + (c / (cols - 1)) * plotW + 0.5;
+        c2d.moveTo(x, yOf(e[c * 2 + 1]));
+        c2d.lineTo(x, yOf(e[c * 2]));
+      }
+      c2d.stroke();
+    }
+    c2d.strokeStyle = "rgba(240,244,250,.85)";
+    c2d.setLineDash([5, 4]);
+    [HA, HB].forEach((t) => {
+      const x = Math.round(PADL + ((t - f0) / (f1 - f0)) * plotW) + 0.5;
+      c2d.beginPath(); c2d.moveTo(x, PADT); c2d.lineTo(x, PADT + plotH); c2d.stroke();
+    });
+    c2d.setLineDash([]);
+  }
+
+  resize();
+  const paint = () => (glOK ? paintGL() : paint2D());
+  paint();
+
+  // 只上报「同步绘制成本」，不上报帧率：
+  // 无头 Chrome 会对 requestAnimationFrame 限频，帧率数字不反映真实交互体验。
+  let frames = 0, acc = 0, t0 = performance.now();
+  const fpsEl = document.getElementById("fps");
+  function loop() {
+    const a = performance.now();
+    paint();
+    acc += performance.now() - a;
+    frames++;
+    const el = performance.now() - t0;
+    if (el >= 1000) {
+      fpsEl.textContent = (acc / frames).toFixed(2) + " ms/帧"
+        + (glOK ? " · WebGL" : " · 2D 回退");
+      window.__protoStats = { msPerFrame: acc / frames, webgl: glOK, framesSampled: frames };
+      frames = 0; acc = 0; t0 = performance.now();
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+  window.__protoReady = true;
+  window.__webglOK = glOK;
+})();
+</script>
+</body>
+</html>

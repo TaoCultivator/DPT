@@ -1,0 +1,263 @@
+{
+  "meta": {
+    "sample": "E:\\Works\\DPT\\示例文件\\songzhenxi\\KSU2577\\SSM1R7PB12B3DTFMMSPP25M4CF0016\\SSS\\RT\\tss\\WL_750V_805A_000.tss",
+    "sample_kb": 1425.4,
+    "n_samples": 375000,
+    "n_channels": 9,
+    "mapping_source": "trend",
+    "repeat": 10,
+    "note": "已预热 2 次，排除 numba 编译；单次 extract_all 平均耗时"
+  },
+  "total_tottime_ms_per_run": 3007.213,
+  "by_kind": [
+    {
+      "kind": "numpy: 其他",
+      "tottime_ms": 1461.3,
+      "share": 0.4859
+    },
+    {
+      "kind": "第三方其他",
+      "tottime_ms": 989.912,
+      "share": 0.3292
+    },
+    {
+      "kind": "本项目代码",
+      "tottime_ms": 516.955,
+      "share": 0.1719
+    },
+    {
+      "kind": "numpy: 排序/搜索",
+      "tottime_ms": 30.042,
+      "share": 0.01
+    },
+    {
+      "kind": "numpy: 算术/ufunc",
+      "tottime_ms": 6.665,
+      "share": 0.0022
+    },
+    {
+      "kind": "numpy: 索引/形状",
+      "tottime_ms": 0.914,
+      "share": 0.0003
+    },
+    {
+      "kind": "scipy",
+      "tottime_ms": 0.65,
+      "share": 0.0002
+    },
+    {
+      "kind": "numpy: 分配/拷贝",
+      "tottime_ms": 0.631,
+      "share": 0.0002
+    },
+    {
+      "kind": "Python 内建/字节码",
+      "tottime_ms": 0.144,
+      "share": 0.0
+    }
+  ],
+  "project_top25": [
+    {
+      "file": "metrics/plateau_level.py",
+      "line": 10,
+      "func": "_quiet_plateau_mid",
+      "tottime_ms": 271.659,
+      "ncalls_per_run": 4.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 437,
+      "func": "_local_extrema_indices",
+      "tottime_ms": 91.463,
+      "ncalls_per_run": 11.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "detect/pulse_detector.py",
+      "line": 42,
+      "func": "detect_all",
+      "tottime_ms": 33.236,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 814,
+      "func": "_first_sustained_rise_crossing",
+      "tottime_ms": 15.749,
+      "ncalls_per_run": 4.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 355,
+      "func": "_crossing_pair_indices",
+      "tottime_ms": 15.26,
+      "ncalls_per_run": 11.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/plateau_level.py",
+      "line": 57,
+      "func": "_plateau_mid_without_isolated_spikes",
+      "tottime_ms": 11.163,
+      "ncalls_per_run": 10.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/commutation_inductance.py",
+      "line": 27,
+      "func": "_finite_series",
+      "tottime_ms": 11.021,
+      "ncalls_per_run": 2.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "detect/pulse_detector.py",
+      "line": 177,
+      "func": "_refine_pulse_off",
+      "tottime_ms": 6.43,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 1464,
+      "func": "_main_edge_level_crossing",
+      "tottime_ms": 4.438,
+      "ncalls_per_run": 6.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/plateau_level.py",
+      "line": 634,
+      "func": "_turn_on_rise_index",
+      "tottime_ms": 3.803,
+      "ncalls_per_run": 2.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 1017,
+      "func": "_three_full_cycle_settle_region",
+      "tottime_ms": 3.772,
+      "ncalls_per_run": 5.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 3353,
+      "func": "_err_vd_main_rise_search",
+      "tottime_ms": 3.309,
+      "ncalls_per_run": 3.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/slopes.py",
+      "line": 858,
+      "func": "_turn_on_main_rise_between_base_top",
+      "tottime_ms": 3.061,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 3543,
+      "func": "_err_irr_fall_cross_ha_t",
+      "tottime_ms": 2.481,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 3415,
+      "func": "_err_vd_rise_cross_hb_t",
+      "tottime_ms": 2.461,
+      "ncalls_per_run": 2.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 1114,
+      "func": "_legacy_settled_level_crossing_after_main_edge",
+      "tottime_ms": 2.26,
+      "ncalls_per_run": 3.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 2506,
+      "func": "_legacy_err_recovery_settled_base",
+      "tottime_ms": 2.165,
+      "ncalls_per_run": 2.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 1737,
+      "func": "_eoff_crossing_time_us",
+      "tottime_ms": 2.032,
+      "ncalls_per_run": 1011.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 4057,
+      "func": "integrate_err_recovery",
+      "tottime_ms": 1.776,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 395,
+      "func": "_level_crossing_time",
+      "tottime_ms": 1.204,
+      "ncalls_per_run": 313.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/rr_tail.py",
+      "line": 6,
+      "func": "reverse_recovery_tail_end_index",
+      "tottime_ms": 1.195,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "metrics/iec_windows.py",
+      "line": 1226,
+      "func": "<genexpr>",
+      "tottime_ms": 1.177,
+      "ncalls_per_run": 1075.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "pipeline/extract.py",
+      "line": 328,
+      "func": "_turn_on_ic_max_in_base_window",
+      "tottime_ms": 1.076,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "pipeline/extract.py",
+      "line": 106,
+      "func": "_turn_on_delta_vce_knee_point",
+      "tottime_ms": 1.071,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    },
+    {
+      "file": "models/waveform.py",
+      "line": 182,
+      "func": "_finite_percentiles",
+      "tottime_ms": 1.048,
+      "ncalls_per_run": 1.0,
+      "kind": "本项目代码"
+    }
+  ],
+  "python_side_tottime_ms_per_run": 517.098,
+  "python_side_share": 0.172
+}

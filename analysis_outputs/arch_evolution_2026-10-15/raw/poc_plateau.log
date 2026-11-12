@@ -1,0 +1,40 @@
+生产文件（未修改）: E:\Works\DPT-vk-k-mv89ep9q-2\dpt_extractor\metrics\plateau_level.py
+  sha256: d54c3c2d7a1ab56f9cae4973e5c1532b5550881838771687ec67843deb991a88
+
+== 1. 随机模糊测试 8000 轮 ==
+  不一致 0 例 / 8000
+
+== 2. 真实语料调用抓取（分层抽样 40 个文件（覆盖小/中/大体积与短路/双脉冲算路））==
+  scanned 1/18  captured=0
+  scanned 2/18  captured=0
+  scanned 3/18  captured=0
+  scanned 4/18  captured=0
+  scanned 5/18  captured=0
+  scanned 6/18  captured=0
+  scanned 7/18  captured=4
+  scanned 8/18  captured=8
+  scanned 9/18  captured=12
+  scanned 10/18  captured=16
+  scanned 11/18  captured=20
+  scanned 12/18  captured=24
+  scanned 13/18  captured=28
+  scanned 14/18  captured=32
+  scanned 15/18  captured=36
+  scanned 16/18  captured=40
+  scanned 17/18  captured=44
+  scanned 18/18  captured=48
+  抓到真实调用 48 次
+
+== 3. 真实语料逐值比对 ==
+  调用总数        : 48
+  按位相等        : 48
+  不一致          : 0
+
+== 4. 实测加速比（相同真实入参）==
+  调用次数        : 48
+  平均 band 长度  : 2392.6  最大 21724
+  原始实现        : 12110.76 ms  (252307.5 us/次)
+  向量化实现      : 194.36 ms  (4049.2 us/次)
+  >>> 加速比      : 62.31x
+
+raw -> E:\Works\DPT-vk-k-mv89ep9q-2\analysis_outputs\arch_evolution_2026-10-15\raw\poc_plateau_vectorize.json

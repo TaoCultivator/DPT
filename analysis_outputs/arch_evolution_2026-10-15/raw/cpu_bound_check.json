@@ -1,0 +1,22 @@
+{
+  "files_ok": 24,
+  "files_failed": 0,
+  "cpu_count": 16,
+  "load": {
+    "cpu_s": 2.078,
+    "wall_s": 2.169,
+    "ratio": 0.9579
+  },
+  "extract": {
+    "cpu_s": 30.266,
+    "wall_s": 30.988,
+    "ratio": 0.9767
+  },
+  "total": {
+    "cpu_s": 32.344,
+    "wall_s": 33.157,
+    "ratio": 0.9755
+  },
+  "ideal_speedup_ceiling": 15.61,
+  "note": "cpu/wall ≈ 1 表示单线程跑满一核，属纯 CPU 受限；上限按 min(核数, ratio×核数) 估算，未计进程启动与内存带宽折损"
+}

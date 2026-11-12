@@ -1,0 +1,472 @@
+{
+  "summary": {
+    "sample": "E:\\Works\\DPT\\示例文件\\songzhenxi\\KSU2577\\SSM1R7PB12B3DTFMMSPP25M4CF0016\\SSS\\RT\\tss\\WL_750V_805A_000.tss",
+    "parameter_items": 32,
+    "first_switch_ms": 477.16,
+    "rest_median_ms": 59.45,
+    "rest_mean_ms": 148.74,
+    "all_median_ms": 59.58,
+    "all_p95_ms": 477.16,
+    "all_max_ms": 848.71,
+    "all_max_item": {
+      "i": 4,
+      "section": "关断过程",
+      "name": "di/dt",
+      "ms": 848.71
+    },
+    "fast_items_over_50ms": [
+      {
+        "i": 1,
+        "section": "关断过程",
+        "name": "Ic_off_max",
+        "ms": 189.02
+      },
+      {
+        "i": 2,
+        "section": "关断过程",
+        "name": "Vce_off_max",
+        "ms": 69.11
+      },
+      {
+        "i": 4,
+        "section": "关断过程",
+        "name": "di/dt",
+        "ms": 848.71
+      },
+      {
+        "i": 5,
+        "section": "关断过程",
+        "name": "Ls_off",
+        "ms": 796.82
+      },
+      {
+        "i": 9,
+        "section": "关断过程",
+        "name": "串扰电压",
+        "ms": 75.39
+      },
+      {
+        "i": 10,
+        "section": "关断过程",
+        "name": "Pmax",
+        "ms": 435.04
+      },
+      {
+        "i": 11,
+        "section": "关断过程",
+        "name": "Eoff",
+        "ms": 390.61
+      },
+      {
+        "i": 12,
+        "section": "开通",
+        "name": "ΔVce",
+        "ms": 89.59
+      },
+      {
+        "i": 13,
+        "section": "开通",
+        "name": "Ic_on_max",
+        "ms": 59.7
+      },
+      {
+        "i": 14,
+        "section": "开通",
+        "name": "Vce_on_max",
+        "ms": 59.45
+      },
+      {
+        "i": 15,
+        "section": "开通",
+        "name": "开通电流",
+        "ms": 86.27
+      },
+      {
+        "i": 18,
+        "section": "开通",
+        "name": "Ls_on",
+        "ms": 62.17
+      },
+      {
+        "i": 23,
+        "section": "开通",
+        "name": "Pmax",
+        "ms": 250.08
+      },
+      {
+        "i": 24,
+        "section": "开通",
+        "name": "Eon",
+        "ms": 252.99
+      },
+      {
+        "i": 30,
+        "section": "反向恢复",
+        "name": "Pdmax",
+        "ms": 202.51
+      },
+      {
+        "i": 31,
+        "section": "反向恢复",
+        "name": "Err",
+        "ms": 191.26
+      }
+    ]
+  },
+  "per_item": [
+    {
+      "i": 0,
+      "section": "关断过程",
+      "name": "ΔVce",
+      "ms": 477.16
+    },
+    {
+      "i": 1,
+      "section": "关断过程",
+      "name": "Ic_off_max",
+      "ms": 189.02
+    },
+    {
+      "i": 2,
+      "section": "关断过程",
+      "name": "Vce_off_max",
+      "ms": 69.11
+    },
+    {
+      "i": 3,
+      "section": "关断过程",
+      "name": "dv/dt",
+      "ms": 49.09
+    },
+    {
+      "i": 4,
+      "section": "关断过程",
+      "name": "di/dt",
+      "ms": 848.71
+    },
+    {
+      "i": 5,
+      "section": "关断过程",
+      "name": "Ls_off",
+      "ms": 796.82
+    },
+    {
+      "i": 6,
+      "section": "关断过程",
+      "name": "Toff",
+      "ms": 36.1
+    },
+    {
+      "i": 7,
+      "section": "关断过程",
+      "name": "Td_off",
+      "ms": 35.86
+    },
+    {
+      "i": 8,
+      "section": "关断过程",
+      "name": "Tf",
+      "ms": 34.86
+    },
+    {
+      "i": 9,
+      "section": "关断过程",
+      "name": "串扰电压",
+      "ms": 75.39
+    },
+    {
+      "i": 10,
+      "section": "关断过程",
+      "name": "Pmax",
+      "ms": 435.04
+    },
+    {
+      "i": 11,
+      "section": "关断过程",
+      "name": "Eoff",
+      "ms": 390.61
+    },
+    {
+      "i": 12,
+      "section": "开通",
+      "name": "ΔVce",
+      "ms": 89.59
+    },
+    {
+      "i": 13,
+      "section": "开通",
+      "name": "Ic_on_max",
+      "ms": 59.7
+    },
+    {
+      "i": 14,
+      "section": "开通",
+      "name": "Vce_on_max",
+      "ms": 59.45
+    },
+    {
+      "i": 15,
+      "section": "开通",
+      "name": "开通电流",
+      "ms": 86.27
+    },
+    {
+      "i": 16,
+      "section": "开通",
+      "name": "dv/dt",
+      "ms": 43.16
+    },
+    {
+      "i": 17,
+      "section": "开通",
+      "name": "di/dt",
+      "ms": 45.51
+    },
+    {
+      "i": 18,
+      "section": "开通",
+      "name": "Ls_on",
+      "ms": 62.17
+    },
+    {
+      "i": 19,
+      "section": "开通",
+      "name": "Ton",
+      "ms": 29.02
+    },
+    {
+      "i": 20,
+      "section": "开通",
+      "name": "Td_on",
+      "ms": 29.41
+    },
+    {
+      "i": 21,
+      "section": "开通",
+      "name": "Tr",
+      "ms": 34.49
+    },
+    {
+      "i": 22,
+      "section": "开通",
+      "name": "串扰电压",
+      "ms": 29.59
+    },
+    {
+      "i": 23,
+      "section": "开通",
+      "name": "Pmax",
+      "ms": 250.08
+    },
+    {
+      "i": 24,
+      "section": "开通",
+      "name": "Eon",
+      "ms": 252.99
+    },
+    {
+      "i": 25,
+      "section": "反向恢复",
+      "name": "Irr",
+      "ms": 34.93
+    },
+    {
+      "i": 26,
+      "section": "反向恢复",
+      "name": "Trr",
+      "ms": 31.05
+    },
+    {
+      "i": 27,
+      "section": "反向恢复",
+      "name": "Vrr",
+      "ms": 49.36
+    },
+    {
+      "i": 28,
+      "section": "反向恢复",
+      "name": "dv/dt",
+      "ms": 27.86
+    },
+    {
+      "i": 29,
+      "section": "反向恢复",
+      "name": "di/dt",
+      "ms": 41.98
+    },
+    {
+      "i": 30,
+      "section": "反向恢复",
+      "name": "Pdmax",
+      "ms": 202.51
+    },
+    {
+      "i": 31,
+      "section": "反向恢复",
+      "name": "Err",
+      "ms": 191.26
+    }
+  ],
+  "first_switch_profile_top20_tottime": [
+    {
+      "file": "dpt_extractor/gui/main_window.py",
+      "line": 379,
+      "func": "_nearest_raw_level_crossing_time_us",
+      "tottime_ms": 190.26,
+      "cumtime_ms": 210.05,
+      "ncalls": 1
+    },
+    {
+      "file": "dpt_extractor/gui/main_window.py",
+      "line": 415,
+      "func": "<lambda>",
+      "tottime_ms": 6.82,
+      "cumtime_ms": 8.31,
+      "ncalls": 21818
+    },
+    {
+      "file": "dpt_extractor/gui/main_window.py",
+      "line": 6979,
+      "func": "_enable_turn_off_delta_vce_interaction",
+      "tottime_ms": 1.95,
+      "cumtime_ms": 346.85,
+      "ncalls": 1
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 2988,
+      "func": "_sync_x_scale_readout",
+      "tottime_ms": 1.93,
+      "cumtime_ms": 2.4,
+      "ncalls": 2
+    },
+    {
+      "file": "dpt_extractor/models/waveform.py",
+      "line": 182,
+      "func": "_finite_percentiles",
+      "tottime_ms": 1.4,
+      "cumtime_ms": 6.25,
+      "ncalls": 1
+    },
+    {
+      "file": "dpt_extractor/models/waveform.py",
+      "line": 15,
+      "func": "normalize_channel_reference",
+      "tottime_ms": 1.29,
+      "cumtime_ms": 3.29,
+      "ncalls": 351
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 3372,
+      "func": "_update_y_ticks",
+      "tottime_ms": 1.16,
+      "cumtime_ms": 51.5,
+      "ncalls": 4
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 6749,
+      "func": "_cursor_readout_scene_x",
+      "tottime_ms": 1.02,
+      "cumtime_ms": 1.14,
+      "ncalls": 9
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 3343,
+      "func": "_format_axis_value",
+      "tottime_ms": 0.95,
+      "cumtime_ms": 1.34,
+      "ncalls": 42
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 1522,
+      "func": "_display_curve_data",
+      "tottime_ms": 0.85,
+      "cumtime_ms": 1.54,
+      "ncalls": 18
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 2836,
+      "func": "_sync_graticule_dots",
+      "tottime_ms": 0.8,
+      "cumtime_ms": 26.8,
+      "ncalls": 5
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 2879,
+      "func": "_sync_x_tick_labels",
+      "tottime_ms": 0.55,
+      "cumtime_ms": 21.3,
+      "ncalls": 6
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 3735,
+      "func": "_effective_raw_for_channel",
+      "tottime_ms": 0.52,
+      "cumtime_ms": 2.59,
+      "ncalls": 25
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 4075,
+      "func": "_unit_for_channel",
+      "tottime_ms": 0.48,
+      "cumtime_ms": 1.59,
+      "ncalls": 52
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 6454,
+      "func": "_refresh_cursor_auxiliary_guides",
+      "tottime_ms": 0.45,
+      "cumtime_ms": 10.27,
+      "ncalls": 7
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 1155,
+      "func": "_graticule_dot_values",
+      "tottime_ms": 0.4,
+      "cumtime_ms": 3.52,
+      "ncalls": 10
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 245,
+      "func": "_computeBoundingRect",
+      "tottime_ms": 0.39,
+      "cumtime_ms": 1.48,
+      "ncalls": 12
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 3808,
+      "func": "_refresh_visible_traces",
+      "tottime_ms": 0.34,
+      "cumtime_ms": 12.85,
+      "ncalls": 2
+    },
+    {
+      "file": "dpt_extractor/models/waveform.py",
+      "line": 201,
+      "func": "_dominant_current_polarity",
+      "tottime_ms": 0.32,
+      "cumtime_ms": 6.58,
+      "ncalls": 1
+    },
+    {
+      "file": "dpt_extractor/gui/waveform_plot.py",
+      "line": 7550,
+      "func": "_on_view_range_changed",
+      "tottime_ms": 0.29,
+      "cumtime_ms": 53.93,
+      "ncalls": 1
+    }
+  ]
+}

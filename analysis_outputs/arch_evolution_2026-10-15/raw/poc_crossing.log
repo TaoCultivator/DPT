@@ -1,0 +1,55 @@
+QFontDatabase: Cannot find font directory E:/Works/DPT/.venv/Lib/site-packages/PyQt6/Qt6/lib/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+生产文件（未修改）: E:\Works\DPT-vk-k-mv89ep9q-2\dpt_extractor\gui\main_window.py
+  sha256: 29e79dfa279f31c9b2c9f95a05427a1ee285249fa06b0fe3222b9940c3b5d3fc
+
+== 1. 边界用例比对 ==
+  [OK ] 随机游走             original=4.272527820929425 vectorized=4.272527820929425
+  [OK ] 多交叉              original=2.225286090541034 vectorized=2.225286090541034
+  [OK ] 平段+单尖峰           original=1.6583166332665333 vectorized=1.6583166332665333
+  [OK ] 全精确命中            original=0.03006012024048097 vectorized=0.03006012024048097
+  [OK ] 含 NaN            original=2.520040080160321 vectorized=2.520040080160321
+  [OK ] 含 Inf            original=0.0 vectorized=0.0
+  [OK ] 单调线性             original=2.5000000000000004 vectorized=2.5000000000000004
+  [OK ] 无交叉              original=None vectorized=None
+  [OK ] 越界索引钳制           original=0.034359398042236984 vectorized=0.034359398042236984
+  [OK ] degenerate len<2 original=None vectorized=None
+  [OK ] 水平穿越             original=2.5100200400801604 vectorized=2.5100200400801604
+  边界用例 11/11 按位一致
+
+== 2. 随机模糊测试 4000 轮 ==
+  不一致 0 例 / 4000
+
+== 3. 真实语料调用抓取（分层抽样 30 个文件（覆盖小/中/大体积与短路/双脉冲算路））==
+  scanned 1/15  calls=1
+  scanned 2/15  calls=2
+  scanned 3/15  calls=3
+  scanned 4/15  calls=4
+  scanned 5/15  calls=5
+  scanned 6/15  calls=8
+  scanned 7/15  calls=11
+  scanned 8/15  calls=14
+  scanned 9/15  calls=17
+  scanned 10/15  calls=20
+  scanned 11/15  calls=23
+  scanned 12/15  calls=26
+  scanned 13/15  calls=29
+  scanned 14/15  calls=32
+  scanned 15/15  calls=35
+  抓到真实调用 35 次
+
+== 4. 真实语料逐值比对 ==
+  调用总数      : 35
+  按位相等      : 35
+  双方均为 None : 0
+  不一致        : 0
+
+== 5. 实测加速比（相同真实调用参数）==
+  调用次数            : 35
+  合计扫描样点数      : 383,862
+  平均每次扫描点数    : 10,967.5
+  原始实现总耗时      : 416.24 ms  (11892.7 us/次)
+  向量化总耗时        : 7.01 ms  (200.3 us/次)
+  >>> 加速比          : 59.38x
+
+raw -> E:\Works\DPT-vk-k-mv89ep9q-2\analysis_outputs\arch_evolution_2026-10-15\raw\poc_crossing_vectorize.json

@@ -1,0 +1,77 @@
+{
+  "platform": "offscreen",
+  "sample": "E:\\Works\\DPT\\示例文件\\songzhenxi\\KSU2577\\SSM1R7PB12B3DTFMMSPP25M4CF0016\\SSS\\RT\\tss\\WL_750V_805A_000.tss",
+  "sample_kb": 1425.4,
+  "note": "offscreen 光栅化；单次重绘 CPU 成本，不等于 GPU 帧率",
+  "window_construct_ms": 112.52,
+  "first_screen_ms": 1823.42,
+  "repaint_full_window_ms": 79.05,
+  "pan_view_set_ms": {
+    "n": 12,
+    "mean_ms": 10.65,
+    "median_ms": 9.753,
+    "p95_ms": 15.29,
+    "min_ms": 8.443,
+    "max_ms": 16.076
+  },
+  "pan_repaint_ms": {
+    "n": 12,
+    "mean_ms": 38.609,
+    "median_ms": 38.241,
+    "p95_ms": 40.486,
+    "min_ms": 34.957,
+    "max_ms": 42.61
+  },
+  "zoom_view_set_ms": {
+    "n": 12,
+    "mean_ms": 11.25,
+    "median_ms": 10.449,
+    "p95_ms": 15.296,
+    "min_ms": 6.93,
+    "max_ms": 19.761
+  },
+  "zoom_repaint_ms": {
+    "n": 12,
+    "mean_ms": 39.16,
+    "median_ms": 39.041,
+    "p95_ms": 43.867,
+    "min_ms": 33.817,
+    "max_ms": 46.259
+  },
+  "param_switch_ms": {
+    "n": 10,
+    "mean_ms": 170.391,
+    "median_ms": 55.805,
+    "p95_ms": 635.925,
+    "min_ms": 32.867,
+    "max_ms": 639.592
+  },
+  "param_switch_items": [
+    "关断过程/ΔVce",
+    "关断过程/Ic_off_max",
+    "关断过程/Vce_off_max",
+    "关断过程/dv/dt",
+    "关断过程/di/dt",
+    "关断过程/Ls_off",
+    "关断过程/Toff",
+    "关断过程/Td_off",
+    "关断过程/Tf",
+    "关断过程/串扰电压"
+  ],
+  "cursor_drag_ms": {
+    "n": 24,
+    "mean_ms": 9.755,
+    "median_ms": 8.743,
+    "p95_ms": 9.867,
+    "min_ms": 7.682,
+    "max_ms": 34.448
+  },
+  "result_table_repaint_ms": {
+    "n": 5,
+    "mean_ms": 3.926,
+    "median_ms": 4.267,
+    "p95_ms": 4.55,
+    "min_ms": 3.098,
+    "max_ms": 4.573
+  }
+}

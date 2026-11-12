@@ -1,0 +1,862 @@
+{
+  "meta": {
+    "method": "cProfile deterministic profiling",
+    "pyspy_available": false,
+    "pyspy_note": "本机未安装 py-spy（无 cargo/rustc，pip 安装未授权），改用 cProfile",
+    "corpus_files": 488,
+    "sampled_files": [
+      "E:\\Works\\DPT\\示例文件\\wanglihui\\20260729\\UH_RT_Rgon3.33R_Rgoff8.92R\\UH_486V_50A_Rgon3.33R_Rgoff8.92R_000.tss",
+      "E:\\Works\\DPT\\示例文件\\songzhenxi\\KSU2506\\GCU\\SMC\\LT\\tss\\UH_480V_500A_000.tss",
+      "E:\\Works\\DPT\\示例文件\\liyawei\\PCU2682\\AP_UH_880V_35A_RT_ERR_000.tss"
+    ],
+    "repeat": 2,
+    "seed": 20261015,
+    "profiled_rounds": 6,
+    "total_tottime_s": 8.7259,
+    "project_tottime_s": 2.4673
+  },
+  "top_project_by_tottime": [
+    {
+      "file": "dpt_extractor/detect/pulse_detector.py",
+      "line": 42,
+      "func": "detect_all",
+      "tottime": 0.8621037,
+      "cumtime": 1.1288721000000002,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.34941,
+      "share_of_total_tt": 0.0988
+    },
+    {
+      "file": "dpt_extractor/metrics/plateau_level.py",
+      "line": 10,
+      "func": "_quiet_plateau_mid",
+      "tottime": 0.3532908,
+      "cumtime": 1.6753039,
+      "ncalls": 24,
+      "primitive_calls": 24,
+      "share_of_project_tt": 0.14319,
+      "share_of_total_tt": 0.04049
+    },
+    {
+      "file": "dpt_extractor/metrics/commutation_inductance.py",
+      "line": 27,
+      "func": "_finite_series",
+      "tottime": 0.3334973,
+      "cumtime": 0.42652700000000004,
+      "ncalls": 12,
+      "primitive_calls": 12,
+      "share_of_project_tt": 0.13517,
+      "share_of_total_tt": 0.03822
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 437,
+      "func": "_local_extrema_indices",
+      "tottime": 0.14593240000000002,
+      "cumtime": 1.1908055000000002,
+      "ncalls": 64,
+      "primitive_calls": 64,
+      "share_of_project_tt": 0.05915,
+      "share_of_total_tt": 0.01672
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 814,
+      "func": "_first_sustained_rise_crossing",
+      "tottime": 0.0612409,
+      "cumtime": 1.5931638000000001,
+      "ncalls": 32,
+      "primitive_calls": 32,
+      "share_of_project_tt": 0.02482,
+      "share_of_total_tt": 0.00702
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 4057,
+      "func": "integrate_err_recovery",
+      "tottime": 0.0461046,
+      "cumtime": 0.046561700000000004,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.01869,
+      "share_of_total_tt": 0.00528
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 119,
+      "func": "_sample_interval_from_time",
+      "tottime": 0.0398719,
+      "cumtime": 0.09554960000000001,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.01616,
+      "share_of_total_tt": 0.00457
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 197,
+      "func": "_parse_tss_math_setup",
+      "tottime": 0.038122800000000005,
+      "cumtime": 0.22900620000000002,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.01545,
+      "share_of_total_tt": 0.00437
+    },
+    {
+      "file": "dpt_extractor/metrics/rr_tail.py",
+      "line": 6,
+      "func": "reverse_recovery_tail_end_index",
+      "tottime": 0.0377877,
+      "cumtime": 0.0937265,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.01532,
+      "share_of_total_tt": 0.00433
+    },
+    {
+      "file": "dpt_extractor/metrics/commutation_inductance.py",
+      "line": 61,
+      "func": "_window_series",
+      "tottime": 0.034174800000000005,
+      "cumtime": 0.4609537,
+      "ncalls": 12,
+      "primitive_calls": 12,
+      "share_of_project_tt": 0.01385,
+      "share_of_total_tt": 0.00392
+    },
+    {
+      "file": "dpt_extractor/models/waveform.py",
+      "line": 182,
+      "func": "_finite_percentiles",
+      "tottime": 0.031694,
+      "cumtime": 0.12346700000000001,
+      "ncalls": 10,
+      "primitive_calls": 10,
+      "share_of_project_tt": 0.01285,
+      "share_of_total_tt": 0.00363
+    },
+    {
+      "file": "dpt_extractor/metrics/plateau_level.py",
+      "line": 57,
+      "func": "_plateau_mid_without_isolated_spikes",
+      "tottime": 0.027692400000000002,
+      "cumtime": 0.0390198,
+      "ncalls": 60,
+      "primitive_calls": 60,
+      "share_of_project_tt": 0.01122,
+      "share_of_total_tt": 0.00317
+    },
+    {
+      "file": "dpt_extractor/metrics/slopes.py",
+      "line": 1147,
+      "func": "rr_dvdt_measurement_context",
+      "tottime": 0.0268568,
+      "cumtime": 0.08778570000000001,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.01089,
+      "share_of_total_tt": 0.00308
+    },
+    {
+      "file": "dpt_extractor/utils/timing_adapt.py",
+      "line": 180,
+      "func": "scope_turn_on_bases",
+      "tottime": 0.0252998,
+      "cumtime": 0.0508383,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.01025,
+      "share_of_total_tt": 0.0029
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 2506,
+      "func": "_legacy_err_recovery_settled_base",
+      "tottime": 0.0249205,
+      "cumtime": 0.1834696,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.0101,
+      "share_of_total_tt": 0.00286
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 355,
+      "func": "_crossing_pair_indices",
+      "tottime": 0.0244965,
+      "cumtime": 0.0261522,
+      "ncalls": 66,
+      "primitive_calls": 66,
+      "share_of_project_tt": 0.00993,
+      "share_of_total_tt": 0.00281
+    },
+    {
+      "file": "dpt_extractor/utils/timing_adapt.py",
+      "line": 121,
+      "func": "scope_turn_off_bases",
+      "tottime": 0.024403900000000003,
+      "cumtime": 0.053363100000000004,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00989,
+      "share_of_total_tt": 0.0028
+    },
+    {
+      "file": "dpt_extractor/pipeline/extract.py",
+      "line": 328,
+      "func": "_turn_on_ic_max_in_base_window",
+      "tottime": 0.023964700000000002,
+      "cumtime": 0.026105000000000003,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00971,
+      "share_of_total_tt": 0.00275
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 425,
+      "func": "_eval",
+      "tottime": 0.0190179,
+      "cumtime": 0.0324576,
+      "ncalls": 68,
+      "primitive_calls": 14,
+      "share_of_project_tt": 0.00771,
+      "share_of_total_tt": 0.00218
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_timings.py",
+      "line": 436,
+      "func": "turn_on_vce_top_from_ic_rise",
+      "tottime": 0.018903700000000002,
+      "cumtime": 0.0205808,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00766,
+      "share_of_total_tt": 0.00217
+    },
+    {
+      "file": "dpt_extractor/metrics/plateau_level.py",
+      "line": 634,
+      "func": "_turn_on_rise_index",
+      "tottime": 0.017234000000000003,
+      "cumtime": 0.13143190000000002,
+      "ncalls": 12,
+      "primitive_calls": 12,
+      "share_of_project_tt": 0.00698,
+      "share_of_total_tt": 0.00198
+    },
+    {
+      "file": "dpt_extractor/models/waveform.py",
+      "line": 191,
+      "func": "_current_scale_hint",
+      "tottime": 0.0166757,
+      "cumtime": 0.036143,
+      "ncalls": 18,
+      "primitive_calls": 18,
+      "share_of_project_tt": 0.00676,
+      "share_of_total_tt": 0.00191
+    },
+    {
+      "file": "dpt_extractor/detect/pulse_detector.py",
+      "line": 177,
+      "func": "_refine_pulse_off",
+      "tottime": 0.014944800000000001,
+      "cumtime": 0.018396700000000002,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00606,
+      "share_of_total_tt": 0.00171
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 562,
+      "func": "parse",
+      "tottime": 0.0143037,
+      "cumtime": 1.0688602,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.0058,
+      "share_of_total_tt": 0.00164
+    },
+    {
+      "file": "dpt_extractor/metrics/slopes.py",
+      "line": 2056,
+      "func": "_rr_repair_time_axis",
+      "tottime": 0.0128815,
+      "cumtime": 0.0422102,
+      "ncalls": 12,
+      "primitive_calls": 12,
+      "share_of_project_tt": 0.00522,
+      "share_of_total_tt": 0.00148
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 1464,
+      "func": "_main_edge_level_crossing",
+      "tottime": 0.012705200000000002,
+      "cumtime": 1.5186037000000001,
+      "ncalls": 36,
+      "primitive_calls": 36,
+      "share_of_project_tt": 0.00515,
+      "share_of_total_tt": 0.00146
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 148,
+      "func": "_strip_setup_value",
+      "tottime": 0.0088787,
+      "cumtime": 0.024241400000000003,
+      "ncalls": 15782,
+      "primitive_calls": 15782,
+      "share_of_project_tt": 0.0036,
+      "share_of_total_tt": 0.00102
+    },
+    {
+      "file": "dpt_extractor/metrics/slopes.py",
+      "line": 2027,
+      "func": "_rr_longest_invalid_run",
+      "tottime": 0.0088222,
+      "cumtime": 0.0096217,
+      "ncalls": 24,
+      "primitive_calls": 24,
+      "share_of_project_tt": 0.00358,
+      "share_of_total_tt": 0.00101
+    },
+    {
+      "file": "dpt_extractor/metrics/commutation_inductance.py",
+      "line": 157,
+      "func": "turn_off_commutation_inductance",
+      "tottime": 0.0077085,
+      "cumtime": 0.2404563,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00312,
+      "share_of_total_tt": 0.00088
+    },
+    {
+      "file": "dpt_extractor/metrics/slopes.py",
+      "line": 858,
+      "func": "_turn_on_main_rise_between_base_top",
+      "tottime": 0.007679,
+      "cumtime": 0.011701600000000001,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00311,
+      "share_of_total_tt": 0.00088
+    },
+    {
+      "file": "dpt_extractor/metrics/commutation_inductance.py",
+      "line": 98,
+      "func": "turn_on_commutation_inductance",
+      "tottime": 0.007602,
+      "cumtime": 0.23678900000000003,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00308,
+      "share_of_total_tt": 0.00087
+    },
+    {
+      "file": "dpt_extractor/pipeline/extract.py",
+      "line": 449,
+      "func": "extract_all",
+      "tottime": 0.0061317,
+      "cumtime": 7.6126946,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00249,
+      "share_of_total_tt": 0.0007
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 3353,
+      "func": "_err_vd_main_rise_search",
+      "tottime": 0.0057629000000000005,
+      "cumtime": 0.0058939000000000005,
+      "ncalls": 18,
+      "primitive_calls": 18,
+      "share_of_project_tt": 0.00234,
+      "share_of_total_tt": 0.00066
+    },
+    {
+      "file": "dpt_extractor/utils/signal.py",
+      "line": 12,
+      "func": "smooth",
+      "tottime": 0.004909200000000001,
+      "cumtime": 0.18738290000000002,
+      "ncalls": 68,
+      "primitive_calls": 68,
+      "share_of_project_tt": 0.00199,
+      "share_of_total_tt": 0.00056
+    },
+    {
+      "file": "dpt_extractor/metrics/slopes.py",
+      "line": 2044,
+      "func": "_rr_repair_finite_signal",
+      "tottime": 0.0047843,
+      "cumtime": 0.005884400000000001,
+      "ncalls": 154,
+      "primitive_calls": 154,
+      "share_of_project_tt": 0.00194,
+      "share_of_total_tt": 0.00055
+    },
+    {
+      "file": "dpt_extractor/detect/pulse_detector.py",
+      "line": 35,
+      "func": "detect",
+      "tottime": 0.0047737000000000005,
+      "cumtime": 1.1521484,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00193,
+      "share_of_total_tt": 0.00055
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 423,
+      "func": "_edge_smoothed",
+      "tottime": 0.0044324,
+      "cumtime": 0.0861016,
+      "ncalls": 90,
+      "primitive_calls": 90,
+      "share_of_project_tt": 0.0018,
+      "share_of_total_tt": 0.00051
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 1737,
+      "func": "_eoff_crossing_time_us",
+      "tottime": 0.004273600000000001,
+      "cumtime": 0.015112100000000002,
+      "ncalls": 2416,
+      "primitive_calls": 2416,
+      "share_of_project_tt": 0.00173,
+      "share_of_total_tt": 0.00049
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 395,
+      "func": "_level_crossing_time",
+      "tottime": 0.0041326,
+      "cumtime": 0.013544400000000002,
+      "ncalls": 2000,
+      "primitive_calls": 2000,
+      "share_of_project_tt": 0.00167,
+      "share_of_total_tt": 0.00047
+    },
+    {
+      "file": "dpt_extractor/io/tss_parser.py",
+      "line": 175,
+      "func": "_split_lrn_setup",
+      "tottime": 0.0039066000000000005,
+      "cumtime": 0.011684,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_project_tt": 0.00158,
+      "share_of_total_tt": 0.00045
+    }
+  ],
+  "top_all_by_tottime": [
+    {
+      "file": "dpt_extractor/detect/pulse_detector.py",
+      "line": 42,
+      "func": "detect_all",
+      "tottime": 0.8621037,
+      "cumtime": 1.1288721000000002,
+      "ncalls": 6,
+      "primitive_calls": 6,
+      "share_of_total_tt": 0.0988
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<method 'reduce' of 'numpy.ufunc' objects>",
+      "tottime": 0.7554046000000001,
+      "cumtime": 0.7554046000000001,
+      "ncalls": 754130,
+      "primitive_calls": 754130,
+      "share_of_total_tt": 0.08657
+    },
+    {
+      "file": "dpt_extractor/metrics/plateau_level.py",
+      "line": 10,
+      "func": "_quiet_plateau_mid",
+      "tottime": 0.3532908,
+      "cumtime": 1.6753039,
+      "ncalls": 24,
+      "primitive_calls": 24,
+      "share_of_total_tt": 0.04049
+    },
+    {
+      "file": "dpt_extractor/metrics/commutation_inductance.py",
+      "line": 27,
+      "func": "_finite_series",
+      "tottime": 0.3334973,
+      "cumtime": 0.42652700000000004,
+      "ncalls": 12,
+      "primitive_calls": 12,
+      "share_of_total_tt": 0.03822
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<method 'partition' of 'numpy.ndarray' objects>",
+      "tottime": 0.3182391,
+      "cumtime": 0.3182391,
+      "ncalls": 65628,
+      "primitive_calls": 65628,
+      "share_of_total_tt": 0.03647
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/_core/fromnumeric.py",
+      "line": 69,
+      "func": "_wrapreduction",
+      "tottime": 0.2602688,
+      "cumtime": 0.6826962000000001,
+      "ncalls": 387506,
+      "primitive_calls": 387506,
+      "share_of_total_tt": 0.02983
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/_core/_methods.py",
+      "line": 118,
+      "func": "_mean",
+      "tottime": 0.24956170000000003,
+      "cumtime": 0.666444,
+      "ncalls": 150674,
+      "primitive_calls": 150674,
+      "share_of_total_tt": 0.0286
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_function_base_impl.py",
+      "line": 4771,
+      "func": "_quantile",
+      "tottime": 0.2417253,
+      "cumtime": 1.5581391,
+      "ncalls": 28990,
+      "primitive_calls": 28990,
+      "share_of_total_tt": 0.0277
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/tm_data_types/datum/data_types.py",
+      "line": 478,
+      "func": "_raw_sample_format_to_this_format",
+      "tottime": 0.194063,
+      "cumtime": 0.21464840000000002,
+      "ncalls": 32,
+      "primitive_calls": 32,
+      "share_of_total_tt": 0.02224
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_function_base_impl.py",
+      "line": 4639,
+      "func": "_lerp",
+      "tottime": 0.1671641,
+      "cumtime": 0.1728696,
+      "ncalls": 28990,
+      "primitive_calls": 28990,
+      "share_of_total_tt": 0.01916
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_function_base_impl.py",
+      "line": 3834,
+      "func": "_ureduce",
+      "tottime": 0.1671167,
+      "cumtime": 2.9893691000000002,
+      "ncalls": 128568,
+      "primitive_calls": 65628,
+      "share_of_total_tt": 0.01915
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_function_base_impl.py",
+      "line": 4736,
+      "func": "_get_indexes",
+      "tottime": 0.1528016,
+      "cumtime": 0.391672,
+      "ncalls": 28990,
+      "primitive_calls": 28990,
+      "share_of_total_tt": 0.01751
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 437,
+      "func": "_local_extrema_indices",
+      "tottime": 0.14593240000000002,
+      "cumtime": 1.1908055000000002,
+      "ncalls": 64,
+      "primitive_calls": 64,
+      "share_of_total_tt": 0.01672
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/_core/_methods.py",
+      "line": 76,
+      "func": "_count_reduce_items",
+      "tottime": 0.1392547,
+      "cumtime": 0.1635077,
+      "ncalls": 150674,
+      "primitive_calls": 150674,
+      "share_of_total_tt": 0.01596
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<method 'astype' of 'numpy.ndarray' objects>",
+      "tottime": 0.13863150000000002,
+      "cumtime": 0.13863150000000002,
+      "ncalls": 59138,
+      "primitive_calls": 59138,
+      "share_of_total_tt": 0.01589
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<built-in method scipy.ndimage._nd_image.uniform_filter1d>",
+      "tottime": 0.13777910000000002,
+      "cumtime": 0.13777910000000002,
+      "ncalls": 70,
+      "primitive_calls": 70,
+      "share_of_total_tt": 0.01579
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/_core/fromnumeric.py",
+      "line": 3052,
+      "func": "max",
+      "tottime": 0.13687470000000002,
+      "cumtime": 0.6860729000000001,
+      "ncalls": 315672,
+      "primitive_calls": 315672,
+      "share_of_total_tt": 0.01569
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<method 'flatten' of 'numpy.ndarray' objects>",
+      "tottime": 0.1340646,
+      "cumtime": 0.1340646,
+      "ncalls": 94618,
+      "primitive_calls": 94618,
+      "share_of_total_tt": 0.01536
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_function_base_impl.py",
+      "line": 4005,
+      "func": "_median",
+      "tottime": 0.1303281,
+      "cumtime": 0.8037654000000001,
+      "ncalls": 36638,
+      "primitive_calls": 36638,
+      "share_of_total_tt": 0.01494
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<method 'decompress' of 'zlib.Decompress' objects>",
+      "tottime": 0.129778,
+      "cumtime": 0.129778,
+      "ncalls": 44,
+      "primitive_calls": 44,
+      "share_of_total_tt": 0.01487
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<method 'any' of 'numpy.generic' objects>",
+      "tottime": 0.10565260000000001,
+      "cumtime": 0.2950834,
+      "ncalls": 154602,
+      "primitive_calls": 154602,
+      "share_of_total_tt": 0.01211
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_function_base_impl.py",
+      "line": 1369,
+      "func": "diff",
+      "tottime": 0.102956,
+      "cumtime": 0.10349040000000001,
+      "ncalls": 444,
+      "primitive_calls": 444,
+      "share_of_total_tt": 0.0118
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_arraysetops_impl.py",
+      "line": 339,
+      "func": "_unique1d",
+      "tottime": 0.0965676,
+      "cumtime": 0.1357992,
+      "ncalls": 28990,
+      "primitive_calls": 28990,
+      "share_of_total_tt": 0.01107
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/_core/fromnumeric.py",
+      "line": 3735,
+      "func": "mean",
+      "tottime": 0.0962987,
+      "cumtime": 0.7623945000000001,
+      "ncalls": 150646,
+      "primitive_calls": 150646,
+      "share_of_total_tt": 0.01104
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<built-in method numpy.asanyarray>",
+      "tottime": 0.09556650000000001,
+      "cumtime": 0.09556650000000001,
+      "ncalls": 709048,
+      "primitive_calls": 709048,
+      "share_of_total_tt": 0.01095
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<built-in method numpy.arange>",
+      "tottime": 0.09293000000000001,
+      "cumtime": 0.09293000000000001,
+      "ncalls": 240,
+      "primitive_calls": 240,
+      "share_of_total_tt": 0.01065
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_nanfunctions_impl.py",
+      "line": 144,
+      "func": "_remove_nan_1d",
+      "tottime": 0.089782,
+      "cumtime": 0.17936580000000002,
+      "ncalls": 62940,
+      "primitive_calls": 62940,
+      "share_of_total_tt": 0.01029
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/_core/numerictypes.py",
+      "line": 471,
+      "func": "issubdtype",
+      "tottime": 0.0890717,
+      "cumtime": 0.21020080000000002,
+      "ncalls": 124106,
+      "primitive_calls": 124106,
+      "share_of_total_tt": 0.01021
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<built-in method builtins.issubclass>",
+      "tottime": 0.08750970000000001,
+      "cumtime": 0.08750970000000001,
+      "ncalls": 674762,
+      "primitive_calls": 674762,
+      "share_of_total_tt": 0.01003
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_nanfunctions_impl.py",
+      "line": 1228,
+      "func": "nanpercentile",
+      "tottime": 0.06889390000000001,
+      "cumtime": 1.7594646,
+      "ncalls": 26538,
+      "primitive_calls": 26538,
+      "share_of_total_tt": 0.0079
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/_core/numerictypes.py",
+      "line": 289,
+      "func": "issubclass_",
+      "tottime": 0.0675739,
+      "cumtime": 0.1097911,
+      "ncalls": 248212,
+      "primitive_calls": 248212,
+      "share_of_total_tt": 0.00774
+    },
+    {
+      "file": "dpt_extractor/metrics/iec_windows.py",
+      "line": 814,
+      "func": "_first_sustained_rise_crossing",
+      "tottime": 0.0612409,
+      "cumtime": 1.5931638000000001,
+      "ncalls": 32,
+      "primitive_calls": 32,
+      "share_of_total_tt": 0.00702
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<built-in method builtins.isinstance>",
+      "tottime": 0.0569597,
+      "cumtime": 0.06001480000000001,
+      "ncalls": 431662,
+      "primitive_calls": 431342,
+      "share_of_total_tt": 0.00653
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<built-in method numpy._core._multiarray_umath.correlate>",
+      "tottime": 0.056770900000000006,
+      "cumtime": 0.056770900000000006,
+      "ncalls": 120,
+      "primitive_calls": 120,
+      "share_of_total_tt": 0.00651
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/site-packages/numpy/lib/_utils_impl.py",
+      "line": 643,
+      "func": "_median_nancheck",
+      "tottime": 0.0559211,
+      "cumtime": 0.1692121,
+      "ncalls": 36638,
+      "primitive_calls": 36638,
+      "share_of_total_tt": 0.00641
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<method 'argsort' of 'numpy.ndarray' objects>",
+      "tottime": 0.053114100000000004,
+      "cumtime": 0.053114100000000004,
+      "ncalls": 12,
+      "primitive_calls": 12,
+      "share_of_total_tt": 0.00609
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<built-in method builtins.len>",
+      "tottime": 0.0518078,
+      "cumtime": 0.0518078,
+      "ncalls": 488244,
+      "primitive_calls": 488244,
+      "share_of_total_tt": 0.00594
+    },
+    {
+      "file": "D:/System-XG/Python/python-3.13.12/Lib/re/__init__.py",
+      "line": 169,
+      "func": "fullmatch",
+      "tottime": 0.0517463,
+      "cumtime": 0.1447531,
+      "ncalls": 164860,
+      "primitive_calls": 164860,
+      "share_of_total_tt": 0.00593
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<built-in method numpy.fromfile>",
+      "tottime": 0.051271000000000004,
+      "cumtime": 0.051456100000000005,
+      "ncalls": 192,
+      "primitive_calls": 192,
+      "share_of_total_tt": 0.00588
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "func": "<method 'items' of 'dict' objects>",
+      "tottime": 0.0501054,
+      "cumtime": 0.0501054,
+      "ncalls": 419692,
+      "primitive_calls": 419692,
+      "share_of_total_tt": 0.00574
+    }
+  ]
+}

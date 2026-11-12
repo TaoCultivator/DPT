@@ -1,0 +1,39 @@
+{
+  "frozen_production_file": {
+    "path": "E:\\Works\\DPT-vk-k-mv89ep9q-2\\dpt_extractor\\gui\\main_window.py",
+    "sha256": "29e79dfa279f31c9b2c9f95a05427a1ee285249fa06b0fe3222b9940c3b5d3fc"
+  },
+  "boundary_cases": {
+    "total": 11,
+    "mismatch": []
+  },
+  "fuzz": {
+    "rounds": 4000,
+    "mismatch_count": 0,
+    "mismatch_examples": []
+  },
+  "corpus_comparison": {
+    "calls": 35,
+    "bitwise_equal": 35,
+    "both_none": 0,
+    "mismatch_count": 0,
+    "mismatch_examples": []
+  },
+  "speed": {
+    "calls": 35,
+    "repeats": 1,
+    "total_scanned_elements": 383862,
+    "mean_scanned_elements": 10967.5,
+    "max_scanned_elements": 43796,
+    "original_total_ms": 416.244,
+    "vectorized_total_ms": 7.01,
+    "original_per_call_us": 11892.69,
+    "vectorized_per_call_us": 200.29,
+    "speedup": 59.38
+  },
+  "scope": {
+    "sampled_files": 30,
+    "description": "分层抽样 30 个文件（覆盖小/中/大体积与短路/双脉冲算路）",
+    "note": "每个文件只跑一次提取；调用数即该抽样集下该函数的实际调用总数"
+  }
+}
