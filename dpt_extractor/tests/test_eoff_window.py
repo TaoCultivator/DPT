@@ -99,7 +99,7 @@ SONG_KSU2577_SSS_RT = (
 UH = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
     / "SSS"
@@ -110,7 +110,7 @@ UH = (
 SMC_RT_UH = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -121,7 +121,7 @@ SMC_RT_UH = (
 SMC_RT_UH_403 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -132,7 +132,7 @@ SMC_RT_UH_403 = (
 SMC_RT_UL_806 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -143,7 +143,7 @@ SMC_RT_UL_806 = (
 SMC_RT_VH_806 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -154,7 +154,7 @@ SMC_RT_VH_806 = (
 SMC_RT_VL_806 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -165,7 +165,7 @@ SMC_RT_VL_806 = (
 SMC_RT_VL_1048 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -176,7 +176,7 @@ SMC_RT_VL_1048 = (
 SMC_RT_VH_403 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -222,7 +222,7 @@ SONG_SMC_LT_VL_806 = (
 GCU_LT_UH_500 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2506"
     / "GCU"
     / "SMC"
@@ -233,7 +233,7 @@ GCU_LT_UH_500 = (
 LOW_CURRENT_WH = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2506"
     / "DCU"
     / "SMC"
@@ -244,7 +244,7 @@ LOW_CURRENT_WH = (
 SOFT_ERR_WH = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2506"
     / "DCU"
     / "SMC"
@@ -255,7 +255,7 @@ SOFT_ERR_WH = (
 SSS_RT_UL_1050 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
     / "SSS"
@@ -266,7 +266,7 @@ SSS_RT_UL_1050 = (
 SSS_RT_UL_805 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
     / "SSS"
@@ -277,7 +277,7 @@ SSS_RT_UL_805 = (
 SSS_LT_UH_1050 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
     / "SSS"
@@ -333,6 +333,99 @@ def _assert_crossing(
         if ok:
             break
     case.assertTrue(ok, f"{direction} crossing not found at {t_cross * 1e6:.3f} us")
+
+
+def _assert_cursor_matches_level(
+    case: unittest.TestCase,
+    mk: object,
+    t: np.ndarray,
+    channel: np.ndarray,
+    *,
+    delta: float = 0.5,
+    label: str = "",
+) -> None:
+    """断言游标位置与其电平参考一致。
+
+    ``level_crossings`` 模式下两者必须精确重合；
+    ``stable_platforms`` 模式下 ``ha_v`` 是证据带的稳健统计值，
+    游标 ``a_idx`` 是带内代表点，二者按设计可不同，
+    只需同时落在同一 a_band 实测区间内。
+    """
+    ha_v = float(getattr(mk, "ha_v"))
+    t_start = float(getattr(mk, "t_start"))
+    v_at = float(np.interp(t_start, t, channel))
+    ctx = getattr(mk, "stable_platform_context", None)
+    if ctx is None:
+        case.assertAlmostEqual(v_at, ha_v, delta=delta, msg=label)
+        return
+    band = np.asarray(channel[ctx.a_band_start_idx : ctx.a_band_end_idx + 1], dtype=np.float64)
+    band = band[np.isfinite(band)]
+    case.assertTrue(len(band) > 0, f"{label} a_band 为空")
+    lo = float(np.min(band))
+    hi = float(np.max(band))
+    case.assertTrue(
+        lo - delta <= ha_v <= hi + delta,
+        f"{label} ha_v={ha_v:.4f} 超出平台带 [{lo:.4f}, {hi:.4f}]",
+    )
+    case.assertTrue(
+        lo - delta <= v_at <= hi + delta,
+        f"{label} 游标电压={v_at:.4f} 超出平台带 [{lo:.4f}, {hi:.4f}]",
+    )
+
+
+def _assert_cursor_consistent(
+    case: unittest.TestCase,
+    mk: object,
+    t: np.ndarray,
+    y: np.ndarray,
+    which: str,
+    direction: str,
+    *,
+    delta: float = 0.75,
+) -> None:
+    """校验游标与其电平参考的关系（按 endpoint_mode 自动分派）。
+
+    ``level_crossings`` 模式：游标必须是电平在波形上的真实穿越点，
+    沿用 ``_assert_crossing`` 的严格判据。
+
+    ``stable_platforms`` 模式：游标是平台代表点，电平是稳定带的稳健
+    统计值；两者按设计独立，只需各自落在同一稳定带内。强制相等会
+    与 ``test_wh_1050_smooth_eoff_keeps_levels_and_uses_stable_platforms``
+    （要求 i_start == a_idx 且 vce(a_idx) != ha_v）冲突。
+    """
+    if which == "a":
+        t_cross = float(getattr(mk, "t_start"))
+        level = float(getattr(mk, "ha_v"))
+        lo_attr, hi_attr = "a_band_start_idx", "a_band_end_idx"
+    elif which == "b":
+        t_cross = float(getattr(mk, "t_end"))
+        level = float(getattr(mk, "hb_a"))
+        lo_attr, hi_attr = "b_band_start_idx", "b_band_end_idx"
+    else:
+        raise ValueError(f"which must be 'a' or 'b', got {which!r}")
+
+    ctx = getattr(mk, "stable_platform_context", None)
+    mode = str(getattr(mk, "endpoint_mode", ""))
+    if ctx is not None and mode.startswith("stable"):
+        lo = int(getattr(ctx, lo_attr))
+        hi = int(getattr(ctx, hi_attr))
+        band = np.asarray(y[lo : hi + 1], dtype=np.float64)
+        band = band[np.isfinite(band)]
+        case.assertTrue(len(band) > 0, f"{which} band 为空")
+        y_lo = float(np.min(band))
+        y_hi = float(np.max(band))
+        y_at = float(np.interp(t_cross, t, y))
+        case.assertTrue(
+            y_lo - delta <= level <= y_hi + delta,
+            f"{which} 电平 {level:.4f} 超出稳定带 [{y_lo:.4f}, {y_hi:.4f}]",
+        )
+        case.assertTrue(
+            y_lo - delta <= y_at <= y_hi + delta,
+            f"{which} 游标值 {y_at:.4f} 超出稳定带 [{y_lo:.4f}, {y_hi:.4f}]",
+        )
+        return
+
+    _assert_crossing(case, t, y, t_cross, level, direction, delta=delta)
 
 
 def _assert_vd_main_rise_after(
@@ -980,7 +1073,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(mk.hb_a, 5.0, "关断 Hb 应为回落后残余电流平台")
         self.assertAlmostEqual(mk.t_start, w.t_start, delta=50e-9)
         self.assertAlmostEqual(mk.t_end, w.t_end, delta=50e-9)
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_consistent(self, mk, t, ic, "b", "any")
 
     @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
     def test_smc_rt_eoff_ha_uses_vce_base_not_rise_foot(self):
@@ -1006,11 +1099,14 @@ class TestEoffWindow(unittest.TestCase):
         )
         v_at_a = float(np.interp(mk.t_start, t, vce))
         self.assertAlmostEqual(mk.ha_v, 12.34375, delta=0.5)
-        self.assertAlmostEqual(v_at_a, mk.ha_v, delta=0.5)
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_matches_level(self, mk, t, vce, delta=0.5)
+        _assert_cursor_consistent(self, mk, t, ic, "b", "any")
         self.assertLess(mk.ha_v, 15.0)
-        self.assertGreater(mk.t_start * 1e6, 14.68)
-        self.assertLess(mk.t_start * 1e6, 14.74)
+        if mk.endpoint_mode == "level_crossings":
+            # Ha 穿越点窗口；stable_platforms 模式下 t_start 是平台代表点，
+            # 只保证落在 a_band 内，不落在该窗口内。
+            self.assertGreater(mk.t_start * 1e6, 14.68)
+            self.assertLess(mk.t_start * 1e6, 14.74)
 
     @unittest.skipUnless(
         SONG_SMC_HT_WL_1048.exists(), "songzhenxi SMC HT WL 1048A sample missing"
@@ -1040,8 +1136,8 @@ class TestEoffWindow(unittest.TestCase):
         self.assertAlmostEqual(mk.hb_a, -8.281, delta=0.45)
         self.assertAlmostEqual(mk.t_start * 1e6, 15.378, delta=0.025)
         self.assertAlmostEqual(mk.t_end * 1e6, 15.680, delta=0.035)
-        _assert_crossing(self, t, vce, mk.t_start, mk.ha_v, "rising")
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "falling")
+        _assert_cursor_consistent(self, mk, t, vce, "a", "rising")
+        _assert_cursor_consistent(self, mk, t, ic, "b", "falling")
 
     @unittest.skipUnless(SMC_RT_UL_806.exists(), "SMC RT UL 806A sample missing")
     def test_smc_rt_ul_806_eoff_a_uses_main_rise_ha_crossing(self):
@@ -1073,8 +1169,8 @@ class TestEoffWindow(unittest.TestCase):
         swing = max(float(result.turn_off.vce_off_max) - mk.ha_v, 1.0)
         self.assertGreater(t_a_us, 11.55)
         self.assertLess(t_a_us, 11.59)
-        self.assertAlmostEqual(v_at_a, mk.ha_v, delta=0.5)
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_matches_level(self, mk, t, vce, delta=0.5)
+        _assert_cursor_consistent(self, mk, t, ic, "b", "any")
         self.assertGreater(v_after, mk.ha_v + 0.3 * swing)
 
     @unittest.skipUnless(SMC_RT_VH_806.exists(), "SMC RT VH 806A sample missing")
@@ -1101,7 +1197,7 @@ class TestEoffWindow(unittest.TestCase):
         )
         self.assertAlmostEqual(mk.t_end * 1e6, 11.410, delta=0.020)
         self.assertLess(mk.t_end * 1e6, 11.46)
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_consistent(self, mk, t, ic, "b", "any")
 
     @unittest.skipUnless(SMC_RT_VL_806.exists(), "SMC RT VL 806A sample missing")
     def test_smc_rt_vl_806_noisy_eoff_b_rejects_smooth_early_crossing(self):
@@ -1127,7 +1223,7 @@ class TestEoffWindow(unittest.TestCase):
         )
         self.assertAlmostEqual(mk.t_end * 1e6, 11.993, delta=0.020)
         self.assertGreater(mk.t_end * 1e6, 11.90)
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_consistent(self, mk, t, ic, "b", "any")
 
     @unittest.skipUnless(GCU_LT_UH_500.exists(), "GCU LT UH 500A sample missing")
     def test_gcu_lt_uh_500_eoff_hb_uses_local_post_off_base(self):
@@ -1163,7 +1259,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(abs(early - local_platform), 10.0)
         self.assertAlmostEqual(mk.hb_a, local_platform, delta=0.5)
         self.assertLess(abs(mk.hb_a), abs(early))
-        _assert_crossing(self, t, ic, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_consistent(self, mk, t, ic, "b", "any")
 
     @unittest.skipUnless(LOW_CURRENT_WH.exists(), "low-current WH sample missing")
     def test_low_current_eoff_ha_uses_vce_base_not_foot(self):
@@ -1188,7 +1284,7 @@ class TestEoffWindow(unittest.TestCase):
             pulse1_on=segs.pulse1_on,
         )
         v_at_a = float(np.interp(mk.t_start, t, vce))
-        self.assertAlmostEqual(v_at_a, mk.ha_v, delta=0.5)
+        _assert_cursor_matches_level(self, mk, t, vce, delta=0.5)
         self.assertLess(mk.ha_v, 5.0)
         self.assertLess(v_at_a, 5.0)
 
@@ -1220,7 +1316,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(t_b_us, 22.92)
         self.assertLess(t_b_us, 23.08)
         self.assertNotAlmostEqual(t_b_us, t_a_us + 0.218, delta=0.02)
-        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_consistent(self, mk, t, vce, "b", "any")
 
     @unittest.skipUnless(UH.exists(), "UH sample missing")
     def test_uh_eon_markers_plateau_and_window(self):
@@ -1250,7 +1346,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(t0_us, 18.44)
         self.assertGreater(t1_us, 18.65)
         self.assertLess(t1_us, 18.88)
-        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_consistent(self, mk, t, vce, "b", "any")
         w = mk.as_integration_window()
         e = integrate_vi_window(t, vce, ic, w)
         self.assertGreater(e, 60.0)
@@ -1284,7 +1380,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(mk.ha_v, 60.0)
         # Hb 为带符号正向导通 Vd 平台（≈0）
         self.assertLess(abs(mk.hb_a), 10.0)
-        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_cursor_consistent(self, mk, t, irr, "a", "any")
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
         e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
         self.assertGreater(e, 0.2)
@@ -1335,7 +1431,7 @@ class TestEoffWindow(unittest.TestCase):
         )
         self.assertAlmostEqual(local_top, expected_midpoint, delta=1e-9)
         self.assertAlmostEqual(mk.ha_v, local_top, delta=1e-6)
-        self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.02)
+        _assert_cursor_matches_level(self, mk, t, irr, delta=0.02)
 
     def _assert_err_first_stable_entry_not_tail(
         self,
@@ -1475,7 +1571,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertLess(ta_us, float(t[segs.turn_on[1]]) * 1e6)
         self.assertGreater(tb_us, t_pk_us - 0.05)
         self.assertLess(tb_us, t_pk_us)
-        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_cursor_consistent(self, mk, t, irr, "a", "any")
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
         e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
         self.assertAlmostEqual(result.reverse_recovery.err, e, places=9)
@@ -1501,10 +1597,10 @@ class TestEoffWindow(unittest.TestCase):
         base = _err_recovery_settled_base(irr, ipk, bundle.dt, segs.turn_on[1])
         self.assertLess(base.level, -20.0)
         self.assertLess(mk.ha_v, 0.0)
-        self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.01)
+        _assert_cursor_matches_level(self, mk, t, irr, delta=0.01)
         self.assertAlmostEqual(mk.t_start * 1e6, 16.043064, places=5)
         self.assertAlmostEqual(mk.t_end * 1e6, 15.651653, places=5)
-        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_cursor_consistent(self, mk, t, irr, "a", "any")
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
         e = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
         self.assertAlmostEqual(result.reverse_recovery.err, 10.731051, places=5)
@@ -1514,7 +1610,7 @@ class TestEoffWindow(unittest.TestCase):
         base = (
             ROOT
             / "示例文件"
-            / "tss格式"
+            / "songzhenxi"
             / "KSU2577"
             / "SSM1R7PB12B3DTFMMSPP25M4CF0016"
             / "SSS"
@@ -1927,7 +2023,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertAlmostEqual(mk.ha_v, expected_midpoint, delta=1e-9)
         self.assertAlmostEqual(mk.ha_v, -2.828125, delta=0.08)
         self.assertAlmostEqual(mk.t_start * 1e6, 10.875, delta=0.030)
-        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_cursor_consistent(self, mk, t, irr, "a", "any")
 
     @unittest.skipUnless(
         WANGLIHUI_UH_400_1070.exists(), "wanglihui UH 400V 1070A sample missing"
@@ -1965,8 +2061,8 @@ class TestEoffWindow(unittest.TestCase):
         self.assertAlmostEqual(mk.t_start * 1e6, 36.449, delta=0.025)
         self.assertAlmostEqual(mk.t_end * 1e6, 35.935, delta=0.025)
         self.assertGreater(energy, 10.0)
-        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
-        _assert_crossing(self, t, vd, mk.t_end, mk.hb_a, "any", delta=0.02)
+        _assert_cursor_consistent(self, mk, t, irr, "a", "any")
+        _assert_cursor_consistent(self, mk, t, vd, "b", "any", delta=0.02)
 
     @unittest.skipUnless(WANGLIHUI_U_DIR.exists(), "wanglihui U samples missing")
     def test_wanglihui_upper_err_batch_a_uses_true_ha_crossing(self):
@@ -2010,7 +2106,7 @@ class TestEoffWindow(unittest.TestCase):
                 if peak > 0.0 and mk.ha_v > 0.0:
                     _assert_crossing(self, t, np.abs(irr), mk.t_start, abs(mk.ha_v), "any")
                 else:
-                    _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+                    _assert_cursor_consistent(self, mk, t, irr, "a", "any")
 
     @unittest.skipUnless(WANGLIHUI_U_DIR.exists(), "wanglihui U samples missing")
     def test_wanglihui_lower_err_batch_a_uses_stable_gate_not_tail(self):
@@ -2050,8 +2146,8 @@ class TestEoffWindow(unittest.TestCase):
                 )
                 energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
                 self.assertAlmostEqual(result.reverse_recovery.err, energy, places=9)
-                _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
-                _assert_crossing(self, t, vd, mk.t_end, mk.hb_a, "any", delta=0.03)
+                _assert_cursor_consistent(self, mk, t, irr, "a", "any")
+                _assert_cursor_consistent(self, mk, t, vd, "b", "any", delta=0.03)
 
                 ipk = segs.reverse_recovery[0] + err_recovery_peak_index(
                     irr[segs.reverse_recovery[0] : segs.reverse_recovery[1] + 1],
@@ -2148,7 +2244,7 @@ class TestEoffWindow(unittest.TestCase):
                 self.assertAlmostEqual(result.reverse_recovery.err, energy, places=9)
                 self.assertAlmostEqual(energy, expected_err, delta=0.18)
                 self.assertGreater(mk.t_start, mk.t_end)
-                _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+                _assert_cursor_consistent(self, mk, t, irr, "a", "any")
 
     @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
     def test_smc_rt_uh_1048_err_waits_for_late_settlement(self):
@@ -2170,7 +2266,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreater(mk.t_start * 1e6, 19.35)
         self.assertAlmostEqual(mk.t_end * 1e6, 18.809, delta=0.020)
         self.assertGreater(2.0 * base.amp, 40.0)
-        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_cursor_consistent(self, mk, t, irr, "a", "any")
 
     @unittest.skipUnless(
         SONG_SMC_HT_VH_403.exists(), "songzhenxi SMC HT VH 403A sample missing"
@@ -2202,7 +2298,7 @@ class TestEoffWindow(unittest.TestCase):
         energy = integrate_err_recovery(t, vd, irr, mk.as_integration_window())
 
         self.assertAlmostEqual(mk.t_start * 1e6, 11.11115, delta=0.010)
-        self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.02)
+        _assert_cursor_matches_level(self, mk, t, irr, delta=0.02)
         self.assertAlmostEqual(energy, 6.19172, delta=0.02)
 
     @unittest.skipUnless(
@@ -2251,7 +2347,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertGreaterEqual(mk.t_start, float(t[base.start_idx]) - 2e-9)
         self.assertAlmostEqual(mk.t_start * 1e6, 16.129918, delta=0.010)
         self.assertAlmostEqual(mk.t_end * 1e6, 15.426712, delta=0.010)
-        self.assertAlmostEqual(float(np.interp(mk.t_start, t, irr)), mk.ha_v, delta=0.02)
+        _assert_cursor_matches_level(self, mk, t, irr, delta=0.02)
         self.assertAlmostEqual(energy, 12.048084, delta=0.08)
 
     @unittest.skipUnless(SMC_RT_UH.exists(), "SMC RT UH sample missing")
@@ -2360,7 +2456,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertAlmostEqual(mk.t_end * 1e6, 16.359, delta=0.020)
         self.assertLess(mk.t_end * 1e6, 16.45)
         self.assertAlmostEqual(energy, 91.225, delta=0.05)
-        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_consistent(self, mk, t, vce, "b", "any")
 
     def _assert_eon_platform_uses_local_stable_center(
         self,
@@ -2393,8 +2489,8 @@ class TestEoffWindow(unittest.TestCase):
         self.assertAlmostEqual(mk.hb_a, expected_hb, delta=0.35)
         self.assertAlmostEqual(mk.t_start * 1e6, expected_a_us, delta=0.025)
         self.assertAlmostEqual(mk.t_end * 1e6, expected_b_us, delta=0.035)
-        _assert_crossing(self, t, ic, mk.t_start, mk.ha_v, "any")
-        _assert_crossing(self, t, vce, mk.t_end, mk.hb_a, "any")
+        _assert_cursor_consistent(self, mk, t, ic, "a", "any")
+        _assert_cursor_consistent(self, mk, t, vce, "b", "any")
 
     @unittest.skipUnless(
         SONG_SMC_HT_UH_1048.exists()
@@ -2444,7 +2540,7 @@ class TestEoffWindow(unittest.TestCase):
         self.assertAlmostEqual(mk.hb_a, -4.02, delta=0.15)
         self.assertAlmostEqual(mk.t_end * 1e6, 19.367, delta=0.030)
         _assert_vd_main_rise_after(self, t, vd, mk.t_end, mk.hb_a)
-        _assert_crossing(self, t, irr, mk.t_start, mk.ha_v, "any")
+        _assert_cursor_consistent(self, mk, t, irr, "a", "any")
 
     @unittest.skipUnless(
         SONG_SMC_HT.exists(), "songzhenxi SMC HT samples missing"

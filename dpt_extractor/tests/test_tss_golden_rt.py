@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = {
     "UH": {
         "path": ROOT
-        / "示例文件/tss格式/KSU2577/SSM1R7PB12B3DTFMMSPP25M4CF0016/SSS/RT/tss/UH_750V_1050A_000.tss",
+        / "示例文件/songzhenxi/KSU2577/SSM1R7PB12B3DTFMMSPP25M4CF0016/SSS/RT/tss/UH_750V_1050A_000.tss",
         "segments_us": {
             "turn_off": (13.831680, 15.633040),
             "turn_on": (18.197440, 19.158720),
@@ -70,7 +70,7 @@ GOLDEN = {
     },
     "UL": {
         "path": ROOT
-        / "示例文件/tss格式/KSU2577/SSM1R7PB12B3DTFMMSPP25M4CF0016/SSS/RT/tss/UL_750V_1050A_000.tss",
+        / "示例文件/songzhenxi/KSU2577/SSM1R7PB12B3DTFMMSPP25M4CF0016/SSS/RT/tss/UL_750V_1050A_000.tss",
         "segments_us": {
             "turn_off": (14.725040, 16.384560),
             "turn_on": (19.184640, 20.158320),

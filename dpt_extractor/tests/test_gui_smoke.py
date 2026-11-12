@@ -20,7 +20,7 @@ UH = sample_tss("UH_750V_1050A_000.tss")
 SMC_RT_UH = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -31,7 +31,7 @@ SMC_RT_UH = (
 SMC_RT_UL = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -42,7 +42,7 @@ SMC_RT_UL = (
 SMC_RT_UL_806 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"
@@ -53,7 +53,7 @@ SMC_RT_UL_806 = (
 SMC_RT_UL_403 = (
     ROOT
     / "示例文件"
-    / "tss格式"
+    / "songzhenxi"
     / "KSU2577"
     / "07CF2C1000 20260506"
     / "SMC"

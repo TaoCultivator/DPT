@@ -24,3 +24,5 @@ analysis_outputs/
 outputs/
 参考工具/
 .pytest_tmp/
+.agents/
+.claude/

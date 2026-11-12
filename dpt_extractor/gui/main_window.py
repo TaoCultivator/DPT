@@ -2831,6 +2831,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在安全关闭后台任务...")
         self.statusBar().repaint()
         self.report_progress._timer.stop()
+        self.stop_api_server()
 
         # Invalidate queued callbacks, discard work that has not started, and
         # terminate the only external subprocess family before waiting for the
@@ -12981,3 +12982,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "导出成功", f"已保存:\n{path}{suffix}")
         except Exception as e:
             QMessageBox.critical(self, "导出失败", str(e))
+    def start_api_server(self,port=8765):
+        from dpt_extractor.api import gui_host
+        gui_host.ensure_running(port=port)
+        return gui_host.current_url()
+
+    def stop_api_server(self):
+        try:
+            from dpt_extractor.api import gui_host
+        except Exception:
+            return
+        gui_host.shutdown()
