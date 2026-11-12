@@ -1020,3 +1020,75 @@ GUI 光标审计覆盖双脉冲参数；单脉冲不适用项按 `INFO` 记录�
 - **全语料影响评估（改前/改后各跑一次原始 TSS strict 全量）**：两次均 `total=1464、dpt_ok=1197、dpt_single_ok=48、sc_ok=219、rr_polarity_negative=1197、failed=0、warnings=0`（8 分片退出码全 0；枚举口径与历史默认 `--root` 相同，含 `.tmp` 副本）。逐样例差分：`err=` 变化 45 条记录 = **15 个唯一样例**（各含 2 份 `.tmp` 副本），其余记录的**全部字段逐位不变**；15 个样例全部落在被修改支路（`600V_403A`/`600V_285A`/`480V_500A`/`450V_500A`），最大相对变化 **5.07%**（`20260717/SMC/HT/VL_600V_403A` `3.332→3.501mJ`）、最大绝对变化 `0.169mJ`。⇒ **未发现新增不合规点**。
 - **② 关断 B 落点（甲）与 Irr INFO 通道**：B 落点「稳定抬升前 Base」见上一节（`:790` 现行边界）；本节补充 `scripts/validate_gui_cursors.py` 的 `Irr` 分支——样例**无真实 Irr 稳定平台来源**（`mw._rr_irr_cursor_context()` 不可用）时，Ha 绑定/有效性/可见性期望无从校验，按 **`INFO`** 记录（保留已采集诊断文本），不再计 `FAIL`。实测 `likangkang\NED34jixian` 单卡 `反向恢复/Irr`：该目录由 `FAIL=1`/exit=1 变为 `files=36 items=36 OK=34 INFO=2 FAIL=0`/exit=0；同目录单卡 `关断过程/Ic_off_max` 为 `files=36 items=36 OK=36 INFO=0 FAIL=0`。**覆盖范围仅此一个语料目录、仅这两条单卡路径，不等于全参数全语料通过。**
 - **证据**：`.dsh/kanban-reports/k-mvaaecqt-26-report-v2.md`；探针与日志 `.tmp/k26c/`（`probe_scope.py`、`probe_b1.py`、`parse_strict.py`、`diff_strict.py`、`summarise_impact.py`、`logsA`/`logsB`）。
+
+## 2026-11-12 p7ul5 分支治理合并后的门禁复跑：29 项 test_eoff_window 失败定性
+
+本节记录 `dev/v3.0.11` 合入 main（commit `1f27929a`）及后续 7 个 merge（`0364ea23`/`f88857e9`/`1152d575`/`3a1fb1c7`/`74789187`/`09af0561`/`f1d76137`）后，完整 pytest 实测结果与责任归属分析。
+
+### 实测数据
+
+- 命令：`.venv\Scripts\python.exe -m pytest dpt_extractor\tests -q --basetemp=.tmp_gate`
+- 结果：**29 failed / 158 passed / 11 skipped / 116 subtests passed**，耗时 211s
+- 失败全部集中在 `dpt_extractor/tests/test_eoff_window.py` 单文件
+- 14 个 FAILED + 15 个 SUBFAILED = 29 项
+- 偏差全在时间轴，量级 **0.033 ~ 0.577 μs**
+
+### 责任归属（三条独立证据，非推测）
+
+**证据 1 · 非本次合并引入**
+
+- `git diff --name-only 1f27929a..HEAD -- dpt_extractor/` = 空
+- `git rev-parse '1f27929a^{tree}'` == `git rev-parse 'dev/v3.0.11^{tree}'`
+- 阶段 2-4 的 7 个 merge 仅改动 `docs/` 与配置文件，对 `dpt_extractor/` 和 `scripts/` 零改动
+
+**证据 2 · 非采样量化误差**
+
+实测 8 个失败样例的采样间隔 `dt` 全部 = **0.0800 ns**（12.5 GS/s）：
+
+| 样例 | dt |
+|---|---|
+| UL_600V_285A_000.tss | 0.0800 ns |
+| UH_750V_1050A_000.tss | 0.0800 ns |
+| UL_750V_805A_000.tss | 0.0800 ns |
+| WH_750V_50A_000.tss | 0.0800 ns |
+| WL_750V_50A_000.tss | 0.0800 ns |
+| WL_750V_805A_000.tss | 0.0800 ns |
+| VH_600V_285A_000.tss | 0.0800 ns |
+| UL_750V_50A_000.tss | 0.0800 ns |
+
+偏差 0.033~0.577 μs 换算为 **415 ~ 7213 个采样点**。若为预期值标定过严，偏差应在 1~2 个采样点以内。⇒ 不是量化误差，是算法落点判定的逻辑差异。
+
+**证据 3 · 真因：测试路径修复揭开了长期被掩盖的不一致**
+
+| 提交 | 动作 | 后果 |
+|---|---|---|
+| `937dc8ad`（合并前 main） | `test_eoff_window.py` 路径写错（`tss格式`，实际目录名 `songzhenxi`） | 48 个测试被 `skipUnless` 静默跳过，只跑 17 个 → **全绿** |
+| `57755a7c`（v3.0.11 第 1 提交，消息含 WIP） | `iec_windows.py` +1139 行（Eoff Hb refine 重构、`_eoff_ic_base_refine_quality` 新增、`_low_current_eoff_envelope_crossing` 新增、`EnergyLossMarkers.endpoint_mode`/`stable_platform_context` 新增）；`test_eoff_window.py` +583 行 | 实现与测试同时大改 |
+| `30aa7daa`（第 3 提交） | 修复测试路径（`tss格式` → `songzhenxi`）；新增 `_assert_cursor_matches_level` 辅助函数 | 37 个测试**真正执行** → 暴露 29 项实现与预期的长期不一致 |
+
+**结论**：v3.0.11 本身是「修好路径 bug 反而暴露更多问题」的情况。此前本节记载的「完整 pytest 623 passed、57 skipped」应是在测试被大量 skip 的状态下跑出的——**skip 不是 pass**，与本台账 `:1007` 的「不得用 FAIL=0 代替数值回归」同理，**也不得用 skip 代替 pass**。
+
+### 基线对照（方法论记录）
+
+在 `937dc8ad` 建 detached worktree 跑同一测试文件：
+
+- **基线**：`17 passed / 48 skipped / 29 subtests passed`，耗时 2.40s
+- **当前**：`158 passed / 11 skipped / 29 failed`，耗时 211s
+
+差距说明 v3.0.11 大幅提高了测试覆盖率（skip 从 48 降到 11）与严格度。
+
+**方法论沉淀**：判断回归责任归属，不要在改动后的树上争论，直接把改动前的 commit checkout 到独立 worktree 跑同一测试，两个数字一对比，责任归属即明确。代价是一次额外测试时间，收益是不用扯皮。
+
+### 已登记 vs 未登记
+
+29 项失败涉及 14 个样例，其中仅 3 个在本台账有提及：
+
+- 已提及：`UH_750V_1050A_000.tss`、`UL_750V_805A_000.tss`、`UL_750V_50A_000.tss`
+- 未提及（12 个）：`UL_600V_285A`、`WH_750V_50A`、`WL_750V_50A`、`WL_750V_805A`、`VH_600V_285A`、`GCU_LT_UH_500`、`SMC_RT_UH`、`SMC_RT_VH_806`、`SMC_RT_VL_1048`、`SMC_RT_VL_806`、`SSS_RT_UL_805`、`SSS_RT_UL_1050`
+
+### 处置状态与后续
+
+- **本节仅记录事实，不代表这些差异已被接受**
+- 发布门槛仍按 `:1007` 执行：原始 TSS strict + pytest + 全语料光标审计三者同时满足
+- 29 项待专项修复，需独立工程立项
+- 完整日志留存：`.archive/gate-evidence/gate-20261112-1527.log`（94 KB）、`.archive/gate-evidence/baseline-937dc8ad-20261112.log`
