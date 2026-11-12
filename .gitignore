@@ -26,3 +26,8 @@ outputs/
 .pytest_tmp/
 .agents/
 .claude/
+# 归档与临时目录（Nova 2026-11-12 补）
+.archive/
+.tmp_pytest_*/
+.tmp_gate*/
+.tmp_baseline/
