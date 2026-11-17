@@ -31,3 +31,15 @@ outputs/
 .tmp_pytest_*/
 .tmp_gate*/
 .tmp_baseline/
+
+# 一次性临时产物（DeepSeek 2026-11-17 补）
+# 每次会话/回归都会在根目录长出 .tmp_*.py 诊断脚本与 .pytest_tmp_* 目录，
+# 清理口径见 docs/TMP_CLEANUP_INVENTORY.md；此处的规则只让 git status 保持干净，
+# 不代替清理。历史会话的脚本已归档到 .archive/20261117-root-tmp/。
+.tmp_*
+.tmp_*/
+.pytest_tmp_*/
+.pytest_*_tmp/
+.pytest_out_*.txt
+*.bak_*
+.reg_backup/
