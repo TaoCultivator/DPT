@@ -18,9 +18,12 @@
 
 from __future__ import annotations
 
+import json
+import math
 import threading
 import time
 import traceback
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -53,6 +56,10 @@ from dpt_extractor.models.slope_range import (
 )
 from dpt_extractor.models.test_mode import TestMode, parse_test_mode
 from dpt_extractor.models.waveform import WaveformBundle
+from dpt_extractor.models.wiring import (
+    detect_wiring,
+    validate_profile_against_wiring,
+)
 from dpt_extractor.pipeline.run_extract import run_extraction
 from dpt_extractor.utils.sample_corpus import discover_sample_waveforms
 
@@ -94,6 +101,33 @@ _CONTEXT_FIELD_BY_SECTION: dict[str, str] = {
     "power_contexts": "power",
 }
 
+#: 温度工况码与温度值域，口径同 ``main_window.TEMP_CONDITION_DEFAULTS`` 与
+#: ``spin_temp_value`` 的 ``setRange(-100, 250)``。协议层先校验一遍是因为
+#: 本机 HTTP 直连可以绕过界面，非法值一旦写进 QSettings 会污染后续每份报告。
+_GUI_TEMPERATURE_CODES: tuple[str, ...] = ("RT", "HT", "LT")
+_GUI_TEMPERATURE_MIN_C = -100.0
+_GUI_TEMPERATURE_MAX_C = 250.0
+
+#: 报告工况字段集随测试模式切换，口径同 ``main_window.DPT/SHORT_REPORT_CONDITION_FIELDS``。
+#: 服务层不能 import Qt，因此这里保留一份同名字段表，只用于协议侧校验。
+_GUI_DPT_REPORT_CONDITION_FIELDS: tuple[str, ...] = (
+    "voltage_v",
+    "current_a",
+    "rg_on_ohm",
+    "rg_off_ohm",
+    "cg_nf",
+)
+_GUI_SHORT_REPORT_CONDITION_FIELDS: tuple[str, ...] = (
+    "vce_v",
+    "imax_a",
+    "cdesat_pf",
+    "rdesat_kohm",
+    "vdesat_v",
+)
+
+#: 工况输入框的 QDoubleValidator 上限；超过它的值在界面上无法表示，协议侧直接拒。
+_GUI_REPORT_CONDITION_VALUE_MAX = 1_000_000_000.0
+
 
 def _slope_row_key(section: str, name: str) -> str | None:
     return SLOPE_ROW_KEYS.get((section, name))
@@ -101,6 +135,46 @@ def _slope_row_key(section: str, name: str) -> str | None:
 
 def _as_us(seconds: float) -> float:
     return float(seconds) * 1e6
+
+
+def _gui_report_mode_key(test_mode: Any) -> str:
+    """把测试模式收敛成报告工况的两套口径：``dpt`` / ``short``。
+
+    与 ``main_window._report_condition_mode_key`` 同一判据：只有短路模式
+    换成短路字段表，其余（含偏移测量）都沿用双脉冲字段表。
+    """
+    return (
+        "short"
+        if str(test_mode or "").strip().lower() == "short_circuit"
+        else "dpt"
+    )
+
+
+def _gui_condition_value(field: str, raw: Any) -> float | None:
+    """校验单个工况字段值：``None`` 表示清空，否则必须是非负有限数。
+
+    负值必须在这里拒掉：界面 ``ReportConditionEdit.numeric_value()`` 会把
+    负文本读成 ``None``，放过去就会变成「静默清空」，报告 C 列凭空少一项。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ApiError(
+            "invalid_condition_value",
+            f"工况字段 {field} 需要数字或 null，收到 {raw!r}",
+        )
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ApiError(
+            "invalid_condition_value", f"工况字段 {field} 必须是有限数，收到 {raw!r}"
+        )
+    if not 0.0 <= value <= _GUI_REPORT_CONDITION_VALUE_MAX:
+        raise ApiError(
+            "invalid_condition_value",
+            f"工况字段 {field} 必须落在 0~{_GUI_REPORT_CONDITION_VALUE_MAX:g}，"
+            f"收到 {raw!r}",
+        )
+    return value
 
 
 class ApiService:
@@ -118,6 +192,10 @@ class ApiService:
     def __init__(self, config: AppConfig | None = None) -> None:
         self._lock = threading.RLock()
         self._cfg: AppConfig = config if config is not None else load_config()
+        # 会话级配置增量：load_session 传了 test_mode/vdc_override 时，仅把这两个
+        # 字段写入此处，绝不写回 self._cfg，避免跨请求粘滞（先后提取 short_circuit
+        # 与 dpt 文件时串味）。空 dict 即无覆盖，_active_cfg() 直接返回 _cfg。
+        self._session_overrides: dict[str, Any] = {}
         self._profile: BridgeProfile = make_profile("U", "upper")
         self._bundle: WaveformBundle | None = None
         self._result: ExtractResult | None = None
@@ -131,6 +209,27 @@ class ApiService:
             "last_duration_ms": None,
             "revision": 0,
         }
+
+    def _active_cfg(self) -> AppConfig:
+        """当前生效配置：在基础配置之上叠加会话级覆盖。
+
+        语义约定（重要，与旧实现不同）：
+
+        - 旧实现是「load 时刻的整份配置快照」，只有 slope_ranges / pulse_selection
+          被特殊回绑，其余字段冻结在加载那一刻。新增全局设置字段会静默失同步。
+        - 现实现是「增量覆盖」：``_session_overrides`` 只记录本次会话真正要覆盖的
+          字段（当前是 ``test_mode`` / ``vdc_override``），其余字段**每次实时读取**
+          ``self._cfg``。因此 ``set_slope_range`` 等全局改动会立即对当前会话生效，
+          这是有意为之——它们本就属于全局运行时设置，不属于某次提取的一次性覆盖。
+        - ``_session_overrides`` 内的值视为**只读快照**，调用方不得原地修改；
+          需要改配置请走对应 setter，由 setter 写 ``self._cfg``。
+
+        无覆盖时直接返回 ``self._cfg``（同一对象，零开销）；有覆盖时返回新对象，
+        调用方不应依赖其身份稳定。
+        """
+        if not self._session_overrides:
+            return self._cfg
+        return replace(self._cfg, **self._session_overrides)
 
     # ------------------------------------------------------------------ 状态
 
@@ -174,7 +273,7 @@ class ApiService:
                 "loaded": self._bundle is not None,
                 "has_result": self._result is not None,
                 "source_path": self._source_path,
-                "test_mode": parse_test_mode(self._cfg.test_mode.mode).value,
+                "test_mode": parse_test_mode(self._active_cfg().test_mode.mode).value,
             }
 
     def status(self) -> dict[str, Any]:
@@ -185,7 +284,7 @@ class ApiService:
             payload["phase"] = self._profile.phase
             payload["bridge"] = self._profile.bridge
             payload["profile_code"] = self._profile.code
-            payload["test_mode"] = parse_test_mode(self._cfg.test_mode.mode).value
+            payload["test_mode"] = parse_test_mode(self._active_cfg().test_mode.mode).value
             if self._bundle is not None:
                 payload["sample_count"] = int(self._bundle.n)
                 payload["dt_s"] = float(self._bundle.dt)
@@ -257,7 +356,7 @@ class ApiService:
             try:
                 phase_value = (phase or self._profile.phase).upper()
                 bridge_value = (bridge or self._profile.bridge).lower()
-                test_mode = parse_test_mode(self._cfg.test_mode.mode)
+                test_mode = parse_test_mode(self._active_cfg().test_mode.mode)
                 if test_mode == TestMode.SHORT_CIRCUIT:
                     profile = make_short_circuit_profile(phase_value, bridge_value)
                 else:
@@ -388,12 +487,21 @@ class ApiService:
                 if not source.is_file():
                     raise ApiError("file_not_found", f"TSS 文件不存在：{source}")
 
-                cfg = self._cfg
+                # 只记录本次会话真正要覆盖的字段，绝不写回 self._cfg：一次请求的
+                # mode/override 不应残留给后续请求（否则先提取 short_circuit、再提取
+                # dpt 不带 test_mode 时会沿用旧模式）。test_mode 是嵌套 dataclass，
+                # 必须再 replace() 一层构造新对象，避免与基础配置共享同一实例。
+                overrides: dict[str, Any] = {}
                 if test_mode is not None:
-                    mode = parse_test_mode(test_mode)
-                    cfg.test_mode.mode = mode.value
+                    overrides["test_mode"] = replace(
+                        self._cfg.test_mode,
+                        mode=parse_test_mode(test_mode).value,
+                    )
                 if vdc_override is not None:
-                    cfg.vdc_override = float(vdc_override)
+                    overrides["vdc_override"] = float(vdc_override)
+                # 未显式指定模式时 overrides 为空，等价于「回到基础配置」。
+                self._session_overrides = overrides
+                cfg = self._active_cfg()
 
                 mode = parse_test_mode(cfg.test_mode.mode)
                 if phase and bridge:
@@ -423,6 +531,36 @@ class ApiService:
                     profile = apply_mapping(profile, candidate)
 
                 bundle = load_waveform(source)
+
+                # 接线一致性校验：必须在 assign self._bundle 之前完成。
+                # auto_extract=False 时 run_extraction 不会执行，接线错配会潜伏到
+                # 调用方下一次提取才爆；校验点前移到加载完成处才能提前拦住。
+                # 判据是示波器 MATH 恒等式，不依赖文件名或目录名。
+                wiring = detect_wiring(bundle)
+                wiring_ok, wiring_severity, wiring_reason = validate_profile_against_wiring(
+                    profile, wiring
+                )
+                wiring_warnings: list[str] = []
+                if not wiring_ok:
+                    if wiring_severity == "fatal":
+                        raise ApiError(
+                            "wiring_incompatible",
+                            wiring_reason,
+                            detail=json.dumps(wiring.to_dict(), ensure_ascii=False),
+                        )
+                    # mismatch：通道存在但语义对不上，程序能跑通而数值全错。
+                    # 显式传 mapping 说明调用方已接管通道映射，此处降级为提示；
+                    # 未传 mapping 则是静默错配，必须告警让人看见。
+                    wiring_warnings.append(wiring_reason)
+                    if not mapping:
+                        warnings.warn(
+                            f"[wiring] {source.name}: {wiring_reason}",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                elif wiring_reason:
+                    wiring_warnings.append(wiring_reason)
+
                 self._bundle = bundle
                 self._profile = profile
                 self._source_path = str(source)
@@ -435,6 +573,7 @@ class ApiService:
                     "sample_count": int(bundle.n),
                     "dt_s": float(bundle.dt),
                     "channels": sorted(bundle.channels.keys()),
+                    "wiring": {**wiring.to_dict(), "warnings": wiring_warnings},
                 }
                 if auto_extract:
                     payload["result"] = self.run_extraction()
@@ -448,11 +587,12 @@ class ApiService:
                 raise ApiError("load_session_failed", str(exc), detail=traceback.format_exc()) from exc
 
     def close_session(self) -> dict[str, Any]:
-        """释放已加载波形与结果。"""
+        """释放已加载波形与结果，并丢弃会话级配置覆盖。"""
         with self._lock:
             self._bundle = None
             self._result = None
             self._source_path = None
+            self._session_overrides = {}
             self._manual_cursors.clear()
             return {"closed": True}
 
@@ -465,7 +605,7 @@ class ApiService:
             try:
                 if self._bundle is None:
                     raise ApiError("no_waveform", "尚未加载任何波形文件")
-                result = run_extraction(self._bundle, self._profile, self._cfg)
+                result = run_extraction(self._bundle, self._profile, self._active_cfg())
                 self._result = result
                 self._manual_cursors.clear()
                 self._end(started)
@@ -473,6 +613,24 @@ class ApiService:
             except ApiError as exc:
                 self._fail(started, exc.message)
                 raise
+            except KeyError as exc:
+                # extract.py 内部对缺通道抛裸 KeyError，直接透出会让调用方只看到
+                # 一句中文而拿不到错误码。这里升级为结构化 ApiError，附接线诊断。
+                self._fail(started, str(exc))
+                wiring_hint = ""
+                if self._bundle is not None and self._profile is not None:
+                    try:
+                        report = detect_wiring(self._bundle)
+                        wiring_hint = f"实测接线：{report.label}"
+                        if report.note:
+                            wiring_hint += f"；{report.note}"
+                    except Exception:  # pragma: no cover - 诊断失败不影响主错误
+                        wiring_hint = ""
+                raise ApiError(
+                    "wiring_incompatible",
+                    str(exc).strip("'"),
+                    detail=wiring_hint or traceback.format_exc(),
+                ) from exc
             except Exception as exc:
                 self._fail(started, str(exc))
                 raise ApiError(
@@ -506,14 +664,25 @@ class ApiService:
         self,
         paths: list[str | Path],
         *,
+        test_mode: str | None = None,
         phase: str | None = None,
         bridge: str | None = None,
-        test_mode: str | None = None,
         vdc_override: float | None = None,
         array_mode: str = "summary",
         continue_on_error: bool = True,
     ) -> dict[str, Any]:
-        """批量无头提取，逐文件返回结果或错误，不因单点失败中断整批。"""
+        """批量无头提取，逐文件返回结果或错误，不因单点失败中断整批。
+
+        **必须显式指定 test_mode**：短路与双脉冲是两套不同的计算方法，
+        产出语义不同的结果对象，不能在同一批次中混合。调用方应按测试类型
+        分组、分多次调用（如 SMC 组传 dpt、DL 组传 short_circuit）。
+        """
+        if test_mode is None:
+            raise ApiError(
+                "missing_test_mode",
+                "批量接口必须显式指定 test_mode（dpt / short_circuit / offset_measurement）。"
+                "短路与双脉冲是两套不同的计算方法，不支持在同一批次中混合。",
+            )
         with self._lock:
             started = self._begin("extract_all")
             items: list[dict[str, Any]] = []
@@ -774,12 +943,22 @@ class ApiService:
         paths: list[str | Path],
         output_dir: str | Path,
         *,
+        test_mode: str | None = None,
         phase: str | None = None,
         bridge: str | None = None,
-        test_mode: str | None = None,
         vdc_override: float | None = None,
     ) -> dict[str, Any]:
-        """批量提取并导出 xlsx，输出到指定目录。"""
+        """批量提取并导出 xlsx，输出到指定目录。
+
+        **必须显式指定 test_mode**，理由同 extract_all：短路与双脉冲是两套
+        不同的计算方法，不能在同一批次中混合。
+        """
+        if test_mode is None:
+            raise ApiError(
+                "missing_test_mode",
+                "批量接口必须显式指定 test_mode（dpt / short_circuit / offset_measurement）。"
+                "短路与双脉冲是两套不同的计算方法，不支持在同一批次中混合。",
+            )
         with self._lock:
             started = self._begin("export_all")
             out_dir = Path(output_dir).expanduser()
@@ -813,6 +992,218 @@ class ApiService:
                 raise ApiError(
                     "export_all_failed", str(exc), detail=traceback.format_exc()
                 ) from exc
+
+    # ------------------------------------------------------------------ GUI 自动化控制桥接
+
+    def _require_gui_bridge(self) -> Any:
+        from dpt_extractor.api import gui_host
+
+        bridge = gui_host.get_gui_bridge()
+        if bridge is None:
+            raise ApiError(
+                "gui_bridge_unavailable",
+                "当前未挂载 GUI 主窗口控制桥（请确认已通过 GUI 启动并开启内嵌 API）",
+            )
+        return bridge
+
+    def gui_set_template(self, path: str | None) -> dict[str, Any]:
+        """设置 GUI 当前报告模板路径。"""
+        if not path:
+            raise ApiError("missing_param", "缺少必填参数 path")
+        started = self._begin("gui_set_template")
+        try:
+            bridge = self._require_gui_bridge()
+            res = bridge.invoke("set_template", {"path": str(path)}, timeout=15.0)
+            self._end(started)
+            return res
+        except ApiError:
+            raise
+        except Exception as exc:
+            self._fail(started, str(exc))
+            raise ApiError("gui_set_template_failed", str(exc), detail=traceback.format_exc()) from exc
+
+    def gui_set_output(self, path: str | None) -> dict[str, Any]:
+        """设置 GUI 当前报告输出路径。"""
+        if not path:
+            raise ApiError("missing_param", "缺少必填参数 path")
+        started = self._begin("gui_set_output")
+        try:
+            bridge = self._require_gui_bridge()
+            res = bridge.invoke("set_output", {"path": str(path)}, timeout=15.0)
+            self._end(started)
+            return res
+        except ApiError:
+            raise
+        except Exception as exc:
+            self._fail(started, str(exc))
+            raise ApiError("gui_set_output_failed", str(exc), detail=traceback.format_exc()) from exc
+
+    def gui_load_file(
+        self,
+        path: str | None,
+        *,
+        phase: str | None = None,
+        bridge: str | None = None,
+        test_mode: str | None = None,
+    ) -> dict[str, Any]:
+        """在 GUI 主窗口加载单个波形并等待提取/渲染完成。"""
+        if not path:
+            raise ApiError("missing_param", "缺少必填参数 path")
+        params = {
+            "path": str(path),
+            "phase": phase,
+            "bridge": bridge,
+            "test_mode": test_mode,
+        }
+        started = self._begin("gui_load_file")
+        try:
+            gui_bridge = self._require_gui_bridge()
+            res = gui_bridge.invoke("load_file", params, timeout=60.0)
+            self._end(started)
+            return res
+        except ApiError:
+            raise
+        except Exception as exc:
+            self._fail(started, str(exc))
+            raise ApiError("gui_load_file_failed", str(exc), detail=traceback.format_exc()) from exc
+
+    def gui_write_report(self, *, timeout: float = 60.0) -> dict[str, Any]:
+        """触发 GUI 主窗口“写入报告”（含真实图表截图与双脉冲/单脉冲/短路多sheet写入）并等待完成。"""
+        started = self._begin("gui_write_report")
+        try:
+            gui_bridge = self._require_gui_bridge()
+            res = gui_bridge.invoke("write_report", {"timeout": timeout}, timeout=max(10.0, float(timeout) + 5.0))
+            self._end(started)
+            return res
+        except ApiError:
+            raise
+        except Exception as exc:
+            self._fail(started, str(exc))
+            raise ApiError("gui_write_report_failed", str(exc), detail=traceback.format_exc()) from exc
+
+    def gui_set_temperature(
+        self, code: str | None, value: float | None = None
+    ) -> dict[str, Any]:
+        """设置 GUI 的温度工况与温度值。
+
+        语义等价于「用户在温度下拉选 ``code``，再在 ℃ 输入框填 ``value``」：
+        省略 ``value`` 只切工况，该 code 保持既有温度值。合法域在协议层先校验
+        一次，因为本机 HTTP 直连可以绕过界面控件，不能只靠 GUI 兜底。
+        """
+        if not code:
+            raise ApiError("missing_param", "缺少必填参数 code")
+        normalized = str(code).strip().upper()
+        if normalized not in _GUI_TEMPERATURE_CODES:
+            raise ApiError(
+                "invalid_temperature_code",
+                "温度工况码必须是 "
+                f"{'/'.join(_GUI_TEMPERATURE_CODES)} 之一，收到 {code!r}",
+            )
+        params: dict[str, Any] = {"code": normalized}
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ApiError(
+                    "invalid_temperature_value", f"温度值必须是数字，收到 {value!r}"
+                )
+            number = float(value)
+            if not math.isfinite(number) or not (
+                _GUI_TEMPERATURE_MIN_C <= number <= _GUI_TEMPERATURE_MAX_C
+            ):
+                raise ApiError(
+                    "invalid_temperature_value",
+                    "温度值必须是 "
+                    f"{_GUI_TEMPERATURE_MIN_C:g}~{_GUI_TEMPERATURE_MAX_C:g} ℃ "
+                    f"之间的有限数，收到 {value!r}",
+                )
+            params["value"] = number
+        started = self._begin("gui_set_temperature")
+        try:
+            bridge = self._require_gui_bridge()
+            res = bridge.invoke("set_temperature", params, timeout=15.0)
+            self._end(started)
+            return res
+        except ApiError as exc:
+            self._fail(started, exc.message)
+            raise
+        except Exception as exc:
+            self._fail(started, str(exc))
+            raise ApiError(
+                "gui_set_temperature_failed", str(exc), detail=traceback.format_exc()
+            ) from exc
+
+    def gui_set_report_conditions(
+        self, conditions: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """设置 GUI 的报告工况字段（部分更新，``null`` 清空该字段）。
+
+        字段集随当前测试模式变化，而模式只存在于 GUI 进程里，因此先做一次
+        只读的 ``get_report_context`` 拿口径，再按该模式的字段表校验：把短路
+        字段写进双脉冲报告（或反之）在界面上是看不见的，只能在这里挡掉。
+        """
+        if not isinstance(conditions, dict) or not conditions:
+            raise ApiError(
+                "missing_param", "缺少必填参数：至少给出一个报告工况字段"
+            )
+        started = self._begin("gui_set_report_conditions")
+        try:
+            bridge = self._require_gui_bridge()
+            context = bridge.invoke("get_report_context", {}, timeout=15.0)
+            mode_key = _gui_report_mode_key(
+                context.get("test_mode") if isinstance(context, dict) else None
+            )
+            allowed = (
+                _GUI_SHORT_REPORT_CONDITION_FIELDS
+                if mode_key == "short"
+                else _GUI_DPT_REPORT_CONDITION_FIELDS
+            )
+            unknown = sorted(set(conditions) - set(allowed))
+            if unknown:
+                raise ApiError(
+                    "mode_mismatch",
+                    f"当前测试模式为 {mode_key}，可用工况字段："
+                    f"{', '.join(allowed)}；本次传入的 {', '.join(unknown)} "
+                    "不属于该模式",
+                )
+            payload = {
+                field: _gui_condition_value(field, raw)
+                for field, raw in conditions.items()
+            }
+            res = bridge.invoke("set_report_conditions", payload, timeout=15.0)
+            self._end(started)
+            return res
+        except ApiError as exc:
+            self._fail(started, exc.message)
+            raise
+        except Exception as exc:
+            self._fail(started, str(exc))
+            raise ApiError(
+                "gui_set_report_conditions_failed",
+                str(exc),
+                detail=traceback.format_exc(),
+            ) from exc
+
+    def gui_get_report_context(self) -> dict[str, Any]:
+        """查询当前 GUI 会写进报告的温度与工况口径。
+
+        取值由 GUI 走页面状态（控件与内存态），不回读 QSettings：设置只是
+        控件状态的镜像，页面保存时还会反过来覆盖它。
+        """
+        started = self._begin("gui_get_report_context")
+        try:
+            bridge = self._require_gui_bridge()
+            res = bridge.invoke("get_report_context", {}, timeout=15.0)
+            self._end(started)
+            return res
+        except ApiError as exc:
+            self._fail(started, exc.message)
+            raise
+        except Exception as exc:
+            self._fail(started, str(exc))
+            raise ApiError(
+                "gui_get_report_context_failed",
+                str(exc),
+                detail=traceback.format_exc(),
+            ) from exc
 
     # ------------------------------------------------------------------ 分发
 
@@ -899,6 +1290,25 @@ class ApiService:
                 test_mode=params.get("test_mode"),
                 vdc_override=params.get("vdc_override"),
             ),
+            "gui_set_template": lambda: self.gui_set_template(params.get("path")),
+            "gui_set_output": lambda: self.gui_set_output(params.get("path")),
+            "gui_load_file": lambda: self.gui_load_file(
+                params.get("path"),
+                phase=params.get("phase"),
+                bridge=params.get("bridge"),
+                test_mode=params.get("test_mode"),
+            ),
+            "gui_write_report": lambda: self.gui_write_report(
+                timeout=float(params.get("timeout", 60.0))
+            ),
+            "gui_set_temperature": lambda: self.gui_set_temperature(
+                params.get("code"), params.get("value")
+            ),
+            # 工况命令的 params 本身就是「字段: 值」字典，没有外层包装键。
+            "gui_set_report_conditions": lambda: self.gui_set_report_conditions(
+                params
+            ),
+            "gui_get_report_context": lambda: self.gui_get_report_context(),
         }
         handler = handlers.get(command)
         if handler is None:

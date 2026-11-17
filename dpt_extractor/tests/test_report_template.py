@@ -171,7 +171,9 @@ class TestReportTemplateWriter(unittest.TestCase):
             )
 
             saved = load_workbook(report)["短路测试"]
-            self.assertIsNone(saved.cell(5, 4).value)
+            # An empty ShortReportConditions means "no operator override": the
+            # bus voltage recognized from the filename must survive.
+            self.assertEqual(saved.cell(5, 4).value, 750)
             self.assertEqual(saved.cell(5, 5).value, 593)
 
             # The empty DPT snapshot itself is valid and carries explicit blanks.
@@ -994,7 +996,7 @@ class TestReportTemplateWriter(unittest.TestCase):
             shutil.copyfile(default_report_template_path(), report)
 
             rows = []
-            for temperature, eoff in ((150, 1.5), (170, 1.7)):
+            for temperature, eoff in ((175, 1.5), (200, 1.7)):
                 summary = write_report_template(
                     ExtractResult(
                         source_path=str(
@@ -1019,11 +1021,11 @@ class TestReportTemplateWriter(unittest.TestCase):
             data = saved["U相_双脉冲数据"]
             wave = saved["U相_双脉冲波形"]
             self.assertEqual(rows, [13, 21])
-            self.assertEqual(data["B13"].value, "150℃")
-            self.assertEqual(data["B17"].value, "150℃")
-            self.assertEqual(data["B21"].value, "170℃")
-            self.assertEqual(wave["A1"].value, "UH_150℃")
-            self.assertEqual(wave["A54"].value, "UH_170℃")
+            self.assertEqual(data["B13"].value, "175℃")
+            self.assertEqual(data["B17"].value, "175℃")
+            self.assertEqual(data["B21"].value, "200℃")
+            self.assertEqual(wave["A1"].value, "UH_175℃")
+            self.assertEqual(wave["A54"].value, "UH_200℃")
             self.assertEqual(len(wave._images), 2)
             self.assertEqual(
                 sorted(item.anchor._from.row + 1 for item in wave._images),
@@ -4431,6 +4433,76 @@ class TestReportTemplateWriter(unittest.TestCase):
             self.assertEqual(saved["短路测试图片"].cell(6, 1).value, "750V")
             self.assertEqual(saved["短路测试图片"].cell(6, 2).value, "3210.5A")
             self.assertEqual(len(saved["短路测试图片"]._images), 1)
+
+
+    def test_short_multiple_voltages_get_distinct_picture_blocks(self):
+        from dpt_extractor.export.report_template import (
+            _merged_ranges_with_value,
+            _phase_temp_token_parts,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, ShortCircuitResult
+        from dpt_extractor.utils.app_paths import default_report_template_path
+
+        # The shipped template carries one picture block per phase/temperature,
+        # so a real bench run that repeats a phase/temperature at several bus
+        # voltages used to write every sample into the same four image slots and
+        # only the last picture survived.  Each voltage must own a block.
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            report = td_path / "short_multi_voltage.xlsx"
+            shutil.copyfile(default_report_template_path(), report)
+
+            voltages = (400.0, 600.0, 900.0)
+            for voltage in voltages:
+                image = td_path / f"v{int(voltage)}.png"
+                _write_rgb_png(image, (32, 8))
+                write_report_template(
+                    ExtractResult(
+                        source_path=str(
+                            Path("samples") / f"UH_{int(voltage)}V_short.tss"
+                        ),
+                        profile_code="UH",
+                        short_circuit_mode=True,
+                        short_circuit=ShortCircuitResult(ic_max=voltage / 2),
+                    ),
+                    report,
+                    images={("短路过程", "短路电流Imax"): image},
+                )
+
+            saved = load_workbook(report)
+            data = saved["短路测试"]
+            picture = saved["短路测试图片"]
+
+            self.assertEqual(
+                [data.cell(row, 4).value for row in (5, 6, 7)],
+                list(voltages),
+            )
+
+            anchors = sorted(
+                rng.min_row
+                for rng, value in _merged_ranges_with_value(
+                    picture,
+                    min_col=1,
+                    max_col=5,
+                )
+                if _phase_temp_token_parts(value) is not None
+                and str(value).startswith("UH_")
+            )
+            self.assertGreaterEqual(len(anchors), 3)
+
+            image_rows = sorted(item.anchor._from.row + 1 for item in picture._images)
+            self.assertEqual(len(image_rows), len(voltages))
+            self.assertEqual(len(set(image_rows)), len(voltages))
+
+            # Every written block records the voltage that owns it.
+            recorded = []
+            for anchor in anchors:
+                for row in range(anchor, anchor + 15):
+                    if str(picture.cell(row, 1).value or "").upper() == "VCE":
+                        recorded.append(str(picture.cell(row + 1, 1).value))
+                        break
+            self.assertEqual(recorded[: len(voltages)], ["400V", "600V", "900V"])
 
 
 if __name__ == "__main__":

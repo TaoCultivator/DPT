@@ -16,7 +16,7 @@ def isolate_qsettings_root(tmp_path_factory):
 def reset_production_qsettings(isolate_qsettings_root, monkeypatch):
     """Give each test a clean app store without touching real user settings."""
     from PyQt6.QtCore import QSettings
-    from dpt_extractor.gui import main_window
+    from dpt_extractor.gui import main_window, recent_paths
 
     def settings_factory(*_args, **_kwargs):
         return QSettings(
@@ -25,6 +25,9 @@ def reset_production_qsettings(isolate_qsettings_root, monkeypatch):
         )
 
     monkeypatch.setattr(main_window, "QSettings", settings_factory)
+    # ``set_last_open_path`` 等走 recent_paths 自己的 QSettings：不 patch 它，
+    # 任何加载真实 TSS 的 GUI 测试都会真写用户注册表（paths/last_open）。
+    monkeypatch.setattr(recent_paths, "QSettings", settings_factory)
 
     settings = settings_factory()
     settings.clear()

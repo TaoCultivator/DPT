@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
-from typing import Callable
+from typing import Any, Callable
 import numpy as np
 
 from PyQt6 import sip
@@ -1703,6 +1703,134 @@ class _ReportWriteTask(QRunnable):
         self.signals.finished.emit(self.request_id, summary, elapsed_ms)
 
 
+class _MainWindowApiBridge:
+    """把 ``MainWindow`` 的自动化入口收敛成 ``invoke(action, params)`` 门面。
+
+    ``service.gui_*`` 的七个命令都经由本类。调用者是 HTTP 后台线程，因此
+    除 ``write_report`` 外的动作全部经 :func:`gui_host.call_sync` 回到 Qt
+    主线程执行——在 HTTP 线程直接碰控件必然崩。
+
+    ``write_report`` 是唯一的两段式动作：**发起**回主线程，**等待终态**留在
+    当前线程阻塞。若把等待也塞进主线程，Qt 事件循环会等自己，截图用的
+    ``QTimer.singleShot`` 与 QRunnable 回执永远发不出来。
+    """
+
+    __slots__ = ("_window",)
+
+    def __init__(self, window: "MainWindow") -> None:
+        self._window = window
+
+    # ------------------------------------------------------------ 入口
+
+    def invoke(
+        self,
+        action: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        payload = dict(params or {})
+        if str(action) == "write_report":
+            return self._write_report(payload, timeout)
+        from dpt_extractor.api import gui_host
+
+        return gui_host.call_sync(
+            self._sync_job(str(action), payload), timeout=timeout
+        )
+
+    # ------------------------------------------------------------ 同步动作
+
+    def _sync_job(self, action: str, payload: dict[str, Any]) -> Any:
+        def run() -> dict[str, Any]:
+            if action == "set_template":
+                path = payload.get("path")
+                if not path:
+                    raise ValueError("缺少必填参数 path")
+                return self._set_paths(template=str(path))
+            if action == "set_output":
+                path = payload.get("path")
+                if not path:
+                    raise ValueError("缺少必填参数 path")
+                return self._set_paths(output=str(path))
+            if action == "load_file":
+                path = payload.get("path")
+                if not path:
+                    raise ValueError("缺少必填参数 path")
+                # 相别/桥臂的应用、以及失败回滚都在 api_load_file 内部完成：
+                # 只有它知道加载失败时该把下拉框/温度/工况上下文恢复成什么。
+                return self._window.api_load_file(
+                    str(path),
+                    test_mode=payload.get("test_mode"),
+                    phase=payload.get("phase"),
+                    bridge=payload.get("bridge"),
+                )
+            if action == "set_temperature":
+                return self._window.api_set_temperature(
+                    payload.get("code"), payload.get("value")
+                )
+            if action == "set_report_conditions":
+                # 工况命令的 payload 本身就是「字段: 值」字典，没有外层包装键。
+                return self._window.api_set_report_conditions(payload)
+            if action == "get_report_context":
+                return self._window.api_get_report_context()
+            raise ValueError(f"未知的 GUI 桥接动作：{action}")
+
+        return run
+
+    def _set_paths(
+        self, *, template: str | None = None, output: str | None = None
+    ) -> dict[str, Any]:
+        window = self._window
+        tpl = (
+            Path(template).expanduser()
+            if template
+            else window._report_template_source_path
+        )
+        out = Path(output).expanduser() if output else window._report_output_path
+        # 与文件对话框同一条硬约束：模板源与输出不能是同一个文件，
+        # 否则写报告会把自己的输入覆盖掉。
+        if tpl is not None and out is not None and tpl.resolve() == out.resolve():
+            raise ValueError("报告模板源不能与报告输出路径相同")
+        return window.api_set_report_paths(template=template, output=output)
+
+    # ------------------------------------------------------------ 两段式写报告
+
+    def _write_report(
+        self, payload: dict[str, Any], timeout: float
+    ) -> dict[str, Any]:
+        from dpt_extractor.api import gui_host
+
+        wait_s = max(5.0, float(payload.get("timeout") or timeout))
+        waiter = gui_host.GuiReportWaiter()
+        # 发起阶段回主线程；异常原样上抛，由 service 包成 ApiError。
+        started = gui_host.call_sync(
+            lambda: self._window.api_begin_write_report(waiter), timeout=30.0
+        )
+        if not started.get("started"):
+            # 该分支里 api_begin_write_report 已自行 _notify_api_report，
+            # 静默计数与 waiter 都已收尾，此处只需把失败原因抛出去。
+            raise RuntimeError(started.get("error") or "报告流水线未能启动")
+        # 等待必须留在当前（HTTP）线程：回到主线程阻塞会让 Qt 事件循环
+        # 等自己，截图 QTimer 与 QRunnable 回执永远发不出来。
+        if not waiter.done.wait(wait_s):
+            # 标记放弃让迟到终态静默丢弃；同时必须回主线程释放
+            # _api_report_waiter 占位与 _api_silent 计数，否则后续每一次
+            # write_report 都会被「已有 API 报告写入正在进行」永久档死
+            # （180 例批量实测：首例超时后余下 44 例全灭于此）。
+            waiter.abandoned = True
+            try:
+                gui_host.call_sync(
+                    lambda: self._window._abandon_api_report(waiter), timeout=15.0
+                )
+            except Exception:
+                # 主线程拿不到也必须让超时本身抛出去，不吞原始错误。
+                pass
+            raise TimeoutError(f"报告写入超时（{wait_s:.0f}s）")
+        if not waiter.ok:
+            raise RuntimeError(waiter.error or "报告写入失败")
+        return dict(waiter.result)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1722,6 +1850,14 @@ class MainWindow(QMainWindow):
         self._current_path: str = ""
         self._report_template_source_path: Path | None = report_template_source_path()
         self._report_output_path: Path | None = report_output_path()
+        # API 自动化驱动期间非零：抑制模态弹窗，改走状态栏与完成信箱。
+        self._api_silent = 0
+        # 当前 API 报告写入请求的完成信箱，由 gui_write_report 阻塞等待。
+        self._api_report_waiter: Any = None
+        # 内嵌 API 的跨线程派发器与桥接门面；仅在 start_api_server 成功时赋值，
+        # 这里先钉住字段，避免关闭路径读到未定义属性。
+        self._api_dispatcher: Any = None
+        self._api_bridge: Any = None
         self._channel_store = ChannelMappingStore()
         self._mapping_custom = False
         self._slope_ranges = self._load_slope_ranges()
@@ -2601,9 +2737,13 @@ class MainWindow(QMainWindow):
             self._report_condition_specs(mode_key),
             self._report_condition_edits,
         ):
-            value = getattr(conditions, field)
-            if value is not None:
-                edit.set_numeric_value(value)
+            # 文件名未携带的参数必须显式清空：None 表示该参数在本份数据中
+            # 无来源，绝不能保留上一份文件的旧值或 QSettings 历史记忆，
+            # 否则报告 C 列会写出凭空捏造的工况。set_numeric_value(None)
+            # 走 clear()，随后的 _save_current_report_conditions 会 remove
+            # 对应 QSettings 键，切断下次 _switch_report_condition_context
+            # 的复活路径。
+            edit.set_numeric_value(getattr(conditions, field))
         self._save_current_report_conditions()
 
     def _apply_detected_short_imax(self, result: ExtractResult | None) -> None:
@@ -3985,6 +4125,25 @@ class MainWindow(QMainWindow):
         if busy:
             self.statusBar().showMessage("正在处理报告...")
 
+    def _alert(self, level: str, title: str, message: str) -> None:
+        """统一的通知出口。
+
+        API 自动化期间（``_api_silent > 0``）绝不弹模态框——模态会阻塞
+        Qt 主线程事件循环，使后续 RPC 永远拿不到回执。改为写状态栏并把
+        文案留在工具提示里，调用方通过 RPC 返回值获知结果。
+        """
+        text = f"{title}：{message}" if message else title
+        if self._api_silent > 0:
+            self.statusBar().showMessage(text, 10000)
+            self.lbl_top_status.setToolTip(text)
+            return
+        if level == "info":
+            QMessageBox.information(self, title, message)
+        elif level == "warning":
+            QMessageBox.warning(self, title, message)
+        else:
+            QMessageBox.critical(self, title, message)
+
     def _try_begin_report_operation(self) -> bool:
         if self._report_operation_active:
             return False
@@ -4955,7 +5114,14 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(self._loaded_status_message(outcome, inferred))
 
-    def _load_file(self, path: str, *, background: bool = False) -> None:
+    def _load_file(
+        self,
+        path: str,
+        *,
+        background: bool = False,
+        raise_on_error: bool = False,
+    ) -> None:
+        """加载波形。``raise_on_error`` 供 API 调用方取回原始异常。"""
         if background:
             self._start_background_load(path)
             return
@@ -4970,7 +5136,9 @@ class MainWindow(QMainWindow):
             )
             self._apply_loaded_waveform(outcome)
         except Exception as e:
-            QMessageBox.critical(self, "加载失败", str(e))
+            if raise_on_error:
+                raise
+            self._alert("critical", "加载失败", str(e))
 
     def _on_slope_range_changed(self, key: str, sr: SlopeRange) -> None:
         old = self._slope_ranges.get(key)
@@ -12317,7 +12485,8 @@ class MainWindow(QMainWindow):
         _safe_cleanup_tempdir(state.tempdir)
         self._finish_report_progress("写入失败", ok=False)
         self._release_report_operation()
-        QMessageBox.critical(self, "写入报告失败", str(exc))
+        self._alert("critical", "写入报告失败", str(exc))
+        self._notify_api_report(ok=False, error=str(exc))
 
     def _capture_next_report_image(self) -> None:
         state = self._report_capture_state
@@ -12496,8 +12665,8 @@ class MainWindow(QMainWindow):
         target = self._report_output_path
         src = self._current_report_template_source()
         if _same_report_path(target, src):
-            QMessageBox.warning(
-                self,
+            self._alert(
+                "warning",
                 "报告位置不可用",
                 "项目报告文件不能与报告模板源文件相同，请重新选择报告位置。",
             )
@@ -12506,8 +12675,8 @@ class MainWindow(QMainWindow):
             return True
 
         if src is None or not src.is_file():
-            QMessageBox.critical(
-                self,
+            self._alert(
+                "critical",
                 "缺少报告模板",
                 "已加载的报告模板不存在，请重新加载模板源。\n\n"
                 f"模板:\n{src}",
@@ -12536,8 +12705,8 @@ class MainWindow(QMainWindow):
             )
         except PermissionError as exc:
             self._finish_report_progress("写入失败", ok=False)
-            QMessageBox.critical(
-                self,
+            self._alert(
+                "critical",
                 "生成报告失败",
                 "无法写入报告文件，请确认目标文件未被 Excel 打开且目录可写。\n\n"
                 f"文件:\n{target}\n\n错误:\n{exc}",
@@ -12545,7 +12714,7 @@ class MainWindow(QMainWindow):
             return False
         except Exception as exc:
             self._finish_report_progress("写入失败", ok=False)
-            QMessageBox.critical(self, "生成报告失败", str(exc))
+            self._alert("critical", "生成报告失败", str(exc))
             return False
 
         set_report_output_path(self._report_output_path)
@@ -12723,7 +12892,8 @@ class MainWindow(QMainWindow):
             _safe_cleanup_tempdir(tempdir)
             self._finish_report_progress("写入失败", ok=False)
             self._release_report_operation()
-            QMessageBox.critical(self, "写入报告失败", str(exc))
+            self._alert("critical", "写入报告失败", str(exc))
+            self._notify_api_report(ok=False, error=str(exc))
 
     def _on_report_prepare_failed(self, request_id: int, message: str) -> None:
         self._report_prepare_tasks.pop(request_id, None)
@@ -12731,36 +12901,45 @@ class MainWindow(QMainWindow):
             return
         self._finish_report_progress("写入失败", ok=False)
         self._release_report_operation()
-        QMessageBox.critical(self, "写入报告失败", message)
+        self._alert("critical", "写入报告失败", message)
+        self._notify_api_report(ok=False, error=message)
 
     def _write_report_template(self) -> None:
         if not self._try_begin_report_operation():
+            # 已有报告在跑：立刻把本次请求判失败，避免 API 侧无限等待。
+            self._notify_api_report(ok=False, error="已有报告写入正在进行")
             return
         if self.result is None:
             self._release_report_operation()
-            QMessageBox.warning(self, "提示", "无提取结果可写入报告")
+            self._alert("warning", "提示", "无提取结果可写入报告")
+            self._notify_api_report(ok=False, error="无提取结果可写入报告")
             return
         try:
             self._commit_report_submission_state()
             if not self._ensure_report_output_file():
                 self._release_report_operation()
+                self._notify_api_report(
+                    ok=False,
+                    error="报告输出路径或模板不可用",
+                )
                 return
             self._start_report_prepare_task()
         except PermissionError as e:
             self._finish_report_progress("写入失败", ok=False)
             self._release_report_operation()
-            QMessageBox.critical(
-                self,
-                "写入报告失败",
+            message = (
                 "无法保存报告文件，通常是这个 .xlsx 正在被 Excel 打开或没有写入权限。\n"
                 "请先关闭该报告文件，再点击“写入报告”。\n\n"
                 f"文件:\n{self._report_output_path}\n\n"
-                f"错误:\n{e}",
+                f"错误:\n{e}"
             )
+            self._alert("critical", "写入报告失败", message)
+            self._notify_api_report(ok=False, error=message)
         except Exception as e:
             self._finish_report_progress("写入失败", ok=False)
             self._release_report_operation()
-            QMessageBox.critical(self, "写入报告失败", str(e))
+            self._alert("critical", "写入报告失败", str(e))
+            self._notify_api_report(ok=False, error=str(e))
 
     def _start_report_write_task(
         self,
@@ -12931,12 +13110,31 @@ class MainWindow(QMainWindow):
             if summary.data_rows_written == 1
             else f"{summary.data_row}-{summary.data_row_end} 行（{summary.data_rows_written} 行）"
         )
-        QMessageBox.information(
-            self,
+        self._alert(
+            "info",
             "写入成功",
             f"已写入:\n{summary.report_path}\n\n"
             f"数据位置: {summary.data_sheet} 第 {row_text}\n"
             f"图片: {summary.images_written} 张",
+        )
+        self._notify_api_report(
+            ok=True,
+            result={
+                "report_path": str(summary.report_path),
+                "data_sheet": summary.data_sheet,
+                "data_row": int(summary.data_row),
+                "data_rows_written": int(summary.data_rows_written),
+                # 短路报告是单行结果，ReportWriteSummary 不携带 data_row_end；
+                # 无条件 int() 会在 _notify_api_report 之前抛 TypeError，
+                # 让 API 侧永远收不到真实回执并误判为写错 sheet。回退 data_row。
+                "data_row_end": (
+                    int(summary.data_row_end)
+                    if summary.data_row_end is not None
+                    else int(summary.data_row)
+                ),
+                "images_written": int(summary.images_written),
+                "elapsed_ms": float(elapsed_ms),
+            },
         )
 
     def _on_report_write_failed(self, request_id: int, message: str) -> None:
@@ -12954,7 +13152,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(terminal_status)
         self.lbl_top_status.setToolTip(f"{terminal_status}\n{message}")
         self.lbl_top_status.repaint()
-        QMessageBox.critical(self, "写入报告失败", message)
+        self._alert("critical", "写入报告失败", message)
+        self._notify_api_report(ok=False, error=message)
 
     def _export_excel(self) -> None:
         if self.result is None:
@@ -12982,6 +13181,409 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "导出成功", f"已保存:\n{path}{suffix}")
         except Exception as e:
             QMessageBox.critical(self, "导出失败", str(e))
+    # ---------------------------------------------------------- API 自动化入口
+
+    def _abandon_api_report(self, waiter: Any) -> None:
+        """超时放弃 Only 清理仍属于该 waiter 的占位
+
+        GUI 侧流水线可能还在跑 截图或写 Excel 不能强行中断
+        否则半截图状态会污染下一次请求 这里只释放当前有活跃 API 报告
+        这一凭证 迟到的终态由 _notify_api_report 的守卫丢弃
+        """
+        if self._api_report_waiter is not waiter:
+            return
+        self._api_report_waiter = None
+        if self._api_silent > 0:
+            self._api_silent -= 1
+
+    def _notify_api_report(
+        self,
+        *,
+        ok: bool,
+        result: dict[str, Any] | None = None,
+        error: str = "",
+        detail: str = "",
+    ) -> None:
+        """把报告流水线终态回传给在 API 线程阻塞等待的调用方。"""
+        waiter = self._api_report_waiter
+        if waiter is None:
+            # 已被 _abandon_api_report 超时释放 静默计数也已归位
+            # 迟到的终态直接丢弃 不能再减一次 silent
+            return
+        self._api_report_waiter = None
+        if self._api_silent > 0:
+            self._api_silent -= 1
+        waiter.finish(ok=ok, result=result, error=error, detail=detail)
+
+    def api_set_report_paths(
+        self, *, template: str | None = None, output: str | None = None
+    ) -> dict[str, Any]:
+        """直接设置报告模板源与输出路径，跳过两个文件对话框。"""
+        if template:
+            self._report_template_source_path = Path(template).expanduser()
+            set_report_template_source_path(self._report_template_source_path)
+            self._update_report_template_tooltip()
+        if output:
+            target = Path(output).expanduser()
+            if target.suffix.lower() != ".xlsx":
+                target = target.with_suffix(".xlsx")
+            self._report_output_path = target
+            set_report_output_path(target)
+            set_last_export_path(target)
+            self._update_report_output_tooltip()
+        template_path = self._report_template_source_path
+        output_path = self._report_output_path
+        return {
+            "template": str(template_path) if template_path else None,
+            "output": str(output_path) if output_path else None,
+            "template_exists": bool(template_path and template_path.is_file()),
+            "output_exists": bool(output_path and output_path.is_file()),
+        }
+
+    def api_load_file(
+        self,
+        path: str,
+        *,
+        test_mode: str | None = None,
+        phase: str | None = None,
+        bridge: str | None = None,
+    ) -> dict[str, Any]:
+        """同步加载波形并立即绘制，返回提取摘要。异常原样抛给调用方。
+
+        ``phase``/``bridge`` 只是**希望值**：加载成功后相别/桥臂仍以文件路径与
+        接线推断为权威（``_apply_loaded_waveform`` → ``_set_profile_combos(guessed)``），
+        推断结果覆盖了显式入参时不会报错，只会在返回体的 ``selection_honored``
+        里诚实标出 ``False``。调用方必须看这个字段，不要假设入参生效。
+
+        正因为「先改下拉框、再加载」而推断可能覆盖，``api_load_file`` 自己负责
+        记录旧选择 → 应用 → 加载 → **失败回滚**。失败后若留下
+        ``combo_bridge=请求桥臂`` 而 ``_temperature_context`` 仍是旧桥臂的脱节
+        状态，随后 ``gui_write_report`` 就会把旧桥臂的温度写进新桥臂的行
+        （A列=UL / B列=175℃，而 lower 的 HT 实际是 150）。
+
+        切相别/桥臂/测试模式全程屏蔽信号、**不预先重算**：新模式的结果由加载
+        本身给出；失败回滚同时还原 profile，使失败后 profile 与回滚后的
+        桥臂/模式一致（bundle/result 在加载早期失败时未被替换，无需还原）。
+        """
+        old_phase_index = self.combo_phase.currentIndex()
+        old_bridge_index = self.combo_bridge.currentIndex()
+        old_mode = str(self.cfg.test_mode.mode)
+        old_profile = self.profile
+        self._apply_api_profile_selection(phase, bridge)
+        try:
+            if test_mode:
+                mode = parse_test_mode(test_mode)
+                if str(self.cfg.test_mode.mode) != mode.value:
+                    # 只切模式，**不**触发重算：_on_test_mode_changed 会立刻
+                    # _recalculate，在加载成功之前就把旧波形按新模式重算一遍；
+                    # 一旦随后加载失败、回滚把模式拉回旧值，就留下
+                    # 「模式=dpt / 结果=short」这种混合态，写报告直接失败。
+                    # 这里复刻 _on_test_mode_changed 其余两步（UI + profile），
+                    # 真正的新模式结果由下面的 _load_file 提取给出。
+                    idx = self.combo_test_mode.findData(mode.value)
+                    if idx >= 0:
+                        self.combo_test_mode.blockSignals(True)
+                        try:
+                            self.combo_test_mode.setCurrentIndex(idx)
+                        finally:
+                            self.combo_test_mode.blockSignals(False)
+                    self.cfg.test_mode.mode = mode.value
+                    self._apply_test_mode_ui()
+                    self.profile = self._current_profile()
+            restore_silent = self._api_silent
+            self._api_silent += 1
+            try:
+                self._load_file(path, raise_on_error=True)
+            finally:
+                self._api_silent = restore_silent
+        except BaseException:
+            self._rollback_api_profile_selection(
+                old_phase_index, old_bridge_index, old_mode
+            )
+            # bundle/result 无需还原：_load_file 先在纯函数里解析、成功后才
+            # _apply_loaded_waveform，早期失败时它们从未被替换。只需把 profile
+            # 拉回，使失败后 profile 与回滚后的桥臂/模式一致。
+            self.profile = old_profile
+            raise
+        result = self.result
+        bundle = self.bundle
+        requested_phase = str(phase).strip().upper() if phase else None
+        requested_bridge = str(bridge).strip().lower() if bridge else None
+        applied_phase = str(self.combo_phase.currentData() or "U").strip().upper()
+        applied_bridge = str(self.combo_bridge.currentData() or "upper").strip().lower()
+        selection_honored: bool | None = None
+        if requested_phase is not None or requested_bridge is not None:
+            selection_honored = (
+                requested_phase in (None, applied_phase)
+                and requested_bridge in (None, applied_bridge)
+            )
+        return {
+            "path": path,
+            "test_mode": parse_test_mode(self.cfg.test_mode.mode).value,
+            "has_result": result is not None,
+            "short_circuit_mode": bool(result.short_circuit_mode) if result else False,
+            "single_pulse_mode": bool(result.single_pulse_mode) if result else False,
+            "detected_pulse_count": int(result.detected_pulse_count) if result else 0,
+            "off_pulse_index": int(result.off_pulse_index) if result else 0,
+            "on_pulse_index": int(result.on_pulse_index) if result else 0,
+            "channels": sorted(bundle.channels.keys()) if bundle else [],
+            "status": self.statusBar().currentMessage(),
+            # 显式入参只是希望值：applied_* 才是真正生效的下拉值。
+            "requested_phase": requested_phase,
+            "requested_bridge": requested_bridge,
+            "applied_phase": applied_phase,
+            "applied_bridge": applied_bridge,
+            # 未传参数时为 None；请求了但被路径/接线推断覆盖时为 False。
+            "selection_honored": selection_honored,
+        }
+
+    def _apply_api_profile_selection(
+        self, phase: str | None, bridge: str | None
+    ) -> None:
+        """把相别/桥臂写进下拉框。屏蔽信号，避免触发一次无用的全量重算。"""
+        for combo, value in (
+            (self.combo_phase, phase),
+            (self.combo_bridge, bridge),
+        ):
+            if not value:
+                continue
+            index = combo.findData(str(value))
+            if index < 0:
+                index = combo.findData(str(value).lower())
+            if index < 0 or index == combo.currentIndex():
+                continue
+            combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(index)
+            finally:
+                combo.blockSignals(False)
+
+    def _rollback_api_profile_selection(
+        self, phase_index: int, bridge_index: int, mode: str
+    ) -> None:
+        """把相别/桥臂/测试模式恢复到 ``api_load_file`` 调用前，并让上下文跟随。
+
+        下拉框同样屏蔽信号复位（不触发重算、不弹提示），复位后再显式调用
+        ``_switch_temperature_context`` / ``_switch_report_condition_context``：
+        两者都只在目标上下文与当前不一致时才换一组值，所以重复调用不会产生
+        多余的落盘或控件抖动。异常由调用方原样抛给协议层。
+        """
+        for combo, index in (
+            (self.combo_phase, phase_index),
+            (self.combo_bridge, bridge_index),
+        ):
+            if index < 0 or index == combo.currentIndex():
+                continue
+            combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(index)
+            finally:
+                combo.blockSignals(False)
+        if str(self.cfg.test_mode.mode) != str(mode):
+            self.cfg.test_mode.mode = str(mode)
+            index = self.combo_test_mode.findData(str(mode))
+            if index >= 0 and index != self.combo_test_mode.currentIndex():
+                self.combo_test_mode.blockSignals(True)
+                try:
+                    self.combo_test_mode.setCurrentIndex(index)
+                finally:
+                    self.combo_test_mode.blockSignals(False)
+            self._apply_test_mode_ui()
+        # 顺序要紧：_switch_* 都从下拉框现读桥臂，必须先把下拉框恢复回去。
+        self._switch_temperature_context()
+        self._switch_report_condition_context()
+
+    def _report_result_mode_matches(self) -> bool | None:
+        """当前测试模式推断出的报告口径与已有结果的实际类型是否一致。
+
+        报告 writer 在两者不一致时会直接抛 ``TypeError``（模板按模式选 sheet
+        与字段），协议调用方需要提前看得见这个坑，而不是等写报告时才炸。
+        无结果时返回 ``None``：没有可写的东西，也就无从比较。
+        """
+        if self.result is None:
+            return None
+        return (self._report_condition_mode_key() == "short") == bool(
+            self.result.short_circuit_mode
+        )
+
+    def api_set_temperature(
+        self, code: str, value: float | None = None
+    ) -> dict[str, Any]:
+        """设置温度工况与温度值，等价于「下拉选 code + ℃ 框填 value」。
+
+        严格按界面同源顺序执行，不另写一套持久化：
+        ``_switch_temperature_context``（对齐桥臂）→ 写 ``_temperature_values``
+        与 ``_save_temperature_value``（温度值落盘）→ ``_set_temperature_code``
+        （屏蔽信号地同步下拉框与 ℃ 框）→ ``_save_current_setup_selection``
+        （``conditions/temperature_code`` 落盘）→ 刷新结果表温度标签。
+        省略 ``value`` 时只切工况，该 code 保持自己的既有温度值。
+        """
+        normalized = str(code or "").strip().upper()
+        if normalized not in TEMP_CONDITION_DEFAULTS:
+            raise ValueError(
+                "invalid_temperature_code: 温度工况码必须是 "
+                f"{'/'.join(TEMP_CONDITION_DEFAULTS)} 之一，收到 {code!r}"
+            )
+        low = float(self.spin_temp_value.minimum())
+        high = float(self.spin_temp_value.maximum())
+        number = float(value) if value is not None else None
+        if number is not None and (
+            not math.isfinite(number) or not low <= number <= high
+        ):
+            raise ValueError(
+                "invalid_temperature_value: 温度值必须是 "
+                f"{low:g}~{high:g} ℃ 之间的有限数，收到 {value!r}"
+            )
+        # 相别/桥臂可能刚被 api_load_file 换过（那条路径屏蔽了信号，不会触发
+        # _on_phase_bridge_changed），先对齐温度上下文，否则值会被写进上一个
+        # 桥臂的键，下次切回来就是界面残留值。
+        self._switch_temperature_context()
+        if number is not None:
+            self._temperature_values[normalized] = number
+            self._save_temperature_value(normalized, number)
+        # _set_temperature_code 内部屏蔽信号地同步下拉框与 ℃ 框：既不依赖
+        # valueChanged 是否发出，也不会顺带触发一次无意义的重算。
+        self._set_temperature_code(normalized)
+        # 工况码本身必须经 _save_current_setup_selection 落盘
+        # （conditions/temperature_code/<bridge>），只写温度值是半个状态：
+        # 下次冷启动会挂回旧工况，报告温度身份随之漂移。
+        self._save_current_setup_selection()
+        self.result_table.set_temperature_labels(self._temperature_display_labels())
+        if self.result is not None:
+            self.result_table.set_result(self.result)
+        return {
+            "code": normalized,
+            "value": float(self._temperature_values[normalized]),
+            "bridge": self._temperature_context,
+            "temperatures": {
+                item: float(self._temperature_values[item])
+                for item in TEMP_CONDITION_DEFAULTS
+            },
+            "result_mode_matches": self._report_result_mode_matches(),
+        }
+
+    def api_set_report_conditions(self, values: dict[str, Any]) -> dict[str, Any]:
+        """写入报告工况字段，等价于「在工况输入框输入并触发 editingFinished」。
+
+        只改传入的字段（部分更新），``null`` 表示清空该字段。工况不参与计算，
+        因此全程不碰 ``_recalculate``；落盘复用 ``_save_current_report_conditions``。
+        """
+        if not isinstance(values, dict) or not values:
+            raise ValueError("missing_param: 至少给出一个报告工况字段")
+        # 字段表跟着 (测试模式, 桥臂) 走，必须先对齐上下文，否则按位置
+        # zip 到编辑框会把 A 模式的字段值写进 B 模式的输入框。
+        self._switch_report_condition_context()
+        mode_key = self._report_condition_mode_key()
+        specs = self._report_condition_specs(mode_key)
+        allowed = [field for field, _label, _unit in specs]
+        unknown = sorted(set(values) - set(allowed))
+        if unknown:
+            raise ValueError(
+                f"mode_mismatch: 当前测试模式为 {mode_key}，可用工况字段："
+                f"{', '.join(allowed)}；本次传入的 {', '.join(unknown)} 不属于该模式"
+            )
+        # 数值域直接取编辑框的 QDoubleValidator：负值在界面上会被
+        # numeric_value() 读成 None，放过去等于静默清空报告 C 列。
+        upper = 1e9
+        if self._report_condition_edits:
+            validator = self._report_condition_edits[0].validator()
+            if hasattr(validator, "top"):
+                upper = float(validator.top())
+        normalized: dict[str, float | None] = {}
+        for field, raw in values.items():
+            if raw is None:
+                normalized[field] = None
+                continue
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError(
+                    f"invalid_condition_value: 工况字段 {field} 需要数字或 null，"
+                    f"收到 {raw!r}"
+                )
+            number = float(raw)
+            if not math.isfinite(number) or not 0.0 <= number <= upper:
+                raise ValueError(
+                    f"invalid_condition_value: 工况字段 {field} 必须落在 "
+                    f"0~{upper:g}，收到 {raw!r}"
+                )
+            normalized[field] = number
+        for (field, _label, _unit), edit in zip(specs, self._report_condition_edits):
+            if field in normalized:
+                edit.set_numeric_value(normalized[field])
+        self._save_current_report_conditions()
+        self._update_report_condition_edit_widths()
+        return {
+            "mode": mode_key,
+            "bridge": str(self.combo_bridge.currentData() or "upper").lower(),
+            "conditions": {
+                field: edit.numeric_value()
+                for (field, _label, _unit), edit in zip(
+                    specs, self._report_condition_edits
+                )
+            },
+            "result_mode_matches": self._report_result_mode_matches(),
+        }
+
+    def api_get_report_context(self) -> dict[str, Any]:
+        """返回当前页面会写进报告的温度与工况口径。
+
+        一律走页面取值器（``_current_report_conditions`` 内部会先对齐工况
+        上下文），不读 QSettings 回填：QSettings 只是控件状态的镜像，页面
+        保存时还会反过来覆盖它，照它回填会拿到过期口径。
+        """
+        mode_key = self._report_condition_mode_key()
+        conditions = self._current_report_conditions()
+        code = self._current_temperature_code()
+        template = self._report_template_source_path
+        output = self._report_output_path
+        return {
+            "test_mode": parse_test_mode(self.cfg.test_mode.mode).value,
+            "phase": str(self.combo_phase.currentData() or "U").strip().upper(),
+            "bridge": str(self.combo_bridge.currentData() or "upper").strip().lower(),
+            # 报告抬头用的是由此刻下拉推导的相别码，这里给的就是写进报告的那一个。
+            "profile_code": self._current_report_phase_code(),
+            "temperature_code": code,
+            "temperature_value": float(self._temperature_values[code]),
+            "temperatures": {
+                item: float(value) for item, value in self._temperature_values.items()
+            },
+            # 报告里实际写出的温度文本（如 "175℃"），与数字口径同源同刻。
+            "temperature_labels": self._temperature_display_labels(),
+            "conditions": {
+                field: getattr(conditions, field)
+                for field, _label, _unit in self._report_condition_specs(mode_key)
+            },
+            "template": str(template) if template else None,
+            "output": str(output) if output else None,
+            "result_mode_matches": self._report_result_mode_matches(),
+        }
+
+    def api_begin_write_report(self, waiter: Any) -> dict[str, Any]:
+        """非阻塞发起写报告；终态通过 ``waiter`` 回传。
+
+        返回 ``started=True`` 表示异步流水线已接管，调用方应转到工作线程
+        阻塞等待 ``waiter.done``——绝不能在本方法里等，否则 Qt 事件循环
+        被占死，截图用的 ``QTimer.singleShot`` 与 QRunnable 回执都发不出。
+        """
+        if self._api_report_waiter is not None:
+            return {"started": False, "error": "已有 API 报告写入正在进行"}
+        if self.result is None:
+            return {"started": False, "error": "无提取结果可写入报告"}
+        if self._report_output_path is None:
+            return {"started": False, "error": "未设置报告输出路径"}
+        output_path = self._report_output_path
+        self._api_report_waiter = waiter
+        self._api_silent += 1
+        try:
+            self._write_report_template()
+        except Exception as exc:  # 同步阶段异常（模板缺失等）
+            self._notify_api_report(ok=False, error=str(exc))
+            return {"started": False, "error": str(exc)}
+        if not self._report_operation_active:
+            # 提前 return 说明前置校验失败，流水线根本没起。
+            self._notify_api_report(ok=False, error="报告流水线未能启动")
+            return {"started": False, "error": "报告流水线未能启动"}
+        return {"started": True, "output": str(output_path)}
+
     def start_api_server(
         self, port: int = 8765, token: str | None = None
     ) -> str | None:
@@ -12995,6 +13597,17 @@ class MainWindow(QMainWindow):
             from dpt_extractor.api import gui_host
         except Exception as exc:  # pragma: no cover - 可选依赖缺失
             self.statusBar().showMessage(f"API 服务不可用：{exc}", 10000)
+            return None
+        # 在 Qt 主线程创建派发器并把主窗口登记进桥接器，否则 API 后台
+        # 线程拿不到任何可用的 GUI 入口，七个 gui_* 命令会全部失联。
+        try:
+            self._api_dispatcher = gui_host.create_dispatcher()
+            self._api_bridge = _MainWindowApiBridge(self)
+            gui_host.register_gui_bridge(
+                self._api_bridge, dispatcher=self._api_dispatcher
+            )
+        except Exception as exc:  # pragma: no cover - 极罕见
+            self.statusBar().showMessage(f"GUI 桥接器注册失败：{exc}", 15000)
             return None
         handle = gui_host.ensure_running(port=port, token=token)
         if handle is None:

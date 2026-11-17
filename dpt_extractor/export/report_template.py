@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass
 from math import isfinite
+import io
 from pathlib import Path
 import re
 from typing import Callable, Mapping
@@ -1787,18 +1788,94 @@ def _ensure_dpt_temperature_group(
     if exact_groups:
         return
 
-    seed_groups = [
+    display_temp = _temperature_display(temp_code, temperature_labels)
+    # Only the very same bridge phase may seed a rewrite.  ``_phase_base_code``
+    # keeps the high/low bit (UH and UL stay distinct) while ignoring the module
+    # number, so UH2 can reuse UH geometry without ever touching another phase.
+    same_phase_groups = [
         (index, group)
         for index, group in enumerate(groups)
         if _phase_base_code(group.phase) == _phase_base_code(phase_code)
-        and _temperature_cell_matches(group.temp, temp_code, temperature_labels)
+    ]
+    # Prefer an exact temperature match.  When the template still carries the
+    # shipped 150℃ placeholder while the project runs 175℃, fall back to the
+    # code lookup so that placeholder can be claimed and relabelled in place;
+    # a block that already holds data is never relabelled, it gets a new block.
+    seed_groups = [
+        (index, group)
+        for index, group in same_phase_groups
+        if _temperature_values_match(group.temp, display_temp)
     ]
     if not seed_groups:
-        display_temp = _temperature_display(temp_code, temperature_labels)
-        raise ValueError(
-            f"报告模板工作表“{data_ws.title}”缺少工况组："
-            f"{phase_code.upper()} / {display_temp}；为避免写入错误行，已停止写入"
+        seed_groups = [
+            (index, group)
+            for index, group in same_phase_groups
+            if _temperature_cell_matches(group.temp, temp_code, temperature_labels)
+        ]
+    if not seed_groups:
+        if not same_phase_groups:
+            raise ValueError(
+                f"报告模板工作表“{data_ws.title}”缺少工况组："
+                f"{phase_code.upper()} / {display_temp}；为避免写入错误行，已停止写入"
+            )
+        _new_source_index, new_source_group = same_phase_groups[-1]
+        _insert_dpt_temperature_group(
+            data_ws,
+            new_source_group,
+            phase_code,
+            temp_code,
+            temperature_labels,
+            insert_row=_dpt_temperature_group_insert_row(
+                groups,
+                phase_code,
+                temp_code,
+                temperature_labels,
+                fallback_row=new_source_group.end_row,
+            ),
         )
+        return
+    if not any(
+        _temperature_values_match(group.temp, display_temp)
+        for _index, group in seed_groups
+    ):
+        # The seed only matched through its RT/HT/LT code, so the block still
+        # carries the template's own temperature.  Rewriting it is only safe
+        # when it holds no measurement of its own.
+        empty_seed = next(
+            (
+                (index, group)
+                for index, group in seed_groups
+                if not any(
+                    _data_row_has_payload(data_ws, row)
+                    for row in range(group.start_row, group.end_row)
+                )
+            ),
+            None,
+        )
+        if empty_seed is not None:
+            _set_merged_cell_value(
+                data_ws,
+                empty_seed[1].start_row,
+                2,
+                display_temp,
+            )
+            return
+        _new_source_index, new_source_group = same_phase_groups[-1]
+        _insert_dpt_temperature_group(
+            data_ws,
+            new_source_group,
+            phase_code,
+            temp_code,
+            temperature_labels,
+            insert_row=_dpt_temperature_group_insert_row(
+                groups,
+                phase_code,
+                temp_code,
+                temperature_labels,
+                fallback_row=new_source_group.end_row,
+            ),
+        )
+        return
     if _phase_module_number(phase_code) == 1:
         legacy_group = next(
             (
@@ -2950,6 +3027,55 @@ def _image_aspect(image_path: str | Path) -> float | None:
     return image.width / image.height
 
 
+#: 嵌入报告前，波形图会先重采样到这个最长边像素。
+#: Excel 里显示尺寸是 320×240，物理像素加倍，放大 200% 内仍锐利；
+#: 同时把无损 PNG 转成 JPEG，单张约 250KB → 62KB。
+#: 实测 1000 张：原始 428MB / PNG 重采样 137MB / JPEG 重采样 59MB。
+_EMBED_IMAGE_MAX_EDGE_PX = 640
+_EMBED_IMAGE_JPEG_QUALITY = 88
+
+
+def _embed_ready_image(path: str | Path) -> XLImage:
+    """加载待嵌入报告的图片，必要时重采样并压缩。
+
+    ``openpyxl`` 的 ``Image`` 只改写 drawing XML 里的显示尺寸，``xl/media``
+    里的原始字节原样拷贝。直接嵌入 1280×960 的波形截图会让报告体积失控
+    （实测每例约 3MB，180 例超 400MB）。这里在加载前用 Pillow 把最长边压到
+    :data:`_EMBED_IMAGE_MAX_EDGE_PX` 并转 JPEG，保持宽高比不变。
+
+    图片以 ``BytesIO`` 嵌入，不产生临时文件；任何异常都回退到原始文件，
+    绝不因压缩失败而丢失报告图片。
+    """
+    source = Path(path)
+    try:
+        from PIL import Image as _PILImage
+    except Exception:  # pragma: no cover - Pillow 是硬依赖，此处仅兜底
+        return XLImage(str(source))
+    try:
+        with _PILImage.open(source) as raw:
+            width, height = raw.size
+            longest = max(width, height)
+            if longest > _EMBED_IMAGE_MAX_EDGE_PX:
+                scale = _EMBED_IMAGE_MAX_EDGE_PX / longest
+                target = (
+                    max(1, round(width * scale)),
+                    max(1, round(height * scale)),
+                )
+                work = raw.convert("RGB").resize(target, _PILImage.LANCZOS)
+            else:
+                work = raw.convert("RGB")
+            buffer = io.BytesIO()
+            work.save(
+                buffer,
+                format="JPEG",
+                quality=_EMBED_IMAGE_JPEG_QUALITY,
+                optimize=True,
+            )
+        buffer.seek(0)
+        return XLImage(buffer)
+    except Exception:
+        return XLImage(str(source))
+
 def _prepare_uniform_image_slots(
     ws: Worksheet,
     items: list[tuple[str | Path, CellRange]],
@@ -3203,7 +3329,7 @@ def _insert_image(
         raise FileNotFoundError(f"报告图片不存在或不是文件：{path}")
     _remove_images_in_range(ws, rng)
     ws.cell(rng.min_row, rng.min_col).value = None
-    image = XLImage(str(path))
+    image = _embed_ready_image(path)
     if shrink_columns:
         _fit_columns_to_image_aspect(ws, rng, image)
     max_w, max_h = _range_size_px(ws, rng)
@@ -3323,30 +3449,133 @@ def _write_dpt_images(
     return written
 
 
+def _short_row_matches_voltage(
+    ws: Worksheet,
+    row: int,
+    voltage_v: float | None,
+) -> bool:
+    """Match the recorded bus voltage of one short-circuit row.
+
+    Column E holds the measured Imax rather than a setpoint, so bus voltage is
+    the only per-row identity the short-circuit sheet actually carries.
+    """
+
+    if voltage_v is None:
+        return False
+    actual = _numeric_cell_value(_merged_value(ws, row, COL_VOLTAGE))
+    if actual is None:
+        return False
+    return abs(float(actual) - float(voltage_v)) <= _FILENAME_SETPOINT_TOLERANCE
+
+
+def _insert_short_data_row(ws: Worksheet, insert_row: int) -> int:
+    """Insert one short-circuit data row and repair its merges.
+
+    Column A holds a vertically merged temperature block.  ``insert_rows`` does
+    not move merged ranges, so unmerge first, insert, then re-merge with the
+    block covering the insertion point grown by exactly one row.
+    """
+
+    max_row_before = ws.max_row
+    merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
+    for rng in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(rng))
+
+    inserted = insert_row <= max_row_before
+    if inserted:
+        ws.insert_rows(insert_row)
+        _shift_row_dimensions_for_insert(ws, insert_row, 1)
+
+    source_row = max(1, insert_row - 1)
+    copied_source_row = (
+        source_row + 1 if inserted and insert_row <= source_row else source_row
+    )
+    if copied_source_row <= max_row_before:
+        _copy_row_style(ws, copied_source_row, insert_row)
+
+    for rng in merged_ranges:
+        min_row = rng.min_row
+        max_row = rng.max_row
+        if rng.min_row >= insert_row:
+            min_row += 1
+            max_row += 1
+        elif rng.min_row < insert_row <= rng.max_row:
+            max_row += 1
+        ws.merge_cells(
+            start_row=min_row,
+            end_row=max_row,
+            start_column=rng.min_col,
+            end_column=rng.max_col,
+        )
+    return insert_row
+
+
 def _short_target_row(
     ws: Worksheet,
     phase_code: str,
     temp_code: str,
     temperature_labels: TemperatureLabels | None = None,
+    *,
+    voltage_v: float | None = None,
 ) -> int:
+    """Locate the short-circuit row for one phase/temperature/voltage.
+
+    The shipped template holds a single row per phase/temperature pair, while a
+    real measurement set contains several bus voltages inside that pair.  The
+    original implementation returned the first phase/temperature row
+    unconditionally, so every later voltage silently overwrote the first
+    (measured: four voltages all landed on row 6).  Match the recorded voltage
+    first, then reuse an empty row, and finally grow the temperature block so
+    each measurement keeps its own line.
+    """
+
+    display_temp = _temperature_display(temp_code, temperature_labels)
+    matching_rows: list[int] = []
     for row in range(5, ws.max_row + 1):
         phase = str(ws.cell(row, 2).value or "").upper()
         if phase != phase_code.upper():
             continue
-        row_temp = _merged_value(ws, row, 1)
-        if _temperature_cell_matches_display(
-            row_temp,
+        if not _temperature_cell_matches_display(
+            _merged_value(ws, row, 1),
             temp_code,
             temperature_labels,
         ):
-            _set_merged_cell_value(
-                ws,
-                row,
-                1,
-                _temperature_display(temp_code, temperature_labels),
-            )
+            continue
+        matching_rows.append(row)
+
+    for row in matching_rows:
+        if _short_row_matches_voltage(ws, row, voltage_v):
+            _set_merged_cell_value(ws, row, 1, display_temp)
             return row
-    display_temp = _temperature_display(temp_code, temperature_labels)
+
+    # A row is free as long as its identity column (bus voltage) is empty.  Every
+    # other cell is a measurement of the previous run and is rewritten or cleared
+    # by this write, so treating them as payload made stale template values look
+    # like a foreign sample and forced a needless extra row.
+    for row in matching_rows:
+        if _numeric_cell_value(_merged_value(ws, row, COL_VOLTAGE)) is None:
+            _set_merged_cell_value(ws, row, 1, display_temp)
+            return row
+
+    if matching_rows:
+        last_row = matching_rows[-1]
+        block = _merged_range_containing(ws, last_row, 1)
+        new_row = _insert_short_data_row(ws, last_row + 1)
+        if block is not None and block.max_row == last_row:
+            # Keep the new line inside its temperature group: column A is a
+            # vertically merged 25/150/-40 block, and insert_rows leaves the
+            # merged ranges where they were.
+            ws.unmerge_cells(str(block))
+            ws.merge_cells(
+                start_row=block.min_row,
+                end_row=block.max_row + 1,
+                start_column=block.min_col,
+                end_column=block.max_col,
+            )
+        _set_merged_cell_value(ws, new_row, 2, phase_code.upper())
+        _set_merged_cell_value(ws, new_row, 1, display_temp)
+        return new_row
+
     raise ValueError(
         f"报告模板工作表“{ws.title}”缺少短路工况行："
         f"{phase_code.upper()} / {display_temp}；为避免写入错误行，已停止写入"
@@ -3612,7 +3841,9 @@ def _write_short_data(
     vdc = _short_voltage_from_filename(result.source_path)
     if vdc is None:
         vdc, _idc = _match_setpoints(result)
-    if report_conditions is not None:
+    # An empty ShortReportConditions (all fields None) means "no operator
+    # override", not "erase the bus voltage recognized from the filename".
+    if report_conditions is not None and report_conditions.vce_v is not None:
         vdc = report_conditions.vce_v
     _set_merged_cell_value(ws, row, 4, _num(vdc, 1))
     _set_metric_value(ws, row, 5, result, "短路过程", "短路电流Imax", _num(sc.ic_max, 3))
@@ -3782,18 +4013,223 @@ def _write_short_picture_conditions(
             _set_merged_cell_value(ws, row + 1, col, values[key])
 
 
+def _short_picture_block_bounds(
+    ws: Worksheet,
+    anchor_row: int,
+) -> int:
+    """Return the last row owned by the picture block anchored at ``anchor_row``.
+
+    The shipped template places the block label near the top and its parameter
+    table several rows below, with uneven gaps between blocks.  Deriving the
+    bottom from the next block anchor is the only reliable bound; a fixed window
+    stopped above the parameter table and could never read a recorded voltage.
+    """
+
+    anchors = sorted(
+        rng.min_row
+        for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5)
+        if (parts := _phase_temp_token_parts(value)) is not None
+        and parts[0] in PHASE_CODES
+    )
+    later = [row for row in anchors if row > anchor_row]
+    return (later[0] - 1) if later else ws.max_row
+
+def _short_picture_block_voltage(
+    ws: Worksheet,
+    anchor_row: int,
+    end_row: int | None = None,
+) -> float | None:
+    """Read the VCE bus voltage recorded inside one picture block.
+
+    The parameter table under the block label is the only per-sample identity a
+    picture block carries: two samples of the same phase/temperature are told
+    apart by their bus voltage, exactly like the rows of the data sheet.
+    """
+
+    last_row = (
+        _short_picture_block_bounds(ws, anchor_row)
+        if end_row is None
+        else max(anchor_row, end_row)
+    )
+    for row in range(anchor_row, min(last_row, ws.max_row) + 1):
+        for col in range(1, 6):
+            label = _normalized(ws.cell(row, col).value)
+            if not label.startswith("VCE") or row >= ws.max_row:
+                continue
+            text = str(_merged_value(ws, row + 1, col) or "")
+            match = re.search(r"(\d+(?:\.\d+)?)", text)
+            if match is not None:
+                return float(match.group(1))
+    return None
+
+
+def _short_picture_block_is_occupied(
+    ws: Worksheet,
+    anchor_row: int,
+    end_row: int | None = None,
+    voltage_v: float | None = None,
+) -> bool:
+    """Return True when the block already belongs to a different bus voltage.
+
+    Bus voltage, not the presence of pictures, is the occupancy signal.  A
+    block that still holds this run's own pictures must be reused and rewritten,
+    otherwise re-running one sample would pile up duplicates; a block recorded
+    a different voltage belongs to another sample and needs a block of its own.
+    """
+
+    recorded = _short_picture_block_voltage(ws, anchor_row, end_row)
+    if recorded is None:
+        # Untouched template block, or a block whose parameter table was never
+        # filled: nothing proves it belongs to somebody else.
+        return False
+    if voltage_v is None:
+        return True
+    return abs(float(recorded) - float(voltage_v)) > _FILENAME_SETPOINT_TOLERANCE
+
+
+def _clone_short_picture_block(ws: Worksheet, source_anchor: int) -> int:
+    """Clone the picture block starting at ``source_anchor`` below itself.
+
+    Repeated phase/temperature samples each need their own image slots; sharing
+    one block made every later sample clear the previous sample's pictures.
+    Returns the anchor row of the new block.
+    """
+
+    phase_anchors = sorted(
+        rng.min_row
+        for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5)
+        if (parts := _phase_temp_token_parts(value)) is not None
+        and parts[0] in PHASE_CODES
+    )
+    if source_anchor not in phase_anchors:
+        return source_anchor
+
+    source_start = source_anchor
+    index = phase_anchors.index(source_anchor)
+    source_next_row = (
+        phase_anchors[index + 1]
+        if index + 1 < len(phase_anchors)
+        else ws.max_row + 1
+    )
+    row_count = max(1, source_next_row - source_start)
+    insert_row = source_next_row
+
+    merged_ranges = [CellRange(str(rng)) for rng in ws.merged_cells.ranges]
+    cloned_ranges = [
+        CellRange(
+            min_col=rng.min_col,
+            max_col=rng.max_col,
+            min_row=insert_row + (rng.min_row - source_start),
+            max_row=insert_row + (rng.max_row - source_start),
+        )
+        for rng in merged_ranges
+        if source_start <= rng.min_row and rng.max_row < source_start + row_count
+    ]
+    for rng in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(rng))
+    ws.insert_rows(insert_row, row_count)
+    _shift_row_dimensions_for_insert(ws, insert_row, row_count)
+    _shift_image_anchors_for_insert(ws, insert_row, row_count)
+    copied_source_start = (
+        source_start + row_count if insert_row <= source_start else source_start
+    )
+    for offset in range(row_count):
+        source_row = copied_source_start + offset
+        target_row = insert_row + offset
+        ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+        for col in range(1, ws.max_column + 1):
+            source = ws.cell(source_row, col)
+            target = ws.cell(target_row, col)
+            target.value = copy(source.value)
+            if source.has_style:
+                target.font = copy(source.font)
+                target.fill = copy(source.fill)
+                target.border = copy(source.border)
+                target.alignment = copy(source.alignment)
+                target.protection = copy(source.protection)
+                target.number_format = source.number_format
+    for rng in merged_ranges:
+        shifted = (
+            CellRange(
+                min_col=rng.min_col,
+                max_col=rng.max_col,
+                min_row=rng.min_row + row_count,
+                max_row=rng.max_row + row_count,
+            )
+            if rng.min_row >= insert_row
+            else rng
+        )
+        ws.merge_cells(str(shifted))
+    for rng in cloned_ranges:
+        ws.merge_cells(str(rng))
+
+    # Copied parameter values belong to the previous sample; clear them so the
+    # new block starts empty and is not mistaken for an occupied block.
+    for row in range(insert_row, min(ws.max_row, insert_row + row_count - 1) + 1):
+        for col in range(1, 6):
+            label = _normalized(ws.cell(row, col).value)
+            if (
+                label.startswith(("VCE", "IMAX", "CDESAT", "RDESAT", "VDESAT"))
+                and row < ws.max_row
+            ):
+                _set_merged_cell_value(ws, row + 1, col, None)
+    return insert_row
+
+
+def _short_picture_label_matches(
+    value: object,
+    phase_code: str,
+    temp_code: str,
+    temperature_labels: TemperatureLabels | None = None,
+) -> bool:
+    """Match a picture-block label against one phase/temperature condition.
+
+    Two channels are accepted on purpose: a literal ``RT``/``HT``/``LT`` cell is
+    an uninitialized template placeholder, while a cell that already carries a
+    number must be compared by that number.  Comparing only the derived code
+    made ``UL_-40℃`` match a run whose ``LT`` had been redefined to ``-20℃``.
+    """
+
+    parts = _phase_temp_token_parts(value)
+    if parts is None or parts[0].upper() != phase_code.upper():
+        return False
+    token = parts[1].strip()
+    if token.upper() == temp_code.upper():
+        return True
+    return _temperature_values_match(
+        token,
+        _temperature_display(temp_code, temperature_labels),
+    )
+
+
 def _short_image_anchor_row(
     ws: Worksheet,
     phase_code: str,
     temp_code: str,
     temperature_labels: TemperatureLabels | None = None,
+    voltage_v: float | None = None,
 ) -> int | None:
-    for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5):
-        if _phase_temperature_matches_display(
+    candidates = [
+        rng
+        for rng, value in _merged_ranges_with_value(ws, min_col=1, max_col=5)
+        if _short_picture_label_matches(
             value,
             phase_code,
             temp_code,
             temperature_labels,
+        )
+    ]
+    if not candidates:
+        return None
+    for rng in candidates:
+        # ``rng.max_row`` covers only the merged label span; the parameter table
+        # that records the bus voltage sits below it, so let the occupancy check
+        # derive the block bottom from the next block anchor.
+        if not _short_picture_block_is_occupied(
+            ws,
+            rng.min_row,
+            None,
+            voltage_v,
         ):
             _set_range_value(
                 ws,
@@ -3801,7 +4237,8 @@ def _short_image_anchor_row(
                 _phase_temp_label(phase_code, temp_code, temperature_labels),
             )
             return rng.min_row
-    return None
+    last = max(candidates, key=lambda rng: rng.min_row)
+    return _clone_short_picture_block(ws, last.min_row)
 
 
 def _ensure_short_picture_temperature_block(
@@ -3812,7 +4249,7 @@ def _ensure_short_picture_temperature_block(
 ) -> None:
     labels = _merged_ranges_with_value(ws, min_col=1, max_col=5)
     if any(
-        _phase_temperature_matches_display(
+        _short_picture_label_matches(
             value,
             phase_code,
             temp_code,
@@ -3827,22 +4264,37 @@ def _ensure_short_picture_temperature_block(
         if (parts := _phase_temp_token_parts(value)) is not None
         and parts[0] in PHASE_CODES
     ]
-    seeds = [
+    same_phase = [
         (index, rng, value)
-        for index, (rng, value, _parts) in enumerate(phase_labels)
-        if _phase_temp_parts(value, temperature_labels)
-        == (phase_code.upper(), temp_code)
+        for index, (rng, value, parts) in enumerate(phase_labels)
+        if parts[0].upper() == phase_code.upper()
     ]
-    if not seeds:
+    if not same_phase:
         return
-    seed_index, seed_range, _seed_value = seeds[-1]
+    # Prefer a block of the very same condition as the geometry source so the
+    # copy inherits the right column layout; otherwise borrow any block of the
+    # same phase.  Never borrow a block of another phase: that rewrote the
+    # neighbour's own condition instead of adding a new one.
+    exact_seeds = [
+        entry
+        for entry in same_phase
+        if _short_picture_label_matches(
+            entry[2],
+            phase_code,
+            temp_code,
+            temperature_labels,
+        )
+    ]
+    seed_index, seed_range, _seed_value = (exact_seeds or same_phase)[-1]
     source_start = seed_range.min_row
     source_next_row = (
         phase_labels[seed_index + 1][0].min_row
         if seed_index + 1 < len(phase_labels)
         else ws.max_row + 1
     )
-    row_count = max(1, source_next_row - source_start)
+    # Block height is the merged label span, not the distance to the next block;
+    # the shipped template leaves uneven gaps between condition blocks.
+    row_count = max(1, seed_range.max_row - seed_range.min_row + 1)
     temperature = _temperature_number_for_report_order(
         _temperature_display(temp_code, temperature_labels),
         temperature_labels,
@@ -4140,11 +4592,20 @@ def write_report_template(
             temp_code,
             temperature_labels,
         )
+        short_voltage = _short_voltage_from_filename(result.source_path)
+        if short_voltage is None:
+            short_voltage, _short_idc = _match_setpoints(result)
+        if (
+            short_report_conditions is not None
+            and short_report_conditions.vce_v is not None
+        ):
+            short_voltage = short_report_conditions.vce_v
         data_row = _short_target_row(
             data_ws,
             phase_code,
             temp_code,
             temperature_labels,
+            voltage_v=short_voltage,
         )
         _write_short_data(
             data_ws,
@@ -4172,6 +4633,7 @@ def write_report_template(
                 phase_code,
                 temp_code,
                 temperature_labels,
+                short_voltage,
             )
             if expected_image_keys and anchor_row is None:
                 raise ValueError(
@@ -4202,6 +4664,9 @@ def write_report_template(
             report_path=path,
             data_sheet=data_sheet,
             data_row=data_row,
+            # 短路报告固定单行：data_row_end 与 data_row 同值，保证回执
+            # 字段完整，下游 int(summary.data_row_end) 不会拿到 None。
+            data_row_end=data_row,
             waveform_sheet=picture_sheet if picture_sheet in wb.sheetnames else None,
             waveform_anchor_row=anchor_row,
             images_written=images_written,

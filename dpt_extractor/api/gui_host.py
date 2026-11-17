@@ -10,7 +10,9 @@ from __future__ import annotations
 import secrets
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 from dpt_extractor.api.server import ApiServerHandle, start_in_thread
 
@@ -21,6 +23,137 @@ _lock = threading.Lock()
 _handle: ApiServerHandle | None = None
 _last_error: str | None = None
 _active_token: str | None = None
+
+
+class GuiDispatcher(QObject):
+    """把 Python 可调用对象从任意线程投递到 Qt 主线程执行。
+
+    ``_requested`` 信号跨线程 emit 时，Qt 自动按 QueuedConnection 排队到
+    构造本对象所在线程（即 Qt 主线程）的事件循环，因此是唯一安全的
+    「API 后台线程 -> 主窗口控件」入口。
+    """
+
+    _requested = pyqtSignal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._requested.connect(self._execute, Qt.ConnectionType.QueuedConnection)
+
+    def _execute(self, job: Callable[[], None]) -> None:
+        job()
+
+
+class GuiCall:
+    """一次跨线程调用的结果信箱。"""
+
+    __slots__ = ("done", "result", "error", "abandoned")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: Any = None
+        self.error: BaseException | None = None
+        self.abandoned = False
+
+
+class GuiReportWaiter:
+    """GUI 报告流水线的跨线程完成信号。
+
+    API 线程提交写入任务后阻塞在 :attr:`done`；GUI 在写入成功、失败或
+    截图异常时调用 :meth:`finish` 唤醒。``abandoned`` 用来丢弃超时后迟到
+    的终态，避免污染下一次请求。
+    """
+
+    __slots__ = ("done", "ok", "result", "error", "detail", "abandoned")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.ok = False
+        self.result: dict[str, Any] = {}
+        self.error = ""
+        self.detail = ""
+        self.abandoned = False
+
+    def finish(
+        self,
+        *,
+        ok: bool,
+        result: dict[str, Any] | None = None,
+        error: str = "",
+        detail: str = "",
+    ) -> None:
+        if self.abandoned:
+            self.done.set()
+            return
+        self.ok = bool(ok)
+        self.result = dict(result or {})
+        self.error = str(error)
+        self.detail = str(detail)
+        self.done.set()
+
+
+_gui_bridge: Any = None
+_dispatcher: GuiDispatcher | None = None
+
+
+def register_gui_bridge(bridge: Any, *, dispatcher: GuiDispatcher | None = None) -> None:
+    """登记 GUI 主窗口与跨线程派发器；两者都必须在 Qt 主线程构造。"""
+    global _gui_bridge, _dispatcher
+    with _lock:
+        _gui_bridge = bridge
+        if dispatcher is not None:
+            _dispatcher = dispatcher
+
+
+def get_gui_bridge() -> Any | None:
+    with _lock:
+        return _gui_bridge
+
+
+def create_dispatcher() -> GuiDispatcher:
+    """在 Qt 主线程创建派发器并立即登记，返回同一实例。"""
+    dispatcher = GuiDispatcher()
+    register_gui_bridge(get_gui_bridge(), dispatcher=dispatcher)
+    return dispatcher
+
+
+def has_bridge() -> bool:
+    with _lock:
+        return _gui_bridge is not None and _dispatcher is not None
+
+
+def call_sync(fn: Callable[[], Any] | None, *, timeout: float = 120.0) -> Any:
+    """在 GUI 主线程同步执行 ``fn`` 并把结果（或异常）带回调用线程。
+
+    没有运行中的主线程事件循环时抛 ``RuntimeError``；超时抛
+    ``TimeoutError`` 并把该次作业标记为放弃，防止迟到执行污染后续状态。
+    """
+    with _lock:
+        dispatcher = _dispatcher
+    if dispatcher is None:
+        raise RuntimeError("GUI 派发器未注册：API 服务需要由 GUI 主窗口启动")
+    if fn is None:
+        raise RuntimeError("GUI 派发器收到空任务")
+
+    call = GuiCall()
+
+    def job() -> None:
+        if call.abandoned:
+            call.done.set()
+            return
+        try:
+            call.result = fn()
+        except BaseException as exc:  # noqa: BLE001 - 原样回传调用线程
+            call.error = exc
+        finally:
+            call.done.set()
+
+    dispatcher._requested.emit(job)
+    if not call.done.wait(timeout):
+        call.abandoned = True
+        raise TimeoutError(f"GUI 主线程派发超时（{timeout:.0f}s）")
+    if call.error is not None:
+        raise call.error
+    return call.result
 
 
 def _token_path() -> Path:

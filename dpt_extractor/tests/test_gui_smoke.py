@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -160,6 +162,17 @@ SONG_DCU_LT_WH_480_50 = (
     / "LT"
     / "tss"
     / "WH_480V_50A_000.tss"
+)
+SONG_GCU_RT_UH_480_100 = (
+    ROOT
+    / "示例文件"
+    / "songzhenxi"
+    / "KSU2506"
+    / "GCU"
+    / "SMC"
+    / "RT"
+    / "tss"
+    / "UH_480V_100A_000.tss"
 )
 LIYAWEI_AP_UL_880_35_ERR = (
     ROOT
@@ -11239,6 +11252,431 @@ class TestMainWindowSmoke(unittest.TestCase):
             self.assertAlmostEqual(hb_irr, expected, delta=0.5)
             self.assertAlmostEqual(win.result.reverse_recovery.irr, expected, delta=0.5)
             win.close()
+
+
+class TestApiBridgeTemperatureReportCondition(unittest.TestCase):
+    """温度工况 / 报告工况三条协议命令的界面闭环（offscreen 真实主窗口）。
+
+    ``_MainWindowApiBridge.invoke`` 内部经 ``gui_host.call_sync`` 把活儿投回 Qt
+    主线程，因此测试必须同时扮演「HTTP 线程」和「主线程事件循环」：工作线程
+    阻塞等回执，主线程泵事件。直接在主线程调 ``invoke`` 会自己等自己。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        from dpt_extractor.gui.main_window import MainWindow
+
+        self.win = MainWindow()
+        self.app.processEvents()
+        self.addCleanup(self._teardown)
+
+    def _teardown(self):
+        from dpt_extractor.api import gui_host
+
+        self.win.close()
+        self.app.processEvents()
+        # 桥接器是进程级全局登记，留着会让同进程后续用例误用已销毁的窗口。
+        gui_host.register_gui_bridge(None)
+        gui_host._dispatcher = None
+
+    def _settings(self):
+        from dpt_extractor.gui import main_window
+
+        settings = main_window._app_settings()
+        # 落盘由被测代码 sync 过；这里再 sync 一次确保读到的是磁盘上的最新值。
+        settings.sync()
+        return settings
+
+    def _invoke(self, action: str, params: dict | None = None, *, timeout: float = 30.0):
+        from dpt_extractor.api import gui_host
+        from dpt_extractor.gui.main_window import _MainWindowApiBridge
+
+        gui_host.register_gui_bridge(
+            _MainWindowApiBridge(self.win), dispatcher=gui_host.create_dispatcher()
+        )
+        self.win._api_bridge = gui_host.get_gui_bridge()
+        outcome: dict[str, object] = {}
+
+        def worker() -> None:
+            try:
+                outcome["result"] = self.win._api_bridge.invoke(
+                    action, params, timeout=timeout
+                )
+            except BaseException as exc:  # noqa: BLE001 - 原样回抛给测试断言
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + timeout + 5.0
+        while thread.is_alive() and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.002)
+        thread.join(timeout=5.0)
+        self.assertFalse(
+            thread.is_alive(), f"桥接动作 {action} 未在超时内返回（疑似死锁）"
+        )
+        if "error" in outcome:
+            raise outcome["error"]  # type: ignore[misc]
+        return outcome["result"]
+
+    def test_set_temperature_writes_settings_and_updates_widgets(self):
+        driver = self._invoke("set_temperature", {"code": "HT", "value": 175.0})
+
+        self.assertEqual(driver["code"], "HT")
+        self.assertEqual(driver["bridge"], "upper")
+        self.assertEqual(self.win.combo_temp.currentData(), "HT")
+        self.assertAlmostEqual(self.win.spin_temp_value.value(), 175.0)
+        # 结果表温度标签随工况刷新（报告里的温度文本就取这一份）
+        self.assertEqual(self.win.result_table._temp_labels["HT"], "175℃")
+
+        settings = self._settings()
+        self.assertEqual(str(settings.value("conditions/temperature_code/upper")), "HT")
+        self.assertAlmostEqual(
+            float(settings.value("conditions/temperature/upper/HT")), 175.0
+        )
+        # 无结果时 result_mode_matches 必须是 None，不能伪造成 True
+        self.assertIsNone(driver["result_mode_matches"])
+        json.dumps(driver, allow_nan=False)
+
+    def test_set_temperature_without_value_keeps_each_code_own_value(self):
+        self._invoke("set_temperature", {"code": "HT", "value": 175.0})
+        switched = self._invoke("set_temperature", {"code": "LT"})
+
+        self.assertEqual(switched["code"], "LT")
+        self.assertEqual(self.win.combo_temp.currentData(), "LT")
+        # 省略 value 只切工况：LT 保持自己的现值，不能被 HT 的 175 污染
+        self.assertAlmostEqual(self.win.spin_temp_value.value(), -40.0)
+        self.assertAlmostEqual(switched["value"], -40.0)
+        self.assertEqual(
+            str(self._settings().value("conditions/temperature_code/upper")), "LT"
+        )
+
+        # 切回 HT：值跟着 code 走，仍是 175
+        back = self._invoke("set_temperature", {"code": "HT"})
+        self.assertAlmostEqual(self.win.spin_temp_value.value(), 175.0)
+        self.assertAlmostEqual(back["temperatures"]["HT"], 175.0)
+
+    def test_set_temperature_rejects_invalid_code_and_value(self):
+        for params in (
+            {"code": "MT"},
+            {"value": 25.0},
+            {"code": "HT", "value": 300.0},
+            {"code": "HT", "value": -100.5},
+        ):
+            with self.subTest(params=params):
+                with self.assertRaises(ValueError) as ctx:
+                    self._invoke("set_temperature", params)
+                self.assertIn("invalid_temperature", str(ctx.exception))
+        settings = self._settings()
+        self.assertIsNone(
+            settings.value("conditions/temperature/upper/HT"),
+            "越界/非法输入不得落进 QSettings",
+        )
+
+    def test_set_report_conditions_partial_update_and_null_clear(self):
+        from unittest.mock import patch
+
+        with patch.object(self.win, "_recalculate") as recalc:
+            first = self._invoke(
+                "set_report_conditions", {"voltage_v": 750.0, "current_a": 1050.0}
+            )
+        # 工况不参与计算：全程不得触发重算
+        recalc.assert_not_called()
+        self.assertEqual(first["mode"], "dpt")
+        self.assertEqual(first["bridge"], "upper")
+        self.assertAlmostEqual(first["conditions"]["voltage_v"], 750.0)
+        self.assertIsNone(first["conditions"]["rg_on_ohm"])
+
+        edits = self.win._report_condition_edits
+        self.assertEqual(edits[0].text(), "750")
+        self.assertEqual(edits[1].text(), "1050")
+        conditions = self.win._current_report_conditions()
+        self.assertAlmostEqual(conditions.voltage_v, 750.0)
+        self.assertAlmostEqual(conditions.current_a, 1050.0)
+        self.assertIsNone(conditions.cg_nf)
+
+        settings = self._settings()
+        self.assertAlmostEqual(
+            float(settings.value("conditions/report/dpt/upper/voltage_v")), 750.0
+        )
+
+        # 部分更新：未给出的字段必须保持原值，不能被清空
+        partial = self._invoke("set_report_conditions", {"rg_on_ohm": 5.0})
+        self.assertAlmostEqual(partial["conditions"]["voltage_v"], 750.0)
+        self.assertAlmostEqual(partial["conditions"]["current_a"], 1050.0)
+        self.assertAlmostEqual(partial["conditions"]["rg_on_ohm"], 5.0)
+
+        # null = 清空该字段（QSettings 键同步移除）
+        cleared = self._invoke("set_report_conditions", {"current_a": None})
+        self.assertIsNone(cleared["conditions"]["current_a"])
+        self.assertAlmostEqual(cleared["conditions"]["voltage_v"], 750.0)
+        self.assertIsNone(self._settings().value("conditions/report/dpt/upper/current_a"))
+
+    def test_short_mode_rejects_dpt_fields_and_accepts_short_fields(self):
+        from dpt_extractor.models.test_mode import TestMode
+
+        mode_index = self.win.combo_test_mode.findData(TestMode.SHORT_CIRCUIT.value)
+        self.assertGreaterEqual(mode_index, 0)
+        self.win.combo_test_mode.setCurrentIndex(mode_index)
+        self.app.processEvents()
+        self.assertEqual(self.win._report_condition_mode_key(), "short")
+
+        with self.assertRaises(ValueError) as ctx:
+            self._invoke("set_report_conditions", {"voltage_v": 750.0})
+        self.assertIn("mode_mismatch", str(ctx.exception))
+        self.assertIn("vce_v", str(ctx.exception))
+
+        written = self._invoke("set_report_conditions", {"vce_v": 800.0})
+        self.assertEqual(written["mode"], "short")
+        self.assertAlmostEqual(written["conditions"]["vce_v"], 800.0)
+        settings = self._settings()
+        self.assertAlmostEqual(
+            float(settings.value("conditions/report/short/upper/vce_v")), 800.0
+        )
+        self.assertIsNone(
+            settings.value("conditions/report/dpt/upper/voltage_v"),
+            "跨模式字段被拒后不得留下任何落盘痕迹",
+        )
+
+    def test_get_report_context_reflects_page_state(self):
+        self._invoke("set_temperature", {"code": "HT", "value": 175.0})
+        self._invoke("set_report_conditions", {"voltage_v": 750.0})
+        context = self._invoke("get_report_context")
+
+        self.assertEqual(context["test_mode"], "dpt")
+        self.assertEqual(context["bridge"], "upper")
+        self.assertEqual(context["temperature_code"], "HT")
+        self.assertAlmostEqual(context["temperature_value"], 175.0)
+        self.assertEqual(context["temperature_labels"]["HT"], "175℃")
+        self.assertAlmostEqual(context["conditions"]["voltage_v"], 750.0)
+        self.assertEqual(
+            context["profile_code"], self.win._current_report_phase_code()
+        )
+        self.assertIn("template", context)
+        self.assertIn("output", context)
+        self.assertIsNone(context["result_mode_matches"])
+        json.dumps(context, allow_nan=False)
+
+    def test_result_mode_matches_flags_mode_result_mismatch(self):
+        """模式口径与结果类型不一致必须提前可见：writer 会直接 TypeError。"""
+        from types import SimpleNamespace
+
+        from dpt_extractor.models.test_mode import TestMode
+
+        # 只提供 short_circuit_mode：_recalculate 因没有 bundle 不会跑，
+        # 这份桩结果只用来驱动口径比较。
+        self.win.result = SimpleNamespace(short_circuit_mode=True)
+        short_index = self.win.combo_test_mode.findData(TestMode.SHORT_CIRCUIT.value)
+        self.win.combo_test_mode.setCurrentIndex(short_index)
+        self.app.processEvents()
+        self.assertTrue(self._invoke("get_report_context")["result_mode_matches"])
+
+        dpt_index = self.win.combo_test_mode.findData(TestMode.DPT.value)
+        self.win.combo_test_mode.setCurrentIndex(dpt_index)
+        self.app.processEvents()
+        mismatch = self._invoke("get_report_context")
+        self.assertEqual(mismatch["test_mode"], "dpt")
+        self.assertFalse(
+            mismatch["result_mode_matches"],
+            "dpt 口径 + 短路结果必须报 False，否则调用方会在写报告时才撞 TypeError",
+        )
+
+    @unittest.skipUnless(UH.exists(), "UH dpt sample missing")
+    def test_get_report_context_matches_real_dpt_result(self):
+        self.win._load_file(str(UH))
+        self.assertIsNotNone(self.win.result)
+        context = self._invoke("get_report_context")
+        self.assertEqual(context["test_mode"], "dpt")
+        self.assertTrue(context["result_mode_matches"])
+        # 加载会按路径推断温度工况并清空文件名里没有的工况字段，这里只断言
+        # 口径自洽，不断言具体数值。
+        self.assertIn(context["temperature_code"], ("RT", "HT", "LT"))
+        self.assertEqual(
+            set(context["conditions"]),
+            {"voltage_v", "current_a", "rg_on_ohm", "rg_off_ohm", "cg_nf"},
+        )
+
+    # ---------------------------------------------------- gui_load_file 回滚
+
+    def _load_good_then_fail_with_lower(self):
+        """加载 good（推断 upper）→ 设 HT=175 → 用坏路径 + bridge=lower 加载。"""
+        loaded = self._invoke("load_file", {"path": str(UH)})
+        self.assertEqual(loaded["applied_bridge"], "upper")
+        self.assertEqual(self.win._temperature_context, "upper")
+        self._invoke("set_temperature", {"code": "HT", "value": 175.0})
+        missing = UH.parent / "definitely_missing_rollback_case.tss"
+        self.assertFalse(missing.exists(), "用例需要一个确实不存在的路径")
+        with self.assertRaises(Exception) as ctx:
+            self._invoke("load_file", {"path": str(missing), "bridge": "lower"})
+        self.assertTrue(
+            str(ctx.exception), "失败加载必须把原始异常抛给协议调用方"
+        )
+        return ctx.exception
+
+    @unittest.skipUnless(UH.exists(), "UH dpt sample missing")
+    def test_failed_load_with_explicit_bridge_rolls_back_selection(self):
+        """D1：加载失败必须把桥臂回滚，且温度上下文跟随回滚后的桥臂。
+
+        否则会留下 ``combo_bridge='lower'`` + ``_temperature_context='upper'``
+        （温度仍是 upper 的 175℃），随后写报告就是「UL 行 + upper 温度」。
+        """
+        self._load_good_then_fail_with_lower()
+
+        self.assertEqual(str(self.win.combo_bridge.currentData()), "upper")
+        self.assertEqual(self.win.combo_phase.currentData(), "U")
+        self.assertEqual(self.win._temperature_context, "upper")
+        context = self._invoke("get_report_context")
+        self.assertEqual(context["bridge"], "upper")
+        self.assertEqual(context["temperature_code"], "HT")
+        self.assertAlmostEqual(context["temperature_value"], 175.0)
+        self.assertEqual(context["temperature_labels"]["HT"], "175℃")
+        # 桥臂与温度值必须自洽：lower 侧根本没被写过 175
+        self.assertAlmostEqual(self.win._temperature_values["HT"], 175.0)
+
+    @unittest.skipUnless(UH.exists(), "UH dpt sample missing")
+    def test_failed_load_rollback_keeps_report_context_usable(self):
+        """D1：回滚后 gui_get_report_context 仍不抛错、字段齐全、口径自洽。"""
+        self._load_good_then_fail_with_lower()
+
+        context = self._invoke("get_report_context")
+        for key in (
+            "test_mode",
+            "phase",
+            "bridge",
+            "profile_code",
+            "temperature_code",
+            "temperature_value",
+            "temperatures",
+            "temperature_labels",
+            "conditions",
+            "template",
+            "output",
+            "result_mode_matches",
+        ):
+            self.assertIn(key, context)
+        self.assertEqual(context["test_mode"], "dpt")
+        self.assertTrue(context["result_mode_matches"], "失败加载不该动已有结果")
+        self.assertEqual(
+            set(context["conditions"]),
+            {"voltage_v", "current_a", "rg_on_ohm", "rg_off_ohm", "cg_nf"},
+        )
+        json.dumps(context, allow_nan=False)
+
+    @unittest.skipUnless(
+        SONG_GCU_RT_UH_480_100.exists(), "GCU UH 480V dpt sample missing"
+    )
+    def test_failed_load_with_other_test_mode_keeps_result_and_report(self):
+        """R1：失败加载若请求了不同 test_mode，不得留下「模式=dpt / 结果=short」。
+
+        旧实现用 ``combo_test_mode.setCurrentIndex`` 切模式，会走
+        ``_on_test_mode_changed`` → 立刻 ``_recalculate(reset_manual=True)``：
+        加载失败、回滚把模式拉回 dpt 之后，result 已是短路结果
+        （idc/dvdt/eoff/trr 全 0），随后 ``gui_write_report`` 直接报
+        「短路报告收到不匹配的双脉冲工况快照」。
+        """
+        import shutil
+
+        from openpyxl import load_workbook
+
+        from dpt_extractor.utils.app_paths import default_report_template_path
+
+        loaded = self._invoke("load_file", {"path": str(SONG_GCU_RT_UH_480_100)})
+        self.assertEqual(loaded["test_mode"], "dpt")
+        self.assertEqual(loaded["applied_bridge"], "upper")
+        self.assertIsNotNone(self.win.result)
+        self.assertEqual(self.win.profile.code, "UH")
+        self._invoke("set_temperature", {"code": "HT", "value": 175.0})
+        vdc_before = float(self.win.result.vdc)
+        self.assertGreater(vdc_before, 0.0)
+
+        missing = SONG_GCU_RT_UH_480_100.parent / "definitely_missing_mode_case.tss"
+        self.assertFalse(missing.exists(), "用例需要一个确实不存在的路径")
+        with self.assertRaises(Exception):
+            self._invoke(
+                "load_file",
+                {
+                    "path": str(missing),
+                    "bridge": "lower",
+                    "test_mode": "short_circuit",
+                },
+            )
+
+        # 1) 相别/桥臂/测试模式/温度上下文 + profile 全部回到失败前
+        self.assertEqual(str(self.win.cfg.test_mode.mode), "dpt")
+        self.assertEqual(str(self.win.combo_test_mode.currentData()), "dpt")
+        self.assertEqual(str(self.win.combo_bridge.currentData()), "upper")
+        self.assertEqual(self.win.combo_phase.currentData(), "U")
+        self.assertEqual(self.win._temperature_context, "upper")
+        self.assertEqual(self.win.profile.code, "UH")
+        # 2) 结果没有被「预重算」破坏：仍是双脉冲结果、真实 vdc
+        self.assertFalse(self.win.result.short_circuit_mode)
+        self.assertAlmostEqual(float(self.win.result.vdc), vdc_before, places=9)
+        self.assertNotEqual(float(self.win.result.turn_off.eoff), 0.0)
+        context = self._invoke("get_report_context")
+        self.assertEqual(context["test_mode"], "dpt")
+        self.assertEqual(context["bridge"], "upper")
+        self.assertEqual(context["profile_code"], "UH")
+        self.assertEqual(context["temperature_code"], "HT")
+        self.assertAlmostEqual(context["temperature_value"], 175.0)
+        self.assertTrue(context["result_mode_matches"])
+        json.dumps(context, allow_nan=False)
+
+        # 3) 随后写报告必须成功，且报告行是 UH + 175℃
+        with tempfile.TemporaryDirectory() as td:
+            template = Path(td) / "r1_template.xlsx"
+            shutil.copyfile(default_report_template_path(), template)
+            report = Path(td) / "r1_report.xlsx"
+            self._invoke("set_template", {"path": str(template)})
+            self._invoke("set_output", {"path": str(report)})
+            written = self._invoke("write_report", {"timeout": 60}, timeout=120.0)
+            self.assertTrue(report.exists(), "报告文件未生成")
+            saved = load_workbook(report, data_only=True)
+            row_values = [
+                "" if value is None else str(value)
+                for value in (
+                    saved[written["data_sheet"]].cell(written["data_row"], col).value
+                    for col in range(1, 8)
+                )
+            ]
+            self.assertIn("UH", row_values, f"报告行相别不是 UH：{row_values}")
+            self.assertTrue(
+                any(value.startswith("175") for value in row_values),
+                f"报告行温度不是 175℃：{row_values}",
+            )
+
+    @unittest.skipUnless(UH.exists(), "UH dpt sample missing")
+    def test_load_file_selection_honored_three_states(self):
+        """D2：显式 phase/bridge 只是希望值，返回体必须诚实标注是否被尊重。"""
+
+        # 1) 未传参数 → None（没有请求，就无所谓被尊重）
+        plain = self._invoke("load_file", {"path": str(UH)})
+        self.assertIsNone(plain["requested_phase"])
+        self.assertIsNone(plain["requested_bridge"])
+        self.assertIsNone(plain["selection_honored"])
+        self.assertEqual(plain["applied_phase"], "U")
+        self.assertEqual(plain["applied_bridge"], "upper")
+
+        # 2) 传了 lower，但 UH 路径推断 upper → 覆盖，必须报 False
+        overridden = self._invoke("load_file", {"path": str(UH), "bridge": "lower"})
+        self.assertEqual(overridden["requested_bridge"], "lower")
+        self.assertEqual(overridden["applied_bridge"], "upper")
+        self.assertFalse(overridden["selection_honored"])
+
+        # 3) 传的与推断一致 → True
+        honored = self._invoke(
+            "load_file", {"path": str(UH), "phase": "U", "bridge": "upper"}
+        )
+        self.assertEqual(honored["requested_phase"], "U")
+        self.assertEqual(honored["requested_bridge"], "upper")
+        self.assertEqual(honored["applied_phase"], "U")
+        self.assertEqual(honored["applied_bridge"], "upper")
+        self.assertTrue(honored["selection_honored"])
 
 
 if __name__ == "__main__":
