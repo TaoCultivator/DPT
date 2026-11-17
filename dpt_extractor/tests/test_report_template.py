@@ -42,6 +42,23 @@ def _drawing_anchor_counts(path: Path) -> dict[str, int]:
                 counts[key] += len(root.findall(f".//{tag}"))
     return counts
 
+def _build_condition_probe_report(path: Path, condition_text: str | None) -> None:
+    """Build the smallest U相 report that still exercises the C column."""
+
+    from dpt_extractor.export.mcu2506_layout import COL_CONDITION
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "U相_双脉冲数据"
+    ws.merge_cells("A5:A8")
+    ws.merge_cells("B5:B8")
+    ws.merge_cells("C5:C8")
+    ws["A5"] = "UH"
+    ws["B5"] = "25℃"
+    if condition_text is not None:
+        ws.cell(5, COL_CONDITION, condition_text)
+    wb.save(path)
+
 
 class TestReportTemplateWriter(unittest.TestCase):
     def test_report_value_writer_uses_merged_range_anchor(self):
@@ -3874,14 +3891,183 @@ class TestReportTemplateWriter(unittest.TestCase):
             saved = load_workbook(report)["U相_双脉冲数据"]
             condition = saved.cell(5, COL_CONDITION).value
             self.assertEqual(summary.data_row, 5)
-            self.assertIn("备注保留", condition)
-            self.assertIn("Rg_on = 3.233 ohm", condition)
-            self.assertIn("Rg_off = 3.586 ohm", condition)
-            self.assertIn("Cg = 10 nf", condition)
-            self.assertEqual(condition.count("Rg_on"), 1)
-            self.assertEqual(condition.count("Rg_off"), 1)
-            self.assertEqual(condition.count("Cg"), 1)
+            # C 列只表达本次快照识别到的字段：模板里的说明文字与空占位
+            # （"备注保留" / "Rg_on =  ohm"）都不再被保留或合写。
+            self.assertEqual(
+                condition,
+                "Rg_on = 3.233 ohm\nRg_off = 3.586 ohm\nCg = 10 nf",
+            )
+            self.assertNotIn("备注保留", condition)
+            self.assertNotIn("Rg_on =  ohm", condition)
             self.assertEqual(saved.cell(5, COL_OFF["delta_vce"]).value, 12.0)
+
+    def test_dpt_condition_cell_keeps_only_recognized_fields(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CONDITION,
+            COL_CURRENT,
+            COL_VOLTAGE,
+        )
+        from dpt_extractor.export.report_template import (
+            DptReportConditions,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "partial_conditions.xlsx"
+            _build_condition_probe_report(
+                report,
+                "Rg_on = 3.233 ohm\nRg_off = 3.586 ohm\nCg = 10 nf",
+            )
+
+            write_report_template(
+                ExtractResult(
+                    source_path="scope://C078514",
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=12.0),
+                ),
+                report,
+                report_conditions=DptReportConditions(
+                    voltage_v=750.0,
+                    current_a=805.0,
+                    rg_on_ohm=5.6,
+                ),
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            # 只识别到 Rg_on 时，仅写这一行：未识别字段留空，且不保留模板里
+            # 的 Rg_off/Cg 历史值。
+            self.assertEqual(saved.cell(5, COL_CONDITION).value, "Rg_on = 5.6 ohm")
+            self.assertEqual(saved.cell(5, COL_VOLTAGE).value, 750)
+            self.assertEqual(saved.cell(5, COL_CURRENT).value, 805)
+
+            write_report_template(
+                ExtractResult(
+                    source_path="scope://C078514",
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=12.0),
+                ),
+                report,
+                report_conditions=DptReportConditions(
+                    voltage_v=750.0,
+                    current_a=805.0,
+                    cg_nf=22.0,
+                ),
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(saved.cell(5, COL_CONDITION).value, "Cg = 22 nf")
+
+    def test_dpt_condition_cell_clears_template_values_when_nothing_recognized(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            COL_CONDITION,
+            COL_CURRENT,
+            COL_VOLTAGE,
+        )
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "unrecognized_conditions.xlsx"
+            _build_condition_probe_report(
+                report,
+                "Rg_on = 3.624 ohm\nRg_off = 3.586 ohm\nCg = 10 nf",
+            )
+
+            # 调用方没传 report_conditions、文件名也没有 Rg/Cg 信息：C 列必须
+            # 清空，不能把模板历史值当成识别结果。
+            write_report_template(
+                ExtractResult(
+                    source_path=str(Path("samples") / "RT" / "UH_750V_805A_000.tss"),
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=12.0),
+                ),
+                report,
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertIsNone(saved.cell(5, COL_CONDITION).value)
+            self.assertEqual(saved.cell(5, COL_VOLTAGE).value, 750)
+            self.assertEqual(saved.cell(5, COL_CURRENT).value, 805)
+            self.assertIn("C5:C8", {str(rng) for rng in saved.merged_cells.ranges})
+
+    def test_dpt_condition_cell_clears_when_snapshot_has_no_condition_fields(self):
+        from dpt_extractor.export.mcu2506_layout import COL_CONDITION
+        from dpt_extractor.export.report_template import (
+            DptReportConditions,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "blank_snapshot_conditions.xlsx"
+            _build_condition_probe_report(
+                report,
+                "Rg_on = 3.233 ohm\nRg_off = 3.586 ohm\nCg = 10 nf",
+            )
+
+            write_report_template(
+                ExtractResult(
+                    source_path="scope://C078514",
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=12.0),
+                ),
+                report,
+                report_conditions=DptReportConditions(
+                    voltage_v=750.0,
+                    current_a=805.0,
+                ),
+            )
+
+            saved = load_workbook(report)["U相_双脉冲数据"]
+            self.assertIsNone(saved.cell(5, COL_CONDITION).value)
+
+    def test_dpt_condition_cell_rewrite_is_idempotent(self):
+        from dpt_extractor.export.mcu2506_layout import COL_CONDITION
+        from dpt_extractor.export.report_template import (
+            DptReportConditions,
+            write_report_template,
+        )
+        from dpt_extractor.models.results import ExtractResult, TurnOffResult
+
+        def write(conditions):
+            write_report_template(
+                ExtractResult(
+                    source_path="scope://C078514",
+                    profile_code="UH",
+                    turn_off=TurnOffResult(delta_vce=12.0),
+                ),
+                report,
+                report_conditions=conditions,
+            )
+            return load_workbook(report)["U相_双脉冲数据"]
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "idempotent_conditions.xlsx"
+            _build_condition_probe_report(
+                report,
+                "Rg_on = 3.233 ohm\nRg_off = 3.586 ohm\nCg = 10 nf",
+            )
+            blank = DptReportConditions(voltage_v=750.0, current_a=805.0)
+            full = DptReportConditions(
+                voltage_v=750.0,
+                current_a=805.0,
+                rg_on_ohm=3.233,
+                rg_off_ohm=3.586,
+                cg_nf=10.0,
+            )
+
+            # 同组连写两次“未识别”：C 保持为空，不留模板值、不叠加空行。
+            self.assertIsNone(write(blank).cell(5, COL_CONDITION).value)
+            self.assertIsNone(write(blank).cell(5, COL_CONDITION).value)
+
+            expected = "Rg_on = 3.233 ohm\nRg_off = 3.586 ohm\nCg = 10 nf"
+            self.assertEqual(write(full).cell(5, COL_CONDITION).value, expected)
+            self.assertEqual(write(full).cell(5, COL_CONDITION).value, expected)
+
+            saved = write(blank)
+            self.assertIsNone(saved.cell(5, COL_CONDITION).value)
+            self.assertIn("C5:C8", {str(rng) for rng in saved.merged_cells.ranges})
 
     def test_dpt_template_multi_pulse_rows_do_not_overwrite_next_condition(self):
         from dpt_extractor.export.mcu2506_layout import COL_CURRENT, COL_OFF, COL_ON, COL_VOLTAGE

@@ -52,6 +52,7 @@ from dpt_extractor.export.report_template import (
     dpt_report_image_params_for_result,
     infer_dpt_report_conditions,
     infer_short_report_conditions,
+    report_sheet_prefix_for_paths,
     write_report_template,
 )
 from dpt_extractor.gui.channel_mapping_dialog import resolve_profile
@@ -1642,6 +1643,7 @@ class _ReportWriteTask(QRunnable):
         phase_code: str | None = None,
         image_result_index: int = 0,
         report_conditions: ReportConditions | None = None,
+        sheet_prefix: str | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -1654,6 +1656,7 @@ class _ReportWriteTask(QRunnable):
         self.temperature_code = temperature_code
         self.phase_code = phase_code
         self.image_result_index = int(image_result_index)
+        self.sheet_prefix = sheet_prefix
         result0 = result[0] if isinstance(result, list) else result
         self.report_conditions = deepcopy(
             report_conditions
@@ -1677,6 +1680,7 @@ class _ReportWriteTask(QRunnable):
                 phase_code=self.phase_code,
                 image_result_index=self.image_result_index,
                 report_conditions=self.report_conditions,
+                sheet_prefix=self.sheet_prefix,
                 progress_callback=lambda value, total, label: self.signals.progress.emit(
                     self.request_id,
                     value,
@@ -12953,12 +12957,24 @@ class MainWindow(QMainWindow):
         phase_code: str | None = None,
         report_conditions: ReportConditions | None = None,
         image_result_index: int | None = None,
+        sheet_prefix: str | None = None,
     ) -> None:
         if not results or self._report_output_path is None:
             _safe_cleanup_tempdir(tempdir)
             self._finish_report_progress("写入失败", ok=False)
             self._release_report_operation()
             return
+        if sheet_prefix is None:
+            # Double-motor projects keep several data folders (``10A2``,
+            # ``10B2``) under one report root; the folder name keeps their
+            # sheets apart.  Only an already loaded template source may act as
+            # the anchor: the default template fallback lives in the repo and
+            # would misread shipped sample paths.
+            sheet_prefix = report_sheet_prefix_for_paths(
+                results[0].source_path,
+                report_path=self._report_output_path,
+                template_path=self._report_template_source_path,
+            )
         if request_id is None:
             self._report_request_id += 1
             request_id = self._report_request_id
@@ -12996,6 +13012,7 @@ class MainWindow(QMainWindow):
                 if results[0].short_circuit_mode
                 else DptReportConditions()
             ),
+            sheet_prefix=sheet_prefix,
         )
         task.signals.progress.connect(self._on_report_write_progress)
         task.signals.finished.connect(self._on_report_write_finished)

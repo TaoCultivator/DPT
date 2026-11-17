@@ -4,10 +4,11 @@ from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass
 from math import isfinite
+import hashlib
 import io
 from pathlib import Path
 import re
-from typing import Callable, Mapping
+from typing import Callable, Literal, Mapping, overload
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
@@ -734,6 +735,213 @@ def _phase_sheet_prefix(phase_code: str) -> str:
     return phase_code[0]
 
 
+# Excel refuses sheet titles longer than 31 characters and rejects these
+# characters outright, so a data-folder prefix has to be sanitised before it is
+# glued to the base title.
+_REPORT_SHEET_TITLE_LIMIT = 31
+_REPORT_SHEET_PREFIX_ILLEGAL_CHARS = "\\/?*[]:"
+_REPORT_SHEET_PREFIX_STRIP_CHARS = " _'"
+# Folder names that describe the measurement structure instead of one data set.
+# A double-motor project stores the real data folders one level above them
+# (``MCU24N9/10A2/SMC/RT/UH_459V_425A_000.tss``), so they never become a
+# sheet prefix on their own.
+_REPORT_SHEET_PREFIX_STRUCTURE_DIRS = frozenset(
+    {
+        "smc",
+        "dl",
+        "dd",
+        "ddd",
+        "sss",
+        "rt",
+        "ht",
+        "lt",
+        "tss",
+        "xlsx",
+        "short",
+        "uh",
+        "ul",
+        "vh",
+        "vl",
+        "wh",
+        "wl",
+        "dpt",
+    }
+)
+# Excel reserves the word "history" for sheet titles that track changes.
+_REPORT_SHEET_PREFIX_RESERVED = frozenset({"history"})
+# A truncated prefix keeps a short digest of the full name so two long folder
+# names that share their head (``...0002`` / ``...0003``) never collapse onto
+# one worksheet and silently overwrite each other.
+_REPORT_SHEET_PREFIX_HASH_LENGTH = 6
+
+
+def _report_sheet_prefix_digest(prefix: str) -> str:
+    return hashlib.sha1(prefix.encode("utf-8")).hexdigest()[
+        :_REPORT_SHEET_PREFIX_HASH_LENGTH
+    ]
+
+
+def _clean_report_sheet_prefix(prefix: object) -> str:
+    """Return one Excel-safe sheet prefix, or ``""`` when nothing is usable."""
+
+    text = str(prefix or "").strip()
+    if not text:
+        return ""
+    for char in _REPORT_SHEET_PREFIX_ILLEGAL_CHARS:
+        text = text.replace(char, "_")
+    text = text.strip().strip(_REPORT_SHEET_PREFIX_STRIP_CHARS)
+    if not text:
+        return ""
+    if text.casefold() in _REPORT_SHEET_PREFIX_RESERVED:
+        return ""
+    return text
+
+
+def _prefixed_sheet_title(prefix: str, base_title: str) -> str:
+    """Combine a data-folder prefix with one base sheet title within 31 chars.
+
+    A prefix that fits keeps its own name (``10A2_U相_双脉冲数据``).  A prefix
+    that has to be cut keeps a readable head plus a digest of the *full* prefix,
+    so distinct long folder names always map to distinct worksheets.
+    """
+
+    cleaned = _clean_report_sheet_prefix(prefix)
+    if not cleaned:
+        return base_title
+    combined = f"{cleaned}_{base_title}"
+    if len(combined) <= _REPORT_SHEET_TITLE_LIMIT:
+        return combined
+    room = _REPORT_SHEET_TITLE_LIMIT - len(base_title) - 1
+    if room <= 0:
+        return base_title
+    digest = _report_sheet_prefix_digest(cleaned)
+    budget = room - len(digest) - 1
+    if budget > 0:
+        head = cleaned[:budget].rstrip("_ ")
+        if head:
+            return f"{head}_{digest}_{base_title}"
+    if len(digest) + 1 + len(base_title) <= _REPORT_SHEET_TITLE_LIMIT:
+        return f"{digest}_{base_title}"
+    return base_title
+
+
+def _resolved_report_path(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        candidate = Path(text).expanduser()
+    except (OSError, ValueError):
+        return None
+    try:
+        return candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return candidate
+
+
+def _relative_directory_names(relative: Path) -> tuple[str, ...]:
+    parts = tuple(part for part in relative.parts if part not in ("", "."))
+    if parts and Path(parts[-1]).suffix:
+        # The sample file itself is never a folder name.
+        parts = parts[:-1]
+    return parts
+
+
+def report_sheet_prefix_for_paths(
+    source_path: str | Path,
+    *,
+    report_path: str | Path | None = None,
+    template_path: str | Path | None = None,
+) -> str:
+    """Derive the report sheet prefix from the data folder of one sample.
+
+    The prefix is the first folder name below the report file (or the loaded
+    template source) that describes one data set, so a double-motor project
+    keeps ``MCU24N9/10A2/...`` and ``MCU24N9/10B2/...`` apart in one workbook.
+    Structure folders (``SMC``/``RT``/``UH`` ...) never become a prefix, and
+    paths outside every anchor keep the original sheet titles.
+    """
+
+    source = _resolved_report_path(source_path)
+    if source is None:
+        return ""
+    for anchor_value in (report_path, template_path):
+        anchor = _resolved_report_path(anchor_value)
+        if anchor is None:
+            continue
+        try:
+            relative = source.relative_to(anchor.parent)
+        except ValueError:
+            continue
+        names = _relative_directory_names(relative)
+        if not names:
+            continue
+        first = names[0]
+        if first.startswith("."):
+            continue
+        if first.casefold() in _REPORT_SHEET_PREFIX_STRUCTURE_DIRS:
+            continue
+        cleaned = _clean_report_sheet_prefix(first)
+        if cleaned:
+            return cleaned
+    return ""
+
+
+@overload
+def _ensure_prefixed_worksheet(
+    wb,
+    base_title: str,
+    prefix: str,
+    *,
+    required: Literal[True],
+) -> Worksheet: ...
+
+
+@overload
+def _ensure_prefixed_worksheet(
+    wb,
+    base_title: str,
+    prefix: str,
+    *,
+    required: Literal[False],
+) -> Worksheet | None: ...
+
+
+def _ensure_prefixed_worksheet(
+    wb,
+    base_title: str,
+    prefix: str,
+    *,
+    required: bool,
+) -> Worksheet | None:
+    """Return the worksheet that belongs to one prefix, cloning the base title.
+
+    The base title itself is never returned when a prefix is set: the shipped
+    base sheets stay empty so the next data folder cannot overwrite the first
+    one.  A repeated prefix reuses the sheet it created earlier.
+    """
+
+    target_title = _prefixed_sheet_title(prefix, base_title)
+    if target_title == base_title:
+        if base_title in wb.sheetnames:
+            return wb[base_title]
+        if required:
+            raise ValueError(f"报告模板缺少工作表：{base_title}")
+        return None
+    if target_title in wb.sheetnames:
+        return wb[target_title]
+    if base_title not in wb.sheetnames:
+        if required:
+            raise ValueError(f"报告模板缺少工作表：{base_title}")
+        return None
+    clone = wb.copy_worksheet(wb[base_title])
+    clone.title = target_title
+    base_index = wb.sheetnames.index(base_title)
+    clone_index = wb.sheetnames.index(target_title)
+    wb.move_sheet(clone, offset=base_index + 1 - clone_index)
+    return clone
+
+
 _CONDITION_NUMBER = r"(-?\d+(?:\.\d+)?)"
 _RG_ON_TERMS = r"RG[\s_\-]*ON|RGON|R[\s_\-]*ON|RON|开通(?:栅极)?(?:电阻)?"
 _RG_OFF_TERMS = r"RG[\s_\-]*OFF|RGOFF|R[\s_\-]*OFF|ROFF|关断(?:栅极)?(?:电阻)?"
@@ -795,19 +1003,6 @@ _CONDITION_TOKEN_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] =
     ),
 )
 _CONDITION_TOKEN_ORDER = ("rg_on", "rg_off", "rg", "cg")
-_CONDITION_LINE_KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("rg_on", re.compile(rf"(?:{_RG_ON_TERMS})", re.IGNORECASE)),
-    ("rg_off", re.compile(rf"(?:{_RG_OFF_TERMS})", re.IGNORECASE)),
-    (
-        "rg",
-        re.compile(
-            rf"(?:^|[^A-Z0-9])(?:{_RG_TERMS})(?![\s_\-]*(?:ON|OFF))",
-            re.IGNORECASE,
-        ),
-    ),
-    ("cg", re.compile(rf"(?:{_CG_TERMS})", re.IGNORECASE)),
-)
-
 
 def _condition_signature(text: object) -> dict[str, float]:
     if text is None:
@@ -920,31 +1115,6 @@ def _format_condition_line(key: str, value: float) -> str:
     label, unit = labels[key]
     return f"{label} = {_format_condition_number(value)} {unit}"
 
-
-def _condition_line_key(line: str) -> str | None:
-    normalized = str(line or "").upper().replace("Ω", "OHM").replace("欧姆", "OHM")
-    for key, pattern in _CONDITION_LINE_KEY_PATTERNS:
-        if pattern.search(normalized):
-            return key
-    return None
-
-
-def _merged_condition_text(
-    existing: object,
-    signature: Mapping[str, float],
-) -> str:
-    lines = [line for line in str(existing or "").splitlines() if line.strip()]
-    used: set[str] = set()
-    for idx, line in enumerate(lines):
-        key = _condition_line_key(line)
-        if key is None or key not in signature:
-            continue
-        lines[idx] = _format_condition_line(key, signature[key])
-        used.add(key)
-    for key in _CONDITION_TOKEN_ORDER:
-        if key in signature and key not in used:
-            lines.append(_format_condition_line(key, signature[key]))
-    return "\n".join(lines)
 
 
 def _format_condition_key(
@@ -1544,28 +1714,28 @@ def _sync_dpt_condition_cell(
     data_ws: Worksheet,
     group_start_row: int,
     signature: Mapping[str, float],
-    *,
-    replace: bool = False,
 ) -> None:
-    if replace:
-        exact = "\n".join(
-            _format_condition_line(key, signature[key])
-            for key in _CONDITION_TOKEN_ORDER
-            if key in signature
-        )
-        _set_merged_cell_value(
-            data_ws,
-            group_start_row,
-            COL_CONDITION,
-            exact or None,
-        )
-        return
-    if not signature:
-        return
-    current = _merged_value(data_ws, group_start_row, COL_CONDITION)
-    merged = _merged_condition_text(current, signature)
-    if merged:
-        _set_merged_cell_value(data_ws, group_start_row, COL_CONDITION, merged)
+    """Write only the condition fields this report snapshot recognizes.
+
+    The C column (测试条件) is a snapshot of the current report, not a place to
+    keep template text: unrecognized fields must stay blank, and when nothing is
+    recognized the cell is cleared while its merged structure is preserved.
+    Previously this function merged the incoming signature into whatever text
+    the template or an earlier report left in the cell, which silently promoted
+    template placeholders such as "Rg_on = 3.233 ohm" to recognized values.
+    """
+
+    exact = "\n".join(
+        _format_condition_line(key, signature[key])
+        for key in _CONDITION_TOKEN_ORDER
+        if key in signature
+    )
+    _set_merged_cell_value(
+        data_ws,
+        group_start_row,
+        COL_CONDITION,
+        exact or None,
+    )
 
 
 def _next_dpt_data_row(
@@ -1996,7 +2166,6 @@ def _find_dpt_data_target(
             data_ws,
             group.start_row,
             source_condition,
-            replace=report_conditions is not None,
         )
         return target
 
@@ -3825,9 +3994,9 @@ def _normalize_report_temperature_labels(
             _normalize_dpt_data_temperature_cells(ws, temperature_labels)
         elif title.endswith("_双脉冲波形") or title.endswith("相_双脉冲波形"):
             _normalize_dpt_waveform_text(ws, temperature_labels)
-        elif title == "短路测试":
+        elif title == "短路测试" or title.endswith("_短路测试"):
             _normalize_short_temperature_cells(ws, temperature_labels)
-        elif title == "短路测试图片":
+        elif title == "短路测试图片" or title.endswith("_短路测试图片"):
             _normalize_short_picture_text(ws, temperature_labels)
 
 
@@ -4524,10 +4693,12 @@ def write_report_template(
     phase_code: str | None = None,
     image_result_index: int | None = None,
     report_conditions: ReportConditions | None = None,
+    sheet_prefix: str | None = None,
 ) -> ReportWriteSummary:
     path = Path(report_path)
     results = _as_report_results(result)
     result0 = results[0]
+    resolved_sheet_prefix = _clean_report_sheet_prefix(sheet_prefix)
     active_index = 0 if image_result_index is None else int(image_result_index)
     if active_index < 0 or active_index >= len(results):
         raise ValueError(f"报告截图结果索引越界：{active_index}")
@@ -4575,15 +4746,30 @@ def write_report_template(
         if len(results) != 1:
             raise ValueError("短路测试报告不支持多行结果")
         result = result0
-        data_sheet = "短路测试"
-        picture_sheet = "短路测试图片"
-        if data_sheet not in wb.sheetnames:
-            raise ValueError("报告模板缺少工作表：短路测试")
-        data_ws = wb[data_sheet]
+        base_data_sheet = "短路测试"
+        base_picture_sheet = "短路测试图片"
+        data_ws = _ensure_prefixed_worksheet(
+            wb,
+            base_data_sheet,
+            resolved_sheet_prefix,
+            required=True,
+        )
+        data_sheet = data_ws.title
+        picture_ws = _ensure_prefixed_worksheet(
+            wb,
+            base_picture_sheet,
+            resolved_sheet_prefix,
+            required=False,
+        )
+        picture_sheet = (
+            picture_ws.title
+            if picture_ws is not None
+            else _prefixed_sheet_title(resolved_sheet_prefix, base_picture_sheet)
+        )
         _normalize_short_data_temperature_order(data_ws, temperature_labels)
-        if picture_sheet in wb.sheetnames:
+        if picture_ws is not None:
             _normalize_short_picture_temperature_order(
-                wb[picture_sheet],
+                picture_ws,
                 temperature_labels,
             )
         _ensure_short_temperature_group(
@@ -4616,12 +4802,12 @@ def write_report_template(
         _normalize_short_temperature_cells(data_ws, temperature_labels)
         emit(2, "写入报告数据")
         expected_image_keys = _expected_short_image_keys(image_map, result)
-        if expected_image_keys and picture_sheet not in wb.sheetnames:
+        if expected_image_keys and picture_ws is None:
             raise ValueError(f"报告模板缺少工作表：{picture_sheet}，无法写入报告图片")
         images_written = 0
         anchor_row = None
-        if picture_sheet in wb.sheetnames:
-            image_ws = wb[picture_sheet]
+        if picture_ws is not None:
+            image_ws = picture_ws
             _ensure_short_picture_temperature_block(
                 image_ws,
                 phase_code,
@@ -4667,7 +4853,7 @@ def write_report_template(
             # 短路报告固定单行：data_row_end 与 data_row 同值，保证回执
             # 字段完整，下游 int(summary.data_row_end) 不会拿到 None。
             data_row_end=data_row,
-            waveform_sheet=picture_sheet if picture_sheet in wb.sheetnames else None,
+            waveform_sheet=picture_ws.title if picture_ws is not None else None,
             waveform_anchor_row=anchor_row,
             images_written=images_written,
         )
@@ -4683,17 +4869,31 @@ def write_report_template(
         else None
     )
 
-    sheet_prefix = _phase_sheet_prefix(phase_code)
-    data_sheet = f"{sheet_prefix}相_双脉冲数据"
-    waveform_sheet = f"{sheet_prefix}相_双脉冲波形"
-    if data_sheet not in wb.sheetnames:
-        raise ValueError(f"报告模板缺少工作表：{data_sheet}")
-    data_ws = wb[data_sheet]
+    phase_sheet_prefix = _phase_sheet_prefix(phase_code)
+    base_data_sheet = f"{phase_sheet_prefix}相_双脉冲数据"
+    base_waveform_sheet = f"{phase_sheet_prefix}相_双脉冲波形"
+    data_ws = _ensure_prefixed_worksheet(
+        wb,
+        base_data_sheet,
+        resolved_sheet_prefix,
+        required=True,
+    )
+    data_sheet = data_ws.title
     _ensure_dpt_data_power_columns(data_ws)
     expected_image_keys = _expected_dpt_image_keys(image_map, image_result)
-    if expected_image_keys and waveform_sheet not in wb.sheetnames:
-        raise ValueError(f"报告模板缺少工作表：{waveform_sheet}，无法写入报告图片")
-    waveform_ws = wb[waveform_sheet] if waveform_sheet in wb.sheetnames else None
+    waveform_ws = _ensure_prefixed_worksheet(
+        wb,
+        base_waveform_sheet,
+        resolved_sheet_prefix,
+        required=False,
+    )
+    if expected_image_keys and waveform_ws is None:
+        raise ValueError(
+            f"报告模板缺少工作表："
+            f"{_prefixed_sheet_title(resolved_sheet_prefix, base_waveform_sheet)}"
+            f"，无法写入报告图片"
+        )
+    waveform_sheet = waveform_ws.title if waveform_ws is not None else None
     _normalize_dpt_data_temperature_order(data_ws, temperature_labels)
     if waveform_ws is not None:
         _normalize_dpt_waveform_temperature_order(
@@ -4722,7 +4922,6 @@ def write_report_template(
         data_ws,
         target.group_start_row,
         condition_signature,
-        replace=dpt_report_conditions is not None,
     )
     data_targets = _prepare_dpt_data_rows(
         data_ws,
