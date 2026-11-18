@@ -162,6 +162,31 @@ DPT_SLOPE_HEADER_BASELINES: dict[str, str] = {
     "rr_didt": "Didt_Irr(A/ns)",
 }
 
+#: 数据页（`<前缀>_<相>相_双脉冲数据`）R3 的六个斜率列表头在 auto_max 模式
+#: 下写回的基线文本（用户 2026-11-18 口径）：关断/开通写参数名
+#: Dvdt_max / Didt_max，反向恢复写模板原文 Dvdt_max / Didt_Irr，**都不带
+#: 单位**——数据页 R4 是单位行，单位只写在那里，R3 绝不重复叠加。
+#: 区间/预设模式数据页复用波形页口径（同样写 dv/dt(10%-90%) 这类文本）。
+DPT_SLOPE_DATA_HEADER_BASELINES: dict[str, str] = {
+    "off_dvdt": "Dvdt_max",
+    "off_didt": "Didt_max",
+    "on_dvdt": "Dvdt_max",
+    "on_didt": "Didt_max",
+    "rr_dvdt": "Dvdt_max",
+    "rr_didt": "Didt_Irr",
+}
+
+#: 每条斜率列在数据页里所属的分区（表头行 R3 的文字定位按分区列范围收窄，
+#: 避免关断/开通/反向恢复同名 dv/dt(...) 表头互相串列）。
+_DPT_SLOPE_DATA_SECTIONS: dict[str, str] = {
+    "off_dvdt": "关断过程",
+    "off_didt": "关断过程",
+    "on_dvdt": "开通",
+    "on_didt": "开通",
+    "rr_dvdt": "反向恢复",
+    "rr_didt": "反向恢复",
+}
+
 #: 每个斜率表头所属的波形带（关断 / 开通 / 反向恢复 = 块内 0 / 17 / 34 行）。
 _DPT_SLOPE_HEADER_BLOCKS: dict[str, str] = {
     "off_dvdt": "off",
@@ -206,6 +231,20 @@ def _dpt_slope_header_write_names(row_key: str) -> tuple[str, ...]:
                 _DPT_SLOPE_HEADER_TEMPLATE_NAMES[row_key],
                 DPT_SLOPE_HEADER_NAMES[row_key],
                 DPT_SLOPE_HEADER_BASELINES[row_key].split("(")[0],
+            )
+        )
+    )
+
+
+def _dpt_slope_data_header_write_names(row_key: str) -> tuple[str, ...]:
+    """数据页一条斜率列头可能的全部写法（模板原文 / 区间参数名 / 数据页基线）。"""
+
+    return tuple(
+        dict.fromkeys(
+            (
+                _DPT_SLOPE_HEADER_TEMPLATE_NAMES[row_key],
+                DPT_SLOPE_HEADER_NAMES[row_key],
+                DPT_SLOPE_DATA_HEADER_BASELINES[row_key],
             )
         )
     )
@@ -2857,8 +2896,10 @@ def _write_dpt_data(
         "Vce_off_max",
         _num(off.vce_off_max),
     )
-    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["dvdt"], "dv/dt"), result, "关断过程", "dv/dt", _num(off.dvdt))
-    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["didt"], "di/dt"), result, "关断过程", "di/dt", _num(off.didt))
+    # auto_max 模式下 R3 会写成 Dvdt_max / Didt_max，别名必须一起给，
+    # 否则列定位退回硬编码列号。
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["dvdt"], "dv/dt", "Dvdt_max", "Dvdt_max(V/ns)"), result, "关断过程", "dv/dt", _num(off.dvdt))
+    _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["didt"], "di/dt", "Didt_max", "Didt_max(A/ns)"), result, "关断过程", "di/dt", _num(off.didt))
     _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["ls_off"], "Ls_off"), result, "关断过程", "Ls_off", _num(off.ls_off))
     _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["toff"], "Toff"), result, "关断过程", "Toff", _num(off.toff))
     _set_dpt_metric_value(ws, row, col("关断过程", COL_OFF["td_off"], "Td_off"), result, "关断过程", "Td_off", _num(off.td_off))
@@ -2887,8 +2928,8 @@ def _write_dpt_data(
         "开通电流",
         _num(on.turn_on_current),
     )
-    _set_dpt_metric_value(ws, row, col("开通", COL_ON["dvdt"], "dv/dt"), result, "开通", "dv/dt", _num(on.dvdt))
-    _set_dpt_metric_value(ws, row, col("开通", COL_ON["didt"], "di/dt"), result, "开通", "di/dt", _num(on.didt))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["dvdt"], "dv/dt", "Dvdt_max", "Dvdt_max(V/ns)"), result, "开通", "dv/dt", _num(on.dvdt))
+    _set_dpt_metric_value(ws, row, col("开通", COL_ON["didt"], "di/dt", "Didt_max", "Didt_max(A/ns)"), result, "开通", "di/dt", _num(on.didt))
     _set_dpt_metric_value(ws, row, col("开通", COL_ON["ls_on"], "Ls_on"), result, "开通", "Ls_on", _num(on.ls_on))
     _set_dpt_metric_value(ws, row, col("开通", COL_ON["ton"], "Ton"), result, "开通", "Ton", _num(on.ton))
     _set_dpt_metric_value(ws, row, col("开通", COL_ON["td_on"], "Td_on"), result, "开通", "Td_on", _num(on.td_on))
@@ -2908,8 +2949,8 @@ def _write_dpt_data(
     _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["irr"], "Irr"), result, "反向恢复", "Irr", _num(rr.irr))
     _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["trr"], "Trr"), result, "反向恢复", "Trr", _num(rr.trr))
     _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["vrr"], "Vrr"), result, "反向恢复", "Vrr", _num(rr.vrr))
-    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["dvdt"], "Dvdt_max", "dv/dt"), result, "反向恢复", "dv/dt", _num(rr.dvdt_max))
-    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["didt"], "Didt_Irr", "di/dt"), result, "反向恢复", "di/dt", _num(rr.didt_irr))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["dvdt"], "Dvdt_max", "dv/dt", "Dvdt_max(V/ns)"), result, "反向恢复", "dv/dt", _num(rr.dvdt_max))
+    _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["didt"], "Didt_Irr", "di/dt", "Didt_Irr(A/ns)"), result, "反向恢复", "di/dt", _num(rr.didt_irr))
     _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["pdmax"], "Pdmax", require_header=True), result, "反向恢复", "Pdmax", _num(rr.pdmax, 3))
     _set_dpt_metric_value(ws, row, col("反向恢复", COL_RR["err"], "Err"), result, "反向恢复", "Err", _num(rr.err, 3))
 
@@ -3280,11 +3321,10 @@ def _image_aspect(image_path: str | Path) -> float | None:
 
 #: 嵌入报告前，波形图重采样到的**最长边**物理像素。
 #: 源抓图固定为 1280×960（``gui/main_window.py`` 的
-#: ``REPORT_PLOT_CAPTURE_SIZE``），Excel 里显示区是 320×240，最长边 960
-#: 相当于 3× 过采样，报告中放大或缩放阅读时小字仍然清晰。
-#: 以无损 PNG 嵌入（不再转 JPEG）：单张约 150KB，1955 张的完整报告约 300MB；
-#: 若直接嵌入 1280×960 原图则接近 500MB，体积换不来可读性收益。
-_EMBED_IMAGE_MAX_EDGE_PX = 960
+#: ``REPORT_PLOT_CAPTURE_SIZE``），这里取 1280 = **不再重采样**，
+#: 原图以无损 PNG 直接嵌入（显示区仍由单元格锚点决定为 320×240，
+#: 表格内尺寸与旧版一致，只有文件体积变大：单张约 250KB、整本约 500MB）。
+_EMBED_IMAGE_MAX_EDGE_PX = 1280
 
 
 def _embed_ready_image(path: str | Path) -> XLImage:
@@ -3293,7 +3333,8 @@ def _embed_ready_image(path: str | Path) -> XLImage:
     ``openpyxl`` 的 ``Image`` 只改写 drawing XML 里的显示尺寸，``xl/media``
     里的原始字节原样拷贝。源抓图是 1280×960，直接嵌入会让报告体积接近 500MB；
     这里在加载前用 Pillow 把最长边压到 :data:`_EMBED_IMAGE_MAX_EDGE_PX`
-    （960）并保存为 ``optimize=True`` 的无损 PNG，保持宽高比不变。
+    （1280；源图正好 1280 时不重采样）并保存为 ``optimize=True`` 的无损 PNG，
+    保持宽高比不变。
     重采样用面积平均（``BOX``）：LANCZOS 在 1280→960 缩放时会造出大量中间
     色，PNG 反而比 1280 原图更大（实测 275KB/张 vs 面积平均 165KB/张），
     而报告显示区只有 320×240，面积平均在 3× 过采样下依旧清晰。
@@ -3674,6 +3715,63 @@ def _apply_dpt_slope_header_labels(
             continue
         _set_range_value(ws, header, str(text))
         applied[row_key] = str(text)
+    return applied
+
+
+def dpt_data_slope_header_label(row_key: str, text: str | None) -> str | None:
+    """把波形页口径的斜率表头文本换算成数据页 R3 文本。
+
+    区间/预设模式两种页面完全相同（`dv/dt(10%-90%)`）；`auto_max` 模式
+    波形页写的是带单位的基线原文（`Dvdt_max(V/ns)`），数据页 R4 已有单位行，
+    所以这里只保留参数名（`Dvdt_max` / `Didt_Irr`），不重复写单位。
+    """
+
+    if not text:
+        return None
+    if str(text) == DPT_SLOPE_HEADER_BASELINES[row_key]:
+        return DPT_SLOPE_DATA_HEADER_BASELINES[row_key]
+    return str(text)
+
+
+def _find_dpt_data_slope_header(ws: Worksheet, row_key: str) -> int | None:
+    """按分区列范围定位数据页 R3 的一条斜率列头。
+
+    表头可能已被改名为 `dv/dt(10%-90%)`（区间）或 `Dvdt_max`（auto_max），
+    因此模板原文、区间参数名、数据页基线三种写法都要试；定位收窄在分区列
+    范围内，避免三个分区同名的 dv/dt(...) 互相串列。
+    """
+
+    section = _DPT_SLOPE_DATA_SECTIONS[row_key]
+    return _dpt_header_col(
+        ws,
+        section,
+        _dpt_slope_data_header_write_names(row_key),
+    )
+
+
+def _apply_dpt_data_slope_header_labels(
+    ws: Worksheet,
+    labels: Mapping[str, str | None] | None,
+) -> dict[str, str]:
+    """按 row_key 改写数据页 R3 的六个斜率列头。
+
+    只改 R3 文本：R4 单位行、样式、合并区、行高列宽与数值一律不动；
+    None / 缺省 / 空串表示保留当前文本（与波形页同语义）。列位置沿用文字
+    定位，不写死列号。
+    """
+
+    if not labels:
+        return {}
+    applied: dict[str, str] = {}
+    for row_key in DPT_SLOPE_HEADER_NAMES:
+        text = dpt_data_slope_header_label(row_key, labels.get(row_key))
+        if not text:
+            continue
+        col = _find_dpt_data_slope_header(ws, row_key)
+        if col is None:
+            continue
+        _set_merged_cell_value(ws, HEADER_NAME_ROW, col, text)
+        applied[row_key] = text
     return applied
 
 
@@ -5113,6 +5211,9 @@ def write_report_template(
     for row, row_result in zip(data_rows, results):
         _write_dpt_data(data_ws, row, row_result, dpt_report_conditions)
     _normalize_dpt_data_temperature_cells(data_ws, temperature_labels)
+    # 数据页 R3 的六个斜率列头按本次取值范围改名；必须在数据行写完、列定位
+    # 用过之后执行（改名前后的写法都由别名兜住），R4 单位行绝不触碰。
+    _apply_dpt_data_slope_header_labels(data_ws, slope_header_labels)
     emit(2, "写入报告数据")
     if waveform_ws is not None:
         _sync_dpt_waveform_insertions(waveform_ws, data_ws, data_targets)

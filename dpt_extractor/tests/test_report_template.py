@@ -705,6 +705,8 @@ class TestReportTemplateWriter(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as td:
+            # 源抓图本身就是 1280×960：上限取 1280，因此**不重采样**，原样无损嵌入。
+            self.assertEqual(_EMBED_IMAGE_MAX_EDGE_PX, 1280)
             capture = Path(td) / "scope_1280x960.png"
             _write_rgb_png(capture, (1280, 960))
 
@@ -712,11 +714,17 @@ class TestReportTemplateWriter(unittest.TestCase):
             payload = embedded._data()
             self.assertTrue(payload.startswith(b"\x89PNG"))
             self.assertNotEqual(embedded.format, "jpeg")
-            self.assertLessEqual(max(embedded.width, embedded.height), _EMBED_IMAGE_MAX_EDGE_PX)
-            self.assertEqual(_EMBED_IMAGE_MAX_EDGE_PX, 960)
             with PILImage.open(io.BytesIO(payload)) as stored:
-                self.assertEqual(max(stored.size), 960)
+                self.assertEqual(stored.size, (1280, 960))
                 self.assertAlmostEqual(stored.width / stored.height, 1280 / 960, places=3)
+
+            # 超过上限的抓图按最长边缩到 1280，保持宽高比。
+            huge = Path(td) / "scope_2560x1920.png"
+            _write_rgb_png(huge, (2560, 1920))
+            scaled = _embed_ready_image(huge)
+            with PILImage.open(io.BytesIO(scaled._data())) as stored_big:
+                self.assertEqual(max(stored_big.size), 1280)
+                self.assertAlmostEqual(stored_big.width / stored_big.height, 4 / 3, places=3)
 
             # 小于上限的抓图不能被放大，否则报告体积白白膨胀。
             small = Path(td) / "scope_640x480.png"
@@ -5085,6 +5093,312 @@ class TestReportSlopeHeaderWriting(unittest.TestCase):
             self.assertEqual(len(wave._images), 2)
             self.assertEqual(wave["AH35"].value, "Dvdt_max(V/ns)")
             self.assertEqual(wave["AP35"].value, "Didt_Irr(A/ns)")
+
+
+#: 双脉冲数据页的列名行 / 单位行（与 dpt_extractor.export.mcu2506_layout 一致，
+#: 由 test_data_page_baselines_and_label_conversion 核对）。
+_HEADER_NAME_ROW = 3
+_HEADER_UNIT_ROW = 4
+
+
+def _build_data_slope_header_template(path: Path) -> Workbook:
+    """最小 U 相报告：完整 R1–R4 列头 + 一个 UH/25℃ 数据组。
+
+    R3 用模板原文（dv/dt / Dvdt_max …），R4 是单位行。数据页表头改名的红线
+    是只改 R3 六个斜率格，R4 一格不动，因此这里保留规范列序与单位原文。
+    返回模板工作簿本身，供调用方在写盘前另存一份未写入的参照。
+    """
+
+    from dpt_extractor.export.mcu2506_layout import COL_CONDITION, build_mcu2506_workbook
+
+    wb = build_mcu2506_workbook()
+    ws = wb.active
+    ws.title = "U相_双脉冲数据"
+    for col in (1, 2, COL_CONDITION):
+        ws.merge_cells(start_row=5, start_column=col, end_row=8, end_column=col)
+    ws.cell(5, 1, "UH")
+    ws.cell(5, 2, "25℃")
+    wb.save(path)
+    return wb
+
+
+#: 数据页六个斜率列（规范列序：关断 I/J、开通 V/W、反向恢复 AH/AI）。
+_DATA_SLOPE_COLUMNS = {
+    "off_dvdt": 9,
+    "off_didt": 10,
+    "on_dvdt": 22,
+    "on_didt": 23,
+    "rr_dvdt": 34,
+    "rr_didt": 35,
+}
+
+#: 写入器定位六个斜率列时使用的别名（含改名后的写法）。测试用错位兜底列号
+#: 调 _dpt_metric_col，命中只能来自表头别名，否则会返回兜底列号。
+_DATA_SLOPE_ALIASES = {
+    "关断过程": (
+        (9, ("dv/dt", "Dvdt_max", "Dvdt_max(V/ns)")),
+        (10, ("di/dt", "Didt_max", "Didt_max(A/ns)")),
+    ),
+    "开通": (
+        (22, ("dv/dt", "Dvdt_max", "Dvdt_max(V/ns)")),
+        (23, ("di/dt", "Didt_max", "Didt_max(A/ns)")),
+    ),
+    "反向恢复": (
+        (34, ("Dvdt_max", "dv/dt", "Dvdt_max(V/ns)")),
+        (35, ("Didt_Irr", "di/dt", "Didt_Irr(A/ns)")),
+    ),
+}
+
+#: 每个斜率列写入的独立数值，用来证明列定位没被改名打断。
+_DATA_SLOPE_VALUES = {
+    "off_dvdt": 11.5,
+    "off_didt": 12.5,
+    "on_dvdt": 13.5,
+    "on_didt": 14.5,
+    "rr_dvdt": 15.5,
+    "rr_didt": 16.5,
+}
+
+
+class TestReportDataSlopeHeaderWriting(unittest.TestCase):
+    """双脉冲数据页 R3 六个斜率列头按取值范围命名，R4 单位行不动。"""
+
+    def _result(self):
+        from dpt_extractor.models.results import ExtractResult
+
+        result = ExtractResult(
+            source_path=str(Path("samples") / "RT" / "UH_750V_1050A_000.tss"),
+            profile_code="UH",
+        )
+        result.turn_off.dvdt = _DATA_SLOPE_VALUES["off_dvdt"]
+        result.turn_off.didt = _DATA_SLOPE_VALUES["off_didt"]
+        result.turn_on.dvdt = _DATA_SLOPE_VALUES["on_dvdt"]
+        result.turn_on.didt = _DATA_SLOPE_VALUES["on_didt"]
+        result.reverse_recovery.dvdt_max = _DATA_SLOPE_VALUES["rr_dvdt"]
+        result.reverse_recovery.didt_irr = _DATA_SLOPE_VALUES["rr_didt"]
+        return result
+
+    def _write(self, report: Path, *, labels: dict[str, str | None] | None = None):
+        from dpt_extractor.export.report_template import write_report_template
+
+        return write_report_template(
+            self._result(),
+            report,
+            images={},
+            slope_header_labels=labels,
+        )
+
+    @staticmethod
+    def _range_labels() -> dict[str, str]:
+        from dpt_extractor.export.report_template import (
+            DPT_SLOPE_HEADER_NAMES,
+            dpt_slope_header_label,
+        )
+        from dpt_extractor.models.slope_range import default_slope_ranges
+
+        ranges = default_slope_ranges()
+        return {
+            key: dpt_slope_header_label(key, ranges[key])
+            for key in DPT_SLOPE_HEADER_NAMES
+        }
+
+    @staticmethod
+    def _auto_max_labels() -> dict[str, str]:
+        from dpt_extractor.export.report_template import (
+            DPT_SLOPE_HEADER_NAMES,
+            dpt_slope_header_label,
+        )
+        from dpt_extractor.models.slope_range import auto_max_slope_range
+
+        return {
+            key: dpt_slope_header_label(key, auto_max_slope_range(key))
+            for key in DPT_SLOPE_HEADER_NAMES
+        }
+
+    @staticmethod
+    def _header_row(ws, row: int) -> list:
+        return [ws.cell(row, col).value for col in range(1, 41)]
+
+    def _unit_row(self, ws) -> list:
+        return self._header_row(ws, _HEADER_UNIT_ROW)
+
+    def _assert_header_lookup_resolves(self, ws) -> None:
+        """R3 无论写成 dv/dt(...) 还是 Dvdt_max，都必须按表头命中目标列。"""
+
+        from dpt_extractor.export.report_template import _dpt_metric_col
+
+        for section, items in _DATA_SLOPE_ALIASES.items():
+            for col, aliases in items:
+                self.assertEqual(
+                    _dpt_metric_col(ws, section, 999, *aliases),
+                    col,
+                    f"{section}/{aliases[0]}/{ws.cell(_HEADER_NAME_ROW, col).value}",
+                )
+
+    def test_data_page_baselines_and_label_conversion(self):
+        from dpt_extractor.export.mcu2506_layout import (
+            HEADER_NAME_ROW as LAYOUT_NAME_ROW,
+            HEADER_UNIT_ROW as LAYOUT_UNIT_ROW,
+        )
+        from dpt_extractor.export.report_template import (
+            DPT_SLOPE_DATA_HEADER_BASELINES,
+            DPT_SLOPE_HEADER_BASELINES,
+            dpt_data_slope_header_label,
+        )
+
+        self.assertEqual((_HEADER_NAME_ROW, _HEADER_UNIT_ROW), (LAYOUT_NAME_ROW, LAYOUT_UNIT_ROW))
+
+        # auto_max：数据页不带宽窄单位（R4 已有单位行）
+        self.assertEqual(
+            DPT_SLOPE_DATA_HEADER_BASELINES,
+            {
+                "off_dvdt": "Dvdt_max",
+                "off_didt": "Didt_max",
+                "on_dvdt": "Dvdt_max",
+                "on_didt": "Didt_max",
+                "rr_dvdt": "Dvdt_max",
+                "rr_didt": "Didt_Irr",
+            },
+        )
+        for key, data_text in DPT_SLOPE_DATA_HEADER_BASELINES.items():
+            # 波形页基线（带单位）换算成数据页文本
+            self.assertEqual(
+                dpt_data_slope_header_label(key, DPT_SLOPE_HEADER_BASELINES[key]),
+                data_text,
+                key,
+            )
+            # 区间/预设标注原样保留
+            self.assertEqual(
+                dpt_data_slope_header_label(key, "dv/dt(10%-90%)"),
+                "dv/dt(10%-90%)",
+                key,
+            )
+            self.assertIsNone(dpt_data_slope_header_label(key, None), key)
+
+    def test_percentage_ranges_rename_data_headers_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "data_slope_percentage.xlsx"
+            _build_data_slope_header_template(report)
+            pristine_unit_row = self._unit_row(
+                load_workbook(report)["U相_双脉冲数据"]
+            )
+
+            self._write(report, labels=self._range_labels())
+
+            data = load_workbook(report)["U相_双脉冲数据"]
+            # R3：与波形页同一口径（区间/自定义预设）
+            self.assertEqual(data.cell(_HEADER_NAME_ROW, 9).value, "dv/dt(10%-90%)")
+            self.assertEqual(data.cell(_HEADER_NAME_ROW, 10).value, "di/dt(90%-10%)")
+            self.assertEqual(data.cell(_HEADER_NAME_ROW, 22).value, "dv/dt(90%-10%)")
+            self.assertEqual(data.cell(_HEADER_NAME_ROW, 23).value, "di/dt(10%-90%)")
+            self.assertEqual(data.cell(_HEADER_NAME_ROW, 34).value, "dv/dt(10%-90%)")
+            self.assertEqual(data.cell(_HEADER_NAME_ROW, 35).value, "di/dt(90%-10%)")
+            # R4：单位行逐格未变
+            self.assertEqual(self._unit_row(data), pristine_unit_row)
+            self._assert_header_lookup_resolves(data)
+            # 数值仍落在改名前的同一列
+            for key, col in _DATA_SLOPE_COLUMNS.items():
+                self.assertEqual(
+                    data.cell(5, col).value,
+                    _DATA_SLOPE_VALUES[key],
+                    key,
+                )
+
+    def test_auto_max_data_headers_drop_units(self):
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "data_slope_auto_max.xlsx"
+            _build_data_slope_header_template(report)
+            pristine_unit_row = self._unit_row(
+                load_workbook(report)["U相_双脉冲数据"]
+            )
+
+            self._write(report, labels=self._auto_max_labels())
+
+            data = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(
+                [data.cell(_HEADER_NAME_ROW, col).value for col in (9, 10, 22, 23, 34, 35)],
+                ["Dvdt_max", "Didt_max", "Dvdt_max", "Didt_max", "Dvdt_max", "Didt_Irr"],
+            )
+            self.assertEqual(self._unit_row(data), pristine_unit_row)
+            self._assert_header_lookup_resolves(data)
+            for key, col in _DATA_SLOPE_COLUMNS.items():
+                self.assertEqual(data.cell(5, col).value, _DATA_SLOPE_VALUES[key], key)
+
+    def test_renamed_data_headers_keep_column_lookup_both_ways(self):
+        # 改名后列定位必须仍能命中：auto_max(Dvdt_max) 与区间(dv/dt(...)) 互相
+        # 切换后都要继续写进同一列，否则数值会退回硬编码列号甚至串列。
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "data_slope_switch.xlsx"
+            _build_data_slope_header_template(report)
+            data = load_workbook(report)["U相_双脉冲数据"]
+            pristine_unit_row = self._unit_row(data)
+
+            # 第一趟：auto_max（R3 = Dvdt_max / Didt_Irr …）
+            self._write(report, labels=self._auto_max_labels())
+            data = load_workbook(report)["U相_双脉冲数据"]
+            for key, col in _DATA_SLOPE_COLUMNS.items():
+                self.assertEqual(data.cell(5, col).value, _DATA_SLOPE_VALUES[key], key)
+            self._assert_header_lookup_resolves(data)
+
+            # 第二趟：区间模式（R3 换成 dv/dt(...)，仍按表头定位）
+            self._write(report, labels=self._range_labels())
+            data = load_workbook(report)["U相_双脉冲数据"]
+            for key, col in _DATA_SLOPE_COLUMNS.items():
+                self.assertEqual(data.cell(5, col).value, _DATA_SLOPE_VALUES[key], key)
+            self.assertEqual(self._unit_row(data), pristine_unit_row)
+            self._assert_header_lookup_resolves(data)
+
+            # 第三趟：切回 auto_max，R3 回到不带单位的基线，列定位继续有效
+            self._write(report, labels=self._auto_max_labels())
+            data = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(data.cell(_HEADER_NAME_ROW, 34).value, "Dvdt_max")
+            self.assertEqual(data.cell(_HEADER_NAME_ROW, 35).value, "Didt_Irr")
+            for key, col in _DATA_SLOPE_COLUMNS.items():
+                self.assertEqual(data.cell(5, col).value, _DATA_SLOPE_VALUES[key], key)
+            self.assertEqual(self._unit_row(data), pristine_unit_row)
+            self._assert_header_lookup_resolves(data)
+
+    def test_writer_resolves_slope_columns_by_header_not_fallback(self):
+        # 把写入器六个斜率列的兜底列号故意挪到 41/42（表外）：只有表头别名
+        # 命中才能写回 9/10/22/23/34/35。auto_max 与区间两种写法都要成立，
+        # 这条锁住 _write_dpt_data 的别名列表（Dvdt_max/Didt_max/Didt_Irr）。
+        from unittest import mock
+
+        from dpt_extractor.export import report_template
+
+        shifted = {"dvdt": 41, "didt": 42}
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "data_slope_fallback.xlsx"
+            _build_data_slope_header_template(report)
+
+            for labels in (self._auto_max_labels(), self._range_labels()):
+                with mock.patch.dict(report_template.COL_OFF, shifted),                         mock.patch.dict(report_template.COL_ON, shifted),                         mock.patch.dict(report_template.COL_RR, shifted):
+                    self._write(report, labels=labels)
+                data = load_workbook(report)["U相_双脉冲数据"]
+                for key, col in _DATA_SLOPE_COLUMNS.items():
+                    self.assertEqual(
+                        data.cell(5, col).value,
+                        _DATA_SLOPE_VALUES[key],
+                        key,
+                    )
+                # 从未写到表外的兜底列
+                self.assertIsNone(data.cell(5, 41).value)
+                self.assertIsNone(data.cell(5, 42).value)
+
+    def test_missing_mapping_keeps_data_headers_untouched(self):
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "data_slope_default.xlsx"
+            _build_data_slope_header_template(report)
+            pristine = load_workbook(report)["U相_双脉冲数据"]
+            pristine_name_row = self._header_row(pristine, _HEADER_NAME_ROW)
+
+            self._write(report)
+
+            data = load_workbook(report)["U相_双脉冲数据"]
+            self.assertEqual(self._header_row(data, _HEADER_NAME_ROW), pristine_name_row)
+            self.assertEqual(self._unit_row(data), self._unit_row(pristine))
+            for key, col in _DATA_SLOPE_COLUMNS.items():
+                self.assertEqual(data.cell(5, col).value, _DATA_SLOPE_VALUES[key], key)
 
 
 if __name__ == "__main__":
