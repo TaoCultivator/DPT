@@ -79,6 +79,8 @@ class _CapturePlot:
         anchor_fraction: float = 0.12,
         prefer_right_room: bool = False,
         minimum_span_us: float | None = None,
+        min_margin_fraction: float = 0.0,  # noqa: ARG002
+        center_required: bool = False,  # noqa: ARG002
     ) -> tuple[float, tuple[float, ...], float, bool]:
         _ = minimum_span_us
         return anchor_us, required_times_us, anchor_fraction, prefer_right_room
@@ -125,10 +127,26 @@ class TestCrosstalkCursorDisplayAudit(unittest.TestCase):
     def test_only_nearest_in_event_extrema_pass(self):
         t = np.arange(9) * 1e-6
         vge = np.asarray([99, -4, -8, -8, -4, -12, -8, -4, -99])
+        # 2026-11-18: 默认窗口允许比「最近极值对」更宽，但必须覆盖段内极值。
         self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 4.0, 5.0), [])
-        for pair in ((1.0, 5.0), (0.0, 8.0), (2.0, 5.0), (4.1, 5.0)):
+        self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 2.0, 5.0), [])
+        self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 1.0, 5.0), [])
+        for pair in ((1.0, 4.0), (0.0, 8.0), (4.0, 4.0), (4.1, 5.0)):
             with self.subTest(pair=pair):
                 self.assertTrue(_crosstalk_cursor_display_problems(t, vge, (1, 8), *pair))
+
+    def test_minimum_span_is_enforced_against_the_event_length(self):
+        t = np.arange(0, 60) * 10e-9
+        vge = np.full(len(t), -5.0)
+        vge[20] = 3.0
+        vge[23] = -16.0  # 极值只差 30ns，小于 50ns 最小跨度
+        self.assertTrue(
+            _crosstalk_cursor_display_problems(t, vge, (0, len(t)), 200e-3, 230e-3)
+        )
+        self.assertEqual(
+            _crosstalk_cursor_display_problems(t, vge, (0, len(t)), 200e-3, 250e-3),
+            [],
+        )
 
     def test_flat_event_may_keep_full_window(self):
         self.assertEqual(
@@ -156,7 +174,7 @@ class TestCrosstalkCursorDisplayAudit(unittest.TestCase):
             rows = audit_file(MainWindow, QApplication, app, path)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][3], "FAIL")
-        self.assertIn("串扰A/B未分别覆盖", rows[0][4])
+        self.assertIn("串扰", rows[0][4])
 
 
 class TestTurnOffSlopeContextAudit(unittest.TestCase):
@@ -555,14 +573,13 @@ class TestCursorAuditCapture(unittest.TestCase):
                     self.assertIn(token, roles)
 
         ic_off_roles = DPT_PARAMETER_CURSOR_ROLES[("关断过程", "Ic_off_max")]
-        self.assertIn("A=Vce", ic_off_roles)
-        self.assertIn("B=Ic", ic_off_roles)
-        self.assertIn("Base稳定", ic_off_roles)
-        self.assertIn("A=Ic", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
-        self.assertIn("B=Ic", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
-        self.assertIn("Top稳定段", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
-        self.assertIn("A=Vce", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
-        self.assertIn("B=Vce", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
+        # 2026-11-18: 极值卡 A/B 统一为「峰值∓300ns(+阶段包络)」口径。
+        self.assertIn("300ns", ic_off_roles)
+        self.assertIn("Hb=Ic Base", ic_off_roles)
+        self.assertIn("Ic", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
+        self.assertIn("Top", DPT_PARAMETER_CURSOR_ROLES[("开通", "Ic_on_max")])
+        self.assertIn("300ns", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
+        self.assertIn("Vce", DPT_PARAMETER_CURSOR_ROLES[("开通", "Vce_on_max")])
 
     def test_dpt_endpoint_and_horizontal_matrices_fail_closed(self) -> None:
         dynamic_power = {

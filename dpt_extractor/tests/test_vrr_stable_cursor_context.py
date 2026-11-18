@@ -20,6 +20,26 @@ from dpt_extractor.models.results import ExtractResult, SegmentIndices
 from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
 
 
+
+
+def _assert_peak_union_span(host, a_idx, b_idx, peak_idx, stage=None):
+    """Assert the 2026-11-18 default interval contract.
+
+    ``物理阶段包络 ∪ 峰值∓300ns``: both sides are at least 300 ns unless the
+    data itself ends, the peak is inside the interval, and when a stage
+    bracket is supplied the interval must cover it.
+    """
+
+    n = len(host.bundle.t)
+    half = max(1, int(round(300e-9 / max(float(host.bundle.dt), 1e-15))))
+    assert 0 <= a_idx < b_idx <= n - 1
+    assert a_idx <= peak_idx <= b_idx
+    assert peak_idx - a_idx >= min(half, peak_idx)
+    assert b_idx - peak_idx >= min(half, n - 1 - peak_idx)
+    if stage is not None:
+        assert a_idx <= int(stage[0])
+        assert b_idx >= int(stage[1])
+
 def _host(ring_end=1300, *, temporary_gap=False, incomplete=False):
     dt = 1e-9
     voltage = np.full(4200, 5.0)
@@ -51,28 +71,36 @@ def _host(ring_end=1300, *, temporary_gap=False, incomplete=False):
 
 
 @pytest.mark.parametrize("ring_end", [1050, 2400])
-def test_vrr_uses_nearest_complete_base_and_first_settled_top(ring_end):
+def test_vrr_default_span_is_peak_centred_300ns(ring_end):
+    """2026-11-18: default A/B = authoritative Vrr peak +/- 300 ns."""
     host = _host(ring_end)
     before = copy.deepcopy(host.result)
     context = MainWindow._rr_vrr_cursor_context(host)
     assert context is not None
     a, b, top = context
-    assert 480 <= a < 600  # Not clipped to turn_on[0] inside the rise.
-    assert ring_end + 85 <= b <= ring_end + 120
-    assert a < 700 < b < host.result.segments.pulse2_off
     voltage = host.bundle.get(host.profile.v_diode)
-    assert np.ptp(voltage[a-90:a+90]) == 0.0
-    assert np.ptp(voltage[b-90:b+90]) == 0.0
-    assert (voltage[a], voltage[b], top) == (5.0, 400.0, 400.0)
+    i0, i1 = host.result.segments.turn_on
+    peak = i0 + int(np.argmax(voltage[i0:i1]))
+    _assert_peak_union_span(host, a, b, peak)
+    assert a < peak < b < host.result.segments.pulse2_off
+    # 窗口内最大值 == 权威 Vrr 数值（口径不变）。
+    assert float(np.max(voltage[a : b + 1])) == pytest.approx(host.result.reverse_recovery.vrr)
+    # 第三个返回值仍是稳定 Top 参考电平，不受 A/B 口径影响。
+    assert top == 400.0
     assert host.result == before
     assert MainWindow._rr_vrr_cursor_context(host) is context
 
 
 def test_vrr_temporary_quiet_gap_cannot_hide_later_rebound():
+    """A quiet gap must not be adopted as the stable Top reference level."""
     host = _host(1500, temporary_gap=True)
     context = MainWindow._rr_vrr_cursor_context(host)
     assert context is not None
-    assert 1585 <= context[1] <= 1620
+    voltage = host.bundle.get(host.profile.v_diode)
+    i0, i1 = host.result.segments.turn_on
+    peak = i0 + int(np.argmax(voltage[i0:i1]))
+    _assert_peak_union_span(host, context[0], context[1], peak)
+    assert context[2] == 400.0
 
 
 def test_vrr_missing_stable_top_does_not_select_least_bad_ringing():
@@ -91,7 +119,10 @@ def test_vrr_sustained_moderate_ringing_cannot_set_its_own_noise_floor(ring_end)
         assert context is None
     else:
         assert context is not None
-        assert ring_end + 85 <= context[1] <= ring_end + 120
+        i0, i1 = host.result.segments.turn_on
+        peak = i0 + int(np.argmax(voltage[i0:i1]))
+        _assert_peak_union_span(host, context[0], context[1], peak)
+        assert context[2] == 400.0
 
 
 @pytest.mark.parametrize("missing_band", ["base", "top", "peak", "short_base"])
@@ -133,15 +164,18 @@ def test_real_vrr_bands_preserve_peak_horizontal_levels_and_result(temperature, 
     a, b, top = context
     voltage = bundle.get(profile.v_diode)
     slope = result.dvdt_contexts[("反向恢复", "dv/dt")]
-    span = slope.top_v - slope.base_v
     i0, i1 = result.segments.turn_on
     peak = i0 + int(np.argmax(voltage[i0:i1]))
-    assert a < peak < b < result.segments.pulse2_off
-    radius = round(95e-9 / bundle.dt)
-    for index, level in ((a, slope.base_v), (b, slope.top_v)):
-        band = np.abs(voltage[index-radius:index+radius])
-        assert abs(np.median(band) - level) < 0.04 * span
-        assert np.ptp(np.percentile(band, [5, 95])) < 0.035 * span
+    # 2026-11-18: default A/B = authoritative Vrr peak +/- 300 ns (clipped to
+    # the turn-on event window); the numeric Vrr and the stable Top reference
+    # stay untouched.
+    assert 0 <= a < peak < b <= len(voltage) - 1
+    assert a < b < result.segments.pulse2_off
+    # 数值中性：默认区间内的电压最大值不得超过「提取 Vrr 与该样例稳定 Top」
+    # 的上界（少数样例的提取 Vrr 低于波形实测 Top，故不外推等号）。
+    assert float(np.max(voltage[a : b + 1])) <= max(
+        float(result.reverse_recovery.vrr), float(slope.top_v)
+    ) + 1e-6
     assert top == slope.top_v
     assert result == before
 
@@ -233,4 +267,5 @@ def test_real_vrr_audit_rejects_peak_as_top_even_when_context_agrees(monkeypatch
     vrr_rows = [row for row in rows if row[1:3] == ("反向恢复", "Vrr")]
     assert len(vrr_rows) == 1
     assert vrr_rows[0][3] == "FAIL"
-    assert "Vrr B周围电压带仍有振荡或偏离稳定平台" in vrr_rows[0][4]
+    # 2026-11-18 起的审计判据是「B = 峰值右侧 300ns」；把 B 顶到峰值即失败。
+    assert "Vrr 权威峰值不在默认A/B区间内" in vrr_rows[0][4]

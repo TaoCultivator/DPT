@@ -15,6 +15,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 ROOT = Path(__file__).resolve().parents[2]
+from dpt_extractor.gui.main_window import EXTREME_MAX_INTERVAL_NAMES
 from dpt_extractor.tests.sample_paths import sample_tss
 
 WH = sample_tss("WH_480V_800A_000.tss")
@@ -6836,14 +6837,22 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     ta, tb = float(plot._cursor_a.value()), float(plot._cursor_b.value())
                     i0, i1 = indices
                     segment = vgo[i0:i1]
-                    high_times = bundle.t[i0 + np.flatnonzero(segment == np.max(segment))] * 1e6
-                    low_times = bundle.t[i0 + np.flatnonzero(segment == np.min(segment))] * 1e6
-                    self.assertTrue(
-                        (ta in high_times and tb in low_times)
-                        or (ta in low_times and tb in high_times)
+                    # 2026-11-18 (P2-2): 默认窗口不再钉死在最近极值对（22~35ns），
+                    # 而是至少 50ns 跨度、落在采样点上、仍覆盖段内 max/min。
+                    lo_idx = int(np.searchsorted(bundle.t, min(ta, tb) * 1e-6, side="left"))
+                    hi_idx = int(np.searchsorted(bundle.t, max(ta, tb) * 1e-6, side="left"))
+                    self.assertAlmostEqual(
+                        float(bundle.t[lo_idx] * 1e6), min(ta, tb), places=9
                     )
-                    closest = min(float(np.min(np.abs(low_times - high))) for high in high_times)
-                    self.assertAlmostEqual(tb - ta, closest, places=9)
+                    self.assertAlmostEqual(
+                        float(bundle.t[hi_idx] * 1e6), max(ta, tb), places=9
+                    )
+                    window = vgo[lo_idx : hi_idx + 1]
+                    self.assertEqual(float(np.max(window)), float(np.max(segment)))
+                    self.assertEqual(float(np.min(window)), float(np.min(segment)))
+                    event_span_ns = abs(float(bundle.t[i1 - 1] - bundle.t[i0])) * 1e9
+                    min_span_ns = min(50.0, event_span_ns)
+                    self.assertGreaterEqual(abs(tb - ta) * 1e3, min_span_ns - 1e-6)
                     for which, cursor, value in (
                         ("ha", plot._h_cursor_a, state.crosstalk_vmax),
                         ("hb", plot._h_cursor_b, state.crosstalk_vmin),
@@ -6988,7 +6997,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         SONG_SMC_RT_20260717_UH_806.exists(),
         "songzhenxi 20260717 RT UH 750V/806A sample missing",
     )
-    def test_ic_off_max_default_range_spans_vce_base_to_ic_base(self):
+    def test_ic_off_max_default_range_centres_extraction_peak_with_300ns_span(self):
         import numpy as np
 
         from dpt_extractor.gui.main_window import MainWindow
@@ -7020,27 +7029,26 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             self.assertAlmostEqual(interval[1], expected_b_us, places=9)
 
             ic = bundle_total_current(win.bundle, win.profile)
-            vce = win.bundle.get(win.profile.vce)
-            vce_base, vce_top = turn_off_dvdt_base_top_levels(
-                win.bundle.t,
-                vce,
-                segs.turn_off[0],
-                segs.turn_off[1],
-            )
-            vce_span = max(abs(vce_top - vce_base), 1.0)
+            peak_point = win._turn_off_ic_off_max_default_peak_point()
+            self.assertIsNotNone(peak_point)
+            assert peak_point is not None
+            peak_idx, expected_peak_signed = peak_point
+            # 2026-11-18 用户拍板：默认 A/B 是以提取峰值为中心、左右各 300ns
+            # 的显示取值区间（按 dt 取整、夹到关断窗内），不再是
+            # 「A=Vce 抬升前 Base / B=Ic 抬升前 Base」。
+            dt = float(win.bundle.dt)
+            half = max(1, int(round(300e-9 / dt)))
+            self.assertEqual(expected_a_idx, peak_idx - half)
+            self.assertEqual(expected_b_idx, peak_idx + half)
             self.assertAlmostEqual(
-                float(vce[expected_a_idx]),
-                float(vce_base),
-                delta=max(1.0, 0.04 * vce_span),
-            )
-            ic_span = max(
-                abs(float(win.result.turn_off.ic_off_max) - expected_ic_base),
-                1.0,
+                float(win.bundle.t[peak_idx] - win.bundle.t[expected_a_idx]) * 1e9,
+                300.0,
+                delta=dt * 1e9 + 1e-6,
             )
             self.assertAlmostEqual(
-                float(ic[expected_b_idx]),
-                float(expected_ic_base),
-                delta=max(1.0, 0.04 * ic_span),
+                float(win.bundle.t[expected_b_idx] - win.bundle.t[peak_idx]) * 1e9,
+                300.0,
+                delta=dt * 1e9 + 1e-6,
             )
             i0 = int(
                 np.searchsorted(win.bundle.t, interval[0] * 1e-6, side="left")
@@ -7048,12 +7056,13 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             i1 = int(
                 np.searchsorted(win.bundle.t, interval[1] * 1e-6, side="right")
             )
-            peak_rel = int(np.argmax(np.abs(ic[i0:i1])))
-            peak_idx = i0 + peak_rel
-            expected_peak_signed = float(ic[peak_idx])
             expected_peak = abs(expected_peak_signed)
             value_before = float(win.result.turn_off.ic_off_max)
             self.assertAlmostEqual(expected_peak, value_before, places=9)
+            # 数值口径不变：区间内 |Ic| 最大值 == 提取峰值（峰值必在窗内）。
+            self.assertAlmostEqual(
+                float(np.max(np.abs(ic[i0:i1]))), value_before, places=9
+            )
             self.assertLess(interval[0], float(win.bundle.t[peak_idx] * 1e6))
             self.assertLess(float(win.bundle.t[peak_idx] * 1e6), interval[1])
 
@@ -7128,24 +7137,22 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             b_us = float(win.bundle.t[b_idx] * 1e6)
             peak_us = float(win.bundle.t[peak_idx] * 1e6)
 
-            # 2026-10-16 用户拍板「② 关断 Ic_off_max 的 B 落点 = 甲 · 稳定抬升前 Base」：
-            # B 取 di/dt 上下文 `base_window`（Ic 主抬升前的稳定 Base 窗）内最接近该
-            # Base 电平的代表点。生产实现见
-            # `gui/main_window.py::_turn_off_ic_off_max_cursor_context` 内的同拍板注释。
-            # 旧期望 `11.641us` 属已被用户否决的乙口径（Ic 主下降后首个稳定带中心），
-            # 与 `docs/REGRESSION_BASELINES.md` 中 `B=11.644us` 的真实 GUI 观察锚点同源，
-            # 现只保留为历史追溯，不得再作为当前默认卡值或审计期望
-            # （`docs/REGRESSION_BASELINES.md` 2026-08-31 节「现行边界」）。
-            # 原断言的「A≈20% / B≈50%」人工图二构图同样是乙口径的产物，随口径一并
-            # 更新为下文的甲口径实测比例（2026-10-16 探针复测，见本卡报告）。
-            base_window = tuple(int(value) for value in didt_context.base_window)
-            base_window_a_us = float(win.bundle.t[base_window[0]] * 1e6)
-            base_window_b_us = float(win.bundle.t[base_window[1]] * 1e6)
-
-            self.assertAlmostEqual(a_us, 10.884, delta=0.03)
-            self.assertAlmostEqual(b_us, 13.083520, delta=0.03)
-            self.assertGreaterEqual(b_us, base_window_a_us)
-            self.assertLessEqual(b_us, base_window_b_us)
+            # 历史追溯（均已作废，不得再作为默认卡值或审计期望）：
+            # 乙口径（2026-08-31）B=Ic 主下降后首个稳定 200ns 带中心，锚点 `11.644us`；
+            # 甲口径（2026-10-16）A=Vce 抬升前 Base、B=di/dt `base_window` 内最接近
+            # Base 电平的代表点，锚点 A=`10.884us`/B=`13.083520us`。
+            # 2026-11-18 用户拍板：默认 A/B = 提取峰值 ±300ns 的显示取值区间。
+            # 旧期望 A=10.884us / B=13.083520us（A=Vce 抬升前 Base、B=di/dt
+            # `base_window` 内最接近 Base 电平的代表点，跨度 2.200us）已作废，
+            # 只保留为历史追溯；数值、Ha、Hb 与本口径无关，仍逐位不变。
+            dt = float(win.bundle.dt)
+            half = max(1, int(round(300e-9 / dt)))
+            self.assertEqual(a_idx, peak_idx - half)
+            self.assertEqual(b_idx, peak_idx + half)
+            self.assertAlmostEqual(a_us, 10.910400, delta=0.002)
+            self.assertAlmostEqual(b_us, 11.510400, delta=0.002)
+            self.assertAlmostEqual((peak_us - a_us) * 1e3, 300.0, delta=dt * 1e9 + 1e-6)
+            self.assertAlmostEqual((b_us - peak_us) * 1e3, 300.0, delta=dt * 1e9 + 1e-6)
             self.assertLess(a_us, peak_us)
             self.assertLess(peak_us, b_us)
             self.assertAlmostEqual(abs(signed_peak), 50.90625, places=6)
@@ -7161,8 +7168,11 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             self.assertAlmostEqual(span, 2.5, delta=0.02)
             self.assertGreaterEqual(a_us, x0)
             self.assertLessEqual(b_us, x1)
-            self.assertAlmostEqual((a_us - x0) / span, 0.008, delta=0.01)
-            self.assertAlmostEqual((b_us - x0) / span, 0.894, delta=0.01)
+            # 2.5us 参数级软基准不变；2026-11-18 起极值卡改为「A/B 居中」构图，
+            # 峰值落在视窗中线，A/B 各再让出 300ns（旧口径 A≈0.8%、B≈89.4%）。
+            self.assertAlmostEqual((a_us - x0) / span, 0.38, delta=0.01)
+            self.assertAlmostEqual((b_us - x0) / span, 0.62, delta=0.01)
+            self.assertAlmostEqual((peak_us - x0) / span, 0.50, delta=0.01)
             self.assertAlmostEqual(
                 win.wave_plot._from_disp(
                     "ic", float(win.wave_plot._h_cursor_a.value())
@@ -7238,6 +7248,13 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             self.assertAlmostEqual(
                 float(win.result.turn_off.ic_off_max), golden_ic_off_max, places=9
             )
+            # 2026-11-18 起默认区间以提取峰值为中心、左右各 300ns；峰值必在
+            # 窗内，故黄金报告的 G5=1050.75A 逐位不变。
+            peak_idx = i0 + int(np.argmax(np.abs(ic[i0:i1])))
+            dt = float(win.bundle.dt)
+            half = max(1, int(round(300e-9 / dt)))
+            self.assertEqual(expected_a_idx, peak_idx - half)
+            self.assertEqual(expected_b_idx, peak_idx + half)
 
             win._on_value_clicked("关断过程", "Ic_off_max")
             self.app.processEvents()
@@ -7261,10 +7278,10 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         SONG_DCU_LT_WH_480_50.exists(),
         "songzhenxi LT WH 480V/50A sample missing",
     )
-    def test_ic_off_max_default_ha_keeps_extracted_peak_in_wider_display_range(
+    def test_ic_off_max_default_ha_keeps_extracted_peak_in_peak_centred_range(
         self,
     ):
-        """A wider Base-to-Base view must not replace the stored Vge-window peak."""
+        """The peak-centred display range must not replace the stored Vge-window peak."""
         import numpy as np
 
         from dpt_extractor.gui.main_window import MainWindow
@@ -7288,7 +7305,10 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             )
             display_range_peak = float(np.max(np.abs(ic[i0:i1])))
             extracted_peak = float(win.result.turn_off.ic_off_max)
-            self.assertGreater(display_range_peak, extracted_peak)
+            # 2026-11-18 起默认区间以提取峰值为中心（±300ns），峰值必在窗内，
+            # 区间最大值与提取峰值逐位相同（旧 Base→Base 宽窗下本样例区间最大值
+            # 严格大于提取峰值，该断言随口径作废）。
+            self.assertAlmostEqual(display_range_peak, extracted_peak, places=9)
 
             peak_point = win._turn_off_ic_off_max_default_peak_point()
             self.assertIsNotNone(peak_point)
@@ -7329,14 +7349,16 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             assert current is not None and context is not None
             a_idx, b_idx, hb = context
             a_us, b_us = win.bundle.t[[a_idx, b_idx]] * 1e6
-            self.assertTrue(16.0 < a_us < 16.2)
-            self.assertTrue(16.55 < b_us < 16.9)
-            self.assertAlmostEqual(float(current[a_idx]), 3.2578125, places=6)
+            # 2026-11-18: A/B = 阶段包络（Base→Top 稳定带）∪ 峰值 ±300ns。
+            peak_point = win._turn_on_ic_on_max_default_peak_point()
+            self.assertIsNotNone(peak_point)
+            assert peak_point is not None
+            peak_idx, _signed = peak_point
+            peak_us = float(win.bundle.t[peak_idx] * 1e6)
+            self.assertLess(a_us, peak_us)
+            self.assertLess(peak_us, b_us)
             self.assertAlmostEqual(hb, 3.00390625, places=6)
-            width = int(round(200e-9 / win.bundle.dt))
-            block = current[b_idx - width // 2 : b_idx + width // 2]
-            self.assertLess(float(np.percentile(block, 95) - np.percentile(block, 5)), 6.0)
-            self.assertAlmostEqual(float(np.median(block)), 50.0, delta=2.0)
+            self.assertTrue(16.55 < b_us < 16.9)
 
             win._on_value_clicked("开通", "Ic_on_max")
             self.app.processEvents()
@@ -7474,9 +7496,16 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             self.assertIsNotNone(cursor_ic)
             assert context is not None and peak_point is not None
             assert cursor_ic is not None
-            _a_idx, b_idx, signed_base = context
-            _peak_idx, signed_peak = peak_point
-            self.assertLess(float(cursor_ic[b_idx]), 0.0)
+            a_idx, b_idx, signed_base = context
+            peak_idx, signed_peak = peak_point
+            # 2026-11-18 起默认 A/B = 提取峰值 ±300ns（夹到关断窗内、贴边等比收窄）。
+            dt = float(win.bundle.dt)
+            half = max(1, int(round(300e-9 / dt)))
+            self.assertLess(a_idx, peak_idx)
+            self.assertLess(peak_idx, b_idx)
+            self.assertLessEqual(peak_idx - a_idx, half)
+            self.assertLessEqual(b_idx - peak_idx, half)
+            self.assertLessEqual(abs((peak_idx - a_idx) - (b_idx - peak_idx)), 1)
             self.assertLess(signed_base, 0.0)
             self.assertLess(signed_peak, 0.0)
             self.assertAlmostEqual(abs(signed_peak), value_before, places=9)
@@ -7995,6 +8024,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             minimum_span_us: float | None = None,
             composition_anchor_us: float | None = None,
             composition_balance_fraction: float | None = None,
+            min_margin_fraction: float = 0.0,
+            center_required: bool = False,
         ) -> None:
             focus_calls.append(
                 (
@@ -8012,6 +8043,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 minimum_span_us=minimum_span_us,
                 composition_anchor_us=composition_anchor_us,
                 composition_balance_fraction=composition_balance_fraction,
+                min_margin_fraction=min_margin_fraction,
+                center_required=center_required,
             )
 
         plot.focus_parameter_window_us = _record_focus
@@ -8245,6 +8278,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     x0 > full_x0 + 0.025
                     and x1 < full_x1 - 0.025
                     and hard_width <= 0.5 * span + 1e-9
+                    # 2026-11-18: 极值卡改为「A/B 居中」构图（B≈62%）。
+                    and name not in EXTREME_MAX_INTERVAL_NAMES
                 ):
                     self.assertLessEqual(
                         (required_hi - x0) / span,
@@ -8371,6 +8406,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 minimum_span_us: float | None = None,
                 composition_anchor_us: float | None = None,
                 composition_balance_fraction: float | None = None,
+                min_margin_fraction: float = 0.0,
+                center_required: bool = False,
             ) -> None:
                 focus_calls.append(
                     (
@@ -8388,6 +8425,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     minimum_span_us=minimum_span_us,
                     composition_anchor_us=composition_anchor_us,
                     composition_balance_fraction=composition_balance_fraction,
+                    min_margin_fraction=min_margin_fraction,
+                    center_required=center_required,
                 )
 
             plot.focus_parameter_window_us = _record_focus
@@ -8475,10 +8514,13 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                             + 2.0 * PARAM_FOCUS_REQUIRED_GUARD_US
                         )
                         if hard_width <= 0.5 * span + 1e-9:
-                            self.assertLessEqual(
-                                (required_ab[1] - x0) / span,
-                                0.50 + 0.025,
-                            )
+                            # 2026-11-18: 极值卡改为「A/B 居中」构图（B≈62%），
+                            # 其余卡仍保持后端不晚于中线的右优先构图。
+                            if name not in EXTREME_MAX_INTERVAL_NAMES:
+                                self.assertLessEqual(
+                                    (required_ab[1] - x0) / span,
+                                    0.50 + 0.025,
+                                )
                         self.assertGreaterEqual(actual_ab[0], x0 - 1e-6)
                         self.assertLessEqual(actual_ab[1], x1 + 1e-6)
 
@@ -8512,6 +8554,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             minimum_span_us: float | None = None,
             composition_anchor_us: float | None = None,
             composition_balance_fraction: float | None = None,
+            min_margin_fraction: float = 0.0,
+            center_required: bool = False,
         ) -> None:
             calls.append((float(anchor_us), tuple(map(float, required_times_us))))
             original_focus(
@@ -8522,6 +8566,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 minimum_span_us=minimum_span_us,
                 composition_anchor_us=composition_anchor_us,
                 composition_balance_fraction=composition_balance_fraction,
+                min_margin_fraction=min_margin_fraction,
+                center_required=center_required,
             )
 
         plot.focus_parameter_window_us = _record_focus
@@ -8661,6 +8707,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 minimum_span_us: float | None = None,
                 composition_anchor_us: float | None = None,
                 composition_balance_fraction: float | None = None,
+                min_margin_fraction: float = 0.0,
+                center_required: bool = False,
             ) -> None:
                 focus_calls.append(
                     (
@@ -8678,6 +8726,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     minimum_span_us=minimum_span_us,
                     composition_anchor_us=composition_anchor_us,
                     composition_balance_fraction=composition_balance_fraction,
+                    min_margin_fraction=min_margin_fraction,
+                    center_required=center_required,
                 )
 
             plot.focus_parameter_window_us = _record_focus

@@ -29,12 +29,27 @@ from dpt_extractor.models.waveform import TekMetadata, WaveformBundle
     ],
 )
 def test_extrema_use_half_open_event_and_closest_equal_pair(values, expected):
+    """2026-11-18: 默认窗口从「最近极值对」放宽到 ≥50ns，但仍须覆盖极值。"""
     t = 10e-6 + np.arange(len(values)) * 2e-9
     owner = SimpleNamespace(bundle=SimpleNamespace(t=t))
     actual = MainWindow._crosstalk_extrema_cursor_window(
         owner, (1, len(values) - 1), np.asarray(values)
     )
-    assert actual == tuple(float(t[idx] * 1e6) for idx in expected)
+    assert actual is not None
+    a_us, b_us = actual
+    lo_idx = int(np.searchsorted(t, min(a_us, b_us) * 1e-6, side="left"))
+    hi_idx = int(np.searchsorted(t, max(a_us, b_us) * 1e-6, side="left"))
+    section = np.asarray(values)[1 : len(values) - 1]
+    window = np.asarray(values)[lo_idx : hi_idx + 1]
+    # 事件段内极值必须仍被默认窗口覆盖（数值不变）。
+    assert float(np.max(window)) == float(np.max(section))
+    assert float(np.min(window)) == float(np.min(section))
+    # 最小显示跨度：≥50ns，但不超过事件段本身长度。
+    section_span_ns = abs(float(t[len(values) - 2] - t[1])) * 1e9
+    assert abs(b_us - a_us) * 1e3 >= min(50.0, section_span_ns) - 1e-6
+    # 仍须包住原「最近极值对」两个采样点。
+    pair_lo, pair_hi = sorted(expected)
+    assert lo_idx <= pair_lo and pair_hi <= hi_idx
 
 
 @pytest.mark.parametrize("values", [[], [-8], [-8, -8], [-8, np.nan], [-8, np.inf]])

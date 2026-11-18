@@ -103,6 +103,8 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                 minimum_span_us: float | None = None,
                 composition_anchor_us: float | None = None,
                 composition_balance_fraction: float | None = None,
+                min_margin_fraction: float = 0.0,
+                center_required: bool = False,
             ) -> None:
                 focus_calls.append(
                     (
@@ -120,6 +122,8 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                     minimum_span_us=minimum_span_us,
                     composition_anchor_us=composition_anchor_us,
                     composition_balance_fraction=composition_balance_fraction,
+                    min_margin_fraction=min_margin_fraction,
+                    center_required=center_required,
                 )
 
             plot.focus_parameter_window_us = record_focus  # type: ignore[method-assign]

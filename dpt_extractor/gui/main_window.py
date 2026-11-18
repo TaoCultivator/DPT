@@ -197,6 +197,121 @@ from dpt_extractor.metrics.slopes import (
     turn_off_didt_measurement_context,
     turn_off_dvdt_measurement_context,
 )
+from dpt_extractor.metrics.default_spans import (
+    extreme_display_span_indices,
+    stage_union_span_indices,
+)
+
+
+EXTREME_MAX_INTERVAL_NAMES = {
+    "Ic_off_max",
+    "Vce_off_max",
+    "Ic_on_max",
+    "Vce_on_max",
+    "Vrr",
+    "Irr",
+}
+
+
+def _extreme_card_minimum_span_us(
+    section: str,
+    name: str,
+    t0_us: float,
+    t1_us: float,
+) -> float | None:
+    """View span that keeps extreme-card A/B at least 10% inside the view.
+
+    The generic right-priority composition splits the remaining room 30/70,
+    so a 10% left margin needs ``span >= 1.5 * (B - A)``.  Cards without an
+    A/B pair (or non-extreme cards) keep the historical baseline.
+    """
+
+    if name not in EXTREME_MAX_INTERVAL_NAMES:
+        return None
+    baseline = 2.5 if (section, name) == ("关断过程", "Ic_off_max") else 2.0
+    width_us = abs(float(t1_us) - float(t0_us))
+    if not np.isfinite(width_us) or width_us <= 0.0:
+        return baseline
+    # 居中构图 + 两侧各 ≥10%: span ≥ width / (1 - 2*0.10)。
+    return max(baseline, width_us / (1.0 - 2.0 * 0.10))
+
+
+def _stage_union_span_for_trace(
+    t: np.ndarray,
+    dt: float,
+    peak_idx: int,
+    stage_lo: int | None,
+    stage_hi: int | None,
+    *,
+    min_span_s: float = 0.0,
+    values: np.ndarray | None = None,
+    peak_value: float | None = None,
+) -> tuple[int, int] | None:
+    """Module-level stage-union default A/B span (see the shared helper).
+
+    Cards that keep expressing a physical stage pass their stage bracket so
+    the span never collapses to a few tens of nanoseconds when the peak sits
+    on an event-window edge; the result is clipped to the available data and
+    always contains the peak.
+    """
+
+    n = len(t)
+    if n < 2:
+        return None
+    span = stage_union_span_indices(
+        int(peak_idx),
+        None if stage_lo is None else int(stage_lo),
+        None if stage_hi is None else int(stage_hi),
+        0,
+        n - 1,
+        max(float(dt), 1e-15),
+        min_span_s=float(min_span_s),
+    )
+    if span is None:
+        return None
+    peak_idx = int(peak_idx)
+    a_idx, b_idx = int(span[0]), int(span[1])
+    # Never let the widened interval include a sample larger than the
+    # authoritative peak: the published number is the maximum inside the
+    # default A/B interval, so the interval must stay value-neutral.
+    if values is not None and peak_value is not None:
+        limit = abs(float(peak_value))
+        if np.isfinite(limit) and limit > 0.0:
+            tol = limit * 1e-9 + 1e-12
+            block = np.abs(np.asarray(values, dtype=np.float64)[a_idx : b_idx + 1])
+            exceed = np.flatnonzero(block > limit + tol)
+            if len(exceed):
+                first = a_idx + int(exceed[0])
+                last = a_idx + int(exceed[-1])
+                if first > peak_idx:
+                    b_idx = min(b_idx, first - 1)
+                if last < peak_idx:
+                    a_idx = max(a_idx, last + 1)
+    if b_idx <= a_idx or not (a_idx <= peak_idx <= b_idx):
+        return None
+    return int(a_idx), int(b_idx)
+
+
+def _extreme_display_span_for_trace(
+    t: np.ndarray,
+    dt: float,
+    peak_idx: int,
+    lo: int,
+    hi: int,
+) -> tuple[int, int] | None:
+    """Module-level peak-centred default A/B span (see the shared helper).
+
+    Kept module-level so lightweight ``MainWindow`` stand-ins used by the
+    context unit tests (``SimpleNamespace`` hosts) can exercise the contexts
+    without the full window object.
+    """
+
+    n = len(t)
+    if n < 2:
+        return None
+    lo = max(0, min(int(lo), n - 2))
+    hi = max(lo + 1, min(int(hi), n - 1))
+    return extreme_display_span_indices(int(peak_idx), lo, hi, max(float(dt), 1e-15))
 from dpt_extractor.metrics.derived import crosstalk_extrema
 from dpt_extractor.metrics.iec_timings import (
     turn_off_ic_fall_window,
@@ -5769,11 +5884,21 @@ class MainWindow(QMainWindow):
             prefer_right_room=prefer_right_room,
             composition_anchor_us=composition_anchor_us,
             composition_balance_fraction=composition_balance_fraction,
-            minimum_span_us=(
-                2.5
-                if (section, name) == ("关断过程", "Ic_off_max")
-                else None
+            minimum_span_us=_extreme_card_minimum_span_us(
+                section,
+                name,
+                fallback_t0_us,
+                fallback_t1_us,
             ),
+            # 2026-11-18: 极值卡按「A/B 居中」构图；ΔVce 与串扰电压因 A/B
+            # 可能贴近事件起点/两光标几乎重合，额外强制两侧 ≥10% 余量。
+            min_margin_fraction=(
+                0.10
+                if name in EXTREME_MAX_INTERVAL_NAMES
+                or name in {"ΔVce", "串扰电压", "Err"}
+                else 0.0
+            ),
+            center_required=name in EXTREME_MAX_INTERVAL_NAMES,
         )
 
     def _recovery_peak_us(self) -> float | None:
@@ -8492,7 +8617,7 @@ class MainWindow(QMainWindow):
             self.result.reverse_recovery.irr = val
             self.result_table.set_metric_value("反向恢复", "Irr", val)
             self.statusBar().showMessage(
-                f"反向恢复 Irr: {val:.3f}A（A/B=正向稳定段到恢复Base稳定段，"
+                f"反向恢复 Irr: {val:.3f}A（A/B=峰值左右各300ns的取值区间，"
                 "Hb=反向恢复尖峰，Ha=恢复Base）  "
                 f"[{min(t0_us, t1_us):.3f}~{max(t0_us, t1_us):.3f}µs]"
             )
@@ -8842,10 +8967,53 @@ class MainWindow(QMainWindow):
         opposite = values[extrema[:-1]] != values[extrema[1:]]
         gaps = np.where(opposite, np.diff(t[i0 + extrema]), np.inf)
         pair = int(np.argmin(gaps))
-        return (
-            float(t[i0 + extrema[pair]] * 1e6),
-            float(t[i0 + extrema[pair + 1]] * 1e6),
-        )
+        a_us = float(t[i0 + extrema[pair]] * 1e6)
+        b_us = float(t[i0 + extrema[pair + 1]] * 1e6)
+        # 2026-11-18 (P2-2): 两个极值时刻可能只差 22~35ns，两光标几乎重合。
+        # 用共享 helper 的最小跨度能力把默认窗口撑到 ≥50ns（按 dt 取整），
+        # 仍夹在事件段内；事件段内 max/min 本就是该段全局极值，故数值中性。
+        dt_s = float(getattr(self.bundle, "dt", 0.0) or 0.0)
+        if dt_s <= 0.0 and len(t) > 1:
+            dt_s = float(t[1] - t[0])
+        dt_us = max(dt_s, 1e-15) * 1e6
+        min_span_us = max(50e-3, dt_us)
+        span_us = abs(b_us - a_us)
+        if span_us < min_span_us:
+            seg_lo_us = float(t[i0] * 1e6)
+            seg_hi_us = float(t[i1 - 1] * 1e6)
+            half = 0.5 * min_span_us
+            centre = 0.5 * (a_us + b_us)
+            lo_us = centre - half
+            hi_us = centre + half
+            if lo_us < seg_lo_us:
+                hi_us += seg_lo_us - lo_us
+                lo_us = seg_lo_us
+            if hi_us > seg_hi_us:
+                lo_us -= hi_us - seg_hi_us
+                hi_us = seg_hi_us
+            lo_us = max(seg_lo_us, lo_us)
+            hi_us = min(seg_hi_us, hi_us)
+            # 光标必须落在原始采样时刻上（audit 与拖动都按采样点判定）；
+            # 取整后若不足最小跨度，再按采样步长向两侧补齐（仍夹在事件段内）。
+            lo_idx = max(i0, int(np.searchsorted(t, lo_us * 1e-6, side="left")))
+            hi_idx = min(
+                i1 - 1,
+                max(lo_idx, int(np.searchsorted(t, hi_us * 1e-6, side="right")) - 1),
+            )
+            for _ in range(8):
+                if abs(float(t[hi_idx] - t[lo_idx]) * 1e6) >= min_span_us:
+                    break
+                if hi_idx + 1 < i1:
+                    hi_idx += 1
+                elif lo_idx - 1 >= i0:
+                    lo_idx -= 1
+                else:
+                    break
+            lo_us = float(t[lo_idx] * 1e6)
+            hi_us = float(t[hi_idx] * 1e6)
+            a_us = min(lo_us, a_us)
+            b_us = max(hi_us, b_us)
+        return (float(a_us), float(b_us))
 
     def _enable_crosstalk_interaction(self, section: str) -> None:
         """串扰电压：A/B 卡对管 Vge 极值时刻，Ha/Hb 锁定极值电平。"""
@@ -9207,7 +9375,8 @@ class MainWindow(QMainWindow):
                     else self.result.turn_off.vce_off_max
                 )
                 self.statusBar().showMessage(
-                    f"{section}-{name} 区间最大值: [{t0_us:.3f},{t1_us:.3f}]us | {name}={cur:.3f}"
+                    f"{section}-{name}: A/B=峰值左右各300ns的取值区间"
+                    f" [{t0_us:.3f},{t1_us:.3f}]us | {name}={cur:.3f}"
                 )
                 return
             if section == "开通" and name in {"Ic_on_max", "Vce_on_max"} and self.result is not None:
@@ -9217,7 +9386,8 @@ class MainWindow(QMainWindow):
                     else self.result.turn_on.vce_on_max
                 )
                 self.statusBar().showMessage(
-                    f"{section}-{name} 区间最大值: [{t0_us:.3f},{t1_us:.3f}]us | {name}={cur:.3f}"
+                    f"{section}-{name}: A/B=峰值左右各300ns的取值区间"
+                    f" [{t0_us:.3f},{t1_us:.3f}]us | {name}={cur:.3f}"
                 )
                 return
             if isinstance(val, str):
@@ -9342,7 +9512,8 @@ class MainWindow(QMainWindow):
             stored = self._stored_param_value(section, name)
             if stored is not None:
                 self.statusBar().showMessage(
-                    f"{section}-{name} 区间最大值: [{t0_us:.3f},{t1_us:.3f}]us | "
+                    f"{section}-{name}: A/B=峰值左右各300ns的取值区间"
+                    f" [{t0_us:.3f},{t1_us:.3f}]us | "
                     f"{name}={stored:.3f}（拖动 A/B 后重算）"
                 )
         elif name in short_energy_names:
@@ -9447,21 +9618,11 @@ class MainWindow(QMainWindow):
                     f"{name}={manual_extreme[1]:.3f}；Hb 为对应波形稳定平台参考"
                 )
             else:
-                if section == "关断过程" and name == "Ic_off_max":
-                    context = self._turn_off_ic_off_max_cursor_context()
-                    base_text = (
-                        ""
-                        if context is None
-                        else f"，Hb(Ic Base)={float(context[2]):.3f} A"
-                    )
-                    self.statusBar().showMessage(
-                        f"{section}-{name}: A=Vce抬升前Base稳定段，"
-                        f"B=Ic抬升前Base稳定段；Ha=Ic最大值{base_text}"
-                    )
-                    return
+                reference = self._default_extreme_reference(section, name)
+                hb_text = "" if reference is None else f"，Hb={reference:.3f}"
                 self.statusBar().showMessage(
-                    f"{section}-{name}: A/B 为参数物理取值阶段；"
-                    "Ha 为最大值，Hb 为对应波形稳定平台"
+                    f"{section}-{name}: A/B=峰值左右各300ns的取值区间"
+                    f"（数值取窗内最大值）；Ha=峰值{hb_text}"
                 )
         elif name in short_energy_names:
             self.statusBar().showMessage(
@@ -10611,7 +10772,12 @@ class MainWindow(QMainWindow):
     def _turn_off_ic_off_max_cursor_context(
         self,
     ) -> tuple[int, int, float] | None:
-        """Default Ic_off_max display range and signed current Base level."""
+        """Default Ic_off_max display interval and signed current Base level.
+
+        A/B is the peak-centred display interval (peak +/- 300 ns, clipped to
+        the turn-off window); the signed Base level stays the extraction-owned
+        Hb reference.
+        """
 
         if self.bundle is None or self.result is None or self.result.segments is None:
             return None
@@ -10646,38 +10812,60 @@ class MainWindow(QMainWindow):
         ):
             from dpt_extractor.metrics.plateau_level import (
                 _plateau_mid_without_isolated_spikes,
+                turn_off_ic_off_max_display_span_indices,
             )
 
             n = min(len(t), len(vce), len(ic))
-            a_idx = max(0, min(int(vce_context[0]), n - 2))
             peak_point = self._turn_off_ic_off_max_default_peak_point()
             peak_idx = (
                 int(peak_point[0])
                 if peak_point is not None
                 else max(0, min(int(fall_start), n - 2))
             )
-            if a_idx >= peak_idx and peak_idx > 0:
-                base_target = float(vce[a_idx])
-                pre_hi = max(0, peak_idx - 1)
-                pre_lo = max(
-                    int(segs.turn_off[0]),
-                    pre_hi - max(8, int(round(500e-9 / dt))),
-                )
-                candidates = np.arange(pre_lo, pre_hi + 1, dtype=np.int64)
-                if len(candidates):
-                    a_idx = int(
-                        candidates[
-                            int(np.argmin(np.abs(vce[candidates] - base_target)))
-                        ]
-                    )
-
             b0, b1 = (int(value) for value in didt_context.base_window)
             b0 = max(0, min(b0, n - 1))
             b1 = max(b0, min(b1, n - 1))
             block = np.asarray(ic[b0 : b1 + 1], dtype=np.float64)
             if len(block):
                 signed_base = float(_plateau_mid_without_isolated_spikes(block))
-                # 2026-10-16 用户拍板「② 关断 B 落点 = 甲 · 稳定抬升前 Base」：
+                # 2026-11-18 用户拍板：Ic_off_max 的默认 A/B 改为以权威峰值
+                # （Vge 关断电流下降窗内 argmax(|Ic|)，与 ic_off_max 同一窗）为
+                # 中心、左右各 300ns 的显示取值区间，夹到本次关断窗内并保证
+                # A < B。数值仍是区间内 |Ic| 最大值；峰值必在区间内，故
+                # Ic_off_max 数值不变，Ha=既有峰值、Hb=既有 Base 稳定值也不变。
+                display = turn_off_ic_off_max_display_span_indices(
+                    int(peak_idx),
+                    max(0, min(int(segs.turn_off[0]), n - 1)),
+                    max(0, min(int(segs.turn_off[1]), n - 1)),
+                    dt,
+                )
+                if display is not None:
+                    context = (
+                        int(display[0]),
+                        int(display[1]),
+                        float(signed_base),
+                    )
+                    self._default_cursor_context_cache[cache_key] = context
+                    return context
+                # 退化（Ic 全零或关断窗过窄）时退回历史「甲 · 稳定抬升前
+                # Base」落点：A 取 Vce 抬升前 Base 稳定段代表点，B 取
+                # didt_context.base_window 内最接近 Base 电平的代表点。
+                a_idx = max(0, min(int(vce_context[0]), n - 2))
+                if a_idx >= peak_idx and peak_idx > 0:
+                    base_target = float(vce[a_idx])
+                    pre_hi = max(0, peak_idx - 1)
+                    pre_lo = max(
+                        int(segs.turn_off[0]),
+                        pre_hi - max(8, int(round(500e-9 / dt))),
+                    )
+                    candidates = np.arange(pre_lo, pre_hi + 1, dtype=np.int64)
+                    if len(candidates):
+                        a_idx = int(
+                            candidates[
+                                int(np.argmin(np.abs(vce[candidates] - base_target)))
+                            ]
+                        )
+                # 回退路径沿 2026-10-16 拍板「② 关断 B 落点 = 甲 · 稳定抬升前 Base」：
                 # `Ic_off_max` 的 B 回到 `didt_context.base_window`（Vce/Ic 主抬升前
                 # 的稳定 Base 窗）内最接近该 Base 电平的代表点，等同干净 HEAD 行为，
                 # 与 accepted `turn-off-delta-vce-stable-range-cursors-v24` 一致。
@@ -10791,6 +10979,34 @@ class MainWindow(QMainWindow):
             search_end=blocking_end,
         )
         return int(a_idx), int(b_idx), float(top_v)
+
+    def _turn_off_vce_off_max_cursor_context(
+        self,
+    ) -> tuple[int, int, float] | None:
+        """Vce_off_max default A/B = authoritative peak +/- 300 ns.
+
+        The third value keeps the card's unchanged Hb reference (Vce Top
+        level).  ``Delta Vce`` keeps using the stable-platform context, so its
+        own default cursors are untouched.
+        """
+
+        stable = self._turn_off_vce_stable_cursor_context()
+        peak = self._default_extreme_peak_point("关断过程", "Vce_off_max")
+        if stable is None or peak is None:
+            return None
+        # 2026-11-18 (P2-1): 物理阶段包络 ∪ 峰值 ±300ns，禁止裸事件段裁剪。
+        span = _stage_union_span_for_trace(
+            self.bundle.t,
+            self.bundle.dt,
+            int(peak[0]),
+            int(stable[0]),
+            int(stable[1]),
+            values=np.asarray(self.bundle.get(self.profile.vce), dtype=np.float64),
+            peak_value=float(peak[1]),
+        )
+        if span is None:
+            return stable
+        return int(span[0]), int(span[1]), float(stable[2])
 
     def _turn_on_vce_stable_cursor_context(
         self,
@@ -10990,9 +11206,27 @@ class MainWindow(QMainWindow):
                     ):
                         b_idx = int(start + half)
                         break
-        if not 0 <= a_idx < peak_idx < b_idx < n:
-            return context
-        context = (int(a_idx), int(b_idx), float(base_v), float(top_v))
+        # 2026-11-18: default A/B = authoritative Vce_on_max peak +/- 300 ns
+        # inside the turn-on event window; the stable-platform bracket above is
+        # only the degenerate fallback.
+        # 2026-11-18 (P1-1): 物理阶段包络 ∪ 峰值 ±300ns。峰值贴着 turn_on[0]
+        # 时不能用裸事件段裁剪，否则区间退化成几十 ns。
+        # 阶段包络用共享的 Top→Base 稳定平台上下文（不是本卡细化后的宽
+        # Base 搜索端点），避免 A/B 撑满整个 2us 视窗导致两端余量 <10%。
+        span = _stage_union_span_for_trace(
+            self.bundle.t,
+            self.bundle.dt,
+            peak_idx,
+            int(context[0]),
+            int(context[1]),
+            values=vce,
+            peak_value=float(peak[1]),
+        )
+        if span is None:
+            if not 0 <= a_idx < peak_idx < b_idx < n:
+                return context
+            span = (int(a_idx), int(b_idx))
+        context = (int(span[0]), int(span[1]), float(base_v), float(top_v))
         self._default_cursor_context_cache[cache_key] = context
         return context
 
@@ -11133,6 +11367,23 @@ class MainWindow(QMainWindow):
                             int(np.argmin(np.abs(current[candidates] - signed_top)))
                         ]
                     )
+        # 2026-11-18: default A/B = authoritative Ic_on_max peak +/- 300 ns
+        # inside the turn-on event window; Hb keeps the unchanged Base
+        # reference, and the stable-platform bracket is only the fallback.
+        # 2026-11-18: 物理阶段包络（Base→Top 稳定带）∪ 峰值 ±300ns。
+        span = _stage_union_span_for_trace(
+            self.bundle.t,
+            self.bundle.dt,
+            int(peak_idx),
+            int(a_idx),
+            int(b_idx),
+            values=current,
+            peak_value=abs(float(self.result.turn_on.ic_on_max)),
+        )
+        if span is not None:
+            context = (int(span[0]), int(span[1]), float(signed_base))
+            self._default_cursor_context_cache[cache_key] = context
+            return context
         if not int(a_idx) < int(b_idx):
             return None
         context = (int(a_idx), int(b_idx), float(signed_base))
@@ -11214,6 +11465,22 @@ class MainWindow(QMainWindow):
         sign_block = raw[max(0, b_idx - radius) : min(n, b_idx + radius + 1)]
         sign_ref = float(np.nanmedian(sign_block)) if len(sign_block) else float(raw[b_idx])
         signed_top = float(np.copysign(abs(top_v), sign_ref or 1.0))
+        # 2026-11-18: default A/B = authoritative Vrr peak +/- 300 ns inside
+        # the turn-on event window; the signed Top reference (third value) is
+        # computed from the stable rail above and stays unchanged.  The
+        # stable-platform bracket is only the degenerate fallback.
+        # 2026-11-18: 物理阶段包络（Base→Top 稳定带）∪ 峰值 ±300ns。
+        span = _stage_union_span_for_trace(
+            self.bundle.t,
+            self.bundle.dt,
+            int(peak_idx),
+            int(stable_range[0]),
+            int(stable_range[1]),
+            values=raw,
+            peak_value=float(self.result.reverse_recovery.vrr),
+        )
+        if span is not None:
+            a_idx, b_idx = int(span[0]), int(span[1])
         cursor_context = (int(a_idx), int(b_idx), signed_top)
         self._default_cursor_context_cache[cache_key] = cursor_context
         return cursor_context
@@ -11326,6 +11593,12 @@ class MainWindow(QMainWindow):
         if not np.isfinite(stored_peak) or stored_peak <= 0.0:
             stored_peak = abs(float(irr[peak_idx]))
         signed_peak = float(np.copysign(stored_peak, irr[peak_idx] or 1.0))
+        # This A/B pair is also the extraction-owned Pdmax integration window
+        # (result.power_contexts[('反向恢复', 'Pdmax')].current_interval), so it
+        # must keep the stable forward->recovered bracket and is deliberately
+        # NOT peak-centred here.  The Irr card's peak-centred default display
+        # span is applied at the display layer only (see
+        # _parameter_max_interval_indices), so the Pdmax number cannot move.
         context = (
             stable.a_idx, stable.b_idx, stable.post_level, peak_idx, signed_peak
         )
@@ -11397,6 +11670,29 @@ class MainWindow(QMainWindow):
             signed_peak = float(np.copysign(stored_peak, signed_peak or 1.0))
         return int(peak_idx), signed_peak
 
+    def _extreme_display_span_indices(
+        self,
+        peak_idx: int,
+        lo: int,
+        hi: int,
+    ) -> tuple[int, int] | None:
+        """Shared peak-centred default A/B interval for extreme/max cards.
+
+        2026-11-18 user requirement: every card whose numeric value is the
+        extreme of a signal inside its default A/B interval must place that
+        interval 300 ns on either side of the authoritative peak instead of
+        pinning it to an event-window edge.  Callers pass the authoritative
+        peak index (see ``_default_extreme_peak_point``) plus the card's own
+        event window; the helper clips, narrows proportionally and keeps
+        ``A < B``.  New extreme cards must call this helper.
+        """
+
+        if self.bundle is None:
+            return None
+        return _extreme_display_span_for_trace(
+            self.bundle.t, self.bundle.dt, peak_idx, lo, hi
+        )
+
     def _default_extreme_peak_point(
         self, section: str, name: str
     ) -> tuple[int, float] | None:
@@ -11462,7 +11758,7 @@ class MainWindow(QMainWindow):
             context = self._turn_off_ic_off_max_cursor_context()
             return None if context is None else float(context[2])
         if section == "关断过程" and name == "Vce_off_max":
-            context = self._turn_off_vce_stable_cursor_context()
+            context = self._turn_off_vce_off_max_cursor_context()
             return None if context is None else float(context[2])
         if section == "开通" and name == "Ic_on_max":
             context = self._turn_on_ic_on_max_cursor_context()
@@ -11518,7 +11814,7 @@ class MainWindow(QMainWindow):
             return _clip_pair(*segs.turn_off)
 
         if section == "关断过程" and name == "Vce_off_max":
-            context = self._turn_off_vce_stable_cursor_context()
+            context = self._turn_off_vce_off_max_cursor_context()
             return None if context is None else _clip_pair(context[0], context[1])
 
         if section == "开通" and name == "Ic_on_max":
@@ -11535,7 +11831,23 @@ class MainWindow(QMainWindow):
 
         if section == "反向恢复" and name == "Irr":
             context = self._rr_irr_cursor_context()
-            return None if context is None else _clip_pair(context[0], context[1])
+            if context is None:
+                return None
+            # The Irr card's default A/B is the peak-centred display span; the
+            # context keeps the stable bracket because Pdmax integrates over
+            # that same interval and must not move.
+            # 2026-11-18 (P1-2): 物理阶段包络（前向稳定平台→恢复 Base）∪
+            # 峰值 ±300ns；峰值是有符号 I_RM，必须留在窗口内且数值不变。
+            span = _stage_union_span_for_trace(
+                t,
+                self.bundle.dt,
+                int(context[3]),
+                int(context[0]),
+                int(context[1]),
+            )
+            if span is None:
+                return _clip_pair(context[0], context[1])
+            return _clip_pair(span[0], span[1])
 
         return None
 

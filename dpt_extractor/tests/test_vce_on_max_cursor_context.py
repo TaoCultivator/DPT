@@ -72,12 +72,16 @@ def test_peak_left_and_first_settled_base_are_local_and_cached(
         context = window._turn_on_vce_on_max_cursor_context()
         assert context is not None
         a, b, base, top = context
-        assert 0 < peak_idx - a <= 150
-        assert a >= old_context[0]
-        assert ringing_end < b < ringing_end + 220
-        assert b < window.result.segments.pulse2_off
-        assert vce[a] == 400.0
-        assert abs(vce[b] - 5.0) < 1e-8
+        # 2026-11-18: default A/B is the authoritative peak +/- 300 ns inside
+        # the turn-on event window [turn_on[0], pulse2_off], narrowed
+        # proportionally when the peak sits close to one edge.
+        dt = float(window.bundle.dt)
+        half = max(1, int(round(300e-9 / dt)))
+        # 2026-11-18: 物理阶段包络 ∪ 峰值 ±300ns；阶段解析由生产代码在
+        # patched 旧 context 之上再细化，故只断言「两侧至少 ±300ns 且含峰值」。
+        assert a <= peak_idx - half
+        assert b >= peak_idx + half
+        assert a < peak_idx < b
         assert (base, top) == old_context[2:]
         assert window._parameter_max_interval_indices("开通", "Vce_on_max") == (a, b)
         assert stable.call_count == 1
@@ -121,9 +125,10 @@ def test_b_does_not_stop_at_an_isolated_base_crossing_or_falling_tail(window):
         patch.object(window, "_default_extreme_peak_point", return_value=(600, 420.0)),
     ):
         a, b, *_ = window._turn_on_vce_on_max_cursor_context()
-    assert a < 600
-    assert 1700 < b < 1920
-    assert np.max(vce[b - 90 : b + 90]) == 5.0
+    # 2026-11-18: 阶段包络 ∪ 峰值 ±300ns；两侧至少 ±300ns 且含峰值。
+    assert a <= 300 and b >= 900
+    assert a < 600 < b
+    assert np.max(vce[a : b + 1]) == 420.0
 
 
 def test_peak_on_first_numeric_sample_still_has_a_strict_left_cursor(window):
@@ -155,7 +160,9 @@ def test_peak_on_first_numeric_sample_still_has_a_strict_left_cursor(window):
         patch.object(window, "_default_extreme_peak_point", return_value=(500, 425.0)),
     ):
         a, b, *_ = window._turn_on_vce_on_max_cursor_context()
-    assert 350 < a < 500 < b < 1600
+    # 峰值贴在事件段起点时,阶段包络 ∪ 峰值 ±300ns 仍保证两侧有足够跨度，
+    # 不再退化成几十 ns 的窄窗（P1-1）。
+    assert a <= 200 and b >= 800
 
 
 @pytest.mark.parametrize("current", [50, 250])
@@ -178,11 +185,13 @@ def test_zhongban_actual_cursors_highlight_and_manual_value_are_preserved(
     assert context is not None
     a, b, base, _top = context
     peak_idx, peak_v = window._default_extreme_peak_point("开通", "Vce_on_max")
+    dt = float(window.bundle.dt)
+    half = max(1, int(round(300e-9 / dt)))
+    # 2026-11-18: 阶段包络 ∪ 峰值 ±300ns（阶段解析可能比 shared 更靠右）。
+    assert a <= peak_idx - half
+    assert b >= peak_idx + half
     assert a < peak_idx < b
-    assert (window.bundle.t[peak_idx] - window.bundle.t[a]) < 60e-9
     assert context[2:] == shared[2:]
-    if current == 50:
-        assert b - a < shared[1] - shared[0]
     window._on_value_clicked("开通", "Vce_on_max")
     plot = window.wave_plot
     expected = tuple(window.bundle.t[[a, b]] * 1e6)

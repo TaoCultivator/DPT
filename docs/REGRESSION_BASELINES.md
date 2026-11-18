@@ -1092,3 +1092,12 @@ GUI 光标审计覆盖双脉冲参数；单脉冲不适用项按 `INFO` 记录�
 - 发布门槛仍按 `:1007` 执行：原始 TSS strict + pytest + 全语料光标审计三者同时满足
 - 29 项待专项修复，需独立工程立项
 - 完整日志留存：`.archive/gate-evidence/gate-20261112-1527.log`（94 KB）、`.archive/gate-evidence/baseline-937dc8ad-20261112.log`
+## 2026-11-18 极值卡默认 A/B 统一为「峰值居中 + 阶段包络」
+
+用户两次反馈关断 `Ic_off_max` 与 `Vce_off_max` 的默认 A/B 贴边、远离峰值（「太靠左」「主要观察区域不能太靠左边/右边边界」），随后要求同类问题一次性彻底修复。本节的现行口径：
+
+- 共享实现 `dpt_extractor/metrics/default_spans.py`：`extreme_display_span_indices`（`峰值∓300ns`，按 `dt` 取整、夹边、贴边等比收窄、退化返 `None`）与 `stage_union_span_indices`（`物理阶段包络 ∪ 峰值∓300ns`，再夹到可用数据范围、可强制最小跨度）。GUI 统一入口 `MainWindow._parameter_max_interval_indices` / `_extreme_display_span_indices` / 模块级 `_stage_union_span_for_trace`。
+- 覆盖六卡：`Ic_off_max`、`Vce_off_max`、`Ic_on_max`、`Vce_on_max`、`Vrr`（context 内直接复用）、`Irr`（显示层覆盖；其 context A/B 仍是 `Pdmax` 积分窗，不得改）。取景约束：`span ≥ 1.5×(B−A)` 且求解器 `min_margin_fraction=0.10`，保证 A/B 距视窗左右边各 ≥10%。
+- **值中性守卫**：并集扩展后，任何大于权威峰值的采样点都会被剪出默认区间，因此默认区间内极值恒等于报告值；全量比对（crosscheck 代理，16 样例 `ExtractResult` 全字段 2895 项）值差异 0、位差异 0。
+- 枚举测试 `dpt_extractor/tests/test_default_spans_enumeration.py` 遍历六卡断言「峰值居中/两侧 ≥300ns、区间极值 == 权威值、视窗余量 ≥10%」，新增极值卡漏接 helper 时该用例会红；`dpt_extractor/tests/test_ic_off_max_display_span.py` 覆盖贴边夹取、全零回退与数值不变。
+- 已知未纳入本轮：开通 `ΔVce` A 贴事件起点的构图（P1-3）、串扰电压最小跨度（P2）、时序类 12% 锚点提到 ≥10% 余量（P2）；短路模式按全窗截图属设计取舍，已在 `MEASUREMENT_SPEC.md` 写明。

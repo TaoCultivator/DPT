@@ -723,7 +723,7 @@ DISP_HALF_DIV = 5.0  # 纵向显示半高（格），总高 10 格（同示波�
 HORIZONTAL_DIV_COUNT = 10.0  # 横向整格数（与 _update_x_ticks 一致）
 X_NS_PER_DIV = 50  # 水平标度 ns/格 步进（滚轮与显示量化）
 PARAM_FOCUS_DEFAULT_US_PER_DIV = 0.2  # 点击参数局部放大默认 200 ns/div
-PARAM_FOCUS_ANCHOR_FRACTION = 0.12  # 左留约 1.2 格保住前态/切换起点，其余尽量展示右侧振铃
+PARAM_FOCUS_ANCHOR_FRACTION = 0.14  # 2026-11-18：左留约 1.4 格，保证 A/B 距左边 ≥10% 红线；其余尽量展示右侧振铃
 PARAM_FOCUS_MAX_ANCHOR_FRACTION = 0.65  # 构图偏好：无硬内容冲突时事件锚点不晚于约 6.5 格
 PARAM_FOCUS_REQUIRED_GUARD_US = 0.02  # A/B 等必要内容离视窗边缘至少约 20ns
 PARAM_FOCUS_RIGHT_PRIORITY_LEFT_SLACK_FRACTION = 0.30  # 非门极参数保留约三成余量给前态、七成给右侧震荡
@@ -1043,6 +1043,8 @@ def _solve_parameter_x_window(
     prefer_right_room: bool = False,
     composition_anchor_us: float | None = None,
     composition_balance_fraction: float | None = None,
+    min_margin_fraction: float = 0.0,
+    center_required: bool = False,
 ) -> tuple[float, float]:
     """求解有界参数局部视窗；优先保证完整数据范围与必要时刻可见。
 
@@ -1193,6 +1195,20 @@ def _solve_parameter_x_window(
     else:
         # 完整波形比所需保护区还窄时退化为全范围；绝不越过数据边界。
         x0 = float(np.clip(ideal_x0, domain_lo, domain_hi))
+    margin = max(0.0, float(min_margin_fraction))
+    if margin > 0.0 and required:
+        # 2026-11-18: 所有参数卡必须保证 A/B 距视窗左右边各 ≥margin（默认
+        # 10%）。极值卡额外要求「A/B 居中」（center_required）；其余卡只做
+        # 平移夹取，保留原有左锚点构图。数据边界挡住时无法达到 margin，
+        # 由 focus_parameter_window_us 记录 ``_last_focus_margin_limited``。
+        margin_us = margin * span
+        want_hi = guarded_lo - margin_us
+        want_lo = guarded_hi - span + margin_us
+        if want_lo <= want_hi + 1e-12:
+            if center_required:
+                centre = 0.5 * (guarded_lo + guarded_hi)
+                x0 = centre - 0.5 * span
+            x0 = float(np.clip(x0, want_lo, want_hi))
     x1 = x0 + span
     if bounds is not None:
         x0 = max(bounds[0], x0)
@@ -10338,6 +10354,8 @@ class WaveformPlot(QWidget):
         minimum_span_us: float | None = None,
         composition_anchor_us: float | None = None,
         composition_balance_fraction: float | None = None,
+        min_margin_fraction: float = 0.0,
+        center_required: bool = False,
     ) -> None:
         """构造参数视窗；可按真实硬包络自适应优先展示右侧振铃。
 
@@ -10357,6 +10375,8 @@ class WaveformPlot(QWidget):
             prefer_right_room=prefer_right_room,
             composition_anchor_us=composition_anchor_us,
             composition_balance_fraction=composition_balance_fraction,
+            min_margin_fraction=min_margin_fraction,
+            center_required=center_required,
         )
         scale_us = _exact_x_us_per_div(x1 - x0)
         self._x_target_us_per_div = scale_us
@@ -10374,6 +10394,23 @@ class WaveformPlot(QWidget):
             self._last_x_window = (float(xr[0]), float(xr[1]))
         except Exception:
             self._last_x_window = (float(x0), float(x1))
+        # 2026-11-18: 极值卡 margin 验收口径。``_last_focus_margin_limited``
+        # 为 True 表示「10% 余量受完整数据边界限制」，供验收方豁免。
+        self._last_focus_margin_limited = False
+        self._last_focus_min_margin = None
+        if float(min_margin_fraction) > 0.0 and required_times_us:
+            _x0, _x1 = self._last_x_window
+            _span = float(_x1 - _x0)
+            if _span > 0.0 and np.isfinite(_span):
+                _req = [float(value) for value in required_times_us if np.isfinite(value)]
+                if _req:
+                    _lo = min(_req)
+                    _hi = max(_req)
+                    _margin = min((_lo - _x0) / _span, (_x1 - _hi) / _span)
+                    self._last_focus_min_margin = float(_margin)
+                    self._last_focus_margin_limited = bool(
+                        _margin < float(min_margin_fraction) - 1e-9
+                    )
 
     def focus_anchor_left_divs_us(
         self,

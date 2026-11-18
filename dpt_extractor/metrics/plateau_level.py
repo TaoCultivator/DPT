@@ -5,6 +5,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from dpt_extractor.metrics.default_spans import (
+    DEFAULT_EXTREME_HALF_SPAN_S,
+    extreme_display_span_indices,
+)
+
 # 默认 Ha/Hb 只在跃变附近短窗内搜平台，避免对整段波形 O(n²) 滑动窗
 _PLATEAU_PROBE = 96
 
@@ -1184,6 +1189,32 @@ def turn_off_eoff_stable_platform_cursor_context(
     )
 
 
+IC_OFF_MAX_DISPLAY_HALF_SPAN_S = DEFAULT_EXTREME_HALF_SPAN_S
+
+
+def turn_off_ic_off_max_display_span_indices(
+    peak_idx: int,
+    lo: int,
+    hi: int,
+    dt: float,
+) -> tuple[int, int] | None:
+    """Return the default Ic_off_max A/B display interval around the peak.
+
+    Thin wrapper over the shared :func:`extreme_display_span_indices` helper
+    (peak +/- 300 ns, clipped to the turn-off window, centred and ordered even
+    at the window edges).  None means no non-degenerate interval exists and
+    the caller keeps its legacy Base-to-Base placement.
+    """
+
+    return extreme_display_span_indices(
+        peak_idx,
+        lo,
+        hi,
+        dt,
+        half_span_s=IC_OFF_MAX_DISPLAY_HALF_SPAN_S,
+    )
+
+
 def turn_off_ic_off_max_cursor_context(
     t: np.ndarray,
     vce: np.ndarray,
@@ -1198,14 +1229,21 @@ def turn_off_ic_off_max_cursor_context(
     *,
     next_pulse_on: int | None = None,
 ) -> tuple[int, int, float]:
-    """Return Ic_off_max A/B times and its stable current Base reference.
+    """Return Ic_off_max A/B display times and its stable current Base level.
 
-    This is a display context, not the numeric peak calculation.  A is placed
-    in the quiet Vce Base band immediately before the main Vce rise.  B is
-    placed inside the adjacent quiet Ic Base band after the main current fall,
-    and the returned level is the signed, spike-guarded centre of that same
-    current band.  The independent Ha value remains the existing Ic_off_max
-    peak produced by the extraction pipeline.
+    The default A/B pair is a *display interval*, not the numeric peak window:
+    it is centred on the authoritative argmax(|Ic|) of the same Vge
+    current-fall window that produces ic_off_max, with a half span of 300ns
+    quantized by dt and clipped to the turn-off window (see
+    :func:`turn_off_ic_off_max_display_span_indices`).  Because the peak index
+    is always inside that interval, the published number
+    max(|ic[a_idx:b_idx + 1]|) still equals the unchanged extraction peak.
+
+    The returned level is unchanged: it stays the signed, spike-guarded centre
+    of the stable Ic Base band after the main current fall (Hb), and the
+    independent Ha remains the extraction-owned signed peak.  The legacy
+    Vce-Base -> Ic-Base placement is retained only as a fallback for all-zero
+    traces or degenerate windows.
     """
 
     tt = np.asarray(t, dtype=np.float64)
@@ -1318,9 +1356,22 @@ def turn_off_ic_off_max_cursor_context(
         )
         b_idx = int(candidates[int(np.argmin(level_error + time_penalty))])
 
-    a_idx = max(lo, min(int(a_idx), n - 2))
-    b_idx = max(a_idx + 1, min(int(b_idx), n - 1))
-    return int(a_idx), int(b_idx), float(base_a)
+    legacy_a = max(lo, min(int(a_idx), n - 2))
+    legacy_b = max(legacy_a + 1, min(int(b_idx), n - 1))
+
+    # Default A/B is a peak-centred display interval (user decision
+    # 2026-11-18).  It is not the numeric window: Ic_off_max stays max(|ic|)
+    # over the interval, and the authoritative peak index is inside it, so the
+    # published value cannot change.  Degenerate / all-zero traces keep the
+    # legacy Base-to-Base placement above.
+    peak_abs = float(np.max(np.abs(peak_slice))) if len(peak_slice) else 0.0
+    if np.isfinite(peak_abs) and peak_abs > 0.0:
+        display = turn_off_ic_off_max_display_span_indices(
+            int(ic_peak_idx), lo, hi, dt_s
+        )
+        if display is not None:
+            return int(display[0]), int(display[1]), float(base_a)
+    return int(legacy_a), int(legacy_b), float(base_a)
 
 
 def dvdt_on_vce_fall_base_top(

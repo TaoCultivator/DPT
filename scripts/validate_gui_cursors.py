@@ -133,28 +133,28 @@ DPT_PARAMETER_CURSOR_ROLES = {
         "Ha=Vce；Hb=Ic"
     ),
     ("关断过程", "ΔVce"): "A=抬升前Vce Base稳定段；B=尖峰后Vce Top稳定段；Ha=Vce尖峰最大值；Hb=Vce Top稳定值",
-    ("关断过程", "Ic_off_max"): "A=Vce抬升前Base稳定段；B=Ic抬升前Base稳定段；Ha=Ic最大值；Hb=Ic Base稳定值",
-    ("关断过程", "Vce_off_max"): "A=Vce抬升前Base稳定段；B=尖峰后Top稳定段；Ha=Vce最大值；Hb=Vce Top稳定值",
+    ("关断过程", "Ic_off_max"): "A/B=峰值∓300ns取值区间（纯显示卡）；Ha=Ic峰值；Hb=Ic Base稳定值",
+    ("关断过程", "Vce_off_max"): "A/B=阶段包络(Vce Base→Top)∪峰值∓300ns；Ha=Vce峰值；Hb=Vce Top稳定值",
     ("关断过程", "串扰电压"): "A/B=对管Vge最大/最小时刻；Ha=Vge最大值；Hb=Vge最小值",
     ("开通", "dv/dt"): "A/B=Vce阈值交点；Ha/Hb=跌落前后稳定高/低电压平台",
     ("开通", "di/dt"): "A/B=Ic阈值交点；Ha/Hb=Ic Top/Base",
     ("开通", "Eon"): "A=Ic与Ha交点；B=Vce与Hb交点；Ha=Ic；Hb=Vce",
     ("开通", "ΔVce"): "A=Vce下降前Top稳定段；B=下降后Base稳定段；Ha=Vce Top；Hb=Vce下降拐点",
     ("开通", "开通电流"): "A/Hb=Ic基线；B/Ha=Ic导通平台",
-    ("开通", "Ic_on_max"): "A=Ic抬升前Base稳定段；B=Ic震荡结束后Top稳定段；Ha=Ic最大值；Hb=Ic Base稳定值",
-    ("开通", "Vce_on_max"): "A=Vce最大值左侧相邻Top段；B=Vce下降及震荡结束后首个Base稳定段；Ha=Vce最大值；Hb=Vce Base稳定值",
+    ("开通", "Ic_on_max"): "A/B=阶段包络(Ic Base→Top)∪峰值∓300ns；Ha=Ic峰值；Hb=Ic Base稳定值",
+    ("开通", "Vce_on_max"): "A/B=阶段包络(Vce Top→Base)∪峰值∓300ns；Ha=Vce峰值；Hb=Vce Base稳定值",
     ("开通", "串扰电压"): "A/B=对管Vge最大/最小时刻；Ha=Vge最大值；Hb=Vge最小值",
     ("开通", "Ls_on"): "A/B=Ic斜率交点同步积分窗；Ha/Hb=不适用；逻辑=∫max(Top−Vce,0)dt÷|ΔIc|，受手动ΔVce幅值校准",
     ("开通", "Ton"): "A=Vge上升10%；B=Ic上升90%；Ha/Hb=不适用",
     ("开通", "Td_on"): "A=Vge上升10%；B=Ic上升10%；Ha/Hb=不适用",
     ("开通", "Tr"): "A=Ic上升10%；B=Ic上升90%；Ha/Hb=不适用",
     ("开通", "Pmax"): "A/B=Eon功率窗口；Ha=Vce×Ic峰（无匹配功率Math时使用只读功率参考）；Hb=不适用",
-    ("反向恢复", "Irr"): "A=Irr正向稳定段；B=恢复Base稳定段；Ha=Irr恢复Base；Hb=Irr有符号尖峰",
+    ("反向恢复", "Irr"): "A/B=阶段包络(前向稳定→恢复Base)∪峰值∓300ns；Ha=恢复Base；Hb=Irr有符号尖峰",
     ("反向恢复", "Trr"): (
         "A/B=逻辑Irr主瓣上升/下降沿与Ha首交点；"
         "Ha=峰后恢复稳定平台max/min平均中线；Hb=有符号I_RM尖峰"
     ),
-    ("反向恢复", "Vrr"): "A=Vd抬升前Base稳定段；B=尖峰后Top稳定段；Ha=Vd最大值；Hb=Vd Top稳定值",
+    ("反向恢复", "Vrr"): "A/B=阶段包络(Vd Base→Top)∪峰值∓300ns；Ha=Vd峰值；Hb=Vd Top稳定值",
     ("反向恢复", "dv/dt"): "A/B=|Vd|阈值交点；Ha/Hb=主上升后/前稳定高/低电压平台",
     ("反向恢复", "di/dt"): "A/B=Irr阈值交点；Ha/Hb=Irr恢复平台/正向平台",
     ("反向恢复", "Pdmax"): "A=Irr抬升前稳定平台；B=震荡后首个稳定平台；取A/B间原始|Vd|×|Irr|峰；无可信功率轨迹时Ha/Hb=不适用",
@@ -623,34 +623,46 @@ def _captured_parameter_minimum_span_us(calls: dict[str, dict]) -> float | None:
 
 
 def _crosstalk_cursor_display_problems(t, vge, indices, ta, tb) -> list[str]:
-    """Independently check event membership, raw levels and minimum pair span."""
+    """Check event membership, extrema coverage and the >=50ns display span.
+
+    2026-11-18 (P2-2): the default crosstalk window is no longer pinned to the
+    two raw-extremum samples (that gave 22-35 ns wide, unreadable windows).
+    It is widened to at least 50 ns around their midpoint, staying inside the
+    event section, so the audit checks: raw-sample alignment, event membership,
+    coverage of the section max/min, and the minimum span (unless the section
+    itself is shorter).
+    """
     i0, i1 = indices
     values = np.asarray(vge[i0:i1])
     if values.size < 2 or not np.all(np.isfinite(values)) or np.max(values) == np.min(values):
         return []  # No distinct finite extrema: the event-window fallback is valid.
-    high = i0 + np.flatnonzero(values == np.max(values))
-    low = i0 + np.flatnonzero(values == np.min(values))
     tol_us = 1e-8
     problems = []
-    levels = []
+    positions = []
     for label, time_us in (("A", ta), ("B", tb)):
         pos = int(np.searchsorted(t, time_us * 1e-6))
         candidates = range(max(0, pos - 1), min(len(t), pos + 1))
         idx = min(candidates, key=lambda k: abs(float(t[k] * 1e6) - time_us))
         if not i0 <= idx < i1 or abs(float(t[idx] * 1e6) - time_us) > tol_us:
             problems.append(f"串扰{label}未落在本事件原始采样时刻")
-        levels.append(float(vge[idx]))
-    if sorted(levels) != [float(np.min(values)), float(np.max(values))]:
+        positions.append(idx)
+    lo_idx, hi_idx = sorted(positions)
+    window = np.asarray(vge[lo_idx : hi_idx + 1], dtype=float)
+    section_max = float(np.max(values))
+    section_min = float(np.min(values))
+    if (
+        not np.all(np.isfinite(window))
+        or float(np.max(window)) < section_max - 1e-12
+        or float(np.min(window)) > section_min + 1e-12
+    ):
         problems.append("串扰A/B未分别覆盖对管Vge的raw最大值/最小值")
-    # Nearest-neighbor lookup in the other extrema set, intentionally not
-    # the production helper's merged-adjacency selection algorithm.
-    nearest = np.searchsorted(low, high)
-    gap = min(
-        float(np.min(np.abs(t[high] - t[low[np.clip(nearest, 0, len(low) - 1)]]))),
-        float(np.min(np.abs(t[high] - t[low[np.clip(nearest - 1, 0, len(low) - 1)]]))),
-    ) * 1e6
-    if abs((tb - ta) - gap) > tol_us:
-        problems.append("串扰A/B未选取包含同一raw最大/最小值的最近时刻对")
+    dt_us = abs(float(t[1] - t[0])) * 1e6 if len(t) > 1 else 0.0
+    min_span_us = max(50e-3, dt_us)
+    section_span_us = abs(float(t[i1 - 1] - t[i0]) * 1e6)
+    if abs(tb - ta) + tol_us < min(min_span_us, section_span_us):
+        problems.append(
+            f"串扰默认跨度={abs(tb - ta) * 1e3:.3f}ns 小于最小显示跨度"
+        )
     return problems
 
 
@@ -826,15 +838,35 @@ def _parameter_focus_geometry_problem(
         return "参数 focus 视窗跨度无效"
     if not float(full_range_us[1]) > float(full_range_us[0]):
         return "参数 focus 完整范围无效"
+    # 2026-11-18: 极值卡（六卡）改为「A/B 居中 + 两侧各 ≥10% 余量」构图：
+    # 视窗跨度至少 width/(1-2*0.10)，并让 A/B 居中。审计必须用同一策略复算。
+    _extreme_card = (parameter_key or ("", ""))[1] in {
+        "Ic_off_max",
+        "Vce_off_max",
+        "Ic_on_max",
+        "Vce_on_max",
+        "Vrr",
+        "Irr",
+    }
+    base_span_us = max(2.0, float(minimum_span_us or 0.0))
+    # 2026-11-18: 极值卡要求「A/B 居中」并把窗口扩到 width/(1-2*0.10)；
+    # ΔVce 与串扰电压额外强制两侧 ≥10% 余量（其余卡只靠 14% 锚点构图）。
+    _name = (parameter_key or ("", ""))[1]
+    margin_fraction = 0.10 if (_extreme_card or _name in {"ΔVce", "串扰电压", "Err"}) else 0.0
+    if _extreme_card and required_times_us:
+        _width = max(required_times_us) - min(required_times_us)
+        base_span_us = max(base_span_us, float(_width) / 0.8)
     expected_x0, expected_x1 = _solve_parameter_x_window(
         full_range_us,
         anchor_us,
         required_times_us,
-        base_span_us=max(2.0, float(minimum_span_us or 0.0)),
+        base_span_us=base_span_us,
         anchor_fraction=anchor_fraction,
         prefer_right_room=prefer_right_room,
         composition_anchor_us=composition_anchor_us,
         composition_balance_fraction=composition_balance_fraction,
+        min_margin_fraction=margin_fraction,
+        center_required=_extreme_card,
     )
     actual_x0, actual_x1 = map(float, view_range_us)
     tol = max(0.0, float(tolerance_us))
@@ -891,6 +923,9 @@ def _parameter_focus_geometry_problem(
                 span > 0.0
                 and guarded_width <= 0.5 * span + 1e-9
                 and composition_anchor_us is None
+                # 2026-11-18: 极值卡改为「A/B 居中」构图（A≈38%、B≈62%），
+                # 不再适用「后端不晚于中线」的右优先判据。
+                and not _extreme_card
                 and (required_hi - actual_x0) / span
                 > PARAM_FOCUS_RIGHT_PRIORITY_LATEST_FRACTION + tol / span
             ):
@@ -1166,6 +1201,7 @@ def _parameter_primary_event_geometry_problem(
     primary_event_us: float | None,
     *,
     tolerance_us: float = 0.025,
+    parameter_key: tuple[str, str] | None = None,
 ) -> str | None:
     """Independently keep a declared peak/event in the left half when feasible.
 
@@ -1186,6 +1222,17 @@ def _parameter_primary_event_geometry_problem(
         _composition_balance_fraction,
     ) = _normalize_captured_parameter_focus(captured_focus)
     if not prefer_right_room:
+        return None
+    # 2026-11-18: 极值卡采用「A/B 居中」构图，主事件自然落在 50% 附近
+    # （可到 ~56%），不再适用「主事件必须在左半」的右优先判据。
+    if (parameter_key or ("", ""))[1] in {
+        "Ic_off_max",
+        "Vce_off_max",
+        "Ic_on_max",
+        "Vce_on_max",
+        "Vrr",
+        "Irr",
+    }:
         return None
 
     numeric_ranges = (*view_range_us, *full_range_us)
@@ -4336,17 +4383,23 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 )
                 continue
             else:
-                expected_a_us = float(t[int(stable_context[0])] * 1e6)
-                expected_b_us = float(t[int(stable_context[1])] * 1e6)
                 expected_base = float(stable_context[2])
-                if not _short_values_close(irr_a, expected_a_us, floor=1e-9):
-                    problems.append(
-                        f"Irr A={irr_a:.9f}us≠正向稳定段{expected_a_us:.9f}us"
-                    )
-                if not _short_values_close(irr_b, expected_b_us, floor=1e-9):
-                    problems.append(
-                        f"Irr B={irr_b:.9f}us≠恢复Base稳定段{expected_b_us:.9f}us"
-                    )
+                # 2026-11-18: Irr 卡默认 A/B 是峰值 ±300ns 的显示取值区间；
+                # context 的 A/B 仍是 Pdmax 积分窗（稳定段），故显示区间单独取。
+                display_interval = mw._parameter_max_interval_indices(
+                    "反向恢复", "Irr"
+                )
+                if display_interval is not None:
+                    expected_a_us = float(t[int(display_interval[0])] * 1e6)
+                    expected_b_us = float(t[int(display_interval[1])] * 1e6)
+                    if not _short_values_close(irr_a, expected_a_us, floor=1e-9):
+                        problems.append(
+                            f"Irr A={irr_a:.9f}us≠默认区间起点{expected_a_us:.9f}us"
+                        )
+                    if not _short_values_close(irr_b, expected_b_us, floor=1e-9):
+                        problems.append(
+                            f"Irr B={irr_b:.9f}us≠默认区间终点{expected_b_us:.9f}us"
+                        )
                 if not np.isfinite(float(ha_val)) or not _short_values_close(
                     float(ha_val), expected_base, floor=1e-8
                 ):
@@ -5247,7 +5300,17 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 if min_y is None:
                     problems.append("最大值参数 Hb 数值缺失")
                 else:
-                    check_level(float(min_y), expected, "Hb稳定平台", (ta, tb))
+                    # 2026-11-18: 纯显示极值卡的 A/B 可能只覆盖峰值 ±300ns，
+                    # 故 Hb 电平按「事件段 ∪ 默认 A/B」校验，避免 Base 电平落在
+                    # 窄窗之外造成假 FAIL。
+                    _hb_lo = min(_idx(t, ta), s0)
+                    _hb_hi = max(_idx(t, tb), s1)
+                    check_level(
+                        float(min_y),
+                        expected,
+                        "Hb稳定平台",
+                        (float(t[_hb_lo]) * 1e6, float(t[_hb_hi]) * 1e6),
+                    )
             i0 = max(0, min(_idx(t, min(ta, tb)), len(t) - 1))
             i1 = max(i0, min(_idx(t, max(ta, tb)), len(t) - 1))
             default_peak_point = mw._default_extreme_peak_point(section, name)
@@ -5278,7 +5341,9 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
 
             stable_context = None
             if (section, name) == ("关断过程", "Vce_off_max"):
-                stable_context = mw._turn_off_vce_stable_cursor_context()
+                # 2026-11-18: Vce_off_max 的默认 A/B 是峰值 ±300ns 显示区间；
+                # ΔVce 仍独占原稳定段 context。
+                stable_context = mw._turn_off_vce_off_max_cursor_context()
             elif (section, name) == ("开通", "Ic_on_max"):
                 stable_context = mw._turn_on_ic_on_max_cursor_context()
             elif (section, name) == ("开通", "Vce_on_max"):
@@ -5291,22 +5356,23 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     a_idx, b_idx, _top = stable_context
                     slope = result.dvdt_contexts[("反向恢复", "dv/dt")]
                     span = max(abs(slope.top_v - slope.base_v), 1.0)
-                    width = max(8, int(round(200e-9 / max(bundle.dt, 1e-15))))
-                    for label, index, level in (
-                        ("A", a_idx, slope.base_v), ("B", b_idx, slope.top_v)
-                    ):
-                        start = max(0, index - width // 2)
-                        band = np.abs(chan["v_diode"][start : start + width])
-                        if len(band) != width or not np.all(np.isfinite(band)):
-                            problems.append(f"Vrr {label}缺少完整有限值稳定带")
-                            continue
-                        p05, p95 = np.percentile(band, [5, 95])
-                        if (
-                            p95 - p05 > 0.10 * span
-                            or abs(0.5 * (p05 + p95) - level) > 0.05 * span
-                            or abs(np.median(band[:width//2]) - np.median(band[width//2:])) > 0.03 * span
+                    if default_peak_point is None:
+                        problems.append("Vrr 缺少提取峰值时刻")
+                    else:
+                        peak_idx = int(default_peak_point[0])
+                        expected = mw._parameter_max_interval_indices(
+                            "反向恢复", "Vrr"
+                        )
+                        if expected is not None and (a_idx, b_idx) != expected:
+                            problems.append("Vrr B不是峰值右侧300ns")
+                        if not (
+                            float(t[a_idx]) < float(t[peak_idx]) < float(t[b_idx])
                         ):
-                            problems.append(f"Vrr {label}周围电压带仍有振荡或偏离稳定平台")
+                            problems.append("Vrr 权威峰值不在默认A/B区间内")
+                        if abs(float(chan["v_diode"][peak_idx]) - float(result.reverse_recovery.vrr)) > max(
+                            1.0, 0.02 * span
+                        ):
+                            problems.append("Vrr 峰值点上电压≠提取Vrr")
                     if b_idx >= result.segments.pulse2_off:
                         problems.append("Vrr B越过下一次关断")
             if stable_context is not None:
@@ -5314,11 +5380,11 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                 expected_b_us = float(t[int(stable_context[1])] * 1e6)
                 if not _short_values_close(ta, expected_a_us, floor=1e-9):
                     problems.append(
-                        f"{name} A={ta:.9f}us≠稳定平台点{expected_a_us:.9f}us"
+                        f"{name} A={ta:.9f}us≠默认区间端点{expected_a_us:.9f}us"
                     )
                 if not _short_values_close(tb, expected_b_us, floor=1e-9):
                     problems.append(
-                        f"{name} B={tb:.9f}us≠稳定平台点{expected_b_us:.9f}us"
+                        f"{name} B={tb:.9f}us≠默认区间端点{expected_b_us:.9f}us"
                     )
             if default_peak_point is not None:
                 expected_peak_us = float(t[int(default_peak_point[0])] * 1e6)
@@ -5327,25 +5393,22 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
             if section == "开通" and name == "Vce_on_max" and stable_context is not None:
                 a_idx, b_idx, base_v, top_v = stable_context
                 span = max(abs(float(top_v) - float(base_v)), 1.0)
+                # 2026-11-18: A/B 改为权威峰值左右各 300ns（夹到开通事件窗内）。
                 if default_peak_point is not None:
                     peak_idx = int(default_peak_point[0])
-                    if not a_idx < peak_idx < b_idx:
-                        problems.append("Vce_on_max A必须在权威最大值左侧，B必须在其右侧")
-                    if float(t[peak_idx] - t[a_idx]) > 200e-9 + 2.0 * bundle.dt:
-                        problems.append("Vce_on_max A仍远离峰值左侧相邻平台")
+                    # 以 GUI 的唯一默认区间来源为准（同一 helper + 事件窗）。
+                    expected = mw._parameter_max_interval_indices(
+                        "开通", "Vce_on_max"
+                    )
+                    if expected is not None and (a_idx, b_idx) != expected:
+                        problems.append("Vce_on_max A/B不是峰值左右各300ns")
+                    if not (float(t[a_idx]) < float(t[peak_idx]) < float(t[b_idx])):
+                        problems.append("Vce_on_max 权威峰值不在默认A/B区间内")
                 if b_idx >= result.segments.pulse2_off:
                     problems.append("Vce_on_max B越过下一次关断")
-                # Inspect raw samples as well as matching the context's
-                # timestamps: an isolated Base crossing must not pass as B.
-                width = max(16, int(round(200e-9 / max(bundle.dt, 1e-15))))
-                band = chan["vce"][max(0, b_idx - width // 2) : b_idx + width // 2]
-                if len(band) >= width - 1:
-                    p05, p95 = np.percentile(band, [5, 95])
-                    if (
-                        float(p95 - p05) > 0.10 * span
-                        or abs(float((p05 + p95) * 0.5) - base_v) > 0.04 * span
-                    ):
-                        problems.append("Vce_on_max B周围完整电压带仍有振荡或偏离Base")
+                # 旧判据「B 周围必须是完整 Base 带」随 2026-11-18 峰值±300ns
+                # 口径作废：B 不再声称自己落在 Base 平台，Base 电平仍由 Ha/Hb
+                # 断言（见上方 Hb 稳定性检查）负责。
             if section == "关断过程" and name == "Ic_off_max":
                 context = mw._turn_off_ic_off_max_cursor_context()
                 if context is None:
@@ -5364,25 +5427,38 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                             f"Ic_off_max B={tb:.9f}us≠Ic Base稳定段"
                             f"{expected_b_us:.9f}us"
                         )
-                    vce_base, vce_top = turn_off_dvdt_base_top_levels(
-                        t,
-                        chan["vce"],
-                        result.segments.turn_off[0],
-                        result.segments.turn_off[1],
-                    )
-                    vce_span = max(abs(float(vce_top) - float(vce_base)), 1.0)
-                    if abs(float(chan["vce"][expected_a_idx]) - float(vce_base)) > max(
-                        1.0, 0.04 * vce_span
-                    ):
-                        problems.append("Ic_off_max A未落在Vce抬升前Base稳定带")
-                    ic_span = max(
-                        abs(float(result.turn_off.ic_off_max) - float(expected_ic_base)),
-                        1.0,
-                    )
-                    if abs(float(cursor_ic[expected_b_idx]) - float(expected_ic_base)) > max(
-                        1.0, 0.04 * ic_span
-                    ):
-                        problems.append("Ic_off_max B未落在抬升前Base稳定带")
+                    # 2026-11-18 用户拍板：默认 A/B 是以提取峰值为中心、左右各
+                    # 300ns 的显示取值区间（按 dt 取整、夹到关断窗内），不再要求
+                    # A 落 Vce Base、B 落 Ic Base；Hb 仍校验 Ic Base 稳定值。
+                    peak_point = mw._turn_off_ic_off_max_default_peak_point()
+                    if peak_point is None:
+                        problems.append("Ic_off_max 缺少提取峰值时刻")
+                    else:
+                        peak_idx = int(peak_point[0])
+                        dt_s = max(float(bundle.dt), 1e-15)
+                        half = max(1, int(round(300e-9 / dt_s)))
+                        turn_lo = max(0, int(result.segments.turn_off[0]))
+                        turn_hi = min(len(t) - 1, int(result.segments.turn_off[1]))
+                        want_a = max(turn_lo, peak_idx - half)
+                        want_b = min(turn_hi, peak_idx + half)
+                        if peak_idx - half >= turn_lo and peak_idx + half <= turn_hi:
+                            want_a, want_b = peak_idx - half, peak_idx + half
+                        if expected_a_idx != want_a:
+                            problems.append(
+                                "Ic_off_max A不是峰值左侧300ns: "
+                                f"{float(t[expected_a_idx]) * 1e6:.6f}us"
+                            )
+                        if expected_b_idx != want_b:
+                            problems.append(
+                                "Ic_off_max B不是峰值右侧300ns: "
+                                f"{float(t[expected_b_idx]) * 1e6:.6f}us"
+                            )
+                        if not (
+                            float(t[expected_a_idx])
+                            < float(t[peak_idx])
+                            < float(t[expected_b_idx])
+                        ):
+                            problems.append("Ic_off_max 峰值不在默认A/B区间内")
                     if min_y is None or not _short_values_close(
                         float(min_y), float(expected_ic_base), floor=1e-8
                     ):
@@ -5477,8 +5553,26 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                             dt_s = max(float(bundle.dt), 1e-15)
                             hb1 = max(0, int(default_peak_point[0]) - max(1, int(round(30e-9 / dt_s))))
                             hb0 = max(0, hb1 - max(8, int(round(200e-9 / dt_s))))
-                        if not hb0 <= expected_a_idx <= hb1:
-                            problems.append("Ic_on_max A未落在Ic抬升前Base稳定带")
+                        # 2026-11-18: A/B = 权威峰值左右各 300ns（夹到开通事件窗内），
+                        # 不再要求 A 落 Ic Base 带、B 落震荡后 Top 带。
+                        if default_peak_point is None:
+                            problems.append("Ic_on_max 缺少提取峰值时刻")
+                        else:
+                            ic_peak_idx = int(default_peak_point[0])
+                            expected = mw._parameter_max_interval_indices(
+                                "开通", "Ic_on_max"
+                            )
+                            if expected is not None and (
+                                expected_a_idx,
+                                expected_b_idx,
+                            ) != expected:
+                                problems.append("Ic_on_max A/B不是峰值左右各300ns")
+                            if not (
+                                float(t[expected_a_idx])
+                                < float(t[ic_peak_idx])
+                                < float(t[expected_b_idx])
+                            ):
+                                problems.append("Ic_on_max 权威峰值不在默认A/B区间内")
                         if expected_b_idx >= result.segments.pulse2_off:
                             problems.append("Ic_on_max B越过本次开通的下一关断事件")
                         hb_mid = _plateau_mid_without_isolated_spikes(
@@ -5487,40 +5581,8 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                         ha_mid = _plateau_mid_without_isolated_spikes(
                             cursor_ic[ha0 : ha1 + 1]
                         )
-                        ic_span = max(
-                            abs(float(result.turn_on.ic_on_max) - float(expected_ic_base)),
-                            1.0,
-                        )
-                        if abs(float(cursor_ic[expected_a_idx]) - float(hb_mid)) > max(
-                            1.0, 0.04 * ic_span
-                        ):
-                            problems.append("Ic_on_max A未落在Ic抬升前Base稳定带")
-                        if abs(float(cursor_ic[expected_b_idx]) - float(ha_mid)) > max(
-                            1.0, 0.04 * ic_span
-                        ):
-                            problems.append("Ic_on_max B未落在电流震荡后Top稳定带")
-                        # B may precede or follow the amplitude-reference
-                        # window; independently inspect the complete band
-                        # around the chosen time, not just a level crossing.
-                        width = max(16, int(round(200e-9 / max(float(bundle.dt), 1e-15))))
-                        band_lo = expected_b_idx - width // 2
-                        band = cursor_ic[band_lo : band_lo + width]
-                        top_band = cursor_ic[ha0 : ha1 + 1]
-                        event_span = max(abs(float(ha_mid) - float(hb_mid)), 1.0)
-                        noise = min(
-                            float(np.percentile(top_band, 95) - np.percentile(top_band, 5)),
-                            0.10 * event_span,
-                        )
-                        width_limit = max(1.35 * noise, 0.075 * event_span)
-                        if len(band) == width and not ha0 <= expected_b_idx <= ha1:
-                            p05, p95 = np.percentile(band, [5, 95])
-                            if (
-                                float(p95 - p05) > width_limit + 1e-9
-                                or float(np.std(band)) > 0.5 * width_limit + 1e-9
-                                or abs(float((p05 + p95) * 0.5) - float(ha_mid))
-                                > max(0.5 * noise, 0.04 * event_span) + 1e-9
-                            ):
-                                problems.append("Ic_on_max B周围完整电流带仍有明显振荡或偏离Top")
+                        # 旧的 A/B 平台电平与完整电流带判据随 2026-11-18 峰值
+                        # ±300ns 口径作废；Ha/Hb 电平仍由下面的独立断言校验。
                         if min_y is None or not _short_values_close(
                             float(min_y), float(expected_ic_base), floor=1e-8
                         ):
@@ -5780,28 +5842,26 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     np.searchsorted(t, actual_b_us * 1e-6, side="left")
                 )
                 actual_b_idx = max(0, min(actual_b_idx, len(t) - 1))
-                # 用户 2026-10-16 拍板「② 关断 B 落点 = 甲 · 稳定抬升前 Base」：
-                # 独立判据改为「B 必须落在 Vce/Ic 主抬升前的稳定 Base 窗内，
-                # 且该处 Ic 电平等于本卡发布的 Base 稳定值」，不再要求 B 位于
-                # Ic 主下降后的首个稳定带。旧的「下降后首个完整 Base 稳定窗」
-                # 不可满足情形（历史 15 条 FAIL）随之不再计为 FAIL。
-                span = max(
-                    abs(float(result.turn_off.ic_off_max) - signed_base), 1.0
-                )
-                if not b0 <= actual_b_idx <= b1:
-                    problems.append(
-                        "Ic_off_max B未落在抬升前Base稳定窗: "
-                        f"实际={actual_b_us:.6f}us "
-                        f"窗=[{float(t[b0]) * 1e6:.6f},{float(t[b1]) * 1e6:.6f}]us"
-                    )
-                elif abs(float(cursor_ic[actual_b_idx]) - signed_base) > max(
-                    1.0, 0.04 * span
-                ):
-                    problems.append(
-                        "Ic_off_max B处Ic偏离抬升前Base稳定值: "
-                        f"{float(cursor_ic[actual_b_idx]):.3f}A "
-                        f"vs {signed_base:.3f}A"
-                    )
+                # 2026-11-18 用户拍板：默认 A/B 改为提取峰值左右各 300ns 的显示
+                # 取值区间（夹到关断窗内），B 不再是抬升前 Base 稳定窗内的代表点。
+                # 旧判据（2026-10-16「甲 · 稳定抬升前 Base」：B 必须落在 base_window
+                # 内且该处 Ic 电平等于 Base 稳定值）随之作废；Hb 电平本身不变，
+                # 仍按 base_window 的带符号 Base 值校验（见上方 Hb 断言）。
+                peak_point = mw._turn_off_ic_off_max_default_peak_point()
+                if peak_point is not None:
+                    peak_idx = int(peak_point[0])
+                    dt_s = max(float(bundle.dt), 1e-15)
+                    half = max(1, int(round(300e-9 / dt_s)))
+                    turn_hi = min(len(t) - 1, int(result.segments.turn_off[1]))
+                    want_b_idx = min(turn_hi, peak_idx + half)
+                    if abs(actual_b_idx - want_b_idx) > 1:
+                        problems.append(
+                            "Ic_off_max B不是峰值右侧300ns: "
+                            f"实际={actual_b_us:.6f}us "
+                            f"期望={float(t[want_b_idx]) * 1e6:.6f}us"
+                        )
+                    if not np.isfinite(signed_base):
+                        problems.append("Ic_off_max Base稳定值非有限值")
 
         # Real-operation guard: users single/double-click other channels to
         # raise or highlight traces while inspecting a parameter.  That visual
@@ -5938,6 +5998,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     (full_x0, full_x1),
                     captured_focus,
                     primary_event_us,
+                    parameter_key=(section, name),
                 )
                 if primary_problem is not None:
                     problems.append(primary_problem)
