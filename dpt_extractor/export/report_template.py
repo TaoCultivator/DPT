@@ -137,6 +137,88 @@ _DPT_IMAGE_HEADERS: dict[tuple[str, str], tuple[str, str]] = {
     ("反向恢复", "Err"): ("rr", "Err"),
 }
 
+#: 波形页三条带内的六条斜率表头：row_key -> 区间/预设模式使用的参数名。
+#: 反向恢复在区间模式下同样写成 dv/dt(...) / di/dt(...)，不保留模板的
+#: Dvdt_max/Didt_Irr 写法。
+DPT_SLOPE_HEADER_NAMES: dict[str, str] = {
+    "off_dvdt": "dv/dt",
+    "off_didt": "di/dt",
+    "on_dvdt": "dv/dt",
+    "on_didt": "di/dt",
+    "rr_dvdt": "dv/dt",
+    "rr_didt": "di/dt",
+}
+
+#: auto_max（自动最大斜率）模式必须写回的基线表头文本（用户 2026-11-18 口径）：
+#: 关断/开通只写参数名 Dvdt_max / Didt_max（不带单位），反向恢复保持模板原表头。
+#: 不能靠"跳过不改"实现：用户先在区间模式写过区间标注、再切自动最大斜率
+#: 写同一份报告时，跳过会残留旧的区间标注。
+DPT_SLOPE_HEADER_BASELINES: dict[str, str] = {
+    "off_dvdt": "Dvdt_max",
+    "off_didt": "Didt_max",
+    "on_dvdt": "Dvdt_max",
+    "on_didt": "Didt_max",
+    "rr_dvdt": "Dvdt_max(V/ns)",
+    "rr_didt": "Didt_Irr(A/ns)",
+}
+
+#: 每个斜率表头所属的波形带（关断 / 开通 / 反向恢复 = 块内 0 / 17 / 34 行）。
+_DPT_SLOPE_HEADER_BLOCKS: dict[str, str] = {
+    "off_dvdt": "off",
+    "off_didt": "off",
+    "on_dvdt": "on",
+    "on_didt": "on",
+    "rr_dvdt": "rr",
+    "rr_didt": "rr",
+}
+
+#: 模板表头上的文字前缀（用于定位单元格）。反向恢复的模板原文是
+#: Dvdt_max/Didt_Irr，但区间模式会把它改写成 dv/dt(...)/di/dt(...)，
+#: 因此定位时两种写法都要试。
+_DPT_SLOPE_HEADER_TEMPLATE_NAMES: dict[str, str] = {
+    "off_dvdt": "dv/dt",
+    "off_didt": "di/dt",
+    "on_dvdt": "dv/dt",
+    "on_didt": "di/dt",
+    "rr_dvdt": "Dvdt_max",
+    "rr_didt": "Didt_Irr",
+}
+
+#: 图片槽 key -> 斜率 row_key：六条斜率表头在区间/auto_max 之间切换后写法会变
+#: （dv/dt(...)、dv/dt(V/ns)、Dvdt_max ...），图片槽定位必须按 row_key 回退到
+#: 其它写法，否则报告会因"图片写入不完整"整单失败。
+_DPT_SLOPE_HEADER_BY_IMAGE_KEY: dict[tuple[str, str], str] = {
+    ("关断过程", "dv/dt"): "off_dvdt",
+    ("关断过程", "di/dt"): "off_didt",
+    ("开通", "dv/dt"): "on_dvdt",
+    ("开通", "di/dt"): "on_didt",
+    ("反向恢复", "dv/dt"): "rr_dvdt",
+    ("反向恢复", "di/dt"): "rr_didt",
+}
+
+
+def _dpt_slope_header_write_names(row_key: str) -> tuple[str, ...]:
+    """一条斜率表头可能的全部写法（模板原文 / 区间参数名 / 基线参数名）。"""
+
+    return tuple(
+        dict.fromkeys(
+            (
+                _DPT_SLOPE_HEADER_TEMPLATE_NAMES[row_key],
+                DPT_SLOPE_HEADER_NAMES[row_key],
+                DPT_SLOPE_HEADER_BASELINES[row_key].split("(")[0],
+            )
+        )
+    )
+
+
+def _dpt_waveform_header_texts() -> set[str]:
+    """波形页表头归一化/槽位统计使用的全部表头文字。"""
+
+    texts = {header_text for _block, header_text in _DPT_IMAGE_HEADERS.values()}
+    for row_key in DPT_SLOPE_HEADER_NAMES:
+        texts.update(_dpt_slope_header_write_names(row_key))
+    return texts
+
 _SHORT_IMAGE_HEADERS: dict[tuple[str, str], str] = {
     ("短路过程", "短路电流Imax"): "短路电流Imax",
     ("短路过程", "应力Vpeak_本管"): "应力Vpeak_本管",
@@ -3037,7 +3119,7 @@ def _normalize_dpt_waveform_text(
     ws: Worksheet,
     temperature_labels: TemperatureLabels | None = None,
 ) -> None:
-    header_texts = {header_text for _block, header_text in _DPT_IMAGE_HEADERS.values()}
+    header_texts = _dpt_waveform_header_texts()
     for rng in _all_header_ranges_by_texts(ws, header_texts):
         _set_row_height_px(ws, rng.min_row, _WAVEFORM_HEADER_ROW_HEIGHT_PX)
         _style_text_cell(
@@ -3196,24 +3278,32 @@ def _image_aspect(image_path: str | Path) -> float | None:
     return image.width / image.height
 
 
-#: 嵌入报告前，波形图会先重采样到这个最长边像素。
-#: Excel 里显示尺寸是 320×240，物理像素加倍，放大 200% 内仍锐利；
-#: 同时把无损 PNG 转成 JPEG，单张约 250KB → 62KB。
-#: 实测 1000 张：原始 428MB / PNG 重采样 137MB / JPEG 重采样 59MB。
-_EMBED_IMAGE_MAX_EDGE_PX = 640
-_EMBED_IMAGE_JPEG_QUALITY = 88
+#: 嵌入报告前，波形图重采样到的**最长边**物理像素。
+#: 源抓图固定为 1280×960（``gui/main_window.py`` 的
+#: ``REPORT_PLOT_CAPTURE_SIZE``），Excel 里显示区是 320×240，最长边 960
+#: 相当于 3× 过采样，报告中放大或缩放阅读时小字仍然清晰。
+#: 以无损 PNG 嵌入（不再转 JPEG）：单张约 150KB，1955 张的完整报告约 300MB；
+#: 若直接嵌入 1280×960 原图则接近 500MB，体积换不来可读性收益。
+_EMBED_IMAGE_MAX_EDGE_PX = 960
 
 
 def _embed_ready_image(path: str | Path) -> XLImage:
-    """加载待嵌入报告的图片，必要时重采样并压缩。
+    """加载待嵌入报告的图片，必要时按最长边重采样后以无损 PNG 嵌入。
 
     ``openpyxl`` 的 ``Image`` 只改写 drawing XML 里的显示尺寸，``xl/media``
-    里的原始字节原样拷贝。直接嵌入 1280×960 的波形截图会让报告体积失控
-    （实测每例约 3MB，180 例超 400MB）。这里在加载前用 Pillow 把最长边压到
-    :data:`_EMBED_IMAGE_MAX_EDGE_PX` 并转 JPEG，保持宽高比不变。
+    里的原始字节原样拷贝。源抓图是 1280×960，直接嵌入会让报告体积接近 500MB；
+    这里在加载前用 Pillow 把最长边压到 :data:`_EMBED_IMAGE_MAX_EDGE_PX`
+    （960）并保存为 ``optimize=True`` 的无损 PNG，保持宽高比不变。
+    重采样用面积平均（``BOX``）：LANCZOS 在 1280→960 缩放时会造出大量中间
+    色，PNG 反而比 1280 原图更大（实测 275KB/张 vs 面积平均 165KB/张），
+    而报告显示区只有 320×240，面积平均在 3× 过采样下依旧清晰。
 
-    图片以 ``BytesIO`` 嵌入，不产生临时文件；任何异常都回退到原始文件，
-    绝不因压缩失败而丢失报告图片。
+    为什么不是 JPEG：显示区 320×240、源图 1280×960，重采样到 640 再转 JPEG
+    （旧实现 q88）会让参数小字在报告里发糊；无损 PNG 只按几何尺寸损失信息，
+    缩放到 960 后 3× 过采样仍能让文字边缘保持锐利。
+
+    图片以 ``BytesIO`` 嵌入，不产生临时文件；PNG 编码失败等任何异常都回退
+    到原始文件，绝不因压缩失败而丢失报告图片。
     """
     source = Path(path)
     try:
@@ -3224,26 +3314,21 @@ def _embed_ready_image(path: str | Path) -> XLImage:
         with _PILImage.open(source) as raw:
             width, height = raw.size
             longest = max(width, height)
+            work = raw.convert("RGB")
             if longest > _EMBED_IMAGE_MAX_EDGE_PX:
                 scale = _EMBED_IMAGE_MAX_EDGE_PX / longest
                 target = (
                     max(1, round(width * scale)),
                     max(1, round(height * scale)),
                 )
-                work = raw.convert("RGB").resize(target, _PILImage.LANCZOS)
-            else:
-                work = raw.convert("RGB")
+                work = work.resize(target, _PILImage.BOX)
             buffer = io.BytesIO()
-            work.save(
-                buffer,
-                format="JPEG",
-                quality=_EMBED_IMAGE_JPEG_QUALITY,
-                optimize=True,
-            )
+            work.save(buffer, format="PNG", optimize=True)
         buffer.seek(0)
         return XLImage(buffer)
     except Exception:
         return XLImage(str(source))
+
 
 def _prepare_uniform_image_slots(
     ws: Worksheet,
@@ -3527,6 +3612,95 @@ def _insert_image(
     ws.add_image(image)
 
 
+def dpt_slope_header_label(row_key: str, slope_range) -> str:
+    """报告波形页某条斜率表头的目标文本。
+
+    - 区间/自定义预设：``dv/dt(10%-90%)``、``di/dt(50%IF→50%IRM)``；
+    - ``auto_max``：写回基线表头原文（``dv/dt(V/ns)``、``Dvdt_max(V/ns)`` 等），
+      以便把先前区间模式留下的标注清掉。
+    """
+
+    from dpt_extractor.models.slope_range import slope_header_label
+
+    return str(
+        slope_header_label(
+            DPT_SLOPE_HEADER_NAMES[row_key],
+            slope_range,
+            DPT_SLOPE_HEADER_BASELINES[row_key],
+        )
+    )
+
+
+def _find_dpt_slope_header(
+    ws: Worksheet,
+    row: int,
+    row_key: str,
+) -> CellRange | None:
+    """按模板原文 / 区间参数名 / 基线参数名定位一条斜率表头。"""
+
+    for name in _dpt_slope_header_write_names(row_key):
+        header = _find_header_range(ws, row, name)
+        if header is not None:
+            return header
+    return None
+
+
+def _apply_dpt_slope_header_labels(
+    ws: Worksheet,
+    anchor_row: int,
+    labels: Mapping[str, str | None] | None,
+) -> dict[str, str]:
+    """按 row_key 改写一个波形块三条带的六个斜率表头。
+
+    只改单元格文本：样式、合并区、行高列宽和图片一律不动；None / 缺省 /
+    空串表示保留当前表头文本。表头位置沿用文字定位，不写死列号。
+    """
+
+    if not labels:
+        return {}
+    block_rows = {
+        "off": anchor_row,
+        "on": anchor_row + 17,
+        "rr": anchor_row + 34,
+    }
+    applied: dict[str, str] = {}
+    for row_key in DPT_SLOPE_HEADER_NAMES:
+        text = labels.get(row_key)
+        if not text:
+            continue
+        block = _DPT_SLOPE_HEADER_BLOCKS[row_key]
+        header = _find_dpt_slope_header(ws, block_rows[block], row_key)
+        if header is None:
+            continue
+        _set_range_value(ws, header, str(text))
+        applied[row_key] = str(text)
+    return applied
+
+
+def _find_dpt_image_header(
+    ws: Worksheet,
+    row: int,
+    key: tuple[str, str],
+    header_text: str,
+) -> CellRange | None:
+    """定位一个参数图片槽的表头。
+
+    模板原文优先；反向恢复表头被区间标注改名后（Dvdt_max -> dv/dt(...)）
+    用别名回退，避免整份报告因找不到图片槽而判定"图片写入不完整"。
+    """
+
+    header = _find_header_range(ws, row, header_text)
+    if header is not None:
+        return header
+    row_key = _DPT_SLOPE_HEADER_BY_IMAGE_KEY.get(key)
+    if row_key is not None:
+        for name in _dpt_slope_header_write_names(row_key):
+            header = _find_header_range(ws, row, name)
+            if header is not None:
+                return header
+    return None
+
+
 def _write_dpt_images(
     ws: Worksheet,
     anchor_row: int | None,
@@ -3534,6 +3708,7 @@ def _write_dpt_images(
     result: ExtractResult,
     progress_callback: Callable[[int, int, str], None] | None = None,
     temperature_labels: TemperatureLabels | None = None,
+    slope_header_labels: Mapping[str, str | None] | None = None,
 ) -> int:
     if anchor_row is None:
         _normalize_dpt_waveform_text(ws, temperature_labels)
@@ -3551,7 +3726,7 @@ def _write_dpt_images(
     _remove_images_in_range(ws, overview_target)
     parameter_targets: dict[tuple[str, str], CellRange] = {}
     for key, (block, header_text) in _DPT_IMAGE_HEADERS.items():
-        header = _find_header_range(ws, block_rows[block], header_text)
+        header = _find_dpt_image_header(ws, block_rows[block], key, header_text)
         if header is None:
             continue
         target = _picture_range_below(ws, header, rows=16)
@@ -3583,7 +3758,7 @@ def _write_dpt_images(
     )
     all_parameter_slots = _all_picture_ranges_by_headers(
         ws,
-        {header_text for _block, header_text in _DPT_IMAGE_HEADERS.values()},
+        _dpt_waveform_header_texts(),
         rows=16,
     )
     display_size = _prepare_uniform_image_slots(
@@ -3615,6 +3790,9 @@ def _write_dpt_images(
         written += 1
         if progress_callback is not None:
             progress_callback(written, image_total, "插入报告图片")
+    # 六条斜率表头按本次取值范围改名；必须在图片槽定位之后执行，避免
+    # 表头文本变化影响本块的 _find_header_range 结果。
+    _apply_dpt_slope_header_labels(ws, anchor_row, slope_header_labels)
     return written
 
 
@@ -4694,6 +4872,7 @@ def write_report_template(
     image_result_index: int | None = None,
     report_conditions: ReportConditions | None = None,
     sheet_prefix: str | None = None,
+    slope_header_labels: Mapping[str, str | None] | None = None,
 ) -> ReportWriteSummary:
     path = Path(report_path)
     results = _as_report_results(result)
@@ -5008,6 +5187,7 @@ def write_report_template(
             image_result,
             progress_callback=emit_image,
             temperature_labels=temperature_labels,
+            slope_header_labels=slope_header_labels,
         )
         if waveform_ws is not None
         else 0

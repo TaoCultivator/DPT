@@ -44,12 +44,14 @@ from dpt_extractor.config.loader import AppConfig, load_config
 from dpt_extractor.export.excel_export import default_export_path, export_to_excel
 from dpt_extractor.export.report_template import (
     DPT_OVERVIEW_IMAGE_PARAM,
+    DPT_SLOPE_HEADER_NAMES,
     DptReportConditions,
     ReportConditions,
     SHORT_REPORT_IMAGE_PARAMS,
     ReportWriteSummary,
     ShortReportConditions,
     dpt_report_image_params_for_result,
+    dpt_slope_header_label,
     infer_dpt_report_conditions,
     infer_short_report_conditions,
     report_sheet_prefix_for_paths,
@@ -137,6 +139,7 @@ from dpt_extractor.models.slope_range import (
     auto_max_slope_range,
     default_slope_ranges,
     normalize_slope_range,
+    slope_header_label,
     slope_range_result_label,
 )
 from dpt_extractor.models.waveform import WaveformBundle, normalize_channel_reference
@@ -1496,6 +1499,24 @@ def _report_image_result_index(
     return 0
 
 
+def _report_slope_header_labels(
+    slope_ranges: dict[str, SlopeRange] | None,
+) -> dict[str, str]:
+    """按冻结的斜率取值范围生成六条报告表头。
+
+    auto_max（自动最大斜率）写回基线表头原文（dv/dt(V/ns)、Dvdt_max(V/ns) 等），
+    因此"先按区间模式写过、再切最大值写同一份报告"时不会残留旧区间标注。
+    """
+
+    defaults = default_slope_ranges()
+    current = slope_ranges or defaults
+    labels: dict[str, str] = {}
+    for row_key in DPT_SLOPE_HEADER_NAMES:
+        slope_range = current.get(row_key) or defaults[row_key]
+        labels[row_key] = dpt_slope_header_label(row_key, slope_range)
+    return labels
+
+
 class _ReportPrepareTask(QRunnable):
     """在后台准备报告数据行，避免多脉冲重复提取阻塞界面。"""
 
@@ -1644,6 +1665,7 @@ class _ReportWriteTask(QRunnable):
         image_result_index: int = 0,
         report_conditions: ReportConditions | None = None,
         sheet_prefix: str | None = None,
+        slope_header_labels: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.request_id = request_id
@@ -1657,6 +1679,7 @@ class _ReportWriteTask(QRunnable):
         self.phase_code = phase_code
         self.image_result_index = int(image_result_index)
         self.sheet_prefix = sheet_prefix
+        self.slope_header_labels = dict(slope_header_labels or {})
         result0 = result[0] if isinstance(result, list) else result
         self.report_conditions = deepcopy(
             report_conditions
@@ -1681,6 +1704,7 @@ class _ReportWriteTask(QRunnable):
                 image_result_index=self.image_result_index,
                 report_conditions=self.report_conditions,
                 sheet_prefix=self.sheet_prefix,
+                slope_header_labels=self.slope_header_labels,
                 progress_callback=lambda value, total, label: self.signals.progress.emit(
                     self.request_id,
                     value,
@@ -12472,6 +12496,9 @@ class MainWindow(QMainWindow):
                 phase_code=state.phase_code,
                 report_conditions=state.report_conditions,
                 image_result_index=state.image_result_index,
+                slope_header_labels=_report_slope_header_labels(
+                    state.capture_page.slope_ranges
+                ),
             )
         except Exception as exc:
             self._fail_report_capture(state, exc)
@@ -12958,6 +12985,7 @@ class MainWindow(QMainWindow):
         report_conditions: ReportConditions | None = None,
         image_result_index: int | None = None,
         sheet_prefix: str | None = None,
+        slope_header_labels: dict[str, str] | None = None,
     ) -> None:
         if not results or self._report_output_path is None:
             _safe_cleanup_tempdir(tempdir)
@@ -13013,6 +13041,7 @@ class MainWindow(QMainWindow):
                 else DptReportConditions()
             ),
             sheet_prefix=sheet_prefix,
+            slope_header_labels=slope_header_labels,
         )
         task.signals.progress.connect(self._on_report_write_progress)
         task.signals.finished.connect(self._on_report_write_finished)

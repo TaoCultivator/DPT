@@ -3368,6 +3368,7 @@ class TestWaveformImportAutoCenter(unittest.TestCase):
             phase_code=None,
             report_conditions=None,
             image_result_index=None,
+            slope_header_labels=None,
         ):
             self.assertEqual(len(images), len(params))
             self.assertTrue(all(path.read_bytes() == b"captured" for path in images.values()))

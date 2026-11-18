@@ -93,6 +93,27 @@ class SlopeRange:
         return self.start_pct / 100.0, self.end_pct / 100.0
 
 
+def slope_header_label(
+    name: str,
+    sr: SlopeRange,
+    baseline: str | None = None,
+) -> str | None:
+    """报告波形页斜率表头文本。
+
+    - 区间模式：``dv/dt(10%-90%)``、``di/dt(90%-10%)``；
+    - 预设带标签：``di/dt(50%IF→50%IRM)``；
+    - ``auto_max``：返回 ``baseline``（模板表头原文，如 ``dv/dt(V/ns)``），
+      调用方据此把先前区间模式留下的标注清回基线；未提供 baseline 时返回
+      None，表示不改写表头。
+    """
+
+    if sr.is_auto_max:
+        return baseline
+    if sr.preset_label:
+        return f"{name}({sr.preset_label})"
+    return f"{name}({sr.start_pct:g}%-{sr.end_pct:g}%)"
+
+
 def preset_to_range(preset: SlopePreset) -> SlopeRange:
     plabel, a, b = preset[0], preset[1], preset[2]
     ic_ref = "plateau"

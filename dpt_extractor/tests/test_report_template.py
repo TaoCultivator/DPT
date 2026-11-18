@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 from pathlib import Path
 import shutil
 import tempfile
@@ -694,6 +695,34 @@ class TestReportTemplateWriter(unittest.TestCase):
 
             inserted = ws._images[0]
             self.assertAlmostEqual(inserted.width / inserted.height, 160 / 90, delta=0.02)
+
+    def test_embed_ready_image_keeps_scaled_lossless_png_without_upscaling(self):
+        from PIL import Image as PILImage
+
+        from dpt_extractor.export.report_template import (
+            _EMBED_IMAGE_MAX_EDGE_PX,
+            _embed_ready_image,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            capture = Path(td) / "scope_1280x960.png"
+            _write_rgb_png(capture, (1280, 960))
+
+            embedded = _embed_ready_image(capture)
+            payload = embedded._data()
+            self.assertTrue(payload.startswith(b"\x89PNG"))
+            self.assertNotEqual(embedded.format, "jpeg")
+            self.assertLessEqual(max(embedded.width, embedded.height), _EMBED_IMAGE_MAX_EDGE_PX)
+            self.assertEqual(_EMBED_IMAGE_MAX_EDGE_PX, 960)
+            with PILImage.open(io.BytesIO(payload)) as stored:
+                self.assertEqual(max(stored.size), 960)
+                self.assertAlmostEqual(stored.width / stored.height, 1280 / 960, places=3)
+
+            # 小于上限的抓图不能被放大，否则报告体积白白膨胀。
+            small = Path(td) / "scope_640x480.png"
+            _write_rgb_png(small, (640, 480))
+            unchanged = _embed_ready_image(small)
+            self.assertEqual((unchanged.width, unchanged.height), (640, 480))
 
     def test_insert_image_rejects_missing_file_instead_of_counting_blank_slot(self):
         from openpyxl.worksheet.cell_range import CellRange
@@ -4689,6 +4718,373 @@ class TestReportTemplateWriter(unittest.TestCase):
                         recorded.append(str(picture.cell(row + 1, 1).value))
                         break
             self.assertEqual(recorded[: len(voltages)], ["400V", "600V", "900V"])
+
+
+def _build_slope_header_template(path: Path) -> None:
+    """最小 U 相报告：数据组 + 波形页三条带的六个斜率表头。
+
+    表头形态照抄真实模板：单行合并区、文本带单位（dv/dt(V/ns) 等），关断在
+    块锚点行、开通 +17、反向恢复 +34。
+    """
+
+    wb = Workbook()
+    data = wb.active
+    data.title = "U相_双脉冲数据"
+    data.merge_cells("A5:A8")
+    data.merge_cells("B5:B8")
+    data["A5"] = "UH"
+    data["B5"] = "25℃"
+
+    wave = wb.create_sheet("U相_双脉冲波形")
+    wave.merge_cells("A1:A17")
+    wave["A1"] = "UH_25℃"
+    wave.merge_cells("A18:A34")
+    wave["A18"] = "750V_1050A"
+    wave.merge_cells("A35:A51")
+    wave["A35"] = "总概览图"
+    headers = (
+        (1, 10, "△Vce（V）"),
+        (1, 18, "dv/dt(V/ns)"),
+        (1, 26, "di/dt(A/ns)"),
+        (18, 18, "dv/dt(V/ns)"),
+        (18, 26, "di/dt(A/ns)"),
+        (35, 34, "Dvdt_max(V/ns)"),
+        (35, 42, "Didt_Irr(A/ns)"),
+    )
+    for row, col, text in headers:
+        wave.merge_cells(
+            start_row=row,
+            start_column=col,
+            end_row=row,
+            end_column=col + 7,
+        )
+        wave.cell(row, col, text)
+    wb.save(path)
+
+
+class TestReportSlopeHeaderWriting(unittest.TestCase):
+    """报告波形页六条斜率表头按当前取值范围自动命名的口径。"""
+
+    def _write(
+        self,
+        report: Path,
+        *,
+        labels: dict[str, str | None] | None = None,
+        images: dict[tuple[str, str], Path] | None = None,
+        condition: str = "750V_1050A",
+    ):
+        from dpt_extractor.export.report_template import write_report_template
+        from dpt_extractor.models.results import ExtractResult
+
+        return write_report_template(
+            ExtractResult(
+                source_path=str(Path("samples") / "RT" / f"UH_{condition}_000.tss"),
+                profile_code="UH",
+            ),
+            report,
+            images=images or {},
+            slope_header_labels=labels,
+        )
+
+    @staticmethod
+    def _range_labels() -> dict[str, str]:
+        from dpt_extractor.export.report_template import (
+            DPT_SLOPE_HEADER_NAMES,
+            dpt_slope_header_label,
+        )
+        from dpt_extractor.models.slope_range import default_slope_ranges
+
+        ranges = default_slope_ranges()
+        return {
+            key: dpt_slope_header_label(key, ranges[key])
+            for key in DPT_SLOPE_HEADER_NAMES
+        }
+
+    @staticmethod
+    def _auto_max_labels() -> dict[str, str]:
+        from dpt_extractor.export.report_template import (
+            DPT_SLOPE_HEADER_NAMES,
+            dpt_slope_header_label,
+        )
+        from dpt_extractor.models.slope_range import auto_max_slope_range
+
+        return {
+            key: dpt_slope_header_label(key, auto_max_slope_range(key))
+            for key in DPT_SLOPE_HEADER_NAMES
+        }
+
+    def test_slope_header_label_formats_percentage_preset_and_auto_max(self):
+        from dpt_extractor.export.report_template import (
+            DPT_SLOPE_HEADER_BASELINES,
+            DPT_SLOPE_HEADER_NAMES,
+            dpt_slope_header_label,
+        )
+        from dpt_extractor.models.slope_range import (
+            SLOPE_RANGE_PRESETS,
+            auto_max_slope_range,
+            default_slope_ranges,
+            preset_to_range,
+            slope_header_label,
+        )
+
+        defaults = default_slope_ranges()
+        # 区间模式：反向恢复也不保留模板的 Dvdt_max/Didt_Irr 写法
+        self.assertEqual(
+            slope_header_label("dv/dt", defaults["off_dvdt"]),
+            "dv/dt(10%-90%)",
+        )
+        self.assertEqual(
+            slope_header_label("di/dt", defaults["off_didt"]),
+            "di/dt(90%-10%)",
+        )
+        self.assertEqual(
+            dpt_slope_header_label("rr_dvdt", defaults["rr_dvdt"]),
+            "dv/dt(10%-90%)",
+        )
+        self.assertEqual(
+            dpt_slope_header_label("rr_didt", defaults["rr_didt"]),
+            "di/dt(90%-10%)",
+        )
+        # 预设标签原样进括号，包括 → 箭头
+        preset = preset_to_range(SLOPE_RANGE_PRESETS["rr_didt"][2])
+        self.assertEqual(preset.label(), "50%IF→50%IRM")
+        self.assertEqual(
+            slope_header_label("di/dt", preset),
+            "di/dt(50%IF→50%IRM)",
+        )
+        # 自动最大斜率：写回基线（而不是跳过不改写）。
+        # 关断/开通只写参数名 Dvdt_max / Didt_max，反向恢复保持模板原表头。
+        expected_baselines = {
+            "off_dvdt": "Dvdt_max",
+            "off_didt": "Didt_max",
+            "on_dvdt": "Dvdt_max",
+            "on_didt": "Didt_max",
+            "rr_dvdt": "Dvdt_max(V/ns)",
+            "rr_didt": "Didt_Irr(A/ns)",
+        }
+        self.assertEqual(DPT_SLOPE_HEADER_BASELINES, expected_baselines)
+        for key, baseline in expected_baselines.items():
+            self.assertEqual(
+                dpt_slope_header_label(key, auto_max_slope_range(key)),
+                baseline,
+                key,
+            )
+            # 未提供 baseline 的底层函数仍可表达"不改写"（旧语义）
+            self.assertIsNone(
+                slope_header_label(
+                    DPT_SLOPE_HEADER_NAMES[key],
+                    auto_max_slope_range(key),
+                ),
+                key,
+            )
+
+    def test_percentage_ranges_rename_all_six_slope_headers(self):
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "slope_percentage.xlsx"
+            _build_slope_header_template(report)
+            self._write(report, labels=self._range_labels())
+
+            saved = load_workbook(report)
+            wave = saved["U相_双脉冲波形"]
+            self.assertEqual(wave["R1"].value, "dv/dt(10%-90%)")
+            self.assertEqual(wave["Z1"].value, "di/dt(90%-10%)")
+            self.assertEqual(wave["R18"].value, "dv/dt(90%-10%)")
+            self.assertEqual(wave["Z18"].value, "di/dt(10%-90%)")
+            # 反向恢复区间模式同样用 dv/dt / di/dt，不是 Dvdt_max / Didt_Irr
+            self.assertEqual(wave["AH35"].value, "dv/dt(10%-90%)")
+            self.assertEqual(wave["AP35"].value, "di/dt(90%-10%)")
+            # 只改文本：表头仍是原来的单行合并区，条件标签不受影响
+            merged = {str(rng) for rng in wave.merged_cells.ranges}
+            for expected in ("R1:Y1", "Z1:AG1", "AH35:AO35", "AP35:AW35"):
+                self.assertIn(expected, merged)
+            self.assertEqual(wave["A18"].value, "750V_1050A")
+
+            # 改名后表头仍能被文字前缀定位：同一块可以继续插图片。
+            image = Path(td) / "scope.png"
+            _write_tiny_png(image)
+            self._write(
+                report,
+                labels=self._range_labels(),
+                images={("关断过程", "ΔVce"): image},
+            )
+            rewritten = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(len(rewritten._images), 1)
+            self.assertEqual(rewritten["R1"].value, "dv/dt(10%-90%)")
+            self.assertEqual(rewritten["AP35"].value, "di/dt(90%-10%)")
+
+    def test_auto_max_mode_writes_baseline_headers(self):
+        # auto_max 不是"跳过"，而是显式写回基线表头原文：全新模板上结果与
+        # 模板一致（dv/dt(V/ns)、Dvdt_max(V/ns) 等），且不会留下区间标注。
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "slope_auto_max.xlsx"
+            _build_slope_header_template(report)
+            image = Path(td) / "scope.png"
+            _write_tiny_png(image)
+            self._write(
+                report,
+                labels=self._auto_max_labels(),
+                images={("关断过程", "dv/dt"): image},
+            )
+
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            # 关断/开通基线 = 参数名（不带单位）
+            self.assertEqual(wave["R1"].value, "Dvdt_max")
+            self.assertEqual(wave["Z1"].value, "Didt_max")
+            self.assertEqual(wave["R18"].value, "Dvdt_max")
+            self.assertEqual(wave["Z18"].value, "Didt_max")
+            # 反向恢复基线 = 模板原表头
+            self.assertEqual(wave["AH35"].value, "Dvdt_max(V/ns)")
+            self.assertEqual(wave["AP35"].value, "Didt_Irr(A/ns)")
+            # 表头换成 Dvdt_max 后图片槽仍能定位
+            self.assertEqual(len(wave._images), 1)
+
+    def test_switching_percentage_to_auto_max_clears_range_annotations(self):
+        # 用户先在区间模式写过报告，之后切成自动最大斜率再写同一份报告：
+        # 六个表头都必须回到基线原文，不能残留 (10%-90%) 之类的标注。
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "slope_back_to_auto_max.xlsx"
+            _build_slope_header_template(report)
+            self._write(report, labels=self._range_labels())
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(wave["AH35"].value, "dv/dt(10%-90%)")
+            self.assertEqual(wave["AP35"].value, "di/dt(90%-10%)")
+
+            image = Path(td) / "scope.png"
+            _write_tiny_png(image)
+            self._write(
+                report,
+                labels=self._auto_max_labels(),
+                images={("关断过程", "ΔVce"): image},
+            )
+
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(wave["R1"].value, "Dvdt_max")
+            self.assertEqual(wave["Z1"].value, "Didt_max")
+            self.assertEqual(wave["R18"].value, "Dvdt_max")
+            self.assertEqual(wave["Z18"].value, "Didt_max")
+            self.assertEqual(wave["AH35"].value, "Dvdt_max(V/ns)")
+            self.assertEqual(wave["AP35"].value, "Didt_Irr(A/ns)")
+
+    def test_missing_mapping_keeps_writer_backwards_compatible(self):
+        # 不传 slope_header_labels 时与旧版完全一致：模板表头原样保留。
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "slope_default.xlsx"
+            _build_slope_header_template(report)
+            self._write(report)
+
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(wave["R1"].value, "dv/dt(V/ns)")
+            self.assertEqual(wave["Z1"].value, "di/dt(A/ns)")
+            self.assertEqual(wave["AH35"].value, "Dvdt_max(V/ns)")
+            self.assertEqual(wave["AP35"].value, "Didt_Irr(A/ns)")
+
+            # 空 mapping 等同于不传：保持当前文本不变。
+            self._write(report, labels=self._range_labels())
+            self._write(report, labels={})
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(wave["R1"].value, "dv/dt(10%-90%)")
+            self.assertEqual(wave["AH35"].value, "dv/dt(10%-90%)")
+
+    def test_annotated_template_headers_are_replaced_not_appended(self):
+        # 存量模板/报告已经带区间标注时，再次写入必须整格替换，不能叠加成
+        # dv/dt(10%-90%)(20%-80%)；图片槽定位也必须继续可用。
+        from dpt_extractor.export.report_template import DPT_SLOPE_HEADER_NAMES
+        from dpt_extractor.models.slope_range import (
+            SLOPE_RANGE_PRESETS,
+            preset_to_range,
+            slope_header_label,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "slope_reannotate.xlsx"
+            _build_slope_header_template(report)
+            first = self._range_labels()
+            self._write(report, labels=first)
+
+            second: dict[str, str] = dict(first)
+            for row_key, (index, name) in (
+                ("off_dvdt", (1, "dv/dt")),
+                ("on_didt", (0, "di/dt")),
+            ):
+                second[row_key] = slope_header_label(
+                    name,
+                    preset_to_range(SLOPE_RANGE_PRESETS[row_key][index]),
+                )
+            self.assertEqual(second["off_dvdt"], "dv/dt(20%-80%)")
+            image = Path(td) / "scope.png"
+            _write_tiny_png(image)
+            self._write(
+                report,
+                labels=second,
+                images={("关断过程", "ΔVce"): image},
+            )
+
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(wave["R1"].value, "dv/dt(20%-80%)")
+            self.assertEqual(wave["Z18"].value, "di/dt(10%-90%)")
+            self.assertEqual(wave["AH35"].value, "dv/dt(10%-90%)")
+            self.assertEqual(wave["AP35"].value, "di/dt(90%-10%)")
+            self.assertEqual(len(wave._images), 1)
+            self.assertEqual(
+                set(DPT_SLOPE_HEADER_NAMES),
+                {"off_dvdt", "off_didt", "on_dvdt", "on_didt", "rr_dvdt", "rr_didt"},
+            )
+
+    def test_preset_label_written_into_rr_header(self):
+        from dpt_extractor.models.slope_range import (
+            SLOPE_RANGE_PRESETS,
+            preset_to_range,
+            slope_header_label,
+        )
+
+        labels: dict[str, str] = self._range_labels()
+        labels["rr_didt"] = slope_header_label(
+            "di/dt",
+            preset_to_range(SLOPE_RANGE_PRESETS["rr_didt"][2]),
+        )
+        self.assertEqual(labels["rr_didt"], "di/dt(50%IF→50%IRM)")
+
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "slope_preset.xlsx"
+            _build_slope_header_template(report)
+            self._write(report, labels=labels)
+
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(wave["AP35"].value, "di/dt(50%IF→50%IRM)")
+            self.assertEqual(wave["AH35"].value, "dv/dt(10%-90%)")
+
+    def test_rr_image_slots_survive_header_rename(self):
+        # 反向恢复表头被改名为 dv/dt(...)/di/dt(...) 后，图片槽必须仍能定位，
+        # 否则 _require_complete_report_images 会让整份报告写入失败。
+        with tempfile.TemporaryDirectory() as td:
+            report = Path(td) / "slope_rr_images.xlsx"
+            _build_slope_header_template(report)
+            image = Path(td) / "scope.png"
+            _write_tiny_png(image)
+            rr_images = {
+                ("反向恢复", "dv/dt"): image,
+                ("反向恢复", "di/dt"): image,
+            }
+            self._write(report, labels=self._range_labels(), images=rr_images)
+
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(wave["AH35"].value, "dv/dt(10%-90%)")
+            self.assertEqual(wave["AP35"].value, "di/dt(90%-10%)")
+            self.assertEqual(len(wave._images), 2)
+            anchors = sorted(item.anchor._from.row + 1 for item in wave._images)
+            self.assertEqual(anchors, [36, 36])
+
+            # 已改名的模板再次写入（表头已是 dv/dt(...)）：仍旧可写、
+            # 切回 auto_max 时镜像恢复基线表头。
+            self._write(
+                report,
+                labels=self._auto_max_labels(),
+                images=rr_images,
+            )
+            wave = load_workbook(report)["U相_双脉冲波形"]
+            self.assertEqual(len(wave._images), 2)
+            self.assertEqual(wave["AH35"].value, "Dvdt_max(V/ns)")
+            self.assertEqual(wave["AP35"].value, "Didt_Irr(A/ns)")
 
 
 if __name__ == "__main__":
