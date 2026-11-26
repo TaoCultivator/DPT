@@ -20,6 +20,7 @@ from dpt_extractor.export.report_template import (
 from dpt_extractor.gui.main_window import MainWindow
 from dpt_extractor.gui.waveform_plot import (
     PARAM_FOCUS_ANCHOR_FRACTION,
+    PARAM_FOCUS_EVENT_CENTER_FRACTION,
     PARAM_FOCUS_REQUIRED_GUARD_US,
     TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
     TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
@@ -92,7 +93,9 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
 
             win, plot, result = self._load_case(sample_path)
             result_before_focus = deepcopy(result)
-            focus_calls: list[tuple[float, tuple[float, ...], float, bool]] = []
+            focus_calls: list[
+                tuple[float, tuple[float, ...], float, bool, float | None]
+            ] = []
             original_focus = plot.focus_parameter_window_us
 
             def record_focus(
@@ -105,13 +108,19 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                 composition_balance_fraction: float | None = None,
                 min_margin_fraction: float = 0.0,
                 center_required: bool = False,
-            ) -> None:
+                center_event_us: float | None = None,
+                ) -> None:
                 focus_calls.append(
                     (
                         float(anchor_us),
                         tuple(float(value) for value in required_times_us),
                         float(anchor_fraction),
                         bool(prefer_right_room),
+                        (
+                            None
+                            if center_event_us is None
+                            else float(center_event_us)
+                        ),
                     )
                 )
                 original_focus(
@@ -124,7 +133,8 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                     composition_balance_fraction=composition_balance_fraction,
                     min_margin_fraction=min_margin_fraction,
                     center_required=center_required,
-                )
+                    center_event_us=center_event_us,
+                    )
 
             plot.focus_parameter_window_us = record_focus  # type: ignore[method-assign]
             try:
@@ -157,10 +167,12 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                             required_times_us,
                             requested_fraction,
                             prefer_right_room,
+                            center_event_us,
                         ) = focus_calls[-1]
                         gate_anchored = "vge" in win._cursor_endpoint_channels_for_param(
                             section, name
                         )
+                        settle_centered = center_event_us is not None
                         vge_auxiliary = (
                             section in {"开通", "反向恢复"} and not gate_anchored
                         )
@@ -185,6 +197,17 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                             self.assertAlmostEqual(
                                 requested_fraction,
                                 PARAM_FOCUS_ANCHOR_FRACTION,
+                                places=9,
+                            )
+                        elif settle_centered:
+                            # New first-view contract: the post-spike settling onset
+                            # is the 50% composition anchor, not the Vge edge.
+                            self.assertFalse(prefer_right_room)
+                            self.assertTrue(required_times_us)
+                            self.assertAlmostEqual(anchor_us, center_event_us, places=6)
+                            self.assertAlmostEqual(
+                                requested_fraction,
+                                PARAM_FOCUS_EVENT_CENTER_FRACTION,
                                 places=9,
                             )
                         elif vge_auxiliary:
@@ -288,6 +311,19 @@ class TestSongzhenxiParameterFocus(unittest.TestCase):
                         if gate_anchored:
                             self.assertGreaterEqual(anchor_position, 0.10)
                             self.assertLessEqual(anchor_position, 0.65)
+                        elif settle_centered:
+                            full_range = plot._full_x_range
+                            assert full_range is not None
+                            interior = (
+                                x0 > float(full_range[0]) + 0.025
+                                and x1 < float(full_range[1]) - 0.025
+                            )
+                            if interior:
+                                self.assertAlmostEqual(
+                                    anchor_position,
+                                    PARAM_FOCUS_EVENT_CENTER_FRACTION,
+                                    delta=0.025,
+                                )
                         elif vge_auxiliary:
                             # The Vge reference is kept just inside the left
                             # edge; the physical A/B envelope owns the rest

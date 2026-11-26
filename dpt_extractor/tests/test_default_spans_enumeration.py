@@ -146,8 +146,21 @@ def test_every_extreme_card_keeps_peak_value_and_centred_interval() -> None:
             assert 0 <= a_idx < b_idx <= len(t) - 1, key
             assert a_idx <= peak_idx <= b_idx, key
             # 峰值两侧都应尽量拿到 300ns；阶段包络卡至少不退化到几十 ns。
-            assert peak_idx - a_idx >= min(half, peak_idx), key
-            assert b_idx - peak_idx >= min(half, len(t) - 1 - peak_idx), key
+            # 2026-11-19（用户 #4）：Vce_on_max 的 A 改为
+            # clamp(峰值-300ns, Vge 开通起点, 峰值)，允许贴着峰值；
+            # B 改为「回落首个 1.5µs 稳态带起点 + 20ns」，不再要求 ±300ns。
+            if key == ("开通", "Vce_on_max"):
+                # 2026-11-19（用户 #4）：A 在峰值左侧但不得早于 Vge 10% 起点
+                # （含 5ns 余量）；B 在峰值右侧且不越过「事件段尾 + 200ns」。
+                vge_10 = win._vge_turn_on_ten_percent_index()
+                if vge_10 is not None and vge_10 <= peak_idx:
+                    assert a_idx >= vge_10, key
+                assert a_idx < peak_idx, key
+                guard_n = max(1, int(round(200e-9 / dt)))
+                assert peak_idx < b_idx <= int(win.result.segments.turn_on[1]) + guard_n, key
+            else:
+                assert peak_idx - a_idx >= min(half, peak_idx), key
+                assert b_idx - peak_idx >= min(half, len(t) - 1 - peak_idx), key
             # 数值不变：区间极值 == 权威数值。Irr 的权威值是有符号 I_RM 峰值
             # （不是区间内 |Irr| 最大值），故按峰值点取值校验。
             if key == ("反向恢复", "Irr"):

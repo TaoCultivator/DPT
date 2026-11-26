@@ -81,6 +81,7 @@ class _CapturePlot:
         minimum_span_us: float | None = None,
         min_margin_fraction: float = 0.0,  # noqa: ARG002
         center_required: bool = False,  # noqa: ARG002
+        center_event_us: float | None = None,  # noqa: ARG002
     ) -> tuple[float, tuple[float, ...], float, bool]:
         _ = minimum_span_us
         return anchor_us, required_times_us, anchor_fraction, prefer_right_room
@@ -127,24 +128,47 @@ class TestCrosstalkCursorDisplayAudit(unittest.TestCase):
     def test_only_nearest_in_event_extrema_pass(self):
         t = np.arange(9) * 1e-6
         vge = np.asarray([99, -4, -8, -8, -4, -12, -8, -4, -99])
-        # 2026-11-18: 默认窗口允许比「最近极值对」更宽，但必须覆盖段内极值。
-        self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 4.0, 5.0), [])
-        self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 2.0, 5.0), [])
-        self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 1.0, 5.0), [])
-        for pair in ((1.0, 4.0), (0.0, 8.0), (4.0, 4.0), (4.1, 5.0)):
+        # 2026-11-19（R-XT）：A 必须在段内最早极值之前（表达事件起点），
+        # B 必须在段内最晚极值之后（包住极值），且都是原始采样、跨度 >=100ns。
+        self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 1.0, 7.0), [])
+        self.assertEqual(_crosstalk_cursor_display_problems(t, vge, (1, 8), 1.0, 6.0), [])
+        for pair in ((1.0, 4.0), (0.0, 8.0), (4.0, 4.0), (4.1, 5.0), (4.0, 5.0)):
             with self.subTest(pair=pair):
                 self.assertTrue(_crosstalk_cursor_display_problems(t, vge, (1, 8), *pair))
+
+    def test_cursor_must_not_stand_on_the_extrema(self):
+        # 2026-11-19（验收反例）：把 A 放在最早极值、B 放在最晚极值时，
+        # 旧判据（>= / <=）会判过；新判据必须判红。
+        t = np.arange(0, 60) * 10e-9
+        vge = np.full(len(t), -5.0)
+        vge[20] = 3.0
+        vge[40] = -16.0
+        # 极值在 0.20us / 0.40us；A 立在 0.20us、B 立在 0.40us → 必须有问题。
+        self.assertTrue(
+            _crosstalk_cursor_display_problems(t, vge, (0, len(t)), 200e-3, 400e-3)
+        )
+        # 严格外侧后应通过（20ns = 2 采样，且跨度 240ns >= 100ns）。
+        self.assertEqual(
+            _crosstalk_cursor_display_problems(t, vge, (0, len(t)), 180e-3, 420e-3),
+            [],
+        )
+        # B 只比最晚极值晚 10ns（< 20ns 最小偏移）也必须判红。
+        self.assertTrue(
+            _crosstalk_cursor_display_problems(t, vge, (0, len(t)), 180e-3, 410e-3)
+        )
 
     def test_minimum_span_is_enforced_against_the_event_length(self):
         t = np.arange(0, 60) * 10e-9
         vge = np.full(len(t), -5.0)
         vge[20] = 3.0
-        vge[23] = -16.0  # 极值只差 30ns，小于 50ns 最小跨度
+        vge[23] = -16.0  # 两个极值只差 30ns，小于 100ns 最小跨度
         self.assertTrue(
             _crosstalk_cursor_display_problems(t, vge, (0, len(t)), 200e-3, 230e-3)
         )
+        # 2026-11-19（R-XT）：最小显示跨度由 50ns 提到 100ns；且两端必须严格
+        # 落在极值外侧（20ns = 2 采样），故 A 取 0.18us 而不是 0.20us。
         self.assertEqual(
-            _crosstalk_cursor_display_problems(t, vge, (0, len(t)), 200e-3, 250e-3),
+            _crosstalk_cursor_display_problems(t, vge, (0, len(t)), 180e-3, 320e-3),
             [],
         )
 
@@ -164,12 +188,39 @@ class TestCrosstalkCursorDisplayAudit(unittest.TestCase):
         if not path.is_file():
             self.skipTest("UH sample missing")
         app = QApplication.instance() or QApplication([])
+
+        def _stand_on_the_tail(self, index_interval, vge_other):
+            # 2026-11-19（R-XT）：模拟“把光标立在事件段末尾两个采样上”的旧形态，
+            # 审计必须抓出“A 晚于最早极值 + 跨度不足”，不能因为落在原始采样上就 OK。
+            t = np.asarray(self.bundle.t, dtype=np.float64)
+            i1 = min(len(t), int(index_interval[1]))
+            return (float(t[i1 - 2] * 1e6), float(t[i1 - 1] * 1e6))
+
         with (
             patch.dict(os.environ, {
                 "DPT_VALIDATE_FOCUS_ONLY": "1",
                 "DPT_VALIDATE_CURSOR_METRIC": "开通/串扰电压",
             }),
-            patch.object(MainWindow, "_crosstalk_extrema_cursor_window", return_value=None),
+            patch.object(
+                MainWindow,
+                "_crosstalk_event_bracket_window",
+                autospec=True,
+                side_effect=_stand_on_the_tail,
+            ),
+            patch.object(
+                MainWindow,
+                "_crosstalk_extrema_pad_window",
+                autospec=True,
+                side_effect=_stand_on_the_tail,
+            ),
+            # 生产侧还有一道最终严格外侧不变量；这里要单独考察审计能否抓到
+            # “立在极值上”的坏落点，故把它短路成直通。
+            patch.object(
+                MainWindow,
+                "_crosstalk_enforce_strict_outside",
+                autospec=True,
+                side_effect=lambda self, ii, vg, win: win,
+            ),
         ):
             rows = audit_file(MainWindow, QApplication, app, path)
         self.assertEqual(len(rows), 1)

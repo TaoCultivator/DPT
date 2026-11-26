@@ -83,6 +83,7 @@ from dpt_extractor.gui.theme import (
 )
 from dpt_extractor.gui.waveform_plot import (
     PARAM_FOCUS_ANCHOR_FRACTION,
+    PARAM_FOCUS_EVENT_CENTER_FRACTION,
     TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
     TURN_ON_LS_FOCUS_MIDPOINT_FRACTION,
     TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
@@ -312,6 +313,21 @@ def _extreme_display_span_for_trace(
     lo = max(0, min(int(lo), n - 2))
     hi = max(lo + 1, min(int(hi), n - 1))
     return extreme_display_span_indices(int(peak_idx), lo, hi, max(float(dt), 1e-15))
+
+# 2026-11-19（用户 #4）：极值卡 A/B 的默认取值区间口径随卡片不同，状态栏文案
+# 必须与真实落点一致（审计脚本 role 文案与本表保持同一措辞）。
+_MAX_INTERVAL_STATUS_TEXTS = {
+    ("开通", "Vce_on_max"): (
+        "A=峰值往左≤300ns且不小于Vge开通起点；B=回落首个1.5µs稳态带起点+20ns的取值区间"
+    ),
+}
+
+
+def _max_interval_status_text(section: str, name: str) -> str:
+    return _MAX_INTERVAL_STATUS_TEXTS.get(
+        (section, name), "A/B=峰值左右各300ns的取值区间"
+    )
+
 from dpt_extractor.metrics.derived import crosstalk_extrema
 from dpt_extractor.metrics.iec_timings import (
     turn_off_ic_fall_window,
@@ -434,6 +450,13 @@ SHORT_REPORT_CONDITION_FIELDS = (
 # 开通过程的三个 IEC 时序卡共用同一张局部观察页。各卡的 A/B 仍然
 # 保持自己的语义端点；这里只共享 X 轴页面，便于在 Ton/Td_on/Tr 之间切换。
 _TURN_ON_TIMING_LOCAL_VIEW_NAMES = frozenset({"Ton", "Td_on", "Tr"})
+_GATE_TIMING_LOCAL_VIEW_NAMES = frozenset({
+    ("开通", "Ton"),
+    ("开通", "Td_on"),
+    ("开通", "Tr"),
+    ("关断过程", "Toff"),
+    ("关断过程", "Td_off"),
+})
 
 
 def _app_settings() -> QSettings:
@@ -5776,6 +5799,141 @@ class MainWindow(QMainWindow):
             return None
         return float(self.bundle.t[idx] * 1e6)
 
+    def _settle_onset_us(self, section: str, name: str) -> float | None:
+        """Return the display-only post-spike settling onset time in microseconds.
+
+        The signal and authoritative peak are selected from the switching
+        section.  This helper only reads waveform/result data; it never writes
+        extraction fields or changes A/B, Ha/Hb, or any measured value.
+        """
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        t = np.asarray(self.bundle.t, dtype=np.float64)
+        if t.size == 0:
+            return None
+
+        from dpt_extractor.models.waveform import bundle_total_current
+
+        signal: np.ndarray | None = None
+        peak_point: tuple[int, float] | None = None
+        if section == "关断过程":
+            vce = self.bundle.maybe_get(self.profile.vce)
+            if vce is not None:
+                signal = np.asarray(vce, dtype=np.float64)
+                peak_point = self._default_extreme_peak_point(
+                    section, "Vce_off_max"
+                )
+        elif section == "开通":
+            signal = np.asarray(
+                bundle_total_current(self.bundle, self.profile),
+                dtype=np.float64,
+            )
+            peak_point = self._default_extreme_peak_point(section, "Ic_on_max")
+        elif section == "反向恢复":
+            vd = self.bundle.maybe_get(self.profile.v_diode)
+            if vd is not None:
+                # 恢复过冲必须取本事件内的 Vd 峰值：Vrr 的权威 argmax 覆盖整段
+                # turn_on，某些工况会落到脉冲末段而不是恢复主瓣，用它做回落起点
+                # 会把窗口拖离 A/B（实测偏 2.4us）。这里只在反向恢复事件窗内选峰，
+                # 仍只用于显示取景，不写回任何结果字段。
+                vd_abs = np.abs(np.asarray(vd, dtype=np.float64))
+                n_all = int(vd_abs.size)
+                rr0, rr1 = self.result.segments.reverse_recovery
+                dt_all = float(self.bundle.dt) if self.bundle.dt else 0.0
+                pad_lo = int(round(50e-9 / dt_all)) if dt_all > 0 else 0
+                pad_hi = int(round(300e-9 / dt_all)) if dt_all > 0 else 0
+                lo = max(0, int(rr0) - pad_lo)
+                hi = min(n_all - 1, int(rr1) + pad_hi)
+                peak_point = None
+                if hi > lo and np.any(np.isfinite(vd_abs[lo : hi + 1])):
+                    peak_idx_rr = lo + int(np.nanargmax(vd_abs[lo : hi + 1]))
+                    peak_val_rr = float(vd_abs[peak_idx_rr])
+                    # 只有真实存在“过冲后回落”时才用电压；Vd 在本事件内基本平直
+                    # （峰值只比阻断平台高几伏）时没有可用的回落起点，按用户口径
+                    # 退回开通电流。
+                    p_lo = min(n_all - 1, peak_idx_rr + (pad_hi if dt_all > 0 else 0))
+                    p_hi = min(n_all - 1, peak_idx_rr + (2 * pad_hi if dt_all > 0 else 0))
+                    if p_hi > p_lo:
+                        band = vd_abs[p_lo : p_hi + 1]
+                        band = band[np.isfinite(band)]
+                        plateau_est = float(np.median(band)) if band.size else peak_val_rr
+                        if peak_val_rr - plateau_est >= max(
+                            5.0, 0.02 * abs(plateau_est)
+                        ):
+                            signal = vd_abs
+                            peak_point = (peak_idx_rr, peak_val_rr)
+                if peak_point is None:
+                    signal = np.asarray(
+                        bundle_total_current(self.bundle, self.profile),
+                        dtype=np.float64,
+                    )
+                    peak_point = self._default_extreme_peak_point(section, "Irr")
+            else:
+                signal = np.asarray(
+                    bundle_total_current(self.bundle, self.profile),
+                    dtype=np.float64,
+                )
+                peak_point = self._default_extreme_peak_point(section, "Irr")
+        if signal is None or peak_point is None or signal.size != t.size:
+            return None
+
+        peak_idx = int(peak_point[0])
+        n = int(t.size)
+        dt = float(self.bundle.dt)
+        if peak_idx < 0 or peak_idx >= n or not np.isfinite(dt) or dt <= 0.0:
+            return None
+
+        smooth_points = max(1, int(round(5e-9 / dt)))
+        kernel = np.ones(smooth_points, dtype=np.float64) / float(smooth_points)
+        smoothed = np.convolve(signal, kernel, mode="same")
+        peak_smoothed = float(smoothed[peak_idx])
+        if not np.isfinite(peak_smoothed):
+            return None
+
+        plateau_start = min(n - 1, peak_idx + int(round(0.4e-6 / dt)))
+        plateau_end = min(n - 1, peak_idx + int(round(0.6e-6 / dt)))
+        if plateau_end < plateau_start:
+            return None
+        plateau_values = smoothed[plateau_start : plateau_end + 1]
+        plateau_values = plateau_values[np.isfinite(plateau_values)]
+        if plateau_values.size == 0:
+            return None
+        plateau = float(np.median(plateau_values))
+        threshold = peak_smoothed - 0.10 * (peak_smoothed - plateau)
+
+        quiet_points = max(1, int(round(50e-9 / dt)))
+        last_quiet_start = n - quiet_points
+        if last_quiet_start < peak_idx:
+            return None
+        below_threshold = (smoothed < threshold).astype(np.int32)
+        quiet_counts = np.convolve(
+            below_threshold,
+            np.ones(quiet_points, dtype=np.int32),
+            mode="valid",
+        )
+        candidates = np.flatnonzero(
+            quiet_counts[peak_idx : last_quiet_start + 1] == quiet_points
+        )
+        if candidates.size == 0:
+            return None
+        settle_candidate = peak_idx + int(candidates[0])
+
+        # The threshold crossing is the first quiet run.  Move back to the last
+        # smoothed local maximum before that run to mark where the main fall
+        # actually begins, rather than reporting the delayed threshold crossing.
+        for idx in range(settle_candidate - 1, peak_idx - 1, -1):
+            if idx <= 0 or idx >= n - 1:
+                continue
+            if (
+                np.isfinite(smoothed[idx - 1])
+                and np.isfinite(smoothed[idx])
+                and np.isfinite(smoothed[idx + 1])
+                and smoothed[idx] >= smoothed[idx - 1]
+                and smoothed[idx] >= smoothed[idx + 1]
+            ):
+                return float(t[idx] * 1e6)
+        return float(t[peak_idx] * 1e6)
     def _focus_switching_local_view(
         self,
         section: str,
@@ -5785,16 +5943,21 @@ class MainWindow(QMainWindow):
         name: str,
     ) -> None:
         # Gate-semantic timing rows keep the bounded Vge edge as their hard
-        # composition anchor.  For non-gate rows, the actual A/B or
-        # stable/integration envelope remains the hard content.  During turn-on
-        # and reverse recovery, the measured Vge rising edge is an auxiliary
-        # composition reference so the left border stays close to the event
-        # without introducing a fixed pre-event duration.  Turn-off keeps its
-        # existing composition rules unchanged.
+        # composition anchor.  Non-gate rows keep their real A/B envelope as
+        # hard content.  On a first default view, their post-spike settling
+        # onset is placed at the geometric centre without changing the span.
         anchor_fraction = PARAM_FOCUS_ANCHOR_FRACTION
         prefer_right_room = False
         composition_anchor_us: float | None = None
         composition_balance_fraction: float | None = None
+        center_event_us: float | None = None
+        min_margin_fraction = (
+            0.10
+            if name in EXTREME_MAX_INTERVAL_NAMES
+            or name in {"ΔVce", "串扰电压", "Err"}
+            else 0.0
+        )
+        center_required = name in EXTREME_MAX_INTERVAL_NAMES
         if section == "开通" and name in _TURN_ON_TIMING_LOCAL_VIEW_NAMES:
             # Ton 包含 Td_on 与 Tr 的完整开通阶段，三张时序卡统一使用
             # Ton 的默认 required 窗口；实际点击卡片的 A/B 仍由各自语义端点
@@ -5803,76 +5966,93 @@ class MainWindow(QMainWindow):
             if ton_interval is not None:
                 fallback_t0_us, fallback_t1_us = ton_interval
         endpoint_roles = self._cursor_endpoint_channels_for_param(section, name)
-        if "vge" not in endpoint_roles:
-            lo = min(float(fallback_t0_us), float(fallback_t1_us))
-            hi = max(float(fallback_t0_us), float(fallback_t1_us))
-            anchor_us = 0.5 * (lo + hi)
-            prefer_right_room = True
-            vge_anchor_us = (
-                self._switching_focus_anchor_us(section)
-                if section in {"开通", "反向恢复"}
-                else None
-            )
-            if vge_anchor_us is not None:
-                # The Vge edge supplies the proportional left margin (the
-                # default 12% composition reference), while required A/B
-                # times still decide the feasible window.  Vge is deliberately
-                # not added to the hard envelope: a delayed recovery tail
-                # must remain visible to the right.
-                anchor_us = vge_anchor_us
-                composition_anchor_us = vge_anchor_us
-                anchor_fraction = PARAM_FOCUS_ANCHOR_FRACTION
+        settle_centered = False
+        if (
+            "vge" not in endpoint_roles
+            and (section, name) not in _GATE_TIMING_LOCAL_VIEW_NAMES
+        ):
+            settle_onset_us = self._settle_onset_us(section, name)
+            if settle_onset_us is not None and np.isfinite(settle_onset_us):
+                center_event_us = float(settle_onset_us)
+                anchor_us = center_event_us
+                anchor_fraction = PARAM_FOCUS_EVENT_CENTER_FRACTION
+                prefer_right_room = False
+                composition_anchor_us = None
+                composition_balance_fraction = None
+                center_required = False
+                min_margin_fraction = 0.0
+                settle_centered = True
+        if not settle_centered:
+            if "vge" not in endpoint_roles:
+                lo = min(float(fallback_t0_us), float(fallback_t1_us))
+                hi = max(float(fallback_t0_us), float(fallback_t1_us))
+                anchor_us = 0.5 * (lo + hi)
                 prefer_right_room = True
-                if section == "反向恢复" and name == "Pdmax":
-                    # Keep Vge as the auxiliary event reference, while the
-                    # power card itself composes its real current A/B midpoint
-                    # at the balanced position requested for Pdmax.
-                    composition_balance_fraction = RR_POWER_FOCUS_MIDPOINT_FRACTION
-            elif (section, name) == ("开通", "开通电流"):
-                # 开通电流的 A/B 本身覆盖 Ic 基线到导通平台。通用右优先
-                # 构图会把 A 推到左边缘；用真实 A/B 中点做平衡构图，
-                # 只改变局部 X 轴取景，不移动光标或改变开通电流计算。
-                anchor_fraction = TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION
-                prefer_right_room = False
-            elif section == "开通" and name in {"dv/dt", "di/dt"}:
-                # 开通斜率同时需要辨认 Base 与 Top 稳定电压/电流平台。
-                # 仅将 A/B 中点放到约 43% 的平衡位置，避免通用右优先
-                # 把窗口过度推向右侧；A/B 和斜率测量上下文保持不变。
-                anchor_fraction = TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION
-                prefer_right_room = False
-            elif (section, name) == ("开通", "Ls_on"):
-                # Ls_on 与开通 di/dt 共用 Ic 真实 A/B 积分窗。沿用同一
-                # 平衡比例，避免积分窗被通用右优先构图挤到左侧；只改变
-                # 局部 X 轴取景，不改变积分、A/B 或 Ls_on 数值。
-                anchor_fraction = TURN_ON_LS_FOCUS_MIDPOINT_FRACTION
-                prefer_right_room = False
-            elif (section, name) == ("关断过程", "Tf"):
-                # Tf 是 Toff=Td_off+Tf 的末段。通用 30/70 余量分配会把
-                # 很窄的 Tf 区间推得过于靠左；按真实 A/B 中点做比例构图，
-                # 不增加固定前态时间，也不改变 A/B 或 Tf 的计算结果。
-                anchor_fraction = TF_FOCUS_MIDPOINT_FRACTION
-                prefer_right_room = False
-            elif (section, name) == ("反向恢复", "Pdmax"):
-                # Balance the stable-current bounds away from the left edge;
-                # the measurement interval stays independent of this view.
-                anchor_fraction = RR_POWER_FOCUS_MIDPOINT_FRACTION
-                prefer_right_room = False
-            elif (section, name) == ("反向恢复", "Err"):
-                # Err needs the real Vd/Irr crossings plus the post-recovery
-                # quiet band.  Keep the same balanced composition as Pdmax;
-                # this only moves the first-view X axis, never its A/B or
-                # integration result.
-                anchor_fraction = RR_ERR_FOCUS_MIDPOINT_FRACTION
-                prefer_right_room = False
-            elif (section, name) == ("反向恢复", "Trr"):
-                # Trr 的默认右优先构图会把 A/B 挤到窗口左边缘。沿用
-                # 通用锚点比例但关闭右优先，让求解器在满足 A/B 和恢复
-                # 尾段可见的前提下取最靠右的位置；只改变 X 轴取景，
-                # 不改变 Trr 的平台、交点、数值或手动卡尺状态。
-                anchor_fraction = RR_TRR_ANCHOR_FRACTION
-                prefer_right_room = False
-        else:
-            anchor_us = self._switching_focus_anchor_us(section)
+                vge_anchor_us = (
+                    self._switching_focus_anchor_us(section)
+                    if section in {"开通", "反向恢复"}
+                    else None
+                )
+                if vge_anchor_us is not None:
+                    # The Vge edge supplies the proportional left margin (the
+                    # default 12% composition reference), while required A/B
+                    # times still decide the feasible window.  Vge is deliberately
+                    # not added to the hard envelope: a delayed recovery tail
+                    # must remain visible to the right.
+                    anchor_us = vge_anchor_us
+                    composition_anchor_us = vge_anchor_us
+                    anchor_fraction = PARAM_FOCUS_ANCHOR_FRACTION
+                    prefer_right_room = True
+                    if section == "反向恢复" and name == "Pdmax":
+                        # Keep Vge as the auxiliary event reference, while the
+                        # power card itself composes its real current A/B midpoint
+                        # at the balanced position requested for Pdmax.
+                        composition_balance_fraction = RR_POWER_FOCUS_MIDPOINT_FRACTION
+                elif (section, name) == ("开通", "开通电流"):
+                    # 开通电流的 A/B 本身覆盖 Ic 基线到导通平台。通用右优先
+                    # 构图会把 A 推到左边缘；用真实 A/B 中点做平衡构图，
+                    # 只改变局部 X 轴取景，不移动光标或改变开通电流计算。
+                    anchor_fraction = TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION
+                    prefer_right_room = False
+                elif section == "开通" and name in {"dv/dt", "di/dt"}:
+                    # 开通斜率同时需要辨认 Base 与 Top 稳定电压/电流平台。
+                    # 仅将 A/B 中点放到约 43% 的平衡位置，避免通用右优先
+                    # 把窗口过度推向右侧；A/B 和斜率测量上下文保持不变。
+                    anchor_fraction = TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION
+                    prefer_right_room = False
+                elif (section, name) == ("开通", "Ls_on"):
+                    # Ls_on 与开通 di/dt 共用 Ic 真实 A/B 积分窗。沿用同一
+                    # 平衡比例，避免积分窗被通用右优先构图挤到左侧；只改变
+                    # 局部 X 轴取景，不改变积分、A/B 或 Ls_on 数值。
+                    anchor_fraction = TURN_ON_LS_FOCUS_MIDPOINT_FRACTION
+                    prefer_right_room = False
+                elif (section, name) == ("关断过程", "Tf"):
+                    # Tf 是 Toff=Td_off+Tf 的末段。通用 30/70 余量分配会把
+                    # 很窄的 Tf 区间推得过于靠左；按真实 A/B 中点做比例构图，
+                    # 不增加固定前态时间，也不改变 A/B 或 Tf 的计算结果。
+                    anchor_fraction = TF_FOCUS_MIDPOINT_FRACTION
+                    prefer_right_room = False
+                elif (section, name) == ("反向恢复", "Pdmax"):
+                    # Balance the stable-current bounds away from the left edge;
+                    # the measurement interval stays independent of this view.
+                    anchor_fraction = RR_POWER_FOCUS_MIDPOINT_FRACTION
+                    prefer_right_room = False
+                elif (section, name) == ("反向恢复", "Err"):
+                    # Err needs the real Vd/Irr crossings plus the post-recovery
+                    # quiet band.  Keep the same balanced composition as Pdmax;
+                    # this only moves the first-view X axis, never its A/B or
+                    # integration result.
+                    anchor_fraction = RR_ERR_FOCUS_MIDPOINT_FRACTION
+                    prefer_right_room = False
+                elif (section, name) == ("反向恢复", "Trr"):
+                    # Trr 的默认右优先构图会把 A/B 挤到窗口左边缘。沿用
+                    # 通用锚点比例但关闭右优先，让求解器在满足 A/B 和恢复
+                    # 尾段可见的前提下取最靠右的位置；只改变 X 轴取景，
+                    # 不改变 Trr 的平台、交点、数值或手动卡尺状态。
+                    anchor_fraction = RR_TRR_ANCHOR_FRACTION
+                    prefer_right_room = False
+            else:
+                anchor_us = self._switching_focus_anchor_us(section)
         if anchor_us is None:
             self.wave_plot.focus_interval_us(fallback_t0_us, fallback_t1_us)
             return
@@ -5890,15 +6070,9 @@ class MainWindow(QMainWindow):
                 fallback_t0_us,
                 fallback_t1_us,
             ),
-            # 2026-11-18: 极值卡按「A/B 居中」构图；ΔVce 与串扰电压因 A/B
-            # 可能贴近事件起点/两光标几乎重合，额外强制两侧 ≥10% 余量。
-            min_margin_fraction=(
-                0.10
-                if name in EXTREME_MAX_INTERVAL_NAMES
-                or name in {"ΔVce", "串扰电压", "Err"}
-                else 0.0
-            ),
-            center_required=name in EXTREME_MAX_INTERVAL_NAMES,
+            min_margin_fraction=min_margin_fraction,
+            center_required=center_required,
+            center_event_us=center_event_us,
         )
 
     def _recovery_peak_us(self) -> float | None:
@@ -8501,12 +8675,16 @@ class MainWindow(QMainWindow):
         self._focus_switching_local_view(
             section, ta_us, tb_us, name=name
         )
+        # 2026-11-25 用户拍板：Ha 横线一律使用提取层权威电平。stable_platforms
+        # 模式下该电平已由提取层取成 A 所在 Base 稳定带的稳健值，因此横线必然
+        # 穿过 A；2026-11-19「用户 #2 门控版」另取一套导通平台电平的做法已作废。
+        display_ha_v = float(markers.ha_v)
         self.wave_plot.enable_energy_loss_interaction(
             search_t0,
             search_t1,
             ta_us,
             tb_us,
-            markers.ha_v,
+            display_ha_v,
             markers.hb_a,
             _on_energy_change,
             edge_a=edge_a,
@@ -8938,7 +9116,11 @@ class MainWindow(QMainWindow):
         index_interval: tuple[int, int],
         vge_other: np.ndarray,
     ) -> tuple[float, float] | None:
-        """Return the narrowest default A/B window containing Vge max and min.
+        """Return the narrowest window containing the opposite-gate max and min.
+
+        2026-11-19（R-XT）：本 helper 已不在默认链路上（默认改为
+        _crosstalk_event_bracket_window → _crosstalk_extrema_pad_window），
+        仅作为历史口径与被单测直接引用的最小包络实现保留。
 
         The crosstalk value is defined over the complete section interval, but
         the default vertical cursors should show where that opposite-gate
@@ -9015,6 +9197,257 @@ class MainWindow(QMainWindow):
             b_us = max(hi_us, b_us)
         return (float(a_us), float(b_us))
 
+    def _crosstalk_drive_swing(self) -> float:
+        """门极驱动摆幅：把 τ 归一化到门极电压量级（跨 100V~915V 工况）。
+
+        对管 Vge 在多数工况下整段停在低电平，自身极差不能当量程尺度；
+        这里取同侧/对管两条门极通道中较大的 p99.5-p0.5 作为驱动摆幅。
+        """
+
+        if self.bundle is None or self.profile is None:
+            return 0.0
+        swings: list[float] = []
+        for channel in (
+            getattr(self.profile, "vge", None),
+            getattr(self.profile, "vge_other", None),
+        ):
+            if not channel:
+                continue
+            try:
+                raw = np.asarray(self.bundle.get(channel), dtype=float)
+            except (KeyError, ValueError):
+                continue
+            finite = raw[np.isfinite(raw)]
+            if finite.size < 8:
+                continue
+            swings.append(
+                float(np.percentile(finite, 99.5) - np.percentile(finite, 0.5))
+            )
+        return max(swings) if swings else 0.0
+
+    def _crosstalk_sustained_event_region(
+        self,
+        values: np.ndarray,
+        dt: float,
+        swing_scale: float = 0.0,
+    ) -> tuple[int, int, int] | None:
+        """返回对管 Vge 的持续扰动区 (起点, 终点, 段数)，索引为段内相对索引。
+
+        2026-11-19（R-XT）：扰动区 = 连续 >=2ns 且 |v-段中位数| > τ 的采样段，
+        τ = max(4σ_MAD, 6·LSB, 1.5%·全记录 swing)。单采样尖峰不算事件主体，
+        因此“事件起点/落点”不会被尖峰拖走，也不会退化成整个事件段。
+        """
+
+        n = int(values.size)
+        if n < 8 or dt <= 0.0:
+            return None
+        finite = values[np.isfinite(values)]
+        if finite.size < 8:
+            return None
+        base = float(np.median(finite))
+        mad = float(np.median(np.abs(finite - base)))
+        sigma = 1.4826 * mad
+        diffs = np.abs(np.diff(np.unique(finite)))
+        lsb = float(np.median(diffs)) if diffs.size else 0.0
+        swing = float(swing_scale)
+        if not np.isfinite(swing) or swing <= 0.0:
+            swing = float(np.ptp(finite))
+        tau = max(4.0 * sigma, 6.0 * lsb, 0.015 * abs(swing))
+        if not np.isfinite(tau) or tau <= 0.0:
+            return None
+        mask = np.abs(values - base) > tau
+        hold = max(1, int(round(2e-9 / dt)))
+        runs: list[tuple[int, int]] = []
+        index = 0
+        while index < n:
+            if not mask[index]:
+                index += 1
+                continue
+            end = index
+            while end + 1 < n and mask[end + 1]:
+                end += 1
+            if end - index + 1 >= hold:
+                runs.append((index, end))
+            index = end + 1
+        if not runs:
+            return None
+        return int(runs[0][0]), int(runs[-1][1]), len(runs)
+
+    def _crosstalk_event_bracket_window(
+        self,
+        index_interval: tuple[int, int],
+        vge_other: np.ndarray,
+    ) -> tuple[float, float] | None:
+        """默认串扰 A/B：统一「事件起点 → 事件落点」，并把段内极值包进去。
+
+        2026-11-19（R-XT，取代 v28 的“前态平静块 / 事后收敛窗”）：
+        * 持续扰动区 = 连续 >=2ns 且 |v| 超过 τ 的采样段（见
+          _crosstalk_sustained_event_region）；
+        * A = 区起点 - guard、B = 区终点 + guard，
+          guard = clamp(2%·事件段长, 20ns, 100ns)，按 dt 取整落在原始采样上；
+        * 尾窗 max(500ns, 10×区宽) 内的单采样极值继续外扩 A/B，保证
+          A <= 段内最早极值、B >= 段内最晚极值（用户 #5）；
+        * 区不可分离（过宽 / 段数 >8 / 无持续扰动）时退化为
+          _crosstalk_extrema_pad_window 的「极值 ±guard」括号，
+          绝不把光标直接立在极值采样点上。
+        完整事件段仍负责 max/min 取值与数值口径：本 helper 只产出显示时刻。
+        """
+
+        if self.bundle is None or len(self.bundle.t) == 0:
+            return None
+        t = np.asarray(self.bundle.t, dtype=float)
+        i0 = max(0, int(index_interval[0]))
+        i1 = min(len(t), len(vge_other), int(index_interval[1]))
+        values = np.asarray(vge_other[i0:i1], dtype=float)
+        n = int(values.size)
+        if n < 16 or not np.all(np.isfinite(values)):
+            return None
+        vmax = float(np.max(values))
+        vmin = float(np.min(values))
+        if vmax == vmin:
+            return None
+        dt = float(getattr(self.bundle, "dt", 0.0) or 0.0)
+        if dt <= 0.0 and len(t) > 1:
+            dt = float(t[1] - t[0])
+        if dt <= 0.0:
+            return None
+
+        region = self._crosstalk_sustained_event_region(
+            values, dt, self._crosstalk_drive_swing()
+        )
+        if region is None:
+            return None
+        region_lo, region_hi, run_count = region
+        event_ns = float(n - 1) * dt * 1e9
+        guard_ns = min(100.0, max(20.0, 0.02 * event_ns))
+
+        def _samples(ns: float) -> int:
+            return max(1, int(round(ns * 1e-9 / dt)))
+
+        event_width_ns = float(region_hi - region_lo) * dt * 1e9
+        separable = (
+            event_width_ns <= 0.30 * max(event_ns, 1e-9) and run_count <= 64
+        )
+        if not separable:
+            return self._crosstalk_extrema_pad_window(index_interval, vge_other)
+
+        guard = _samples(guard_ns)
+        a_idx = region_lo - guard
+        b_idx = region_hi + guard
+
+        tail = max(_samples(500.0), 10 * (region_hi - region_lo + 1))
+        ext_max = int(np.argmax(values))
+        ext_min = int(np.argmin(values))
+        for extremum in (ext_max, ext_min):
+            if extremum < a_idx and extremum >= region_lo - tail:
+                a_idx = extremum - guard
+            if extremum > b_idx and extremum <= region_hi + tail:
+                b_idx = extremum + guard
+
+        # 硬保证：两光标分别覆盖段内最早/最晚极值，并夹在事件段内。
+        # 2026-11-19（验收）：不得“立在极值采样点”上——要求严格外侧偏移
+        # max(1 采样, 20ns)，只在事件段边界不允许时退化为贴边。
+        earliest_ext = min(ext_max, ext_min)
+        latest_ext = max(ext_max, ext_min)
+        outside_pad = max(1, _samples(20.0))
+        a_idx = min(a_idx, earliest_ext - min(outside_pad, earliest_ext))
+        b_idx = max(b_idx, latest_ext + min(outside_pad, (n - 1) - latest_ext))
+        a_idx = max(0, a_idx)
+        b_idx = min(n - 1, b_idx)
+        min_span_n = max(1, _samples(min(100.0, event_ns)))
+        if b_idx - a_idx < min_span_n:
+            grow = min_span_n - (b_idx - a_idx)
+            add_lo = min(a_idx, (grow + 1) // 2)
+            a_idx -= add_lo
+            b_idx = min(n - 1, b_idx + (grow - add_lo))
+            if b_idx - a_idx < min_span_n:
+                a_idx = max(0, b_idx - min_span_n)
+        if not (0 <= a_idx < b_idx <= n - 1):
+            return None
+        return (float(t[i0 + a_idx] * 1e6), float(t[i0 + b_idx] * 1e6))
+
+    def _crosstalk_extrema_pad_window(
+        self,
+        index_interval: tuple[int, int],
+        vge_other: np.ndarray,
+    ) -> tuple[float, float] | None:
+        """退化回退：段内极值 ±20ns 括号（至少 50ns），不“立在极值上”。"""
+
+        if self.bundle is None or len(self.bundle.t) == 0:
+            return None
+        t = np.asarray(self.bundle.t, dtype=float)
+        i0 = max(0, int(index_interval[0]))
+        i1 = min(len(t), len(vge_other), int(index_interval[1]))
+        values = np.asarray(vge_other[i0:i1], dtype=float)
+        n = int(values.size)
+        if n < 4 or not np.all(np.isfinite(values)):
+            return None
+        dt = float(getattr(self.bundle, "dt", 0.0) or 0.0)
+        if dt <= 0.0 and len(t) > 1:
+            dt = float(t[1] - t[0])
+        if dt <= 0.0:
+            return None
+        # 严格外侧偏移：max(1 采样, 20ns)，夹在事件段内。
+        guard = max(1, int(round(20e-9 / dt)))
+        section_ns = float(n - 1) * dt * 1e9
+        min_span_n = max(guard, int(round(min(100.0, section_ns) * 1e-9 / dt)))
+        extrema = (int(np.argmax(values)), int(np.argmin(values)))
+        a_idx = max(0, min(extrema) - min(guard, min(extrema)))
+        b_idx = min(
+            n - 1, max(extrema) + min(guard, (n - 1) - max(extrema))
+        )
+        if b_idx - a_idx < min_span_n:
+            grow = min_span_n - (b_idx - a_idx)
+            add_lo = min(a_idx, (grow + 1) // 2)
+            a_idx -= add_lo
+            b_idx = min(n - 1, b_idx + (grow - add_lo))
+            if b_idx - a_idx < min_span_n:
+                a_idx = max(0, b_idx - min_span_n)
+        if not (0 <= a_idx < b_idx <= n - 1):
+            return None
+        return (float(t[i0 + a_idx] * 1e6), float(t[i0 + b_idx] * 1e6))
+
+    def _crosstalk_enforce_strict_outside(
+        self,
+        index_interval: tuple[int, int],
+        vge_other: np.ndarray,
+        window: tuple[float, float],
+    ) -> tuple[float, float]:
+        """最终不变量：A 严格在段内最早极值前 ≥max(1采样,20ns)，B 反之。
+
+        2026-11-19（验收 #5）：任何 helper 路径（包络/退化括号）产出的窗口都在
+        这里统一复核一次，保证“不得立在极值采样点上”不是某条分支的巧合。
+        """
+
+        if self.bundle is None:
+            return window
+        t = np.asarray(self.bundle.t, dtype=float)
+        i0 = max(0, int(index_interval[0]))
+        i1 = min(len(t), len(vge_other), int(index_interval[1]))
+        values = np.asarray(vge_other[i0:i1], dtype=float)
+        n = int(values.size)
+        if n < 4 or not np.all(np.isfinite(values)):
+            return window
+        dt = float(getattr(self.bundle, "dt", 0.0) or 0.0)
+        if dt <= 0.0 and len(t) > 1:
+            dt = float(t[1] - t[0])
+        if dt <= 0.0:
+            return window
+        pad = max(1, int(round(20e-9 / dt)))
+        earliest = min(int(np.argmax(values)), int(np.argmin(values)))
+        latest = max(int(np.argmax(values)), int(np.argmin(values)))
+        a_idx = int(np.searchsorted(t, float(window[0]) * 1e-6, side="left"))
+        b_idx = int(np.searchsorted(t, float(window[1]) * 1e-6, side="left"))
+        a_idx = max(i0, min(a_idx, i0 + n - 1))
+        b_idx = max(i0, min(b_idx, i0 + n - 1))
+        a_rel = a_idx - i0
+        b_rel = b_idx - i0
+        a_rel = min(a_rel, earliest - min(pad, earliest))
+        b_rel = max(b_rel, latest + min(pad, (n - 1) - latest))
+        if not (0 <= a_rel < b_rel <= n - 1):
+            return window
+        return (float(t[i0 + a_rel] * 1e6), float(t[i0 + b_rel] * 1e6))
+
     def _enable_crosstalk_interaction(self, section: str) -> None:
         """串扰电压：A/B 卡对管 Vge 极值时刻，Ha/Hb 锁定极值电平。"""
         self._active_slope_param = None
@@ -9089,14 +9522,20 @@ class MainWindow(QMainWindow):
 
         restored = self._manual_intervals.get((section, name))
         if restored is None:
-            # Search the complete event, but only the actual extrema belong
-            # to the default cursor/focus envelope.  Degenerate data keeps
-            # the existing event window instead of fabricating a pair.
-            cursor_interval = self._crosstalk_extrema_cursor_window(
-                index_interval, vge_other
-            ) or interval
+            # 2026-11-19（v28）：默认 A/B 改为「事件包络」——包住对管 Vge 的
+            # 起止过程，max/min 仍由完整事件段搜索（数值不变）。旧的“两光标
+            # 立在 max/min 采样点上”作为回退，退化数据时再退到完整事件段。
+            cursor_interval = (
+                self._crosstalk_event_bracket_window(index_interval, vge_other)
+                or self._crosstalk_extrema_pad_window(index_interval, vge_other)
+                or interval
+            )
         else:
             cursor_interval = restored
+        if restored is None:
+            cursor_interval = self._crosstalk_enforce_strict_outside(
+                index_interval, vge_other, cursor_interval
+            )
         t0_us, t1_us = cursor_interval
         if restored is None:
             self._focus_switching_local_view(
@@ -9386,7 +9825,7 @@ class MainWindow(QMainWindow):
                     else self.result.turn_on.vce_on_max
                 )
                 self.statusBar().showMessage(
-                    f"{section}-{name}: A/B=峰值左右各300ns的取值区间"
+                    f"{section}-{name}: {_max_interval_status_text(section, name)}"
                     f" [{t0_us:.3f},{t1_us:.3f}]us | {name}={cur:.3f}"
                 )
                 return
@@ -9621,8 +10060,9 @@ class MainWindow(QMainWindow):
                 reference = self._default_extreme_reference(section, name)
                 hb_text = "" if reference is None else f"，Hb={reference:.3f}"
                 self.statusBar().showMessage(
-                    f"{section}-{name}: A/B=峰值左右各300ns的取值区间"
+                    f"{section}-{name}: {_max_interval_status_text(section, name)}"
                     f"（数值取窗内最大值）；Ha=峰值{hb_text}"
+                    f"{self._turn_on_vce_on_max_degrade_note(section, name)}"
                 )
         elif name in short_energy_names:
             self.statusBar().showMessage(
@@ -11077,6 +11517,141 @@ class MainWindow(QMainWindow):
                 )
         return int(a_idx), int(b_idx), float(base_v), float(top_v)
 
+    def _vge_turn_on_ten_percent_index(self) -> int | None:
+        """Vge 开通起点：10% 幅度上升穿越的第一个原始采样索引。
+
+        用户口径（#4）：Vce_on_max 的左光标不能越过 Vge 开通起点。这里只用
+        本侧 Vge 通道自身的前/后电平定阈值（方向自适应，上/下桥通用），
+        返回原始采样索引供显示区间做硬下界。
+        """
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        channel = getattr(self.profile, "vge", None)
+        if not channel:
+            return None
+        try:
+            vge = np.asarray(self.bundle.get(channel), dtype=float)
+        except (KeyError, ValueError):
+            return None
+        t = np.asarray(self.bundle.t, dtype=float)
+        n = len(t)
+        if n < 64 or len(vge) != n:
+            return None
+        segs = self.result.segments
+        seg_lo = max(0, min(int(segs.turn_on[0]), n - 1))
+        seg_hi = max(seg_lo, min(int(segs.turn_on[1]), n - 1))
+        dt = max(float(self.bundle.dt), 1e-15)
+        pre_n = max(4, int(round(400e-9 / dt)))
+        pre_lo = max(0, seg_lo - pre_n)
+        pre_hi = max(pre_lo + 2, seg_lo - max(1, int(round(20e-9 / dt))))
+        post_lo = min(seg_hi, seg_lo + max(1, int(round(150e-9 / dt))))
+        post_hi = min(n - 1, post_lo + max(4, int(round(300e-9 / dt))))
+        if pre_hi - pre_lo < 4 or post_hi - post_lo < 4:
+            return None
+        v_lo = float(np.percentile(vge[pre_lo:pre_hi], 5))
+        v_hi = float(np.percentile(vge[post_lo:post_hi], 95))
+        if abs(v_hi - v_lo) < 1.0:
+            return None
+        threshold = threshold_value(v_lo, v_hi, 0.10)
+        search_lo = pre_lo
+        search_hi = min(seg_hi, seg_lo + max(4, int(round(200e-9 / dt))))
+        ts = t[search_lo : search_hi + 1]
+        smoothed = smooth(vge[search_lo : search_hi + 1], dt, 15.0)
+        tv = crossing_time(ts, smoothed, threshold, "rising", start=0)
+        if tv is None or not np.isfinite(tv):
+            return None
+        idx = int(np.searchsorted(t, float(tv), side="left"))
+        # 2026-11-19（Lead 复核）：插值穿越点在平滑后可能比实测 10% 穿越早几 ns。
+        # 取「连续 >=2ns 已高于阈值」的首个原始采样：物理上保证 A 落在 Vge
+        # 确实已经抬过 10% 的位置，而不是插值意义上“刚好碰上”。
+        hold = max(1, int(round(2e-9 / dt)))
+        start = max(search_lo, min(int(idx), search_hi))
+        above = np.asarray(smoothed >= threshold, dtype=np.int64)
+        offset = start - search_lo
+        if 0 <= offset < above.size:
+            prefix = np.concatenate(([0], np.cumsum(above)))
+            tail = above[offset:]
+            run_start = None
+            acc = 0
+            for k, flag in enumerate(tail):
+                acc = acc + 1 if flag else 0
+                if acc >= hold:
+                    run_start = offset + k - hold + 1
+                    break
+            if run_start is None:
+                hits = np.flatnonzero(
+                    np.convolve(above, np.ones(hold, dtype=np.int64), mode="valid")
+                    >= hold
+                )
+                if len(hits):
+                    run_start = int(hits[0])
+            if run_start is not None:
+                idx = max(int(idx), search_lo + int(run_start))
+        return max(0, min(idx, n - 1))
+
+    def _turn_on_vce_settle_band_start_index(
+        self,
+        vce: np.ndarray,
+        peak_idx: int,
+        base_v: float,
+        top_v: float,
+        start_limit: int | None = None,
+    ) -> int | None:
+        """回落之后第一个 1.5µs 稳态带的起点索引（唯一化“第一个平稳点”）。
+
+        用户口径（#4）：右光标不能停在回落曲线上，也不能太靠右——取回落后
+        第一个真正稳态的平台带（1.5µs 内不再漂移）的起点，再往右一点点。
+        只判“平”，不判“等于 Base”：低电压工况的平台可能高于 Base。
+        """
+
+        if self.bundle is None or self.result is None or self.result.segments is None:
+            return None
+        n = len(vce)
+        dt = max(float(self.bundle.dt), 1e-15)
+        segs = self.result.segments
+        seg_lo = max(0, min(int(segs.turn_on[0]), n - 1))
+        seg_hi = max(seg_lo, min(int(segs.turn_on[1]), n - 1))
+        span = max(abs(float(top_v) - float(base_v)), 1.0)
+        diffs = np.abs(np.diff(np.unique(np.asarray(vce, dtype=float))))
+        lsb = float(np.median(diffs)) if diffs.size else 0.0
+        tol = max(6.0 * lsb, 0.02 * span)
+        if not np.isfinite(tol) or tol <= 0.0:
+            return None
+        # 主回落结束点：峰后首次连续 5ns 低于 base+50%span
+        sustain = max(2, int(round(5e-9 / dt)))
+        fall_hi = max(peak_idx + 1, seg_hi)
+        below = np.asarray(vce[peak_idx : fall_hi + 1] <= float(base_v) + 0.5 * span)
+        start_scan = peak_idx + 1
+        if below.size >= sustain:
+            prefix = np.concatenate(([0], np.cumsum(below.astype(np.int64))))
+            hits = np.flatnonzero(
+                prefix[sustain:] - prefix[:-sustain] >= sustain
+            )
+            if len(hits):
+                start_scan = peak_idx + int(hits[0]) + 1
+        band_n = max(16, int(round(1.5e-6 / dt)))
+        step = max(1, int(round(10e-9 / dt)))
+        # 稳态带允许越过事件段尾（由调用方把「事件段尾+200ns」护栏传进来夹取 B），
+        # 否则 1.5us 窗口在 1us 级事件段内永远放不下，规则会退化成死代码。
+        limit = int(seg_hi) if start_limit is None else int(start_limit)
+        last_start = min(limit, n - band_n)
+        for start in range(start_scan, last_start + 1, step):
+            band = np.asarray(vce[start : start + band_n], dtype=float)
+            if band.size != band_n or not np.all(np.isfinite(band)):
+                continue
+            p05, p95 = np.percentile(band, [5, 95])
+            third = max(2, band_n // 3)
+            if float(p95 - p05) > tol:
+                continue
+            if (
+                abs(float(np.median(band[:third]) - np.median(band[-third:])))
+                > 0.25 * tol
+            ):
+                continue
+            return int(start)
+        return None
+
     def _turn_on_vce_on_max_cursor_context(
         self,
     ) -> tuple[int, int, float, float] | None:
@@ -11112,38 +11687,8 @@ class MainWindow(QMainWindow):
         segs = self.result.segments
         span = max(abs(top_v - base_v), 1.0)
 
-        # Search the adjacent pre-peak Top band, not the remote Vge start.
-        # A short, event-relative guard separates A from the peak marker; it
-        # is not a fixed left viewport duration or a numeric-window boundary.
-        guard_n = max(
-            2,
-            min(int(round(30e-9 / dt)), int(0.05 * max(1, b_idx - peak_idx))),
-        )
-        pre_hi = max(0, peak_idx - guard_n)
-        pre_lo = max(0, pre_hi - max(8, int(round(200e-9 / dt))))
-        adjacent_a, _ = stable_platform_cursor_range_indices(
-            vce[pre_lo : peak_idx + 1],
-            0,
-            pre_hi - pre_lo,
-            peak_idx - pre_lo,
-            peak_idx - pre_lo,
-            dt,
-            top_v,
-            top_v,
-        )
-        adjacent_a += pre_lo
-        quiet_n = max(8, int(round(120e-9 / dt)))
-        band = vce[max(pre_lo, pre_hi - quiet_n + 1) : pre_hi + 1]
-        if len(band) >= quiet_n and np.all(np.isfinite(band)):
-            p05, p95 = np.percentile(band, [5, 95])
-            if (
-                float(p95 - p05) <= 0.075 * span
-                and abs(float(np.median(band)) - top_v) <= 0.04 * span
-                and abs(float(vce[pre_hi]) - top_v) <= 0.04 * span
-            ):
-                adjacent_a = pre_hi
-        if a_idx >= peak_idx or adjacent_a > a_idx:
-            a_idx = adjacent_a
+        # 2026-11-19（用户 #4）：A 不再取“峰值邻域 Top 带细化点”，改为
+        # A = clamp(峰值 - 300ns, Vge 开通起点(10% 幅度), 峰值)；见下方终段。
 
         # Locate the sustained Vce fall independently of a user-selected
         # slope percentage.  A pre-fall ripple can own the maximum long before
@@ -11206,29 +11751,78 @@ class MainWindow(QMainWindow):
                     ):
                         b_idx = int(start + half)
                         break
-        # 2026-11-18: default A/B = authoritative Vce_on_max peak +/- 300 ns
-        # inside the turn-on event window; the stable-platform bracket above is
-        # only the degenerate fallback.
-        # 2026-11-18 (P1-1): 物理阶段包络 ∪ 峰值 ±300ns。峰值贴着 turn_on[0]
-        # 时不能用裸事件段裁剪，否则区间退化成几十 ns。
-        # 阶段包络用共享的 Top→Base 稳定平台上下文（不是本卡细化后的宽
-        # Base 搜索端点），避免 A/B 撑满整个 2us 视窗导致两端余量 <10%。
-        span = _stage_union_span_for_trace(
-            self.bundle.t,
-            self.bundle.dt,
-            peak_idx,
-            int(context[0]),
-            int(context[1]),
-            values=vce,
-            peak_value=float(peak[1]),
+        # 2026-11-19（用户 #4，替代 v3.0.16 的“峰值±300ns ∪ 阶段包络”）：
+        # A = clamp(峰值 - 300ns, Vge 开通起点 10% 幅度, 峰值)；
+        # B = 回落第一个 1.5µs 稳态带起点 + 20ns（唯一化“第一个平稳点”），
+        #     硬护栏 B <= min(下一次关断起点, 事件段尾 + 200ns)；
+        # 找不到稳态带时保留已细化 B（不改变量）并打内部降级标记。
+        half_n = max(1, int(round(300e-9 / dt)))
+        vge_start_idx = self._vge_turn_on_ten_percent_index()
+        segment_lo = max(0, min(int(segs.turn_on[0]), n - 1))
+        a_floor = segment_lo
+        self._turn_on_vce_on_max_peak_precedes_vge = False
+        if vge_start_idx is None:
+            a_floor = segment_lo
+        elif int(vge_start_idx) <= peak_idx:
+            a_floor = max(segment_lo, int(vge_start_idx))
+        else:
+            # 峰值本身早于门极开通：两条要求在物理上互斥，取“峰值左移”一侧并标记。
+            self._turn_on_vce_on_max_peak_precedes_vge = True
+            a_floor = segment_lo
+        guarded_floor = a_floor
+        if vge_start_idx is not None and a_floor < peak_idx:
+            guarded_floor = a_floor + max(1, int(round(5e-9 / dt)))
+        if a_floor >= peak_idx or guarded_floor >= peak_idx:
+            # Vge 开通起点（含余量）已到/越过 Vce 峰值："A 不越 Vge 起点"与
+            # "峰值在区间内"物理互斥，退化为峰值左移并打内部降级标记。
+            if vge_start_idx is not None:
+                self._turn_on_vce_on_max_peak_precedes_vge = True
+            a_idx = max(segment_lo, peak_idx - half_n)
+        else:
+            # 10% 穿越点按不同阈值基准会有 ±dt 级差异（红队A 口径 23.7982 vs
+            # 本实现 23.7960）。floor 已含 5ns 量化余量，保证任何 10% 口径下
+            # A 都在 Vge 已开通的一侧，不会落回“Vge 尚未开始”区间。
+            a_idx = max(peak_idx - half_n, guarded_floor)
+        a_idx = max(segment_lo, min(int(a_idx), peak_idx - 1))
+
+        next_off_idx = int(segs.pulse2_off) if segs.pulse2_off is not None else n - 1
+        next_off_idx = max(int(segs.turn_on[1]) + 1, min(next_off_idx, n - 1))
+        b_cap = min(
+            next_off_idx,
+            int(segs.turn_on[1]) + max(1, int(round(200e-9 / dt))),
         )
-        if span is None:
-            if not 0 <= a_idx < peak_idx < b_idx < n:
-                return context
-            span = (int(a_idx), int(b_idx))
-        context = (int(span[0]), int(span[1]), float(base_v), float(top_v))
+        b_cap = max(b_cap, peak_idx + 1)
+        settle_start = self._turn_on_vce_settle_band_start_index(
+            vce, peak_idx, float(base_v), float(top_v), b_cap
+        )
+        self._turn_on_vce_on_max_settle_fallback = settle_start is None
+        if settle_start is not None:
+            b_idx = int(settle_start) + max(1, int(round(20e-9 / dt)))
+            b_idx = min(b_idx, b_cap)
+        b_idx = max(int(b_idx), peak_idx + 1)
+        b_idx = min(int(b_idx), n - 1)
+        if not (0 <= a_idx <= peak_idx < b_idx < n):
+            return context
+        context = (int(a_idx), int(b_idx), float(base_v), float(top_v))
         self._default_cursor_context_cache[cache_key] = context
         return context
+
+    def _turn_on_vce_on_max_degrade_note(self, section: str, name: str) -> str:
+        """把退化状态写进既有状态栏文案（不新增任何弹窗/提示）。
+
+        两个降级标记的实际消费方：卡片状态栏在这两种工况下追加说明，避免
+        “A 被夹到段首/峰值”或“B 保留细化值”被误读成规则失效。
+        """
+
+        if (section, name) != ("开通", "Vce_on_max"):
+            return ""
+        notes = []
+        if getattr(self, "_turn_on_vce_on_max_peak_precedes_vge", False):
+            notes.append("峰值早于Vge开通起点：A退化为峰值左移")
+        if getattr(self, "_turn_on_vce_on_max_settle_fallback", False):
+            notes.append("未找到1.5µs稳态带：B保留细化值")
+        return "" if not notes else "；" + "；".join(notes)
+
 
     def _turn_on_ic_on_max_cursor_context(
         self,
@@ -11741,6 +12335,11 @@ class MainWindow(QMainWindow):
             w1 = max(w0, min(int(w1), n - 1))
             idx = w0 + int(np.nanargmax(vce[w0 : w1 + 1]))
             return idx, float(self.result.turn_on.vce_on_max)
+        if section == "反向恢复" and name == "Irr":
+            context = self._rr_irr_cursor_context()
+            if context is None:
+                return None
+            return int(context[3]), float(context[4])
         if section == "反向恢复" and name == "Vrr":
             vd = self.bundle.maybe_get(self.profile.v_diode)
             if vd is None:

@@ -7168,11 +7168,26 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             self.assertAlmostEqual(span, 2.5, delta=0.02)
             self.assertGreaterEqual(a_us, x0)
             self.assertLessEqual(b_us, x1)
-            # 2.5us 参数级软基准不变；2026-11-18 起极值卡改为「A/B 居中」构图，
-            # 峰值落在视窗中线，A/B 各再让出 300ns（旧口径 A≈0.8%、B≈89.4%）。
-            self.assertAlmostEqual((a_us - x0) / span, 0.38, delta=0.01)
-            self.assertAlmostEqual((b_us - x0) / span, 0.62, delta=0.01)
-            self.assertAlmostEqual((peak_us - x0) / span, 0.50, delta=0.01)
+            # 2.5us 参数级软基准不变。构图口径见 decision-ledger
+            # `settle-onset-center-focus-v27`（2026-11-19）：非门极卡首次取景把
+            # 峰后主回落起点（关断过程取 Vce）置于视窗几何中线 50%，跨度不变只平移；
+            # 极值卡不再强制 A/B 居中（center_required superseded），但 A/B 仍须可见。
+            # 已作废的历史口径（2026-11-18「A/B 居中」A=0.38/B=0.62/峰值=0.50）
+            # 只保留为追溯，不得再作为期望。
+            from dpt_extractor.gui.waveform_plot import (
+                PARAM_FOCUS_EVENT_CENTER_FRACTION,
+            )
+
+            settle_onset_us = win._settle_onset_us("关断过程", "Ic_off_max")
+            self.assertIsNotNone(settle_onset_us)
+            assert settle_onset_us is not None
+            self.assertAlmostEqual(
+                (float(settle_onset_us) - x0) / span,
+                PARAM_FOCUS_EVENT_CENTER_FRACTION,
+                delta=0.01,
+            )
+            self.assertGreaterEqual(peak_us, x0)
+            self.assertLessEqual(peak_us, x1)
             self.assertAlmostEqual(
                 win.wave_plot._from_disp(
                     "ic", float(win.wave_plot._h_cursor_a.value())
@@ -7996,6 +8011,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         from dpt_extractor.gui.waveform_plot import (
             PARAM_FOCUS_ANCHOR_FRACTION,
             PARAM_FOCUS_DEFAULT_US_PER_DIV,
+            PARAM_FOCUS_EVENT_CENTER_FRACTION,
             PARAM_FOCUS_MAX_ANCHOR_FRACTION,
             PARAM_FOCUS_REQUIRED_GUARD_US,
             TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
@@ -8013,7 +8029,9 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         win.cfg = load_config()
         win.wave_plot = plot
         win.result_table.set_result(result)
-        focus_calls: list[tuple[float, tuple[float, ...], float, bool]] = []
+        focus_calls: list[
+            tuple[float, tuple[float, ...], float, bool, float | None]
+        ] = []
         original_focus = plot.focus_parameter_window_us
 
         def _record_focus(
@@ -8026,13 +8044,15 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             composition_balance_fraction: float | None = None,
             min_margin_fraction: float = 0.0,
             center_required: bool = False,
-        ) -> None:
+            center_event_us: float | None = None,
+            ) -> None:
             focus_calls.append(
                 (
                     float(anchor_us),
                     tuple(float(value) for value in required_times_us),
                     float(anchor_fraction),
                     bool(prefer_right_room),
+                    None if center_event_us is None else float(center_event_us),
                 )
             )
             original_focus(
@@ -8045,7 +8065,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 composition_balance_fraction=composition_balance_fraction,
                 min_margin_fraction=min_margin_fraction,
                 center_required=center_required,
-            )
+                center_event_us=center_event_us,
+                )
 
         plot.focus_parameter_window_us = _record_focus
 
@@ -8063,6 +8084,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 required_times,
                 requested_fraction,
                 prefer_right_room,
+                center_event_us,
             ) = focus_calls[-1]
             self.assertTrue(required_times)
             gate_anchored = "vge" in win._cursor_endpoint_channels_for_param(
@@ -8076,7 +8098,19 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             turn_on_ls_balanced = (section, name) == ("开通", "Ls_on")
             tf_balanced = (section, name) == ("关断过程", "Tf")
             rr_trr_shifted = (section, name) == ("反向恢复", "Trr")
-            if gate_anchored:
+            event_centered = center_event_us is not None
+            if event_centered:
+                # v27（settle-onset-center-focus-v27）：非门极卡首次默认视窗以
+                # 峰后主回落起点居中，右优先与各平衡比例均被取代。
+                self.assertFalse(gate_anchored)
+                self.assertFalse(prefer_right_room)
+                self.assertAlmostEqual(anchor_us, center_event_us, places=9)
+                self.assertAlmostEqual(
+                    requested_fraction,
+                    PARAM_FOCUS_EVENT_CENTER_FRACTION,
+                    places=9,
+                )
+            elif gate_anchored:
                 self.assertFalse(prefer_right_room)
                 expected_anchor = win._switching_focus_anchor_us(section)
                 self.assertIsNotNone(expected_anchor)
@@ -8176,7 +8210,18 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 span, PARAM_FOCUS_DEFAULT_US_PER_DIV * 10.0 - 0.02
             )
             primary_position = (anchor_us - x0) / span
-            if gate_anchored:
+            if event_centered:
+                # v27：A/B（required）仍须完整可见；仅在未被完整波形边界
+                # 夹住时要求事件点落在几何中线。
+                self.assertGreaterEqual(min(required_times), x0 - 1e-6)
+                self.assertLessEqual(max(required_times), x1 + 1e-6)
+                if x0 > full_x0 + 0.025 and x1 < full_x1 - 0.025:
+                    self.assertAlmostEqual(
+                        primary_position,
+                        PARAM_FOCUS_EVENT_CENTER_FRACTION,
+                        delta=0.025,
+                    )
+            elif gate_anchored:
                 self.assertGreaterEqual(
                     primary_position,
                     PARAM_FOCUS_ANCHOR_FRACTION - 0.02,
@@ -8278,8 +8323,10 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     x0 > full_x0 + 0.025
                     and x1 < full_x1 - 0.025
                     and hard_width <= 0.5 * span + 1e-9
-                    # 2026-11-18: 极值卡改为「A/B 居中」构图（B≈62%）。
-                    and name not in EXTREME_MAX_INTERVAL_NAMES
+                    # v27（settle-onset-center-focus-v27）：启用事件居中的非门极卡
+                    # 不再受「最晚 required ≤50%」约束；该比例只对门极卡与
+                    # 未启用事件居中的回退路径有效。
+                    and center_event_us is None
                 ):
                     self.assertLessEqual(
                         (required_hi - x0) / span,
@@ -8361,6 +8408,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.gui.waveform_plot import (
             PARAM_FOCUS_ANCHOR_FRACTION,
+            PARAM_FOCUS_EVENT_CENTER_FRACTION,
             PARAM_FOCUS_REQUIRED_GUARD_US,
             TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
             TF_FOCUS_MIDPOINT_FRACTION,
@@ -8395,7 +8443,9 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             win.cfg = load_config()
             win.wave_plot = plot
             win.result_table.set_result(result)
-            focus_calls: list[tuple[float, tuple[float, ...], float, bool]] = []
+            focus_calls: list[
+                tuple[float, tuple[float, ...], float, bool, float | None]
+            ] = []
             original_focus = plot.focus_parameter_window_us
 
             def _record_focus(
@@ -8408,13 +8458,15 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 composition_balance_fraction: float | None = None,
                 min_margin_fraction: float = 0.0,
                 center_required: bool = False,
-            ) -> None:
+                center_event_us: float | None = None,
+                ) -> None:
                 focus_calls.append(
                     (
                         float(anchor_us),
                         tuple(float(value) for value in required_times_us),
                         float(anchor_fraction),
                         bool(prefer_right_room),
+                        None if center_event_us is None else float(center_event_us),
                     )
                 )
                 original_focus(
@@ -8427,7 +8479,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     composition_balance_fraction=composition_balance_fraction,
                     min_margin_fraction=min_margin_fraction,
                     center_required=center_required,
-                )
+                    center_event_us=center_event_us,
+                    )
 
             plot.focus_parameter_window_us = _record_focus
             try:
@@ -8453,6 +8506,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                             required_times,
                             anchor_fraction,
                             prefer_right_room,
+                            center_event_us,
                         ) = focus_calls[-1]
                         self.assertEqual(len(required_times), 2)
                         actual_ab = sorted(
@@ -8466,7 +8520,20 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                             section == "开通" and name in {"dv/dt", "di/dt"}
                         )
                         vge_auxiliary = section in {"开通", "反向恢复"}
-                        if vge_auxiliary:
+                        event_centered = center_event_us is not None
+                        if event_centered:
+                            # v27（settle-onset-center-focus-v27）：非门极卡以峰后主回落
+                            # 起点居中，右优先与各平衡比例均被取代。
+                            self.assertFalse(prefer_right_room)
+                            self.assertAlmostEqual(
+                                anchor_us, center_event_us, places=9
+                            )
+                            self.assertAlmostEqual(
+                                anchor_fraction,
+                                PARAM_FOCUS_EVENT_CENTER_FRACTION,
+                                places=9,
+                            )
+                        elif vge_auxiliary:
                             self.assertTrue(prefer_right_room)
                             expected_anchor = win._switching_focus_anchor_us(section)
                             self.assertIsNotNone(expected_anchor)
@@ -8504,19 +8571,23 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                         x0, x1 = xr
                         span = x1 - x0
                         self.assertAlmostEqual(span, 2.0, delta=0.02)
-                        self.assertGreaterEqual(
-                            x1 - required_ab[1] + 0.025,
-                            required_ab[0] - x0,
-                        )
+                        if not event_centered:
+                            # v27：事件居中卡由 PARAM_FOCUS_EVENT_CENTER_FRACTION 定位，
+                            # 不再要求右侧留白不小于左侧留白。
+                            self.assertGreaterEqual(
+                                x1 - required_ab[1] + 0.025,
+                                required_ab[0] - x0,
+                            )
                         hard_width = (
                             required_ab[1]
                             - required_ab[0]
                             + 2.0 * PARAM_FOCUS_REQUIRED_GUARD_US
                         )
                         if hard_width <= 0.5 * span + 1e-9:
-                            # 2026-11-18: 极值卡改为「A/B 居中」构图（B≈62%），
-                            # 其余卡仍保持后端不晚于中线的右优先构图。
-                            if name not in EXTREME_MAX_INTERVAL_NAMES:
+                            # v27（settle-onset-center-focus-v27）：启用事件居中的非门极卡
+                            # 不再受「最晚 required ≤50%」约束；该比例只对门极卡与
+                            # 未启用事件居中的回退路径有效。
+                            if center_event_us is None:
                                 self.assertLessEqual(
                                     (required_ab[1] - x0) / span,
                                     0.50 + 0.025,
@@ -8556,7 +8627,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             composition_balance_fraction: float | None = None,
             min_margin_fraction: float = 0.0,
             center_required: bool = False,
-        ) -> None:
+            center_event_us: float | None = None,
+            ) -> None:
             calls.append((float(anchor_us), tuple(map(float, required_times_us))))
             original_focus(
                 anchor_us,
@@ -8568,7 +8640,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 composition_balance_fraction=composition_balance_fraction,
                 min_margin_fraction=min_margin_fraction,
                 center_required=center_required,
-            )
+                center_event_us=center_event_us,
+                )
 
         plot.focus_parameter_window_us = _record_focus
         try:
@@ -8638,6 +8711,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
         from dpt_extractor.gui.main_window import MainWindow
         from dpt_extractor.gui.waveform_plot import (
             PARAM_FOCUS_ANCHOR_FRACTION,
+            PARAM_FOCUS_EVENT_CENTER_FRACTION,
             PARAM_FOCUS_REQUIRED_GUARD_US,
             TURN_ON_CURRENT_FOCUS_MIDPOINT_FRACTION,
             TURN_ON_SLOPE_FOCUS_MIDPOINT_FRACTION,
@@ -8696,7 +8770,9 @@ class TestWaveformPlotSmoke(unittest.TestCase):
             win.cfg = load_config()
             win.wave_plot = plot
             win.result_table.set_result(result)
-            focus_calls: list[tuple[float, tuple[float, ...], float, bool]] = []
+            focus_calls: list[
+                tuple[float, tuple[float, ...], float, bool, float | None]
+            ] = []
             original_focus = plot.focus_parameter_window_us
 
             def _record_focus(
@@ -8709,13 +8785,15 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                 composition_balance_fraction: float | None = None,
                 min_margin_fraction: float = 0.0,
                 center_required: bool = False,
-            ) -> None:
+                center_event_us: float | None = None,
+                ) -> None:
                 focus_calls.append(
                     (
                         float(anchor_us),
                         tuple(float(value) for value in required_times_us),
                         float(anchor_fraction),
                         bool(prefer_right_room),
+                        None if center_event_us is None else float(center_event_us),
                     )
                 )
                 original_focus(
@@ -8728,7 +8806,8 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     composition_balance_fraction=composition_balance_fraction,
                     min_margin_fraction=min_margin_fraction,
                     center_required=center_required,
-                )
+                    center_event_us=center_event_us,
+                    )
 
             plot.focus_parameter_window_us = _record_focus
             self.assertIsNotNone(plot._full_x_range)
@@ -8758,6 +8837,7 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                         required_times,
                         anchor_fraction,
                         prefer_right_room,
+                        center_event_us,
                     ) = focus_calls[-1]
                     gate_anchored = "vge" in win._cursor_endpoint_channels_for_param(
                         section, name
@@ -8769,7 +8849,21 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                     )
                     tf_balanced = (section, name) == ("关断过程", "Tf")
                     rr_trr_shifted = (section, name) == ("反向恢复", "Trr")
-                    if gate_anchored:
+                    event_centered = center_event_us is not None
+                    if event_centered:
+                        # v27（settle-onset-center-focus-v27）：非门极卡以峰后主回落
+                        # 起点居中，右优先与各平衡比例均被取代。
+                        self.assertFalse(gate_anchored)
+                        self.assertFalse(prefer_right_room)
+                        self.assertAlmostEqual(anchor_us, center_event_us, places=9)
+                        self.assertAlmostEqual(
+                            anchor_fraction,
+                            PARAM_FOCUS_EVENT_CENTER_FRACTION,
+                            places=9,
+                        )
+                        self.assertGreaterEqual(min(required_times), x0 - 1e-6)
+                        self.assertLessEqual(max(required_times), x1 + 1e-6)
+                    elif gate_anchored:
                         self.assertFalse(prefer_right_room)
                         expected_anchor = win._switching_focus_anchor_us(section)
                         self.assertIsNotNone(expected_anchor)
@@ -8845,7 +8939,13 @@ class TestWaveformPlotSmoke(unittest.TestCase):
                         )
                     if x0 > full_x0 + 0.02 and x1 < full_x1 - 0.02:
                         anchor_position = (anchor_us - x0) / span
-                        if gate_anchored:
+                        if event_centered:
+                            self.assertAlmostEqual(
+                                anchor_position,
+                                PARAM_FOCUS_EVENT_CENTER_FRACTION,
+                                delta=0.025,
+                            )
+                        elif gate_anchored:
                             self.assertGreaterEqual(
                                 anchor_position,
                                 anchor_fraction - 0.025,
@@ -10703,7 +10803,26 @@ class TestMainWindowSmoke(unittest.TestCase):
         ic = bundle_total_current(win.bundle, win.profile)
         vce_at_a = float(np.interp(ta * 1e-6, win.bundle.t, vce))
         ic_at_b = float(np.interp(tb * 1e-6, win.bundle.t, ic))
-        self.assertAlmostEqual(ha_v, float(context.ha_v), places=6)
+        # 2026-11-25 用户拍板：Ha 横线必须与 A 相交。stable_platforms 下 A 是
+        # 「抬升前 Base 稳定带」代表点，提取层因此把 Ha 发布成该稳定带自身的
+        # 稳健电平；显示层不得再另取一套导通平台电平。
+        self.assertEqual(context.endpoint_mode, "stable_platforms")
+        self.assertAlmostEqual(ha_v, float(context.ha_v), delta=1e-6)
+        self.assertAlmostEqual(ha_v, vce_at_a, delta=0.5)
+        self.assertAlmostEqual(ta, float(context.t_start) * 1e6, places=6)
+        # 数值不变：用同一积分窗重算 Eoff/Pmax，必须与已存值逐位相等。
+        from dpt_extractor.metrics.energy import peak_power_kw
+        from dpt_extractor.metrics.iec_windows import integrate_vi_window
+
+        window = context.as_integration_window()
+        self.assertEqual(
+            float(integrate_vi_window(win.bundle.t, vce, ic, window)),
+            float(win.result.turn_off.eoff),
+        )
+        self.assertEqual(
+            float(peak_power_kw(vce, ic, window)),
+            float(win.result.turn_off.pmax),
+        )
         marker_x, marker_y = plot._cursor_a_wave_marker.getData()
         self.assertEqual(len(marker_x), 1)
         self.assertEqual(len(marker_y), 1)
@@ -11118,12 +11237,27 @@ class TestMainWindowSmoke(unittest.TestCase):
         self.assertAlmostEqual(
             float(np.interp(ta * 1e-6, win.bundle.t, vce)), ha_v, delta=0.5
         )
-        self.assertAlmostEqual(
-            float(np.interp(tb * 1e-6, win.bundle.t, ic)), hb_a, delta=0.5
-        )
-        self.assertGreater(ta, 14.68)
-        self.assertLess(ta, 14.74)
-        self.assertAlmostEqual(ha_v, 12.34375, delta=0.5)
+        # Hb/B 侧不走同一条改动：WAVEFORM_UI_SPEC 明确 Hb 保留提取层发布的
+        # 带符号 Ic Base，B 只是该稳定带的代表点，因此两者按设计不必相等
+        # （契约 1）。这里改为独立校验 Hb 与 B 所在稳定带的稳健电平一致。
+        ctx = win.result.energy_contexts[("关断过程", "Eoff")]
+        self.assertAlmostEqual(ctx.endpoint_mode, "stable_platforms")
+        band = ic[
+            int(ctx.stable_platform_context.b_band_start_idx) : int(
+                ctx.stable_platform_context.b_band_end_idx
+            )
+            + 1
+        ]
+        self.assertAlmostEqual(hb_a, float(np.median(band)), delta=5.0)
+        self.assertLess(ta, tb)
+        # A 是提取层发布的「抬升前 Base 稳定带」代表采样时刻，不用硬编码窗口
+        # 钉住具体数值（旧 14.68~14.74 边界是更早口径留下的，A 早已移动）。
+        self.assertAlmostEqual(ta, float(ctx.t_start) * 1e6, places=6)
+        # Ha 取 A 所在 Base 稳定带的稳健电平（2026-11-25 口径），因此应贴住
+        # A 处 Vce；不再使用 2026-11-19 那套与 A 脱钩的导通平台电平。
+        ctx = win.result.energy_contexts[("关断过程", "Eoff")]
+        self.assertAlmostEqual(ctx.endpoint_mode, "stable_platforms")
+        self.assertAlmostEqual(ha_v, float(ctx.ha_v), delta=1e-6)
         win.close()
 
     @unittest.skipUnless(WANGLIHUI_UH_400_1070.exists(), "wanglihui UH sample missing")

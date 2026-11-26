@@ -43,6 +43,7 @@ hiddenimports = collect_submodules("tm_data_types") + collect_submodules("PIL") 
     "dpt_extractor.gui.channel_settings_panel",
     "dpt_extractor.gui.waveform_plot",
     "dpt_extractor.pipeline.extract",
+    "dpt_extractor.utils.qt_bootstrap",
     "dpt_extractor.export.mcu2506_layout",
     "dpt_extractor.export.report_template",
     "dpt_extractor.export.short_circuit_layout",
@@ -56,6 +57,35 @@ if python_library_bin.is_dir():
     os.environ["PATH"] = str(python_library_bin) + os.pathsep + os.environ.get("PATH", "")
     for dll in python_library_bin.glob("tbb*.dll"):
         binaries.append((str(dll), "."))
+
+# MSVC 运行库必须补一份到 _MEIPASS 根目录。
+# PyQt6 wheel 把 MSVCP140.dll / MSVCP140_1.dll / MSVCP140_2.dll 放在
+# PyQt6\Qt6\bin 子目录里，PyInstaller 只会把 python 自己依赖的 VCRUNTIME140*.dll
+# 收进根目录。目标机若没装 VC++ 2015-2022 运行库、又搜不到那个子目录，导入
+# QtWidgets 就会报 "DLL load failed while importing QtWidgets: 找不到指定的模块"。
+# 根目录是打包器唯一保证会被搜索的位置，因此这里显式再放一份（同名 DLL 放在
+# 子目录里的那份保持不变）。优先取 PyQt6 自带副本，保证与 Qt 的编译版本一致。
+_MSVC_RUNTIME_DLLS = (
+    "MSVCP140.dll",
+    "MSVCP140_1.dll",
+    "MSVCP140_2.dll",
+    "VCRUNTIME140.dll",
+    "VCRUNTIME140_1.dll",
+)
+_MSVC_RUNTIME_SOURCES = (
+    Path(sys.prefix) / "Lib" / "site-packages" / "PyQt6" / "Qt6" / "bin",
+    Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32",
+)
+# 注：PyInstaller 6 的 Qt hook 按"文件名"去重，同一个 DLL 名只会留一份，因此
+# 根目录这份会取代 PyQt6\Qt6\bin 子目录那份，而不是两处共存。根目录是打包器
+# 保证会被搜索的位置（bootloader 登记 _MEIPASS + PyQt6 把 _MEIPASS 前置到
+# PATH），所以这是更稳的那一处。
+for _dll_name in _MSVC_RUNTIME_DLLS:
+    for _dll_dir in _MSVC_RUNTIME_SOURCES:
+        _dll_path = _dll_dir / _dll_name
+        if _dll_path.is_file():
+            binaries.append((str(_dll_path), "."))
+            break
 
 a = Analysis(
     [str(ROOT / "main.py")],

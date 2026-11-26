@@ -130,20 +130,30 @@ DPT_PARAMETER_CURSOR_ROLES = {
     ("关断过程", "Eoff"): (
         "A=Vce Base稳定带代表点(smooth)/Vce与Ha交点(fallback)；"
         "B=Ic Base稳定带代表点(smooth)/Ic与Hb交点(fallback)；"
-        "Ha=Vce；Hb=Ic"
+        "Ha=Vce（stable_platforms 时显示为主沿前导通平台，值不变自检）；Hb=Ic"
     ),
     ("关断过程", "ΔVce"): "A=抬升前Vce Base稳定段；B=尖峰后Vce Top稳定段；Ha=Vce尖峰最大值；Hb=Vce Top稳定值",
     ("关断过程", "Ic_off_max"): "A/B=峰值∓300ns取值区间（纯显示卡）；Ha=Ic峰值；Hb=Ic Base稳定值",
     ("关断过程", "Vce_off_max"): "A/B=阶段包络(Vce Base→Top)∪峰值∓300ns；Ha=Vce峰值；Hb=Vce Top稳定值",
-    ("关断过程", "串扰电压"): "A/B=对管Vge最大/最小时刻；Ha=Vge最大值；Hb=Vge最小值",
+    ("关断过程", "串扰电压"): (
+        "A/B=对管Vge持续扰动区起点−guard/落点+guard（覆盖段内raw极值）；"
+        "Ha=Vge最大值；Hb=Vge最小值"
+    ),
     ("开通", "dv/dt"): "A/B=Vce阈值交点；Ha/Hb=跌落前后稳定高/低电压平台",
     ("开通", "di/dt"): "A/B=Ic阈值交点；Ha/Hb=Ic Top/Base",
     ("开通", "Eon"): "A=Ic与Ha交点；B=Vce与Hb交点；Ha=Ic；Hb=Vce",
     ("开通", "ΔVce"): "A=Vce下降前Top稳定段；B=下降后Base稳定段；Ha=Vce Top；Hb=Vce下降拐点",
     ("开通", "开通电流"): "A/Hb=Ic基线；B/Ha=Ic导通平台",
     ("开通", "Ic_on_max"): "A/B=阶段包络(Ic Base→Top)∪峰值∓300ns；Ha=Ic峰值；Hb=Ic Base稳定值",
-    ("开通", "Vce_on_max"): "A/B=阶段包络(Vce Top→Base)∪峰值∓300ns；Ha=Vce峰值；Hb=Vce Base稳定值",
-    ("开通", "串扰电压"): "A/B=对管Vge最大/最小时刻；Ha=Vge最大值；Hb=Vge最小值",
+    ("开通", "Vce_on_max"): (
+        "A=峰值往左≤300ns且不小于Vge开通起点(10%幅度+5ns余量)；"
+        "B=回落首个1.5µs稳态带起点+20ns（护栏：事件段尾+200ns）；"
+        "Ha=Vce峰值；Hb=Vce Base稳定值"
+    ),
+    ("开通", "串扰电压"): (
+        "A/B=对管Vge持续扰动区起点−guard/落点+guard（覆盖段内raw极值）；"
+        "Ha=Vge最大值；Hb=Vge最小值"
+    ),
     ("开通", "Ls_on"): "A/B=Ic斜率交点同步积分窗；Ha/Hb=不适用；逻辑=∫max(Top−Vce,0)dt÷|ΔIc|，受手动ΔVce幅值校准",
     ("开通", "Ton"): "A=Vge上升10%；B=Ic上升90%；Ha/Hb=不适用",
     ("开通", "Td_on"): "A=Vge上升10%；B=Ic上升10%；Ha/Hb=不适用",
@@ -571,11 +581,25 @@ def _captured_cursor_bindings(calls: dict[str, dict]) -> dict[str, object]:
     return binding
 
 
+CapturedParameterFocus = (
+    tuple[float, tuple[float, ...], float, bool]
+    | tuple[float, tuple[float, ...], float, bool, float | None]
+    | tuple[float, tuple[float, ...], float, bool, float | None, float | None]
+    | tuple[
+        float,
+        tuple[float, ...],
+        float,
+        bool,
+        float | None,
+        float | None,
+        float | None,
+    ]
+)
+
+
 def _captured_parameter_focus(
     calls: dict[str, dict],
-) -> tuple[float, tuple[float, ...], float, bool] | tuple[
-    float, tuple[float, ...], float, bool, float | None
-] | tuple[float, tuple[float, ...], float, bool, float | None, float | None] | None:
+) -> CapturedParameterFocus | None:
     """Read the actual focus call used by the UI, without re-deriving its anchor."""
     call = calls.get("focus_parameter_window_us")
     if call is None:
@@ -592,22 +616,38 @@ def _captured_parameter_focus(
     )
     composition_anchor = bound.get("composition_anchor_us")
     composition_balance = bound.get("composition_balance_fraction")
-    if composition_anchor is None and composition_balance is None:
+    center_event = bound.get("center_event_us")
+    if (
+        composition_anchor is None
+        and composition_balance is None
+        and center_event is None
+    ):
         return captured
     return (
         *captured,
         None if composition_anchor is None else float(composition_anchor),
         None if composition_balance is None else float(composition_balance),
+        *((float(center_event),) if center_event is not None else ()),
     )
 
 
 def _normalize_captured_parameter_focus(
     captured_focus,
-) -> tuple[float, tuple[float, ...], float, bool, float | None, float | None]:
+) -> tuple[
+    float,
+    tuple[float, ...],
+    float,
+    bool,
+    float | None,
+    float | None,
+    float | None,
+]:
     """Keep validator helpers compatible with pre-composition captures."""
     if len(captured_focus) == 4:
-        return (*captured_focus, None, None)
+        return (*captured_focus, None, None, None)
     if len(captured_focus) == 5:
+        return (*captured_focus, None, None)
+    if len(captured_focus) == 6:
         return (*captured_focus, None)
     return captured_focus
 
@@ -623,14 +663,15 @@ def _captured_parameter_minimum_span_us(calls: dict[str, dict]) -> float | None:
 
 
 def _crosstalk_cursor_display_problems(t, vge, indices, ta, tb) -> list[str]:
-    """Check event membership, extrema coverage and the >=50ns display span.
+    """Check event membership, extrema coverage and the >=100ns display span.
 
-    2026-11-18 (P2-2): the default crosstalk window is no longer pinned to the
-    two raw-extremum samples (that gave 22-35 ns wide, unreadable windows).
-    It is widened to at least 50 ns around their midpoint, staying inside the
-    event section, so the audit checks: raw-sample alignment, event membership,
-    coverage of the section max/min, and the minimum span (unless the section
-    itself is shorter).
+    2026-11-19 (R-XT): the default crosstalk window means "event start -> event
+    end" while still bracketing the section extrema.  The audit therefore
+    checks: raw-sample alignment, event membership, coverage of the section
+    max/min (A at or before the earliest extremum, B at or after the latest),
+    and the >=100 ns minimum display span (unless the section itself is
+    shorter).  Only geometry is asserted here - the measured max/min are owned
+    by the extraction layer and are verified separately.
     """
     i0, i1 = indices
     values = np.asarray(vge[i0:i1])
@@ -656,8 +697,34 @@ def _crosstalk_cursor_display_problems(t, vge, indices, ta, tb) -> list[str]:
         or float(np.min(window)) > section_min + 1e-12
     ):
         problems.append("串扰A/B未分别覆盖对管Vge的raw最大值/最小值")
+    # 2026-11-19（验收）：必须“严格外侧”——A 在最早极值之前、B 在最晚极值之后，
+    # 且至少让出 max(1 采样, 20ns)；只在事件段边界不允许时才退化为贴边。
+    arg_max = int(np.argmax(values))
+    arg_min = int(np.argmin(values))
+    earliest_rel = min(arg_max, arg_min)
+    latest_rel = max(arg_max, arg_min)
+    earliest_ext = int(i0 + earliest_rel)
+    latest_ext = int(i0 + latest_rel)
+    dt_ns = abs(float(t[1] - t[0])) * 1e9 if len(t) > 1 else 0.0
+    pad_n = max(1, int(round(20.0 / dt_ns))) if dt_ns > 0.0 else 1
+    left_room = earliest_rel
+    right_room = (i1 - 1) - latest_ext
+    required_left = min(pad_n, left_room)
+    required_right = min(pad_n, right_room)
+    if lo_idx > earliest_ext - required_left or (
+        required_left > 0 and lo_idx >= earliest_ext
+    ):
+        problems.append(
+            "串扰A未严格落在最早极值外侧（禁止立在极值点上）"
+        )
+    if hi_idx < latest_ext + required_right or (
+        required_right > 0 and hi_idx <= latest_ext
+    ):
+        problems.append(
+            "串扰B未严格落在最晚极值外侧（禁止立在极值点上）"
+        )
     dt_us = abs(float(t[1] - t[0])) * 1e6 if len(t) > 1 else 0.0
-    min_span_us = max(50e-3, dt_us)
+    min_span_us = max(100e-3, dt_us)
     section_span_us = abs(float(t[i1 - 1] - t[i0]) * 1e6)
     if abs(tb - ta) + tol_us < min(min_span_us, section_span_us):
         problems.append(
@@ -799,9 +866,7 @@ def _independent_ic_off_max_stable_center_index(
 def _parameter_focus_geometry_problem(
     view_range_us: tuple[float, float],
     full_range_us: tuple[float, float],
-    captured_focus: tuple[
-        float, tuple[float, ...], float, bool, float | None, float | None
-    ] | None,
+    captured_focus: CapturedParameterFocus | None,
     *,
     tolerance_us: float = 0.025,
     minimum_span_us: float | None = None,
@@ -824,6 +889,7 @@ def _parameter_focus_geometry_problem(
         prefer_right_room,
         composition_anchor_us,
         composition_balance_fraction,
+        center_event_us,
     ) = _normalize_captured_parameter_focus(captured_focus)
     numeric_values = (
         *view_range_us,
@@ -832,6 +898,8 @@ def _parameter_focus_geometry_problem(
         anchor_fraction,
         *required_times_us,
     )
+    if center_event_us is not None:
+        numeric_values = (*numeric_values, center_event_us)
     if not all(np.isfinite(float(value)) for value in numeric_values):
         return "参数 focus 包含 NaN/Inf 几何值"
     if not float(view_range_us[1]) > float(view_range_us[0]):
@@ -856,18 +924,33 @@ def _parameter_focus_geometry_problem(
     if _extreme_card and required_times_us:
         _width = max(required_times_us) - min(required_times_us)
         base_span_us = max(base_span_us, float(_width) / 0.8)
-    expected_x0, expected_x1 = _solve_parameter_x_window(
-        full_range_us,
-        anchor_us,
-        required_times_us,
-        base_span_us=base_span_us,
-        anchor_fraction=anchor_fraction,
-        prefer_right_room=prefer_right_room,
-        composition_anchor_us=composition_anchor_us,
-        composition_balance_fraction=composition_balance_fraction,
-        min_margin_fraction=margin_fraction,
-        center_required=_extreme_card,
-    )
+    if center_event_us is None:
+        expected_x0, expected_x1 = _solve_parameter_x_window(
+            full_range_us,
+            anchor_us,
+            required_times_us,
+            base_span_us=base_span_us,
+            anchor_fraction=anchor_fraction,
+            prefer_right_room=prefer_right_room,
+            composition_anchor_us=composition_anchor_us,
+            composition_balance_fraction=composition_balance_fraction,
+            min_margin_fraction=margin_fraction,
+            center_required=_extreme_card,
+        )
+    else:
+        expected_x0, expected_x1 = _solve_parameter_x_window(
+            full_range_us,
+            anchor_us,
+            required_times_us,
+            base_span_us=base_span_us,
+            anchor_fraction=anchor_fraction,
+            prefer_right_room=prefer_right_room,
+            composition_anchor_us=composition_anchor_us,
+            composition_balance_fraction=composition_balance_fraction,
+            min_margin_fraction=0.0,
+            center_required=False,
+            center_event_us=center_event_us,
+        )
     actual_x0, actual_x1 = map(float, view_range_us)
     tol = max(0.0, float(tolerance_us))
     if (
@@ -878,6 +961,21 @@ def _parameter_focus_geometry_problem(
             f"参数 focus 构图偏离策略: 实际[{actual_x0:.3f},{actual_x1:.3f}]us，"
             f"期望[{expected_x0:.3f},{expected_x1:.3f}]us"
         )
+
+    if center_event_us is not None:
+        actual_span = actual_x1 - actual_x0
+        center_position = (float(center_event_us) - actual_x0) / actual_span
+        # 事件居中与「required 全部可见」冲突时，求解器必须夹取（硬内容优先）。
+        # 只有求解器本来可以做到居中时才断言 50%，否则接受其夹取结果：
+        # 期望窗口本身已在上面按同一策略复算过，这里只补一条独立的中线证据。
+        ideal_x0 = float(center_event_us) - 0.50 * (expected_x1 - expected_x0)
+        clamped = abs(ideal_x0 - expected_x0) > 1e-6
+        if not clamped and abs(center_position - 0.50) > 0.02:
+            return (
+                "参数 focus 未把回落起点放在中线: "
+                f"实际 {center_position:.2%}"
+            )
+        return None
 
     # Independently audit the right-priority geometry instead of accepting a
     # self-consistent but wrong solver.  No fixed pre-event duration is used:
@@ -1195,9 +1293,7 @@ def _parameter_focus_geometry_problem(
 def _parameter_primary_event_geometry_problem(
     view_range_us: tuple[float, float],
     full_range_us: tuple[float, float],
-    captured_focus: tuple[
-        float, tuple[float, ...], float, bool, float | None, float | None
-    ] | None,
+    captured_focus: CapturedParameterFocus | None,
     primary_event_us: float | None,
     *,
     tolerance_us: float = 0.025,
@@ -1220,6 +1316,7 @@ def _parameter_primary_event_geometry_problem(
         prefer_right_room,
         _composition_anchor_us,
         _composition_balance_fraction,
+        _center_event_us,
     ) = _normalize_captured_parameter_focus(captured_focus)
     if not prefer_right_room:
         return None
@@ -1377,9 +1474,7 @@ def _unnecessary_ab_focus_expansion(
     name: str,
     view_range_us: tuple[float, float],
     full_range_us: tuple[float, float],
-    captured_focus: tuple[
-        float, tuple[float, ...], float, bool, float | None, float | None
-    ] | None,
+    captured_focus: CapturedParameterFocus | None,
     cursor_a_us: float | None,
     cursor_b_us: float | None,
     *,
@@ -1402,6 +1497,7 @@ def _unnecessary_ab_focus_expansion(
         prefer_right_room,
         composition_anchor_us,
         composition_balance_fraction,
+        _center_event_us,
     ) = _normalize_captured_parameter_focus(captured_focus)
     expected_x0, expected_x1 = _solve_parameter_x_window(
         full_range_us,
@@ -5957,6 +6053,7 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     prefer_right_room,
                     _composition_anchor_us,
                     _composition_balance_fraction,
+                    center_event_us,
                 ) = _normalize_captured_parameter_focus(captured_focus)
                 for required_us in required_times_us:
                     if required_us < x0 - 1e-6 or required_us > x1 + 1e-6:
@@ -6007,6 +6104,8 @@ def audit_file(MainWindow, QApplication, app, path: Path) -> list[tuple]:
                     f" required={required_times_us}"
                     f" right_priority={prefer_right_room}"
                 )
+                if center_event_us is not None:
+                    detail += f" center_event={float(center_event_us):.3f}"
                 if primary_event_us is not None and np.isfinite(
                     float(primary_event_us)
                 ):

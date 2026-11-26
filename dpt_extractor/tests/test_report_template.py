@@ -647,6 +647,67 @@ class TestReportTemplateWriter(unittest.TestCase):
                     temperature_code="RT",
                 )
 
+    def test_dpt_incomplete_images_name_the_missing_slots(self):
+        from dpt_extractor.export.report_template import _require_complete_report_images
+
+        expected = (
+            ("关断过程", "Eoff"),
+            ("反向恢复", "dv/dt"),
+            ("反向恢复", "di/dt"),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            _require_complete_report_images(
+                "双脉冲",
+                expected,
+                1,
+                (("反向恢复", "dv/dt"), ("反向恢复", "di/dt")),
+            )
+        message = str(ctx.exception)
+        self.assertIn("应写入 3 张", message)
+        self.assertIn("实际写入 1 张", message)
+        self.assertIn("反向恢复/dv/dt、反向恢复/di/dt", message)
+        self.assertNotIn("待写图片", message)
+
+    def test_dpt_incomplete_images_without_slot_detail_list_expected(self):
+        from dpt_extractor.export.report_template import _require_complete_report_images
+
+        with self.assertRaises(ValueError) as ctx:
+            _require_complete_report_images("双脉冲", (("关断过程", "Eoff"),), 0)
+        self.assertIn("待写图片：关断过程/Eoff", str(ctx.exception))
+
+    def test_write_dpt_images_reports_slots_missing_from_template(self):
+        from dpt_extractor.export.report_template import (
+            _DPT_IMAGE_HEADERS,
+            _write_dpt_images,
+        )
+        from dpt_extractor.models.results import ExtractResult
+
+        missing_targets = {("反向恢复", "dv/dt"), ("反向恢复", "di/dt")}
+        with tempfile.TemporaryDirectory() as td:
+            image = Path(td) / "scope.png"
+            _write_tiny_png(image)
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "U相_双脉冲波形"
+            block_rows = {"off": 1, "on": 18, "rr": 35}
+            for base in block_rows.values():
+                ws.merge_cells(start_row=base, start_column=1, end_row=base + 16, end_column=8)
+                ws.cell(base, 1, "UH_25℃")
+            col = 10
+            for key, (block, header_text) in _DPT_IMAGE_HEADERS.items():
+                if key in missing_targets:
+                    continue
+                ws.cell(block_rows[block], col, header_text)
+                col += 1
+
+            result = ExtractResult(source_path="UH_750V_1050A_000.tss", profile_code="UH")
+            images = {key: image for key in _DPT_IMAGE_HEADERS}
+            written, missing = _write_dpt_images(ws, 1, images, result)
+
+        self.assertEqual(written, len(_DPT_IMAGE_HEADERS) - len(missing_targets))
+        self.assertEqual(set(missing), missing_targets)
+
     def test_short_nonempty_images_reject_missing_parameter_slot(self):
         from dpt_extractor.export.report_template import write_report_template
         from dpt_extractor.models.results import ExtractResult

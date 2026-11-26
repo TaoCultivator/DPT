@@ -6,7 +6,10 @@ param(
     [string]$Provider = '',
     [string]$Resource = '',
     [string]$OutputPath = '',
-    [string]$StatePath = ''
+    [string]$StatePath = '',
+    # Clear the bus only when an interrupted transfer left a half response
+    # queued; normal reads and syncs do not clear unconditionally.
+    [switch]$ClearOnOpen
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,12 +56,14 @@ function Open-NiVisaManager {
     return New-Object NationalInstruments.Visa.ResourceManager
 }
 
-function Open-Scope([object]$Manager, [string]$ResourceName) {
+function Open-Scope([object]$Manager, [string]$ResourceName, [switch]$ShouldClear) {
     $session = $Manager.Open($ResourceName)
     $session.TimeoutMilliseconds = 15000
-    # Clear unread bytes left by an interrupted binary transfer before the
-    # first text query on a newly opened USBTMC session.
-    $session.Clear()
+    if ($ShouldClear) {
+        # Only clear after a really interrupted transfer: device clear is an
+        # instrument-level abort that interrupts live instrument responses.
+        $session.Clear()
+    }
     return $session
 }
 
@@ -157,7 +162,15 @@ function Read-IeeeBinaryBlock(
 }
 
 function Find-TekScope([object]$Manager) {
-    foreach ($candidate in $Manager.Find('USB?*INSTR')) {
+    # viFindRsrc can transiently report nothing right after the scope powers on
+    # or after another process releases the device: retry with short backoff.
+    $candidates = @()
+    foreach ($delayMilliseconds in @(0, 500)) {
+        if ($delayMilliseconds -gt 0) { Start-Sleep -Milliseconds $delayMilliseconds }
+        $candidates = @($Manager.Find('USB?*INSTR'))
+        if ($candidates.Count -gt 0) { break }
+    }
+    foreach ($candidate in $candidates) {
         if ($candidate -notmatch '::0x0699::') { continue }
         Write-ProgressLine 3 100 "Opening scope $candidate..."
         $session = $null
@@ -247,7 +260,7 @@ function Open-PreferredVisaContext(
 function Optional-Query(
     [object]$Session,
     [string]$Command,
-    [int]$TimeoutMilliseconds = 250
+    [int]$TimeoutMilliseconds = 2000
 ) {
     $savedTimeout = $Session.TimeoutMilliseconds
     try {
@@ -255,9 +268,8 @@ function Optional-Query(
         return Invoke-Query $Session $Command
     }
     catch {
-        # An unsupported optional query must not leave a late response queued
-        # in front of the following waveform preamble query.
-        try { $Session.Clear() } catch { }
+        # Missing optional metadata is just missing. Never send a device clear
+        # here: it aborts the instrument response and desyncs later commands.
         return $null
     }
     finally {
@@ -282,7 +294,7 @@ function Get-SourceLabelCommand([string]$Source) {
 function Get-DisplayedSources([object]$Session, [string[]]$AvailableSources) {
     $visible = [System.Collections.Generic.List[string]]::new()
     foreach ($source in $AvailableSources) {
-        $state = Optional-Query $Session (Get-SourceDisplayCommand $source 'STATE?') 500
+        $state = Optional-Query $Session (Get-SourceDisplayCommand $source 'STATE?') 2000
         if ($null -eq $state) {
             # Older firmware without per-waveview state queries falls back to
             # all CURVE?-capable sources instead of silently dropping data.
@@ -313,7 +325,7 @@ function Restore-DataSettings([object]$Session, [hashtable]$Saved) {
 function Read-ScopeWaveforms([object]$Manager, [object]$Identity, [string]$Destination) {
     if ([string]::IsNullOrWhiteSpace($Destination)) { throw 'Waveform output directory is missing' }
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-    $session = Open-Scope $Manager $Identity.resource
+    $session = Open-Scope $Manager $Identity.resource -ShouldClear:$ClearOnOpen
     $resumeAcquisition = $false
     try {
         Write-ProgressLine 6 100 'Preparing scope waveform transfer...'
@@ -349,7 +361,7 @@ function Read-ScopeWaveforms([object]$Manager, [object]$Identity, [string]$Desti
             width = Invoke-Query $session 'DATA:WIDTH?'
             start = Invoke-Query $session 'DATA:START?'
             stop = Invoke-Query $session 'DATA:STOP?'
-            resample = Optional-Query $session 'DATA:RESAMPLE?' 500
+            resample = Optional-Query $session 'DATA:RESAMPLE?' 2000
         }
         $recordLength = [long](Invoke-Query $session 'HORIZONTAL:MODE:RECORDLENGTH?')
         if ($recordLength -le 0) { throw 'Oscilloscope returned an invalid record length' }
@@ -385,8 +397,8 @@ function Read-ScopeWaveforms([object]$Manager, [object]$Identity, [string]$Desti
                 if ($points -ne $recordLength) {
                     throw "$source waveform is incomplete: record length $recordLength, transferable points $points"
                 }
-                $scale = Optional-Query $session (Get-SourceDisplayCommand $source 'VERTICAL:SCALE?') 500
-                $position = Optional-Query $session (Get-SourceDisplayCommand $source 'VERTICAL:POSITION?') 500
+                $scale = Optional-Query $session (Get-SourceDisplayCommand $source 'VERTICAL:SCALE?') 2000
+                $position = Optional-Query $session (Get-SourceDisplayCommand $source 'VERTICAL:POSITION?') 2000
                 $item = [ordered]@{
                     source = $source
                     file = "$source.bin"
@@ -401,17 +413,17 @@ function Read-ScopeWaveforms([object]$Manager, [object]$Identity, [string]$Desti
                     binary_format = Invoke-Query $session 'WFMOUTPRE:BN_FMT?'
                     byte_order = Invoke-Query $session 'WFMOUTPRE:BYT_OR?'
                     unit = Invoke-Query $session 'WFMOUTPRE:YUNIT?'
-                    label = Optional-Query $session (Get-SourceLabelCommand $source) 500
+                    label = Optional-Query $session (Get-SourceLabelCommand $source) 2000
                     scale = $scale
                     position = $position
                     formula = $null
                     inverted = $false
                 }
                 if ($source.StartsWith('MATH')) {
-                    $item.formula = Optional-Query $session "MATH:$source`:DEFINE?" 500
+                    $item.formula = Optional-Query $session "MATH:$source`:DEFINE?" 2000
                 }
                 else {
-                    $invert = Optional-Query $session "$source`:INVERT?" 250
+                    $invert = Optional-Query $session "$source`:INVERT?" 2000
                     $item.inverted = ($null -ne $invert -and [int]$invert -ne 0)
                 }
                 Write-Command $session 'CURVE?'
@@ -482,7 +494,7 @@ function Sync-Scope([object]$Manager, [object]$Identity, [string]$JsonPath) {
     $center = ($start + $stop) / 2.0
     $position = 100.0 * ($center - $recordStart) / ($recordStop - $recordStart)
     $position = [Math]::Max(0.0, [Math]::Min(100.0, $position))
-    $session = Open-Scope $Manager $Identity.resource
+    $session = Open-Scope $Manager $Identity.resource -ShouldClear:$ClearOnOpen
     try {
         # Keep the acquisition timebase untouched. The built-in Zoom1 view
         # retains the full-record overview and gives the operator a one-click

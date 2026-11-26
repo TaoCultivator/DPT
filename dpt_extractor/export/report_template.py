@@ -3807,10 +3807,15 @@ def _write_dpt_images(
     progress_callback: Callable[[int, int, str], None] | None = None,
     temperature_labels: TemperatureLabels | None = None,
     slope_header_labels: Mapping[str, str | None] | None = None,
-) -> int:
+) -> tuple[int, tuple[tuple[str, str], ...]]:
+    """写入当前工况块的全部参数图片。
+
+    返回 ``(写入张数, 缺槽位 key)``。缺槽位指模板里找不到对应表头的参数——
+    调用方必须据此报错或告警，不能让图片悄悄少写。
+    """
     if anchor_row is None:
         _normalize_dpt_waveform_text(ws, temperature_labels)
-        return 0
+        return 0, ()
     allowed_params = set(dpt_report_image_params_for_result(result))
     block_rows = {
         "off": anchor_row,
@@ -3840,6 +3845,7 @@ def _write_dpt_images(
     if overview_path is not None:
         overview_items.append((overview_path, overview_target))
     regular_items: list[tuple[str | Path, CellRange]] = []
+    missing_keys: list[tuple[str, str]] = []
     for key, image_path in images.items():
         if key == DPT_OVERVIEW_IMAGE_PARAM:
             continue
@@ -3847,6 +3853,9 @@ def _write_dpt_images(
             continue
         target = parameter_targets.get(key)
         if target is None:
+            # 模板里找不到该参数的表头：记下来，让调用方点名报错，
+            # 而不是只报一个总数差额。
+            missing_keys.append(key)
             continue
         regular_items.append((image_path, target))
     overview_display_size = _prepare_uniform_image_slots(
@@ -3891,7 +3900,7 @@ def _write_dpt_images(
     # 六条斜率表头按本次取值范围改名；必须在图片槽定位之后执行，避免
     # 表头文本变化影响本块的 _find_header_range 结果。
     _apply_dpt_slope_header_labels(ws, anchor_row, slope_header_labels)
-    return written
+    return written, tuple(missing_keys)
 
 
 def _short_row_matches_voltage(
@@ -4945,15 +4954,22 @@ def _require_complete_report_images(
     report_kind: str,
     expected_keys: Sequence[tuple[str, str]],
     images_written: int,
+    missing_keys: Sequence[tuple[str, str]] = (),
 ) -> None:
     expected_count = len(expected_keys)
     if images_written == expected_count:
         return
-    expected_text = "、".join(f"{section}/{name}" for section, name in expected_keys)
+    if missing_keys:
+        # 点名缺的是哪几个槽位：这是"模板该补哪一列"的唯一可用线索。
+        detail = "模板中找不到这些参数的表头槽位："
+        detail += "、".join(f"{section}/{name}" for section, name in missing_keys)
+    else:
+        detail = "待写图片：" + "、".join(
+            f"{section}/{name}" for section, name in expected_keys
+        )
     raise ValueError(
         f"{report_kind}报告图片写入不完整：应写入 {expected_count} 张，"
-        f"实际写入 {images_written} 张。请检查模板中的工况图片块和参数标题。"
-        f"待写图片：{expected_text}"
+        f"实际写入 {images_written} 张。请检查模板中的工况图片块和参数标题。{detail}"
     )
 
 
@@ -5280,8 +5296,8 @@ def write_report_template(
             temperature_labels,
             protected_anchor_rows=set(waveform_anchor_rows),
         )
-    images_written = (
-        _write_dpt_images(
+    if waveform_ws is not None:
+        images_written, missing_image_keys = _write_dpt_images(
             waveform_ws,
             waveform_anchor_row,
             image_map,
@@ -5290,13 +5306,13 @@ def write_report_template(
             temperature_labels=temperature_labels,
             slope_header_labels=slope_header_labels,
         )
-        if waveform_ws is not None
-        else 0
-    )
+    else:
+        images_written, missing_image_keys = 0, ()
     _require_complete_report_images(
         "双脉冲",
         expected_image_keys,
         images_written,
+        missing_image_keys,
     )
     emit(progress_total - 2, "整理报告版式")
     _normalize_report_temperature_labels(wb, temperature_labels)

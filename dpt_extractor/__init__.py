@@ -1,3 +1,3 @@
 """DPT (Double Pulse Test) parameter extraction toolkit."""
 
-__version__ = "3.0.16"
+__version__ = "3.0.17"

@@ -2548,6 +2548,11 @@ def eoff_energy_markers(
                     i_end_local = int(stable_context.b_idx)
                     t_start = float(t_sw[i_start_local])
                     t_end = float(t_sw[i_end_local])
+                    # 2026-11-25 用户拍板：Ha 横线必须与 A 相交。stable_platforms
+                    # 下 A 是「抬升前 Base 稳定带」的代表采样（已按最接近基带电
+                    # 平挑选），因此 Ha 直接取 A 处的 Vce，横线与 A 严格重合。
+                    # 该电平不参与积分：A/B、t_start/t_end、Eoff 与 Pmax 不变。
+                    ha_v = float(v_seg[i_start_local])
                     endpoint_mode = "stable_platforms"
                     stable_platform_context = stable_context.shifted(sw0)
 

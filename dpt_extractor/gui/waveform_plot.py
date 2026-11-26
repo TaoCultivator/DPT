@@ -724,6 +724,7 @@ HORIZONTAL_DIV_COUNT = 10.0  # 横向整格数（与 _update_x_ticks 一致）
 X_NS_PER_DIV = 50  # 水平标度 ns/格 步进（滚轮与显示量化）
 PARAM_FOCUS_DEFAULT_US_PER_DIV = 0.2  # 点击参数局部放大默认 200 ns/div
 PARAM_FOCUS_ANCHOR_FRACTION = 0.14  # 2026-11-18：左留约 1.4 格，保证 A/B 距左边 ≥10% 红线；其余尽量展示右侧振铃
+PARAM_FOCUS_EVENT_CENTER_FRACTION = 0.50  # 非门极参数默认局部视窗：尖峰回落后起点置于几何中线
 PARAM_FOCUS_MAX_ANCHOR_FRACTION = 0.65  # 构图偏好：无硬内容冲突时事件锚点不晚于约 6.5 格
 PARAM_FOCUS_REQUIRED_GUARD_US = 0.02  # A/B 等必要内容离视窗边缘至少约 20ns
 PARAM_FOCUS_RIGHT_PRIORITY_LEFT_SLACK_FRACTION = 0.30  # 非门极参数保留约三成余量给前态、七成给右侧震荡
@@ -1045,6 +1046,7 @@ def _solve_parameter_x_window(
     composition_balance_fraction: float | None = None,
     min_margin_fraction: float = 0.0,
     center_required: bool = False,
+    center_event_us: float | None = None,
 ) -> tuple[float, float]:
     """求解有界参数局部视窗；优先保证完整数据范围与必要时刻可见。
 
@@ -1195,6 +1197,19 @@ def _solve_parameter_x_window(
     else:
         # 完整波形比所需保护区还窄时退化为全范围；绝不越过数据边界。
         x0 = float(np.clip(ideal_x0, domain_lo, domain_hi))
+    if center_event_us is not None and np.isfinite(float(center_event_us)):
+        # Optional display-only override: place the post-spike settling onset at
+        # the geometric centre while preserving the already-solved span and all
+        # hard visibility bounds.  Omitting this argument leaves legacy geometry
+        # untouched.
+        event_us = float(center_event_us)
+        x0 = float(
+            np.clip(
+                event_us - PARAM_FOCUS_EVENT_CENTER_FRACTION * span,
+                feasible_lo,
+                feasible_hi,
+            )
+        )
     margin = max(0.0, float(min_margin_fraction))
     if margin > 0.0 and required:
         # 2026-11-18: 所有参数卡必须保证 A/B 距视窗左右边各 ≥margin（默认
@@ -10356,6 +10371,7 @@ class WaveformPlot(QWidget):
         composition_balance_fraction: float | None = None,
         min_margin_fraction: float = 0.0,
         center_required: bool = False,
+        center_event_us: float | None = None,
     ) -> None:
         """构造参数视窗；可按真实硬包络自适应优先展示右侧振铃。
 
@@ -10377,6 +10393,7 @@ class WaveformPlot(QWidget):
             composition_balance_fraction=composition_balance_fraction,
             min_margin_fraction=min_margin_fraction,
             center_required=center_required,
+            center_event_us=center_event_us,
         )
         scale_us = _exact_x_us_per_div(x1 - x0)
         self._x_target_us_per_div = scale_us

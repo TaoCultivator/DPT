@@ -18,6 +18,7 @@ from dpt_extractor.io.tek_scope import (
     ScopeViewState,
     TekScopeError,
     _BridgeIdentityError,
+    _BRIDGE_SCOPE_NOT_FOUND_RETRY_SECONDS,
     _decode_ieee_block,
     _bridge_provider_order,
     _parse_scope_label,
@@ -579,6 +580,128 @@ class TekScopeIOTests(unittest.TestCase):
         )
         self.assertIs(captured["zoom_enabled"], False)
         self.assertIs(captured["sync_cursors"], False)
+
+
+    def test_bridge_clears_bus_only_after_interrupted_transfer(self) -> None:
+        bridge = (
+            Path(__file__).parents[1] / "io" / "tek_scope_bridge.ps1"
+        ).read_text(encoding="utf-8")
+
+        open_scope = bridge[
+            bridge.index("function Open-Scope") : bridge.index("function Write-Command")
+        ]
+        self.assertIn("[switch]$ShouldClear", open_scope)
+        self.assertIn("if ($ShouldClear) {", open_scope)
+        self.assertEqual(open_scope.count("Clear()"), 1)
+
+        optional = bridge[
+            bridge.index("function Optional-Query") : bridge.index(
+                "function Get-SourceDisplayCommand"
+            )
+        ]
+        self.assertNotIn("Clear()", optional)
+        self.assertIn("[int]$TimeoutMilliseconds = 2000", optional)
+
+        self.assertIn("[switch]$ClearOnOpen", bridge)
+        self.assertIn("-ShouldClear:$ClearOnOpen", bridge)
+
+    @patch("dpt_extractor.io.tek_scope._bridge_script_path")
+    @patch("dpt_extractor.io.tek_scope._powershell_executable")
+    @patch("dpt_extractor.io.tek_scope.subprocess.Popen")
+    def test_clear_on_open_flag_is_forwarded_to_bridge(
+        self,
+        popen,
+        powershell_executable,
+        bridge_script_path,
+    ) -> None:
+        powershell_executable.return_value = "powershell.exe"
+        bridge_script_path.return_value = Path("tek_scope_bridge.ps1")
+        popen.side_effect = [
+            _FakeBridgeProcess(
+                io.StringIO('RESULT\t{"resource":"USB::SCOPE"}\n'),
+                io.StringIO(""),
+            ),
+            _FakeBridgeProcess(
+                io.StringIO('RESULT\t{"resource":"USB::SCOPE"}\n'),
+                io.StringIO(""),
+            ),
+        ]
+
+        _run_bridge_once("acquire", provider="TekVISA")
+        self.assertNotIn("-ClearOnOpen", popen.call_args_list[0].args[0])
+
+        _run_bridge_once("acquire", provider="TekVISA", clear_on_open=True)
+        self.assertIn("-ClearOnOpen", popen.call_args_list[1].args[0])
+
+    def test_scope_not_found_is_retried_on_the_same_provider(self) -> None:
+        with (
+            patch(
+                "dpt_extractor.io.tek_scope._bridge_provider_order",
+                return_value=("TekVISA", "NI-VISA"),
+            ),
+            patch("dpt_extractor.io.tek_scope._remember_bridge_provider"),
+            patch("dpt_extractor.io.tek_scope.time.sleep") as sleep,
+            patch("dpt_extractor.io.tek_scope._run_bridge_once") as run_once,
+        ):
+            run_once.side_effect = (
+                _BridgeIdentityError(
+                    "未找到通过 USB 连接的 Tektronix 示波器",
+                    scope_not_found=True,
+                ),
+                {"resource": "USB::SCOPE", "visa_backend": "TekVISA"},
+            )
+
+            result = _run_bridge("acquire")
+
+        self.assertEqual(result["visa_backend"], "TekVISA")
+        self.assertEqual(
+            [call.kwargs["provider"] for call in run_once.call_args_list],
+            ["TekVISA", "TekVISA"],
+        )
+        sleep.assert_called_once_with(_BRIDGE_SCOPE_NOT_FOUND_RETRY_SECONDS)
+
+    @patch("dpt_extractor.io.tek_scope._bridge_script_path")
+    @patch("dpt_extractor.io.tek_scope._powershell_executable")
+    @patch("dpt_extractor.io.tek_scope._terminate_hung_tekvisa_resource_managers")
+    @patch("dpt_extractor.io.tek_scope.subprocess.Popen")
+    def test_scope_not_found_keeps_tekvisa_resource_manager(
+        self,
+        popen,
+        terminate_tekvisa,
+        powershell_executable,
+        bridge_script_path,
+    ) -> None:
+        powershell_executable.return_value = "powershell.exe"
+        bridge_script_path.return_value = Path("tek_scope_bridge.ps1")
+        popen.return_value = _FakeBridgeProcess(
+            io.StringIO(""),
+            io.StringIO("SCOPE_NOT_FOUND\n"),
+            return_code=1,
+        )
+
+        with self.assertRaises(_BridgeIdentityError) as captured:
+            _run_bridge_once("acquire", provider="TekVISA")
+
+        self.assertTrue(captured.exception.scope_not_found)
+        terminate_tekvisa.assert_not_called()
+
+    @patch("dpt_extractor.io.tek_scope._run_bridge")
+    def test_failed_read_requests_one_clear_on_the_next_open(self, run_bridge) -> None:
+        from dpt_extractor.io import tek_scope as module
+
+        module._TRANSFER_NEEDS_CLEAR = False
+        try:
+            run_bridge.side_effect = TekScopeError("波形传输中断")
+            with self.assertRaises(TekScopeError):
+                read_tektronix_scope()
+            self.assertTrue(module._TRANSFER_NEEDS_CLEAR)
+            self.assertFalse(run_bridge.call_args.kwargs["clear_on_open"])
+
+            with self.assertRaises(TekScopeError):
+                read_tektronix_scope()
+            self.assertTrue(run_bridge.call_args.kwargs["clear_on_open"])
+        finally:
+            module._TRANSFER_NEEDS_CLEAR = False
 
 
 class _Line:

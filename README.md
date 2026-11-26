@@ -4,6 +4,23 @@
 
 ![DPT 非商业用途授权海报](assets/noncommercial_authorization_poster.png)
 
+## v3.0.17 更新
+
+- **非门极参数卡的首次默认取景改为「尖峰回落起点居中」**（v27）：开通/关断/反向恢复的非门极参数卡，事件点（开通取本管 `Ic`、关断取 `Vce`、反向恢复优先取 `abs(Vd)`，并取该信号的峰后主回落起点）固定在局部视窗几何中线 `50%`，跨度不变、只平移。旧构图把回落起点丢在窗口 `23%~73%`（`Vce_on_max` 实测 67%），右侧只剩约 0.66us，`0.17~0.90us` 的振荡收敛被裁出可观察范围。门极时序卡 `Toff/Td_off/Ton/Td_on`（及共用 `Ton` 页面取景的 `Tr`）不受影响，仍用受限的 Vge 边沿锚点；`required` 硬内容、`20ns` guard 与完整波形边界仍优先，与数据边界冲突时允许事件偏离中线。
+- **三处落点修复只改显示、不改数值**（v29）：
+  - 串扰电压默认 A/B 改为「事件起点 → 事件落点」并包住段内全部原始极值（持续扰动区 `≥2ns`、`τ=max(4σ_MAD, 6·LSB, 1.5%·门极摆幅)`，两端按 `clamp(2%·段长, 20ns, 100ns)` 加 guard），不再把两根光标钉在相隔几十 ns 的最近极值对上、也不立在极值采样点上；
+  - `Vce_on_max` 的 A 不再越过 Vge 开通起点（`A = clamp(峰值−300ns, Vge 开通起点, 峰值)`，Vge 起点另留 `5ns` 量化余量），B 改为回落第一个 `1.5us` 稳态带起点 `+20ns`，并受「不越过下一次关断」护栏；
+  - Eoff 在 `endpoint_mode=stable_platforms` 下，`Ha` 直接取 A 处的 `Vce`，横线与 A 光标严格重合；界面不再另取一套「主沿前导通平台」电平（`_eoff_display_ha_v` 及三道闸整段删除）。`Ha` 不参与积分。
+- **数值零改动的证据**：A/B 索引与时刻、`endpoint_mode`、`Eoff/Pmax`、积分窗、斜率、`Trr/Err`、Top/Base 全部逐位不变；`ExtractResult` 里唯一变化的字段就是上述 Ha 口径带来的 `energy_contexts["关断过程","Eoff"].ha_v`。
+- **示波器读取改为静默总线**：会话打开不再无条件 `device clear`（改由 `-ClearOnOpen` 只在上一轮读取/同步失败后清一次）；可选元数据查询超时 `250/500ms → 2s` 且超时不再补清总线；`viFindRsrc` 瞬时返回空改为桥内 `0.5s` + 首选后端 `1.5s` 重试，`SCOPE_NOT_FOUND` 不再 `Stop-Process` 强杀 TekVisaRM。参数数值与 `ACQUIRE:STATE STOP`／重新武装策略零改动。
+- **新增数值快照差分闸门** `scripts/snapshot_metrics.py`（基线 `baselines/metrics_baseline.json.gz`）：对 `示例文件/` 下全部 1254 个原始 `.tss`（1026 双脉冲 + 228 短路）导出 `ExtractResult` + 四张上下文表，共 254,569 个字段，逐字段比对，「本次改动没改数值」从一句声明变成一条可执行断言。差分为 0 时退出码 0，有差异按「样例路径 + 字段路径 + 旧值 → 新值」逐条打印。
+- **MSVC 运行库补到打包根目录**：核查 v3.0.16 发布 exe（`sha256:a45611e2…`）后确认，包内 `MSVCP140.dll`／`MSVCP140_1.dll`／`MSVCP140_2.dll` 只存在于 `PyQt6\Qt6\bin` 子目录，根目录只有 PyInstaller 顺带收进来的 `VCRUNTIME140*.dll`；而打包机 `System32` 装有 VC++ 2022 运行库，会把「目标机没装运行库」这类失败完全掩盖。本版在 `DPT.spec` 里把五个 MSVC 运行库 DLL 显式补到 `_MEIPASS` 根目录（优先取 PyQt6 自带副本、保证与 Qt 编译版本一致），exe 不再依赖目标机的 VC++ 2015-2022 运行库。
+- **启动前置检查（仅在 Qt 加载失败时弹窗，正常启动无任何变化）**：`main.py` 把 Qt 与主窗口导入包进 try，失败时不再只显示 PyInstaller 的英文 traceback，而是用 `ctypes` 弹中文提示，并把现场写入 exe 同目录（不可写时退回 `%TEMP%`）的 `DPT_startup_failure.txt`：程序版本、打包形态、Windows 版本与架构、14 个关键 DLL（Qt6 三件套、`qwindows` 平台插件、`MSVCP140`/`VCRUNTIME140` 系列、`ucrtbase`、`d3d12`/`d3d11`/`dwrite`）各自在哪找到或缺失、已搜索目录清单与完整 traceback。起因为同事机器上的 `DLL load failed while importing QtWidgets: 找不到指定的模块`——构建机未安装 UPX（exe 未压缩），因此该报错只可能来自目标机缺失的依赖，本检查用于把缺口定位到具体文件。
+- **报告图片缺槽位时点名报错**：模板里找不到某个参数图片槽（表头被改名、漏列或写法不认识）时，原来只报「应写入 19 张，实际写入 17 张」并把 19 个参数全列一遍，看不出缺的是哪两个。现在报错直接点名缺的槽位（例如「模板中找不到这些参数的表头槽位：反向恢复/dv/dt、反向恢复/di/dt」），并且 `_write_dpt_images` 把缺槽位随写入张数一起返回，调用方必须据此报错，不会悄悄少写。图片完整性红线不变：缺槽位仍然整单失败，不写残报告。
+- 系统要求不变：Windows 10 / 11（64 位）。Qt 6 自 6.x 起不再支持 Windows 7 / 8.1，`d3d12.dll` 等系统 DLL 也不可随包分发。
+- 固定非商业用途授权海报未修改，SHA-256 保持 `0042390506059EE1DEEBE810B0BAE52C5F0C7B4BBB672910757659B10630A784`。
+- 验证：全量 pytest `33 failed、1092 passed、48 skipped、559 subtests passed`（29:14）；33 项失败与 v3.0.16 干净检出（`c1413b8`）**逐条一致、0 新增**。数值快照闸门 `1254 样例 / 254,569 字段`，差异 `639` 处且**全部**为 `energy.关断过程/Eoff.ha_v`，无任何测量值变化。GUI 光标审计 `files=13 items=416 OK=416 INFO=0 FAIL=0`；报告模块 `92 passed`。证据与对照方法见 `docs/REGRESSION_BASELINES.md` 的 2026-11-26 节。
+
 ## v3.0.16 更新
 
 - **所有极值类参数的默认 A/B 光标统一改为「以权威峰值为中心」**：关断 `Ic_off_max` / `Vce_off_max`、开通 `Ic_on_max` / `Vce_on_max`、反向恢复 `Vrr` / `Irr` 六卡默认区间按 `峰值 ∓300ns` 起步。旧默认把 A 放在 Vce 抬升前 Base 段、B 放在 Ic 抬升前 Base 段（`Ic_off_max` 跨度约 2.2us、`Vce_off_max` 仅 0.39us 且贴左边界），远离峰值、横向光标取值容易偏，用户两次反馈「太靠左」「观察区域不能贴边」，本版按用户调整后的样例统一修复。

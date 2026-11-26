@@ -14,7 +14,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from dpt_extractor.gui.main_window import MainWindow
-from dpt_extractor.gui.waveform_plot import _is_power_unit
+from dpt_extractor.gui.waveform_plot import _is_power_unit, PARAM_FOCUS_EVENT_CENTER_FRACTION
 from dpt_extractor.metrics import recovery_power
 from dpt_extractor.models.results import SegmentIndices
 from dpt_extractor.models.waveform import bundle_reverse_recovery_current
@@ -191,8 +191,15 @@ def test_default_click_balances_view_and_never_recalculates(power_window):
     a, b = plot._cursor_a.value(), plot._cursor_b.value()
     assert (a, b) == (context.t_start*1e6, context.t_end*1e6)
     x0, x1 = plot.current_x_range_us()
-    assert (0.5*(a+b)-x0)/(x1-x0) == pytest.approx(0.43, abs=0.01)
-    assert a-x0 > 0.15 and x1-b > a-x0
+    # 2026-11-19（v27）：非门极卡默认取景改为「尖峰回落起点居中」，
+    # 事件点固定在中线；旧断言「A/B 中点位于窗口 43%」属被取代的 v26 构图，
+    # 已作废。这里断言事件点 50%±1%，A/B 只要求完整可见。
+    settle_onset_us = win._settle_onset_us("反向恢复", "Pdmax")
+    assert settle_onset_us is not None
+    assert (settle_onset_us - x0) / (x1 - x0) == pytest.approx(
+        PARAM_FOCUS_EVENT_CENTER_FRACTION, abs=0.01
+    )
+    assert x0 <= a <= x1 and x0 <= b <= x1
     assert win.result == before
     assert not win._manual_intervals
 

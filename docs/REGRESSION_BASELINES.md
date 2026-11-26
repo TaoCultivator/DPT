@@ -20,6 +20,29 @@
   原因（环境问题，与代码无关）：本机 `%TEMP%\pytest-of-songzhenxi` 由其它沙箱账号创建，当前账号连它的 ACL 都读不到；省略 `--basetemp` 时 pytest 会在约 `10.6s` 内以 985 个 `setup error` 全灭（`PermissionError: [WinError 5] ...\AppData\Local\Temp\pytest-of-songzhenxi`）。**不得删除、移动或改动该目录及其 ACL**，只做 `--basetemp` 绕行。
 - 任何“某失败是不是本次改动引入”的定性，必须用 HEAD（或对应发布 tag）干净检出做对照实验后才能写结论；未做对照的一律记为「未定性」，不得写成「本就失配」。禁止用“重新标定 golden / 更新期望值”消化失败来掩盖回归。详见文末「2026-10-15 HEAD 对照实验」节。
 
+## 数值快照差分闸门（`scripts/snapshot_metrics.py`）
+
+「本次改动没有改变任何参数数值」由这条命令证明，不再由人工核对加一次性临时脚本证明。
+
+- 基线文件：`baselines/metrics_baseline.json.gz`（gzip，固定 `mtime=0`，同一内容字节相同）。
+- 覆盖：`示例文件/` 下全部 1254 个原始 `.tss`（1026 双脉冲 + 228 短路），**254,569 个字段**：`ExtractResult` 全部字段、`SegmentIndices`、通道映射，以及四张上下文表 `didt/dvdt/energy/power`（含 A/B 索引与时刻、`Ha`/`Hb`、`endpoint_mode`、稳定平台上下文的候选带）。
+- 单轮耗时：15 进程并行约 5–7 分钟（0.24–0.32 s/样例）；单进程约 4 s/样例。半分钟级的快速冒烟用 `--limit 8`。
+- 用法：
+
+  ```powershell
+  # 与基线逐字段比对；有差异时退出码为 1
+  .\.venv\Scripts\python.exe scripts\snapshot_metrics.py --compare baselines\metrics_baseline.json.gz
+
+  # 重新生成基线：属于「重标定数值口径」，必须先取得用户同意
+  .\.venv\Scripts\python.exe scripts\snapshot_metrics.py --out baselines\metrics_baseline.json.gz
+  ```
+
+- 退出码：`0` 一致（或写出成功且无提取异常）；`1` 存在字段差异或提取异常；`2` 用法错误或基线损坏/schema 不符。
+- 口径：与 `scripts/validate_tss_samples.py` 完全相同的提取链（`guess_profile_from_path` → `infer_*_mapping_from_bundle` → `apply_mapping` → `run_extraction`）。样例标签相对于**语料根**而非仓库根，因此在别的 worktree、或用仓库外语料跑同一基线时键名一致。
+- 确定性：`set` 一律排序输出、`gzip` 固定 `mtime=0`。两项都是为了让「同一份代码两次快照字节相同」——不这样做时全量比对实测会冒出 6 处纯顺序假阳性。
+- 单测：`dpt_extractor/tests/test_snapshot_metrics.py`（20 例、约 1 秒、不依赖语料），覆盖序列化规则、叶子摊平、NaN/类型差异、缺失与新增样例、`set` 顺序、gzip 可复现字节。
+- 语料注意：`dpt_extractor/utils/sample_corpus.py` 的 `_SKIP_DIRS` 不含 `.tmp`，而 `validate_tss_samples.py` 的 `--root` 默认为仓库根；若 `.tmp` 下留有 `.tss` 拷贝，全量验证的样例数与双脉冲/短路分类统计会漂移。本闸门默认只扫 `示例文件/` 以避开该问题。
+
 ## 重点保护双脉冲样例
 
 TSS 双脉冲重点复核样例：
@@ -278,7 +301,7 @@ UL：
 低电流损耗光标补充回归：
 
 - `示例文件/songzhenxi/KSU2577/SSM1R7PB12B3DTFMMSPP25M4CF0016/SSS/HT/tss/UL_750V_50A_000.tss`
-- Eoff 当前平滑稳定平台基线必须为 `endpoint_mode=stable_platforms`、`A=6.591520us`、`B=6.873360us`、`Ha=3.975930593V`、`Hb=-1.031227877A`、`Eoff=1.093543528mJ`、`Pmax=13.821929688kW`。旧 `A≈6.621us`、`B≈6.934us`、`Eoff≈1.073mJ` 属于已废弃的交点/旧稳定尾路径，只保留为历史追溯，不得作为当前默认卡值或报告基线。
+- Eoff 当前平滑稳定平台基线必须为 `endpoint_mode=stable_platforms`、`A=6.591520us`、`B=6.873360us`、`Ha=3.90625V`、`Hb=-1.031227877A`、`Eoff=1.093543528mJ`、`Pmax=13.821929688kW`。旧 `A≈6.621us`、`B≈6.934us`、`Eoff≈1.073mJ` 属于已废弃的交点/旧稳定尾路径，只保留为历史追溯，不得作为当前默认卡值或报告基线。`Ha` 自 2026-11-25 起取 A 处的 Vce（旧值 `3.975930593V` 作废）；`A/B/Eoff/Pmax` 与本次改动前逐位相同。
 - Eon 的最终 A 必须是原始 `Ic=Ha` 交点，当前精确值为 `A=10.374462080us`；`B=10.527688948us`、`Ha=-1.5078125A`、`Hb=4.06171875V`、`Eon=3.292493660mJ`。旧 `A≈10.389us` 是 3% 主沿脚点，只能用于门控，不能继续作为不在 Ha 横线上的最终光标。
 - Err 必须约为 `A=10.875us`、`B=10.413us`、`Ha=-1.935A`、`Err=3.325mJ`；App 当前按原始积分得到约 `3.304mJ`。
 - 同批次 `SSS/HT/150℃` 与 `SSS/RT/25℃` 的 50A 样例需要同步对账，不得只修单个截图样例。
@@ -702,7 +725,7 @@ GUI 光标审计覆盖双脉冲参数；单脉冲不适用项按 `INFO` 记录�
 ## 2026-08-18 NDE36 损耗光标、局部重进与双模块报告
 
 - 点名语料为 `示例文件/songzhenxi/NDE36_MCU24A1`，共 8 个原始 TSS，覆盖 RT/HT 与 `UH1、UL1、UH2、UL2`。严格无缓存重算结果为 `dpt_ok=8、failed=0、warnings=0`。
-- `RT/UH2_915V_400A_000.tss` 的关断前 Vce 稳定低值平台不得从主上升沿内部估计。修复后的自动 `Eoff` 上下文为 `Ha=19.7480540068 V、A=4.5453441552 us、B=4.9133788419 us、Eoff=40.0241871190 mJ`；A 仍按规范取原始 Vce 主上升沿与 Ha 的真实交点。
+- `RT/UH2_915V_400A_000.tss` 的关断前 Vce 稳定低值平台不得从主上升沿内部估计。修复后的自动 `Eoff` 上下文为 `Ha=19.7480540068 V、A=4.5453441552 us、B=4.9133788419 us、Eoff=40.0241871190 mJ`；A 仍按规范取原始 Vce 主上升沿与 Ha 的真实交点。**2026-11-25 复核**：本节记录的该组数值对当前代码已不可复现（与本次 Ha 口径改动无关，属既有漂移，待单独定性）；当前实测为 `Ha=19.90625 V、A=4.4896 us、B=4.89568 us、Eoff=42.6067678830 mJ、Pmax=345.1364941406 kW`，其中 `Ha` 已按新口径取 A 处的 Vce。
 - 用户截图给出的手动基准为 `Ha=18.187 V、Hb=14.151 A、A=4.509 us、B=4.913 us`，生产积分路径得到 `Pmax=346.4047402344 kW、Eoff=40.3913107828 mJ`，与截图显示的 `346.405 kW、40.395 mJ` 在显示精度内一致。此手动位置作为交互回归参考，不替代自动原始交点定义。
 - 参数重新点击规则为：现有 A/B 全部仍在当前局部 X 窗口内时保持用户窗口；任一光标离屏时按当前参数重新聚焦并恢复竖光标、横光标和标签。关断/开通/反向恢复 `dv/dt`、`Eoff/Eon/Err` 与功率项均按此规则；横向光标拖动过程本身不得重置 X 窗口。
 - 报告测试项身份由桥臂和可选模块号共同组成。双模块固定排序为 `UH1、UL1、UH2、UL2`；任意写入顺序都必须归一到该顺序，同一模块重写只更新自身数据，模块 2 不得覆盖模块 1。已有带数据的未编号 `UH/UL` 块按模块 1 安全迁移，空白旧模板块允许认领。
@@ -774,7 +797,7 @@ GUI 光标审计覆盖双脉冲参数；单脉冲不适用项按 `INFO` 记录�
 
 ## 2026-08-31 非门极参数自适应右侧振铃优先
 
-> 历史边界：本节记录的“剩余余量左 `20%`、右 `80%`”和“所有参数统一 `2us` 软基准”已由下方“`Ic_off_max` 首个完整稳定带与人工图二比例”修正；其余硬性 required 包络、非固定 `0.4us` 和右侧振铃优先原则继续有效。
+> 历史边界：本节记录的“剩余余量左 `20%`、右 `80%`”和“所有参数统一 `2us` 软基准”已由下方“`Ic_off_max` 首个完整稳定带与人工图二比例”修正；其余硬性 required 包络、非固定 `0.4us` 和右侧振铃优先原则继续有效。> 2026-11-19（v27）修正：自本条起，开通/关断/反向恢复的**非门极参数卡**首次默认局部视窗改为「尖峰回落起点居中」——事件点（开通 `Ic` / 关断 `Vce` / 反向恢复 `abs(Vd)` 的峰后主回落起点）固定在几何中线 `50%`，跨度不变、只平移；`required`、`20ns` guard 与完整波形边界仍优先。`Toff/Td_off/Ton/Td_on`（及共用 `Ton` 页面的 `Tr`）不变；极值卡不再强制 A/B 居中，`10%` 边距让位于事件居中但 A/B 仍须可见。下方 `20%/80%`、`30%/70%`、`43%`、`最晚 ≤50%` 等比例对门极卡与未启用事件居中的回退路径继续有效。参数数值、A/B、Ha/Hb、Top/Base、积分/斜率/损耗/Trr/Err 零改动。
 
 - `0.4us` 只是点名 zhongban RT 50A 波形的观察示例，不是默认值、下限、上限、扩档阈值或回归断言。非门极参数局部视图的左侧时长由当前波形真实 A/B、事件前稳定平台和其他硬性必要时刻动态决定，不能用固定时间裁切。
 - `Toff/Td_off/Ton/Td_on` 四张真实门极语义卡继续保留受限 Vge 边沿约 `12%` 构图；其余极值、`Delta Vce`、斜率、`Ls`、损耗/功率、串扰及反向恢复参数，以本参数现有 A/B、稳定平台或积分阶段构造硬性 `required` 包络，并启用右侧振铃优先。
@@ -1101,3 +1124,14 @@ GUI 光标审计覆盖双脉冲参数；单脉冲不适用项按 `INFO` 记录�
 - **值中性守卫**：并集扩展后，任何大于权威峰值的采样点都会被剪出默认区间，因此默认区间内极值恒等于报告值；全量比对（crosscheck 代理，16 样例 `ExtractResult` 全字段 2895 项）值差异 0、位差异 0。
 - 枚举测试 `dpt_extractor/tests/test_default_spans_enumeration.py` 遍历六卡断言「峰值居中/两侧 ≥300ns、区间极值 == 权威值、视窗余量 ≥10%」，新增极值卡漏接 helper 时该用例会红；`dpt_extractor/tests/test_ic_off_max_display_span.py` 覆盖贴边夹取、全零回退与数值不变。
 - 已知未纳入本轮：开通 `ΔVce` A 贴事件起点的构图（P1-3）、串扰电压最小跨度（P2）、时序类 12% 锚点提到 ≥10% 余量（P2）；短路模式按全窗截图属设计取舍，已在 `MEASUREMENT_SPEC.md` 写明。
+
+## 2026-11-26 v3.0.17 发布：快照闸门实测与 HEAD 对照
+
+本节记录 v3.0.17 发布前两道闸门的实测结果，是本项目第一次用可复现命令（而不是人工核对）证明「参数数值逐位不变」。
+
+- **数值快照差分闸门**：`.\.venv\Scripts\python.exe scripts\snapshot_metrics.py --compare baselines\metrics_baseline.json.gz`，`样例数=1254 auto_slopes=False`、`并行进程数=15`、`比较字段 254569 个`，结果 **发现 639 处差异，全部落在同一个字段 `energy.关断过程/Eoff.ha_v`**，没有第二个字段变化。639 正好等于全语料中 `endpoint_mode=stable_platforms` 的 Eoff 样例数，与 2026-11-25「Ha 取 A 处 Vce、A/B/Eoff/Pmax 不变」的口径一致：该字段是显示用参考电平，不参与积分。
+- **基线身份**：`baselines/metrics_baseline.json.gz` 是本次改动之前的快照（例：`示例文件/songzhenxi/KSU2577/.../SSS/HT/tss/UL_750V_50A_000.tss` 在基线里 `ha_v=3.9759305928912783`，当前代码为 `3.90625`）。因此这条命令证明的是「相对改动前，只有 Ha 一个显示字段变化」，不是「与自身比对恒等」。
+- **全量 pytest 与 HEAD 对照**：`git worktree add --detach .tmp/head-v3016 c1413b8`（= tag `v3.0.16`，与 `origin/main` 一致）＋ `示例文件/` junction 复用真实语料，跑承载全部失败项的 5 个测试文件，结果为 `33 failed, 115 passed, 11 skipped, 93 subtests passed`。工作区全量为 `34 failed, 1080 passed, 48 skipped, 559 subtests passed`，逐条比对后 **33 项与 HEAD 完全一致**，唯一多出的是 `test_rr_power_context.py::test_default_click_balances_view_and_never_recalculates`。
+- **该唯一差异的定性**：该用例断言 `(0.5*(a+b)-x0)/(x1-x0) == 0.43±0.01`（v26 的「A/B 中点 43%」构图），在 HEAD 上 `21 passed`，在工作区实测 `0.492260`。v27 已拍板用「尖峰回落起点居中 50%」取代该比例（见 `docs/decision-ledger/accepted/settle-onset-center-focus-v27.md`），实测事件点 `(settle_onset-x0)/(x1-x0)=0.500000`，因此这是**陈旧期望**而不是数值回归。经用户当次授权，把该断言对齐到新口径（事件点 `PARAM_FOCUS_EVENT_CENTER_FRACTION±0.01` + A/B 必须可见 + `ExtractResult` 不变），对齐后该用例转绿，全量失败项回到 33 项、与 HEAD 逐条一致。
+- **GUI 光标审计**：`scripts/validate_gui_cursors.py`（默认代表语料）`files=13 items=416 OK=416 INFO=0 FAIL=0`，与 v3.0.16 记录的同一口径一致。
+- 仍待单独定性（不属本节）：`2026-08-18 NDE36` 节里 `RT/UH2_915V_400A_000.tss` 的自动 Eoff 组值对当前代码不可复现，已在原节标注，本节不重复处理。

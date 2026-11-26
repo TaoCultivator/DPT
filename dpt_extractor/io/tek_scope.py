@@ -38,11 +38,20 @@ _BRIDGE_OPERATION_LABELS = {
     "sync": "光标同步",
 }
 _BRIDGE_TERMINATE_GRACE_SECONDS = 2.0
+#: `viFindRsrc` can transiently report no resource right after the scope powers
+#: on or after another process releases the device.  Retry the preferred
+#: provider once with a short backoff before switching back end; the second
+#: provider is the fallback already, so it is never retried.
+_BRIDGE_IDENTITY_ATTEMPTS = 2
+_BRIDGE_SCOPE_NOT_FOUND_RETRY_SECONDS = 1.5
 _ACTIVE_BRIDGE_PROCESSES: set[subprocess.Popen[str]] = set()
 _ACTIVE_BRIDGE_LOCK = threading.Lock()
 _BRIDGE_PROVIDER_LOCK = threading.Lock()
 _LAST_WORKING_BRIDGE_PROVIDER: str | None = None
 _TEKVISA_USED_BY_PROCESS = False
+#: Set when the previous transfer stopped before completing, so the next open
+#: clears the bus exactly once.  Direct reads and syncs never clear.
+_TRANSFER_NEEDS_CLEAR = False
 _TEKVISA_RESOURCE_MANAGER_PATH = (
     r"C:\Program Files\IVI Foundation\VISA\Win64\TekVISA\Bin\TekVisaRM.exe"
 )
@@ -310,6 +319,7 @@ def _run_bridge_once(
     output_path: str = "",
     state_path: str = "",
     progress_callback: Callable[[int, int, str], None] | None = None,
+    clear_on_open: bool = False,
 ) -> dict[str, object]:
     global _TEKVISA_USED_BY_PROCESS
     if provider == "TekVISA":
@@ -334,6 +344,8 @@ def _run_bridge_once(
         command.extend(("-OutputPath", output_path))
     if state_path:
         command.extend(("-StatePath", state_path))
+    if clear_on_open:
+        command.append("-ClearOnOpen")
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     process = subprocess.Popen(
         command,
@@ -460,11 +472,13 @@ def _run_bridge_once(
     if return_code != 0:
         message = stderr.splitlines()[-1].strip() if stderr else "VISA 桥接进程失败"
         if max_progress < 6:
-            if provider == "TekVISA":
-                _terminate_hung_tekvisa_resource_managers()
             scope_not_found = "SCOPE_NOT_FOUND" in message
             if scope_not_found:
+                # A transient enumeration miss is not a hung resource manager:
+                # keep TekVisaRM alive and let the caller retry or fall back.
                 message = "未找到通过 USB 连接的 Tektronix 示波器"
+            elif provider == "TekVISA":
+                _terminate_hung_tekvisa_resource_managers()
             raise _BridgeIdentityError(message, scope_not_found=scope_not_found)
         raise TekScopeError(message)
     if result is None:
@@ -484,6 +498,7 @@ def _run_bridge(
     output_path: str = "",
     state_path: str = "",
     progress_callback: Callable[[int, int, str], None] | None = None,
+    clear_on_open: bool = False,
 ) -> dict[str, object]:
     identity_errors: list[str] = []
     scope_not_found_count = 0
@@ -511,21 +526,38 @@ def _run_bridge(
                 100,
                 f"{providers[0]} 身份连接失败，正在尝试 {provider}...",
             )
-        try:
-            result = _run_bridge_once(
-                operation,
-                provider=provider,
-                resource=resource,
-                output_path=output_path,
-                state_path=state_path,
-                progress_callback=emit_progress,
-            )
-            _remember_bridge_provider(_clean_text(result.get("visa_backend")) or provider)
-            return result
-        except _BridgeIdentityError as exc:
-            identity_errors.append(f"{provider}: {exc}")
-            if exc.scope_not_found:
-                scope_not_found_count += 1
+        attempts = _BRIDGE_IDENTITY_ATTEMPTS if index == 0 else 1
+        for attempt in range(attempts):
+            try:
+                result = _run_bridge_once(
+                    operation,
+                    provider=provider,
+                    resource=resource,
+                    output_path=output_path,
+                    state_path=state_path,
+                    progress_callback=emit_progress,
+                    clear_on_open=clear_on_open,
+                )
+                _remember_bridge_provider(
+                    _clean_text(result.get("visa_backend")) or provider
+                )
+                return result
+            except _BridgeIdentityError as exc:
+                if exc.scope_not_found and attempt + 1 < attempts:
+                    # Enumeration can come back empty for a moment; retry the
+                    # same provider before declaring the scope missing.
+                    emit_progress(
+                        1,
+                        100,
+                        f"{provider} 暂时未枚举到示波器，"
+                        f"{_BRIDGE_SCOPE_NOT_FOUND_RETRY_SECONDS:g} 秒后重试...",
+                    )
+                    time.sleep(_BRIDGE_SCOPE_NOT_FOUND_RETRY_SECONDS)
+                    continue
+                identity_errors.append(f"{provider}: {exc}")
+                if exc.scope_not_found:
+                    scope_not_found_count += 1
+                break
     if scope_not_found_count == len(providers):
         raise ScopeNotFoundError("未找到通过 USB 连接的 Tektronix 示波器")
     detail = "; ".join(identity_errors)
@@ -546,13 +578,24 @@ def read_tektronix_scope(
     resource: str | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> WaveformBundle:
+    global _TRANSFER_NEEDS_CLEAR
     with tempfile.TemporaryDirectory(prefix="dpt_scope_") as temp_dir:
-        result = _run_bridge(
-            "acquire",
-            resource=_clean_text(resource),
-            output_path=temp_dir,
-            progress_callback=progress_callback,
-        )
+        try:
+            result = _run_bridge(
+                "acquire",
+                resource=_clean_text(resource),
+                output_path=temp_dir,
+                progress_callback=progress_callback,
+                clear_on_open=_TRANSFER_NEEDS_CLEAR,
+            )
+        except ScopeNotFoundError:
+            raise
+        except Exception:
+            # An interrupted transfer can leave a half response queued on the
+            # instrument; clear the bus once on the next open, not on every open.
+            _TRANSFER_NEEDS_CLEAR = True
+            raise
+        _TRANSFER_NEEDS_CLEAR = False
         resource_name = _clean_text(result.get("resource"))
         idn = _clean_text(result.get("idn"))
         sources = result.get("sources")
@@ -683,6 +726,7 @@ def _waveform_dtype(byte_width: int, binary_format: str, byte_order: str) -> np.
 
 
 def sync_tektronix_scope(resource: str, state: ScopeViewState) -> dict[str, object]:
+    global _TRANSFER_NEEDS_CLEAR
     if not (
         math.isfinite(float(state.x_start_s))
         and math.isfinite(float(state.x_stop_s))
@@ -715,4 +759,18 @@ def sync_tektronix_scope(resource: str, state: ScopeViewState) -> dict[str, obje
             json.dumps(payload, ensure_ascii=False, allow_nan=False),
             encoding="utf-8",
         )
-        return _run_bridge("sync", resource=resource, state_path=str(state_path))
+        try:
+            result = _run_bridge(
+                "sync",
+                resource=resource,
+                state_path=str(state_path),
+                clear_on_open=_TRANSFER_NEEDS_CLEAR,
+            )
+        except ScopeNotFoundError:
+            raise
+        except Exception:
+            # Same as the read path: only an interrupted exchange needs a clear.
+            _TRANSFER_NEEDS_CLEAR = True
+            raise
+        _TRANSFER_NEEDS_CLEAR = False
+        return result

@@ -93,13 +93,36 @@ def window():
 def test_default_display_does_not_recalculate_and_focus_uses_real_extrema(window, section):
     before = copy.deepcopy(window.result)
     t = window.bundle.t
+    index_interval = (20, 80)
+    vge_other = np.asarray(window.bundle.get(window.profile.vge_other), dtype=float)
     with (
         patch("dpt_extractor.gui.main_window.crosstalk_extrema") as calculate,
         patch.object(window, "_focus_switching_local_view") as focus,
     ):
         window._enable_crosstalk_interaction(section)
         calculate.assert_not_called()
-        focus.assert_called_once_with(section, float(t[35] * 1e6), float(t[65] * 1e6), name="串扰电压")
+        focus.assert_called_once()
+    args = focus.call_args.args
+    assert args[0] == section
+    a_us, b_us = float(args[1]), float(args[2])
+    # 2026-11-19（R-XT）：独立核对几何约束——A 在段内最早极值之前、B 在最晚极值
+    # 之后、两端都是事件段内的原始采样、跨度 >=100ns，且取景用的就是这对时刻。
+    t_us = np.asarray(t, dtype=float) * 1e6
+    segment = np.asarray(vge_other[20:80], dtype=float)
+    arg_max = int(np.argmax(segment))
+    arg_min = int(np.argmin(segment))
+    earliest_us = float(t_us[20 + min(arg_max, arg_min)])
+    latest_us = float(t_us[20 + max(arg_max, arg_min)])
+    eps_us = 1e-9
+    assert a_us < earliest_us - eps_us
+    assert b_us > latest_us + eps_us
+    # 20ns 最小外侧偏移，100ns 最小跨度（单位：us）
+    assert a_us <= earliest_us - 0.020 + eps_us
+    assert b_us >= latest_us + 0.020 - eps_us
+    assert float(t_us[20]) <= a_us < b_us <= float(t_us[79])
+    assert b_us - a_us >= 0.100 - eps_us
+    assert a_us == float(window.wave_plot._cursor_a.value())
+    assert b_us == float(window.wave_plot._cursor_b.value())
     assert window.result == before
     assert window._manual_intervals == {}
     plot = window.wave_plot
@@ -115,8 +138,10 @@ def test_manual_drag_commits_once_then_restores_without_recalculation(window, se
     window._enable_crosstalk_interaction(section)
     plot = window.wave_plot
     state = window.result.turn_off if section == "关断过程" else window.result.turn_on
+    # 默认 A 由事件起点给出（R-XT）；B 拖到 -10V 采样点。
+    default_a_us = float(plot._cursor_a.value())
     # Exclude the -12V trough, keeping the -10V trough at an exact sample time.
-    ta, tb = (float(window.bundle.t[idx] * 1e6) for idx in (35, 50))
+    ta, tb = default_a_us, float(window.bundle.t[50] * 1e6)
     with patch("dpt_extractor.gui.main_window.crosstalk_extrema", wraps=crosstalk_extrema) as calculate:
         with patch.object(plot, "_cursor_sender_is_dragging", return_value=True):
             for idx in (60, 55, 50):

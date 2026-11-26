@@ -30,10 +30,17 @@ from dpt_extractor.utils.app_paths import configure_numba_cache_dir
 configure_utf8_text_io()
 configure_numba_cache_dir()
 
-from PyQt6.QtWidgets import QApplication
+try:
+    from PyQt6.QtWidgets import QApplication
 
-from dpt_extractor.gui.main_window import MainWindow
-from dpt_extractor.io.tek_scope import shutdown_tektronix_backend
+    from dpt_extractor.gui.main_window import MainWindow
+    from dpt_extractor.io.tek_scope import shutdown_tektronix_backend
+except Exception as _gui_import_error:  # noqa: BLE001 - 启动期任何异常都要给出可读提示
+    # 打包成 exe 后窗口模式只会弹一个英文 traceback（"DLL load failed while
+    # importing QtWidgets"）；换成中文诊断 + 现场日志，便于远程定位缺什么。
+    from dpt_extractor.utils.qt_bootstrap import report_startup_failure
+
+    raise SystemExit(report_startup_failure(_gui_import_error)) from None
 
 
 def _parse_cli(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:

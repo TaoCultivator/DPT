@@ -913,7 +913,13 @@ class TestEoffWindow(unittest.TestCase):
         self.assertEqual(markers.i_end, context.b_idx)
         self.assertAlmostEqual(markers.t_start * 1e6, 10.868160, delta=0.003)
         self.assertAlmostEqual(markers.t_end * 1e6, 11.395680, delta=0.003)
-        self.assertAlmostEqual(markers.ha_v, 7.957756503, delta=0.001)
+        # 2026-11-25：Ha 取 A 处的 Vce，横线与 A 严格相交（取代 2026-11-19
+        # 门控版的「主沿前导通平台」）。旧期望 7.957756503 作废。
+        self.assertAlmostEqual(
+            markers.ha_v,
+            float(np.interp(markers.t_start, bundle.t, vce)),
+            delta=1e-6,
+        )
         self.assertAlmostEqual(markers.hb_a, 2.937204851, delta=0.002)
         self.assertAlmostEqual(
             integrate_vi_window(
@@ -1098,7 +1104,8 @@ class TestEoffWindow(unittest.TestCase):
             pulse1_on=segs.pulse1_on,
         )
         v_at_a = float(np.interp(mk.t_start, t, vce))
-        self.assertAlmostEqual(mk.ha_v, 12.34375, delta=0.5)
+        # 2026-11-25：Ha 取 A 处的 Vce，与 A 严格相交（旧期望 12.34375 作废）。
+        self.assertAlmostEqual(mk.ha_v, v_at_a, delta=0.5)
         _assert_cursor_matches_level(self, mk, t, vce, delta=0.5)
         _assert_cursor_consistent(self, mk, t, ic, "b", "any")
         self.assertLess(mk.ha_v, 15.0)
@@ -1819,7 +1826,12 @@ class TestEoffWindow(unittest.TestCase):
         self.assertEqual(markers.i_end, context.b_idx)
         self.assertAlmostEqual(markers.t_start * 1e6, 14.482640000, places=6)
         self.assertAlmostEqual(markers.t_end * 1e6, 14.914240000, places=6)
-        self.assertAlmostEqual(markers.ha_v, 12.40625, places=6)
+        # 2026-11-25：Ha 取 A 处的 Vce（旧期望 12.40625 作废）。
+        self.assertAlmostEqual(
+            markers.ha_v,
+            float(np.interp(markers.t_start, bundle.t, vce)),
+            delta=1e-6,
+        )
         self.assertAlmostEqual(markers.hb_a, 28.064254893, places=6)
         self.assertLess(context.a_idx, context.v10_idx)
         self.assertLess(context.i10_idx, context.b_idx)
